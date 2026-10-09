@@ -1,0 +1,6 @@
+{"evidence":"crate root has no no_std attribute and includes std-bound modules","id":"no_std_root","line":89,"source":"src/lib.rs"}
+{"evidence":"Settings exposes from_env but no borrowed-pair entry point","id":"borrowed_environment_source","line":398,"source":"src/lib.rs"}
+{"evidence":"runtime environment resolution calls std::env directly","id":"environment_lookup","line":476,"source":"src/lib.rs"}
+{"evidence":"public error/display surface names std types","id":"std_bound_error_and_display","line":327,"source":"src/lib.rs"}
+{"evidence":"Settings derive emits std environment access","id":"derive_generated_std_paths","line":423,"source":"crates/conflaguration-derive/src/lib.rs"}
+{"api_signature":"fn from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Self>;"}
