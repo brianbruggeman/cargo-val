@@ -18,7 +18,7 @@ commit being present on `main`.
 | P4 | Proxima: `feat: pipe windows child stdin and stderr` | ACP4 | `cargo test -p proxima-process --test windows_stdio -- stdin_stderr_bytes` on Windows | 2 byte payloads, 0 byte mismatches, 0 orphan children | [ ] | one byte-exact fixture |
 | P5 | Proxima: `fix: preserve windows command environment and cwd` | ACP5 | `cargo test -p proxima-process --test windows_command -- env_and_cwd` on Windows | 3 cases passed, 0 mismatches | [ ] | match Unix `CommandDescriptor` behavior |
 | P6 | Proxima: `ci: check process backend on three hosts` | ACP6 | `cargo test -p proxima-process --test process_contract` in native Windows, macOS, and Linux jobs | each host: 7 process contract cases passed, 0 orphan children | [ ] | native execution required; cross-check is not runtime evidence |
-| C0 | `chore: scaffold cargo-val fixture workspace` | AC0 | `cargo test -p cargo-val --test cli_smoke -- help_banner` | 1 fixture passed, 1 `cargo val --help` banner observed | [ ] | Rust 2024; package `cargo-val`, binary `cargo-val` |
+| C0 | `chore: scaffold cargo-val fixture workspace` | AC0 | `cargo test -p cargo-val --test cli_smoke -- help_banner` | 1 fixture passed, 1 `cargo val --help` banner observed | [x] | Rust 2024; package `cargo-val`, binary `cargo-val` |
 | C0a | `build: pin Proxima workspace dependencies` | AC0a | `cargo test -p cargo-val --test dependency_source -- pinned_proxima_revision` | 3 Proxima packages resolve from the same pinned Git revision, 1 mismatched-revision fixture rejected | [ ] | no developer-local path dependencies; depends on P6 on Proxima `main` |
 | C1 | `feat: parse cargo artifacts as a stream` | AC1 | `cargo test -p cargo-val --test artifact_stream -- two_artifacts_before_build_exit` | 2 artifact records ordered, 1 handled before producer exit, 0 non-test launches | [ ] | bounded JSON-line parsing |
 | C2 | `feat: parse one libtest listing incrementally` | AC2 | `cargo test -p cargo-val --test discovery_stream -- line_parser_counts` | 3 names parsed, 0 malformed names accepted | [ ] | parser fixture only |
@@ -43,9 +43,8 @@ commit being present on `main`.
 
 ## resume
 
-Last landed slice: P1 on Proxima main (`6cb786ea`), pushed
-Next action: P2 adds Windows spawn and wait to `proxima-process` before cargo-val
-process adapter work
+Last landed slices: P1 on Proxima main (`6cb786ea`), C0 on cargo-val main
+Next action: P2 adds Windows spawn and wait to `proxima-process`; C0a waits for P6
 Open question, if any: none; C3's dispatch-before-EOF fixture is the explicit
 gate that falsifies the incremental discovery requirement
 
