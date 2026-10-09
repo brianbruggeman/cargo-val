@@ -1,6 +1,6 @@
 # cargo-val
 
-status: audited
+status: draft
 owner: brian
 created: 2026-10-09
 
@@ -15,7 +15,8 @@ and preserve per-test outcomes on all three native hosts.
 ## refutation condition
 
 If a native fixture on any supported host cannot start its first discovered test
-before discovery/build completion, or if a test's timeout/cancellation can
+before discovery/build completion, if a child lifecycle uses blocking wait/stdio,
+busy polling, per-child threads, or `block_on`, or if timeout/cancellation can
 terminate another test or leave an orphan child, this runner does not meet its
 stated execution model.
 
@@ -26,14 +27,17 @@ stated execution model.
 | R1 | Build and run the runner natively on Windows, macOS, and Linux using Proxima process support | yes |
 | R2 | Consume Cargo JSON compiler-artifact events as a stream and start handling an executable before Cargo exits | yes |
 | R3 | Discover names line by line per executable and dispatch a test before discovery reaches EOF; never construct a whole-suite test vector | yes |
-| R4 | Run each selected test as an exact process through `proxima_process::Command`; retain its environment, working directory, and exit classification | yes |
+| R4 | Run each selected test as an exact process through Proxima's async child-session API; retain its environment, working directory, and exit classification | yes |
 | R5 | Bound live child processes with Proxima admission/backpressure primitives; do not pre-enqueue the complete suite | yes |
 | R6 | Collect each child's stdout, stderr, exit status, timeout, cancellation, and cleanup without cross-test interference | yes |
-| R7 | Load runner settings through `conflaguration`, including worker/admission capacity and color policy | yes |
+| R7 | Load typed runtime settings through a no_std-capable `conflaguration` path, including worker/admission capacity and color policy; read host environment bytes through a Proxima platform adapter | yes |
 | R8 | Emit color by default and suppress ANSI when `NO_COLOR` is present | yes |
 | R9 | Preserve explicit counts for discovered, filtered, ignored, passed, failed, and unaccounted tests | yes |
 | R10 | Record per-child allocation and output payloads on Windows, macOS, and Linux before deciding whether arena storage is warranted | yes |
 | R11 | Compare against cargo-nextest with per-test traces and host-labeled throughput, latency, CPU, RSS, errors, and variance | yes |
+| R12 | Keep the runner and Proxima child lifecycle poll-driven: no blocking wait/read/write, busy-poll fallback, per-child worker thread, or `block_on` bridge | yes |
+| R13 | Keep `std` absent from the shipped cargo-val binary and its production dependency graph, including Proxima process sessions; host operations use Proxima's async/no_std-capable substrate | yes |
+| R14 | Document the native cargo-val invocation and link each example to its matching fixture and acceptance command | yes |
 
 ## architecture
 
@@ -43,8 +47,8 @@ Cargo JSON stdout
   -> compiler-artifact filter
   -> per-executable libtest listing stream
   -> exact-test intents
-  -> bounded Proxima demand/admission
-  -> proxima_process::Command child processes
+  -> lossless async admission (await a Proxima semaphore before pulling an intent)
+  -> Proxima async child-session source
   -> child stdout/stderr/exit lifecycle
   -> Proxima fan-in
   -> terminal reporter
@@ -52,13 +56,25 @@ Cargo JSON stdout
 
 The runner holds at most the configured number of live child processes and the
 currently observed artifact/test record. It does not build a Vec containing all
-test names. Artifact and discovery streams feed admission directly; bounded
-capacity expresses backpressure. Process creation stays process-based. Rayon is
-not the test executor: Proxima's background Rayon pool handles CPU jobs, while
-`proxima_process::Command` owns OS process launching.
+test names. Artifact and discovery streams feed admission directly; the runner
+awaits an async semaphore before pulling another intent. It does not use
+`Demand` for admission because disarmed Demand consumes and drops its input.
+Process sessions retain pending native operations and buffers across polling;
+no worker thread, busy-poll fallback, blocking wait/stdio, or executor bridge
+is used. Native process creation is a bounded OS submission call; the child
+lifecycle after submission is entirely readiness-driven. This requires a new
+reactor-driven Proxima process-session capability for child stdio and exit
+notification on Linux, macOS, and Windows. Rayon is not the test executor.
 
-The design reuses `Pipe`, bounded demand/admission, `FanIn`, Proxima runtime
-facilities, `conflaguration`, and `proxima_process::Command`. It does not use
+The design reuses `Pipe`, async semaphore admission, `FanIn`, Proxima runtime
+facilities, `conflaguration`, and Proxima process-session primitives. The
+configuration boundary must be available without `std`: Proxima reads the
+selected environment bytes using its platform adapter, and the typed
+conflaguration layer parses and validates those bytes. The current
+conflaguration environment loader calls `std::env`; its no_std typed mapping
+path is therefore a prerequisite, not an API this spec assumes already exists.
+Build scripts, Cargo, rustc, and host test harnesses are outside the shipped
+binary dependency graph. It does not use
 `ScatterGather` for suite execution because that primitive waits for all inputs
 and collects every result in a `Vec`.
 
@@ -72,50 +88,77 @@ and collects every result in a `Vec`.
 | execution | one exact test per OS child process | process boundaries preserve test isolation and independently enforce timeout/termination |
 | Proxima dependency source | consume the Proxima workspace packages from a pinned Proxima Git revision | the checked `proxima-process`, `proxima-primitives`, and `proxima-runtime` crates are absent from crates.io; a local path would make clean clones fail |
 | Windows support | first add a native Windows backend to `proxima-process`, land it on Proxima `main`, then pin that revision in cargo-val | cargo-val must not create a competing process abstraction |
+| fully async and no_std | add a Proxima-owned reactor-driven child session; remove blocking process wait/read/write, per-child worker threads, and `block_on`; keep `std` out of the shipped cargo-val binary and its production dependency graph | an async signature around blocking workers does not satisfy the execution contract |
+| runtime configuration without std | add a no_std conflaguration mapping/validation seam and obtain only required environment bytes through Proxima's platform adapter | the current conflaguration env loader calls `std::env`; runtime configuration cannot use that loader in a no_std binary |
+| child admission | await a Proxima semaphore before consuming another discovered test intent | `Demand` drops inputs while disarmed; a bounded queue alone does not supply async lossless backpressure |
 | arena | do not add one until per-child traces identify repeated allocations and existing Proxima storage cannot own them | an arena without allocation-site evidence adds a new lifetime and cleanup model without establishing the source of duplication |
 | output color | color enabled by default, including redirected output; `NO_COLOR` presence disables ANSI | the requested default is explicit; the environment override is observable and testable |
 
 ## acceptance criteria
 
-Commands below are the acceptance contract for the implementation cards. Each
-named fixture test checks output against hand-authored expected records that
-are independent of cargo-val's runner. The same semantic fixture is run through
-cargo-nextest and its canonical result records must pass the same comparator.
-For runner-specific behavior with no nextest equivalent (early dispatch,
-`NO_COLOR`, allocation traces), cargo-nextest remains the semantic outcome
-control while a separate literal fixture oracle checks that behavior. Commands
-are prospective until their card lands.
+The former ACP1-ACP16 synchronous acceptance table is retired. Those rows
+used synchronous `std::process` behavior as the process oracle, so they cannot
+discharge R12 or R13. The current Proxima `Command` is not accepted as the
+execution implementation either: its source audit is recorded in
+`TASKS.md` E2-E5. F0, P0, and Q1-Q6 are admitted as source and native-host
+capability probes. Implementation rows remain candidates until the probes
+produce their records and each row has a bounded work packet, an independent
+literal oracle, and an incumbent control.
 
-| id | discharges | command | expected | independent oracle and incumbent control |
+The top-level gate is: on native Windows, macOS, and Linux, cargo-val discovers
+and executes exact test children while the producer remains active, with no
+`std` in cargo-val or the Proxima process-session implementation, no blocking
+wait/read/write, no child helper threads, no lost test intents, and every child
+reaped after completion, timeout, or cancellation. Its falsifier is any
+supported-host trace showing one forbidden call, a missing/duplicate intent,
+or an unreaped child.
+
+The current admission ACs are the source-audit and native-capability probes in
+`TASKS.md`:
+
+| id | discharges | command | expected | independent oracle and control |
 |---|---|---|---|---|
-| ACP1 | R1 | `cargo test -p proxima-process --test windows_target_gate -- unix_only_negative_control` | 1 Windows target fixture accepted, 1 Unix-only control rejected | compare the Windows `std::process::Command` reference fixture to its literal child record; cargo-nextest runs that same reference fixture and must pass the same comparator, while the Unix-only manifest remains the negative compile control |
-| ACP2 | R1 | `cargo test -p proxima-process --test windows_spawn -- spawn_wait_inherited_stdio` on Windows | 1 child spawned, 1 child reaped, 0 orphan children | compare child pid lifecycle and inherited bytes to `std::process::Command`; run the same fixture under cargo-nextest and require the expected exit record |
-| ACP3 | R1, R6 | `cargo test -p proxima-process --test windows_stdio -- stdout_bytes` on Windows | 1 stdout payload, 0 byte mismatches, 0 orphan children | compare bytes to a checked-in literal payload and `std::process::Command`; cargo-nextest control must report the fixture pass |
-| ACP4 | R1, R6 | `cargo test -p proxima-process --test windows_stdio -- stdin_stderr_bytes` on Windows | 2 byte payloads, 0 byte mismatches, 0 orphan children | compare bytes to checked-in stdin/stderr vectors and `std::process::Command`; cargo-nextest control must report the fixture pass |
-| ACP5 | R1, R4 | `cargo test -p proxima-process --test windows_command -- env_and_cwd` on Windows | 3 cases passed, 0 mismatches | compare environment and cwd to independent `std::process::Command` output; cargo-nextest control must pass the same fixture |
-| ACP6 | R1 | `cargo test -p proxima-process --test process_contract` in native Windows, macOS, and Linux jobs | each host: 7 process contract cases passed, 0 orphan children | compare each case to the existing Unix std-process behavior or literal Windows vectors; cargo-nextest control must pass the same seven fixture cases on each native host |
-| AC0 | R1 | `cargo test -p cargo-val --test cli_smoke -- help_banner` | 1 fixture passed, 1 `cargo val --help` banner observed | compare exact banner bytes to a checked-in expected string; Cargo's own external-subcommand resolution is the control and must resolve `cargo-val` as `cargo val` |
-| AC0a | R1, R4, R5 | `cargo test -p cargo-val --test dependency_source -- pinned_proxima_revision` | 3 Proxima packages resolve from the same pinned Git revision, 1 mismatched-revision fixture rejected | compare package source IDs to the pinned revision in `Cargo.lock`; the test invokes `cargo tree` for both fixtures, then cargo-nextest runs the valid fixture and must pass the same source-id comparator |
-| AC1 | R2 | `cargo test -p cargo-val --test artifact_stream -- two_artifacts_before_build_exit` | 2 executable artifact records in input order, 1 test executable handled before Cargo exit, 0 non-test artifacts launched | compare against two hand-authored Cargo JSON event lines; run the same fixture suite with cargo-nextest and require both canonical test result records to match the literal oracle |
-| AC2 | R3 | `cargo test -p cargo-val --test discovery_stream -- line_parser_counts` | 3 names parsed, 0 malformed names accepted | compare to three hand-authored libtest listing lines; cargo-nextest's listing of the same fixture must pass the same canonical name comparator |
-| AC3 | R3 | `cargo test -p cargo-val --test discovery_stream -- dispatch_before_eof` | 1 test dispatched before listing EOF, 3 names discovered, 0 whole-suite materializations | a barrier-controlled stream fixture is the independent ordering oracle; cargo-nextest runs the same fixture and must pass the shared three-name/result comparator |
-| AC4 | R4 | `cargo test -p cargo-val --test exact_process -- selected_tests_once` | 3 selected names, 3 exact child invocations, 0 duplicate invocations | compare invocation names and marker-file records to a hand-authored exact-selection vector; cargo-nextest must pass the same selected fixture and canonical outcome comparator |
-| AC5 | R5 | `cargo test -p cargo-val --test admission -- seven_tests_two_slots` | 7 started, 7 completed, peak live children 2, 0 dropped intents | compare start/finish records to a fixed seven-item fixture and a two-permit state trace; cargo-nextest must produce the same seven final outcome records |
-| AC6 | R6 | `cargo test -p cargo-val --test child_lifecycle -- pass_failure_abort` | 3 outcomes classified, 0 cross-test terminations, 0 orphan children | compare exit classes to three hand-authored child response vectors; cargo-nextest must pass the same semantic fixtures and outcome comparator |
-| AC7a | R6 | `cargo test -p cargo-val --test child_output -- stdout_stderr_payloads` | 2 payloads retained byte-for-byte, 0 mismatches | compare bytes to checked-in stdout/stderr vectors; cargo-nextest must pass the same payload fixture and byte comparator |
-| AC7 | R7 | `cargo test -p cargo-val --test settings -- config_env_cli_precedence` | 4 precedence cases passed, 0 invalid capacities accepted | compare the four resolved settings to a literal precedence table; cargo-nextest runs the same settings fixture and must pass the same expected-value checks |
-| AC8 | R8 | `cargo test -p cargo-val --test color_policy -- no_color_matrix` | 4 cases: 2 ANSI outputs with `NO_COLOR` absent (TTY and pipe), 2 ANSI-free outputs when `NO_COLOR` is present (TTY and pipe) | compare ANSI presence to four fixed byte-level expectations; cargo-nextest output is run through the same presence checker and must pass its color-policy control cases |
-| AC9 | R9 | `cargo test -p cargo-val --test accounting -- mixed_suite` | 5 discovered = 1 filtered + 1 ignored + 2 passed + 1 failed, 0 unaccounted | compare to a hand-counted five-record outcome table; cargo-nextest's output for the same fixture must pass the identical accounting comparator |
-| AC10 | R10 | `cargo test -p cargo-val --test allocation_trace -- child_payload_record` on Windows, macOS, and Linux | each host retains 1 raw per-child allocation record and 1 output payload; no arena claim is made by this measurement | compare output payload to a fixed byte vector and allocation records to host profiler raw events; cargo-nextest is run on the same child and its output payload must pass the same byte comparator |
-| AC11 | R11 | `cargo test -p cargo-val --test comparison_record -- matched_host_outcomes` | each native host: 1 paired cargo-val/cargo-nextest record with the same fixture's raw test outcomes | compare both output records to the hand-authored fixture oracle and require both to pass the same canonical outcome comparator |
-| AC11a | R11 | `cargo test -p cargo-val --test comparison_record -- latency_throughput_samples` | each native host: 1 sample record contains throughput, single-request latency, percentile latency, raw samples, and CoV | compare sample fields to the independent measurement schema and require the cargo-nextest control record to pass the same schema checker |
-| AC11b | R11 | `cargo test -p cargo-val --test comparison_record -- host_resource_samples` | each native host: 1 sample record contains CPU, RSS, error rate, corpus, profile, baseline, and host identity | compare fields to the independent measurement schema and require the cargo-nextest control record to pass the same schema checker |
-| AC12 | R6 | `cargo test -p cargo-val --test cancellation -- cancel_two_live_children` | 2 children reaped, 0 launches after cancellation, 0 orphans | compare process ids and exit records to a barrier-controlled fixture; cargo-nextest must pass the same two-child final-outcome comparator |
-| AC12a | R6 | `cargo test -p cargo-val --test timeout -- terminate_and_reap_child` | 1 timed-out child classified, 1 child reaped, 0 orphan children | compare elapsed-time decision and exit class to a fixed-clock timeout fixture; cargo-nextest must pass the same child final-outcome control |
-| AC13 | R10 | `cargo test -p cargo-val --test allocation_trace -- repeated_process_alloc_sites_and_arena_payload_parity` on Windows | either 1 conditional arena parity case passed with byte-identical payload, or 1 negative trace recorded and 0 arena changes admitted | compare bytes to the fixed payload fixture and repeated allocation sites to retained profiler events; cargo-nextest control must pass the same payload fixture |
-| AC14 | R1, R4, R6 | `cargo test -p cargo-val --test platform_acceptance` in native Windows, macOS, and Linux jobs | each host: 1 acceptance record covering 5 fixture categories, 0 unaccounted outcomes, 0 orphan children | compare to the same checked-in platform fixture records; cargo-nextest control must pass all five semantic categories on every native host |
-| AC15 | R11 | `cargo test -p cargo-val --test comparison_record -- malformed_control` | 1 malformed record rejected, 0 valid host records rejected | compare candidate and cargo-nextest raw records to a schema with hand-authored expected fields; the malformed fixture must be rejected by the same validator |
-| AC16 | R1-R9 | `cargo test -p cargo-val --test docs_contract -- command_examples` | 3 platform examples, 1 command spelling, 0 undocumented platform caveats | compare docs examples to checked-in executable fixture invocations; cargo-nextest runs the same examples and its canonical outcomes must pass the shared result comparator |
+| AC1 | design gate for R7, R13 | `python3 specs/cargo-val/validate_conflag_gap.py` | 5 source-backed gaps, 1 borrowed-pair API signature, 0 unbound runtime dependencies | reopen every cited conflaguration source hunk from its checkout and recount; current `Settings::from_env` source control must pass the same gap-count parser |
+| AC2 | design gate for R1, R4, R6, R12, R13 | `python3 specs/cargo-val/validate_process_gap.py` | 4 source-backed gaps, 1 typed child-session signature, 0 blocking calls admitted | reopen each exact Proxima `main` hunk via `git show 5207d66e:<path>`; existing synchronous child fixture must pass the same output-record comparator |
+| AC3 | R12, R13 feasibility | Linux: `cargo test -p prime --test child_reactor -- linux_exit_probe` | 1 Pending, 1 kernel wake, 1 exit observation, 0 helper threads; or 1 explicit unsupported-source record | held-child barrier plus release pipe; libc wait control emits expected exit record and passes the same comparator, while pre-release poll emits no event |
+| AC4 | R12, R13 feasibility | macOS: `cargo test -p prime --test child_reactor -- macos_exit_probe` | same 4 counts as AC3, or 1 explicit unsupported-source record | held-child barrier plus release pipe; libc wait control emits expected exit record and passes the same comparator, while pre-release poll emits no event |
+| AC5 | R12, R13 feasibility | Windows: `cargo test -p prime --test child_reactor -- windows_handle_probe` | 1 pipe completion and 1 child completion, 0 helper threads; or 1 explicit unsupported-handle record | native `std::process` pipe/child control emits the expected payload and passes the same comparator; non-overlapped negative handle must be classified unsupported |
+| AC6 | R12, R13 launch feasibility | Linux: `cargo test -p proxima-process --test child_spawn -- linux_launch_probe` | 1 child handle, 1 status 0; or 1 explicit unsupported-launch record | libc launch fixture emits the literal child record and passes the same status comparator |
+| AC7 | R12, R13 launch feasibility | macOS: `cargo test -p proxima-process --test child_spawn -- macos_launch_probe` | 1 child handle, 1 status 0; or 1 explicit unsupported-launch record | libc launch fixture emits the literal child record and passes the same status comparator |
+| AC8 | R12, R13 launch feasibility | Windows: `cargo test -p proxima-process --test child_spawn -- windows_launch_probe` | 1 child handle, 1 status 0; or 1 explicit unsupported-launch record | Win32 `CreateProcess` control emits the literal child record and passes the same status comparator |
+
+AC1-AC8 are prospective until their scripts/fixtures and retained outputs
+exist. The complete candidate acceptance map is in the requirement-coverage
+section of `TASKS.md`; no implementation candidate is admitted until its own
+fixture oracle and control are checked. C19a-C19c are the final native
+platform gates and name spawn/environment/cwd, stdout/stderr, pass/fail/abort,
+timeout, and cancellation as separate fixture categories. A fixture's own
+count is never its oracle.
+
+The AC1-AC90 contract is complete in `TASKS.md`: each AC is the exact
+count-bearing command, expected record, independent oracle, and control in its
+card/oracle pair. The table below binds every requirement to those ACs. ACs
+outside AC1-AC8 remain prospective implementation criteria; they define the
+required evidence but do not claim that evidence has been produced. A
+requirement is discharged only when its listed AC records and independent
+control exist and have been reviewed.
+
+| requirement | acceptance criteria |
+|---|---|
+| R1 | AC3-AC8, AC27, AC58, AC60-AC62, AC83-AC85, AC90 |
+| R2 | AC64-AC65 |
+| R3 | AC66-AC67 |
+| R4 | AC32-AC40, AC47-AC55, AC70-AC71, AC83-AC85 |
+| R5 | AC68-AC69 |
+| R6 | AC41-AC55, AC72-AC75, AC83-AC85 |
+| R7 | AC1, AC9-AC21, AC76-AC77 |
+| R8 | AC11-AC13, AC78 |
+| R9 | AC79, AC83-AC85 |
+| R10 | AC80-AC82 |
+| R11 | AC86-AC89 |
+| R12 | AC2-AC8, AC22-AC57, AC68-AC75, AC83-AC85 |
+| R13 | AC1-AC2, AC9-AC18, AC32, AC35, AC38, AC56-AC63 |
+| R14 | AC90 |
 
 ## out of scope
 
@@ -132,19 +175,18 @@ are prospective until their card lands.
 |---|---|---|---|
 | Cargo's artifact stream and a test binary's listing stream do not expose records early enough to beat full discovery | medium | the requested early-start behavior cannot be delivered by this interface | make the first-dispatch-before-EOF fixture a gate before investing in the runner |
 | Windows process creation, job cleanup, or stdio differs from Unix behavior | high | platform coverage and isolation are incomplete | land and test the Proxima Windows backend before runner integration |
+| Proxima lacks child-exit waker registration and Windows pipe-handle readiness | high | fully async process lifecycle cannot be implemented by composing the current Command surface | add and validate reactor-backed child session ownership before cargo-val process integration |
 | bounded capacity is confused with a queue of all undiscovered work | medium | memory grows with suite size and delays execution | represent only currently observed intents and active-child permits |
 | Windows allocation traces do not support reuse via an arena | medium | arena work would add overhead without eliminating repeated allocation | keep arena work conditional on allocation-site traces |
 | `cargo val` package command collides with another installed binary | low | users invoke an unexpected subcommand | package/executable name is distinct from existing `cargo-validate`; check command resolution in install fixtures |
 
 ## context
 
-- Proxima's typed pipe surface: `proxima/proxima-primitives/src/pipe/primitives.rs`.
-- Proxima's finite-source fair merge: `proxima/proxima-primitives/src/pipe/fan_in.rs`.
-- Bounded backpressure and demand semantics: `proxima/proxima-primitives/src/pipe/bounded.rs`, `demand.rs`.
-- Whole-response materialization shape to avoid: `proxima/proxima-primitives/src/pipe/scatter_gather.rs`.
-- Existing Proxima process surface and Windows gaps: `proxima/proxima-process/build.rs`, `src/command.rs`, `src/spawn.rs`, `src/fork_server.rs`.
-- Proxima preallocated inbox example: `proxima/prime/src/core/inbox.rs`.
-- Proxima settings conventions: `proxima/prime/src/config.rs`; `conflaguration` is already a workspace dependency.
+- Proxima source ref inspected: `main` at `5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b` in `/Users/brianbruggeman/repos/slot-0/proxima-windows`.
+- Pipe algebra: `proxima-primitives/src/pipe/primitives.rs:91-113`; finite-source merge: `proxima-primitives/src/pipe/fan_in.rs:253-282`; disarmed Demand behavior: `proxima-primitives/src/pipe/demand.rs:124-132`; async permit acquisition: `proxima-primitives/src/sync/semaphore.rs:78-92`; materializing `ScatterGather`: `proxima-primitives/src/pipe/scatter_gather.rs:78-89`.
+- Process behavior: `proxima-process/src/command.rs:1330-1433` uses worker threads, blocking stdio, `block_on`, and joins; `proxima-process/src/fd_pipe.rs:158-215` uses blocking file operations, worker threads, an unbounded channel, and blocking `waitpid`; `proxima-process/src/spawn_windows.rs:1-74` wraps `std::process`; `proxima-process/src/lib.rs:17-43` gates host spawn and pipe modules on the `std` feature.
+- Readiness boundary: `prime/src/os/readiness.rs:1-3,23-30,59-87` uses `std` and reports off-worker busy-poll; `prime/src/os/reactor_windows.rs:1-16,70-101` stores `OwnedSocket` and accepts `AsSocket`, not child pipe or process handles.
+- Configuration evidence: conflaguration 2.0.0 `src/lib.rs:398,446,476`, `src/builder.rs:180-236`, and `crates/conflaguration-derive/src/lib.rs:395,423`; the current env resolver and derive output use `std`.
 - Registry dependency check, 2026-10-09: crates.io API lookups for `proxima-process`, `proxima-primitives`, and `proxima-runtime` returned 404; pin a Git revision until those packages are published.
 - cargo-nextest's rationale and runner model: [How nextest works](https://www.nexte.st/docs/design/how-it-works/), [runner loop](https://www.nexte.st/docs/design/architecture/runner-loop/), [Why process-per-test](https://www.nexte.st/docs/design/why-process-per-test/).
 - crates.io name check, 2026-10-09: [the `cargo-val` API lookup](https://crates.io/api/v1/crates/cargo-val) returned 404, [`cargo-validate`](https://crates.io/api/v1/crates/cargo-validate) returned 200 with executable `cargo-validate`, and [the normalized `cargo_val` lookup](https://crates.io/api/v1/crates/cargo_val) returned 404. A package `cargo-val` is therefore the selected candidate, subject to a final registry check before publication.

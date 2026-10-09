@@ -8,8 +8,10 @@ The package name `cargo-val` is available on crates.io as checked on
 subcommand. The design and implementation cards are in
 [`specs/cargo-val/`](specs/cargo-val/).
 
-This repository is at the design-card stage. The cards require Proxima process
-support on Windows before the runner can claim native Windows support. The
-Proxima crates checked for this design are not published on crates.io, so the
-initial integration must pin a Proxima Git revision instead of using a local
-path dependency.
+The current help-only executable is a temporary scaffold and uses `std`; it
+does not meet the design. The shipped binary and production dependency graph
+must be no_std, and process execution must use Proxima's async child-session
+path on Windows, macOS, and Linux. That requires no_std configuration support
+from conflaguration and reactor-driven process-session support from Proxima.
+The Proxima crates checked for this design are not published on crates.io, so
+integration must pin a Proxima Git revision rather than use a local path.
