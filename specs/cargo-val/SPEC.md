@@ -1,6 +1,6 @@
 # cargo-val
 
-status: draft
+status: audited
 owner: brian
 created: 2026-10-09
 
@@ -78,22 +78,44 @@ and collects every result in a `Vec`.
 ## acceptance criteria
 
 Commands below are the acceptance contract for the implementation cards. Each
-named fixture test reports its internal record counts as well as the test
-result. Commands are prospective until their card lands.
+named fixture test checks output against hand-authored expected records that
+are independent of cargo-val's runner. The same semantic fixture is run through
+cargo-nextest and its canonical result records must pass the same comparator.
+For runner-specific behavior with no nextest equivalent (early dispatch,
+`NO_COLOR`, allocation traces), cargo-nextest remains the semantic outcome
+control while a separate literal fixture oracle checks that behavior. Commands
+are prospective until their card lands.
 
-| id | discharges | command | expected |
-|---|---|---|---|
-| AC1 | R1 | `cargo test -p cargo-val --test platform_process -- native_spawn_wait_stdio` on Windows, macOS, and Linux | each host: 1 case passed, 0 spawn errors, 0 orphan children |
-| AC2 | R2 | `cargo test -p cargo-val --test artifact_stream -- two_artifacts_before_build_exit` | 2 executable artifact records in input order, 1 test executable handled before Cargo exit, 0 non-test artifacts launched |
-| AC3 | R3 | `cargo test -p cargo-val --test discovery_stream -- dispatch_before_eof` | 1 test dispatched before listing EOF, 3 names discovered, 0 whole-suite materializations |
-| AC4 | R4 | `cargo test -p cargo-val --test exact_process -- selected_tests_once` | 3 selected names, 3 exact child invocations, 0 duplicate invocations |
-| AC5 | R5 | `cargo test -p cargo-val --test admission -- seven_tests_two_slots` | 7 started, 7 completed, peak live children 2, 0 dropped intents |
-| AC6 | R6 | `cargo test -p cargo-val --test child_lifecycle -- pass_assertion_abort_timeout_cancel` | 5 outcomes classified, 0 cross-test terminations, 0 orphan children |
-| AC7 | R7 | `cargo test -p cargo-val --test settings -- config_env_cli_precedence` | 4 precedence cases passed, 0 invalid capacities accepted |
-| AC8 | R8 | `cargo test -p cargo-val --test color_policy -- no_color_matrix` | 4 cases: 2 ANSI outputs with `NO_COLOR` absent (TTY and pipe), 2 ANSI-free outputs when `NO_COLOR` is present (TTY and pipe) |
-| AC9 | R9 | `cargo test -p cargo-val --test accounting -- mixed_suite` | 5 discovered = 1 filtered + 1 ignored + 2 passed + 1 failed, 0 unaccounted |
-| AC10 | R10 | `cargo test -p cargo-val --test allocation_trace -- child_payload_record` on Windows, macOS, and Linux | each host retains 1 raw per-child allocation record and 1 output payload; no arena claim is made by this measurement |
-| AC11 | R11 | `cargo test -p cargo-val --test comparison_record -- complete_host_record` | 1 complete comparison record per host contains throughput, single-request and percentile latency, CPU, RSS, errors, CoV, corpus, profile, baseline, and raw test records |
+| id | discharges | command | expected | independent oracle and incumbent control |
+|---|---|---|---|---|
+| ACP1 | R1 | `cargo test -p proxima-process --test windows_target_gate -- unix_only_negative_control` | 1 Windows target fixture accepted, 1 Unix-only control rejected | compare the Windows `std::process::Command` reference fixture to its literal child record; cargo-nextest runs that same reference fixture and must pass the same comparator, while the Unix-only manifest remains the negative compile control |
+| ACP2 | R1 | `cargo test -p proxima-process --test windows_spawn -- spawn_wait_inherited_stdio` on Windows | 1 child spawned, 1 child reaped, 0 orphan children | compare child pid lifecycle and inherited bytes to `std::process::Command`; run the same fixture under cargo-nextest and require the expected exit record |
+| ACP3 | R1, R6 | `cargo test -p proxima-process --test windows_stdio -- stdout_bytes` on Windows | 1 stdout payload, 0 byte mismatches, 0 orphan children | compare bytes to a checked-in literal payload and `std::process::Command`; cargo-nextest control must report the fixture pass |
+| ACP4 | R1, R6 | `cargo test -p proxima-process --test windows_stdio -- stdin_stderr_bytes` on Windows | 2 byte payloads, 0 byte mismatches, 0 orphan children | compare bytes to checked-in stdin/stderr vectors and `std::process::Command`; cargo-nextest control must report the fixture pass |
+| ACP5 | R1, R4 | `cargo test -p proxima-process --test windows_command -- env_and_cwd` on Windows | 3 cases passed, 0 mismatches | compare environment and cwd to independent `std::process::Command` output; cargo-nextest control must pass the same fixture |
+| ACP6 | R1 | `cargo test -p proxima-process --test process_contract` in native Windows, macOS, and Linux jobs | each host: 7 process contract cases passed, 0 orphan children | compare each case to the existing Unix std-process behavior or literal Windows vectors; cargo-nextest control must pass the same seven fixture cases on each native host |
+| AC0 | R1 | `cargo test -p cargo-val --test cli_smoke -- help_banner` | 1 fixture passed, 1 `cargo val --help` banner observed | compare exact banner bytes to a checked-in expected string; Cargo's own external-subcommand resolution is the control and must resolve `cargo-val` as `cargo val` |
+| AC0a | R1, R4, R5 | `cargo test -p cargo-val --test dependency_source -- pinned_proxima_revision` | 3 Proxima packages resolve from the same pinned Git revision, 1 mismatched-revision fixture rejected | compare package source IDs to the pinned revision in `Cargo.lock`; the test invokes `cargo tree` for both fixtures, then cargo-nextest runs the valid fixture and must pass the same source-id comparator |
+| AC1 | R2 | `cargo test -p cargo-val --test artifact_stream -- two_artifacts_before_build_exit` | 2 executable artifact records in input order, 1 test executable handled before Cargo exit, 0 non-test artifacts launched | compare against two hand-authored Cargo JSON event lines; run the same fixture suite with cargo-nextest and require both canonical test result records to match the literal oracle |
+| AC2 | R3 | `cargo test -p cargo-val --test discovery_stream -- line_parser_counts` | 3 names parsed, 0 malformed names accepted | compare to three hand-authored libtest listing lines; cargo-nextest's listing of the same fixture must pass the same canonical name comparator |
+| AC3 | R3 | `cargo test -p cargo-val --test discovery_stream -- dispatch_before_eof` | 1 test dispatched before listing EOF, 3 names discovered, 0 whole-suite materializations | a barrier-controlled stream fixture is the independent ordering oracle; cargo-nextest runs the same fixture and must pass the shared three-name/result comparator |
+| AC4 | R4 | `cargo test -p cargo-val --test exact_process -- selected_tests_once` | 3 selected names, 3 exact child invocations, 0 duplicate invocations | compare invocation names and marker-file records to a hand-authored exact-selection vector; cargo-nextest must pass the same selected fixture and canonical outcome comparator |
+| AC5 | R5 | `cargo test -p cargo-val --test admission -- seven_tests_two_slots` | 7 started, 7 completed, peak live children 2, 0 dropped intents | compare start/finish records to a fixed seven-item fixture and a two-permit state trace; cargo-nextest must produce the same seven final outcome records |
+| AC6 | R6 | `cargo test -p cargo-val --test child_lifecycle -- pass_failure_abort` | 3 outcomes classified, 0 cross-test terminations, 0 orphan children | compare exit classes to three hand-authored child response vectors; cargo-nextest must pass the same semantic fixtures and outcome comparator |
+| AC7a | R6 | `cargo test -p cargo-val --test child_output -- stdout_stderr_payloads` | 2 payloads retained byte-for-byte, 0 mismatches | compare bytes to checked-in stdout/stderr vectors; cargo-nextest must pass the same payload fixture and byte comparator |
+| AC7 | R7 | `cargo test -p cargo-val --test settings -- config_env_cli_precedence` | 4 precedence cases passed, 0 invalid capacities accepted | compare the four resolved settings to a literal precedence table; cargo-nextest runs the same settings fixture and must pass the same expected-value checks |
+| AC8 | R8 | `cargo test -p cargo-val --test color_policy -- no_color_matrix` | 4 cases: 2 ANSI outputs with `NO_COLOR` absent (TTY and pipe), 2 ANSI-free outputs when `NO_COLOR` is present (TTY and pipe) | compare ANSI presence to four fixed byte-level expectations; cargo-nextest output is run through the same presence checker and must pass its color-policy control cases |
+| AC9 | R9 | `cargo test -p cargo-val --test accounting -- mixed_suite` | 5 discovered = 1 filtered + 1 ignored + 2 passed + 1 failed, 0 unaccounted | compare to a hand-counted five-record outcome table; cargo-nextest's output for the same fixture must pass the identical accounting comparator |
+| AC10 | R10 | `cargo test -p cargo-val --test allocation_trace -- child_payload_record` on Windows, macOS, and Linux | each host retains 1 raw per-child allocation record and 1 output payload; no arena claim is made by this measurement | compare output payload to a fixed byte vector and allocation records to host profiler raw events; cargo-nextest is run on the same child and its output payload must pass the same byte comparator |
+| AC11 | R11 | `cargo test -p cargo-val --test comparison_record -- matched_host_outcomes` | each native host: 1 paired cargo-val/cargo-nextest record with the same fixture's raw test outcomes | compare both output records to the hand-authored fixture oracle and require both to pass the same canonical outcome comparator |
+| AC11a | R11 | `cargo test -p cargo-val --test comparison_record -- latency_throughput_samples` | each native host: 1 sample record contains throughput, single-request latency, percentile latency, raw samples, and CoV | compare sample fields to the independent measurement schema and require the cargo-nextest control record to pass the same schema checker |
+| AC11b | R11 | `cargo test -p cargo-val --test comparison_record -- host_resource_samples` | each native host: 1 sample record contains CPU, RSS, error rate, corpus, profile, baseline, and host identity | compare fields to the independent measurement schema and require the cargo-nextest control record to pass the same schema checker |
+| AC12 | R6 | `cargo test -p cargo-val --test cancellation -- cancel_two_live_children` | 2 children reaped, 0 launches after cancellation, 0 orphans | compare process ids and exit records to a barrier-controlled fixture; cargo-nextest must pass the same two-child final-outcome comparator |
+| AC12a | R6 | `cargo test -p cargo-val --test timeout -- terminate_and_reap_child` | 1 timed-out child classified, 1 child reaped, 0 orphan children | compare elapsed-time decision and exit class to a fixed-clock timeout fixture; cargo-nextest must pass the same child final-outcome control |
+| AC13 | R10 | `cargo test -p cargo-val --test allocation_trace -- repeated_process_alloc_sites_and_arena_payload_parity` on Windows | either 1 conditional arena parity case passed with byte-identical payload, or 1 negative trace recorded and 0 arena changes admitted | compare bytes to the fixed payload fixture and repeated allocation sites to retained profiler events; cargo-nextest control must pass the same payload fixture |
+| AC14 | R1, R4, R6 | `cargo test -p cargo-val --test platform_acceptance` in native Windows, macOS, and Linux jobs | each host: 1 acceptance record covering 5 fixture categories, 0 unaccounted outcomes, 0 orphan children | compare to the same checked-in platform fixture records; cargo-nextest control must pass all five semantic categories on every native host |
+| AC15 | R11 | `cargo test -p cargo-val --test comparison_record -- malformed_control` | 1 malformed record rejected, 0 valid host records rejected | compare candidate and cargo-nextest raw records to a schema with hand-authored expected fields; the malformed fixture must be rejected by the same validator |
+| AC16 | R1-R9 | `cargo test -p cargo-val --test docs_contract -- command_examples` | 3 platform examples, 1 command spelling, 0 undocumented platform caveats | compare docs examples to checked-in executable fixture invocations; cargo-nextest runs the same examples and its canonical outcomes must pass the shared result comparator |
 
 ## out of scope
 
