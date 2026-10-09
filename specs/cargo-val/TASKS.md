@@ -15,7 +15,7 @@ commit being present on `main`.
 | P1 | Proxima: `fix: gate unix process backend by target` | ACP1 | `cargo test -p proxima-process --test windows_target_gate -- unix_only_negative_control` | 1 Windows target fixture accepted, 1 Unix-only control rejected | [x] | `proxima` main `6cb786ea`; Windows cross-check passed; native Windows runtime unavailable |
 | P2 | Proxima: `test: verify windows spawn and wait` | ACP2 | `cargo test -p proxima-process --test windows_spawn -- spawn_wait_inherited_stdio` on Windows | 1 child spawned, 1 child reaped, 0 orphan children | [x] | Proxima main `0a88cf9e`; `cargo xwin` linked the fixture and Wine ran 1 test/0 failures; native Windows remains in P6 |
 | P3 | Proxima: `test: verify windows stdout bytes` | ACP3 | `cargo test -p proxima-process --test windows_stdio -- stdout_bytes` on Windows | 1 stdout payload, 0 byte mismatches, 0 orphan children | [x] | Proxima main `c2730696`; xwin cross-build and Wine run: 1 passed, 0 failed; native Windows remains in P6 |
-| P4 | Proxima: `feat: pipe windows child stdin and stderr` | ACP4 | `cargo test -p proxima-process --test windows_stdio -- stdin_stderr_bytes` on Windows | 2 byte payloads, 0 byte mismatches, 0 orphan children | [ ] | one byte-exact fixture |
+| P4 | Proxima: `test: verify windows stdin and stderr bytes` | ACP4 | `cargo test -p proxima-process --test windows_stdio -- stdin_stderr_bytes` on Windows | 2 byte payloads, 0 byte mismatches, 0 orphan children | [x] | Proxima main `2c561f6e`; xwin cross-build and Wine run: 1 passed, 0 failures; native Windows remains in P6 |
 | P5 | Proxima: `fix: preserve windows command environment and cwd` | ACP5 | `cargo test -p proxima-process --test windows_command -- env_and_cwd` on Windows | 3 cases passed, 0 mismatches | [ ] | match Unix `CommandDescriptor` behavior |
 | P6 | Proxima: `ci: check process backend on three hosts` | ACP6 | `cargo test -p proxima-process --test process_contract` in native Windows, macOS, and Linux jobs | each host: 7 process contract cases passed, 0 orphan children | [ ] | native execution required; cross-check is not runtime evidence |
 | C0 | `chore: scaffold cargo-val fixture workspace` | AC0 | `cargo test -p cargo-val --test cli_smoke -- help_banner` | 1 fixture passed, 1 `cargo val --help` banner observed | [x] | Rust 2024; package `cargo-val`, binary `cargo-val` |
@@ -43,8 +43,8 @@ commit being present on `main`.
 
 ## resume
 
-Last landed slices: P1 (`6cb786ea`), P2 (`0a88cf9e`), and P3 (`c2730696`) on Proxima main; C0 (`57cb50f`) on cargo-val main
-Next action: P4 adds byte-exact Windows stdin and stderr coverage; C0a waits for P6
+Last landed slices: P1 (`6cb786ea`), P2 (`0a88cf9e`), P3 (`c2730696`), and P4 (`2c561f6e`) on Proxima main; C0 (`57cb50f`) on cargo-val main
+Next action: P5 checks Windows command environment and cwd; C0a waits for P6
 Open question, if any: none; C3's dispatch-before-EOF fixture is the explicit
 gate that falsifies the incremental discovery requirement
 
