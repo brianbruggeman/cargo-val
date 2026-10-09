@@ -61,7 +61,7 @@ shipped feature graph.
 
 | card / AC / commit | acceptance command and exact count | depends / evidence |
 |---|---|---|
-| F0 / AC1 `docs: inventory no_std settings api gaps` | `python3 specs/cargo-val/validate_conflag_gap.py` -> 5 source-backed gap rows and 1 concrete borrowed-pair API signature, 0 unbound runtime dependencies; observed 5 / 1 / 0 | E1 plus `/Users/brianbruggeman/repos/mine/conflaguration/Cargo.toml:12-16` and `src/lib.rs:276-388,512-565`; artifact `oracles/f0.jsonl` SHA-256 `74207a43a1a48dd97d19545925aa8a6ffa24e0caf3a228ab3a1cafd8a47cf007`; current `Settings::from_env` source is the compatibility baseline |
+| F0 / AC1 `docs: inventory conflaguration no_std api gaps` | `python3 specs/cargo-val/validate_conflag_gap.py` -> 5 source-backed gap rows and 1 concrete borrowed-pair API signature, 0 unbound runtime dependencies; observed 5 / 1 / 0 | E1 plus `/Users/brianbruggeman/repos/mine/conflaguration/Cargo.toml:12-16` and `src/lib.rs:276-388,512-565`; artifact `oracles/f0.jsonl` SHA-256 `74207a43a1a48dd97d19545925aa8a6ffa24e0caf3a228ab3a1cafd8a47cf007`; committed `949262a` |
 | F1 / AC9 `feat: add a no_std settings leaf crate` | `cargo check -p conflaguration-core --no-default-features --lib --message-format=json` -> 1 library artifact, 0 errors; shared harness -> 1 core-only incumbent accepted, 1 `std::env` fixture rejected | F0's admitted API seam; E1; empty typed source surface, no root crate flip |
 | F2 / AC10 `feat: look up borrowed setting keys` | `cargo test -p conflaguration-core --test borrowed_settings one_key` -> 1 present, 1 absent, 0 owned copies | F1; E1 |
 | F3 / AC11 `feat: distinguish empty setting from absence` | `borrowed_settings present_empty_absent` -> 3 distinct states, 0 collapsed | F2; E1 |
@@ -86,7 +86,7 @@ tests are only independent child-behavior oracles.
 | H1 / AC19 `feat: expose linux environment pairs` | native Linux `cargo test -p proxima-process --test host_env linux_pairs` -> 2 borrowed pairs, 0 retained copies | F9; E1,E2 |
 | H2 / AC20 `feat: expose macos environment pairs` | native macOS `host_env macos_pairs` -> 2 borrowed pairs, 0 retained copies | H1 contract; E1,E2 |
 | H3 / AC21 `feat: expose windows environment units` | native Windows `host_env windows_wide_pairs` -> 2 borrowed wide pairs, 1 empty value distinguished from absence | H1 contract; E1,E4 |
-| P0 / AC2 `docs: inventory no_std child reactor seams` | `python3 specs/cargo-val/validate_process_gap.py` -> 4 source-backed gaps (launch, pipe readiness, exit readiness, no_std feature graph), 1 typed session signature, 0 blocking calls admitted | F0; E2-E6; independently reopen each exact `5207d66e` source hunk through `git show`, count four missing seams, and retain the existing synchronous child fixture as the process outcome control; implementation admission gate |
+| P0 / AC2 `docs: inventory no_std child reactor seams` | `python3 specs/cargo-val/validate_process_gap.py` -> 4 source-backed gaps, 1 typed session signature, 0 blocking calls admitted; observed 4 / 1 / 0 | F0; E2-E6; exact Proxima revision `5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b`; oracle `oracles/p0.jsonl` SHA-256 `a2b2a0d4a9dc5caf1147931fa296fd133987d87bab78711ee08014d71ed030b2` |
 | Q1 / AC3 `test: probe linux kernel child wake source` | native Linux `child_reactor linux_exit_probe` -> 1 Pending, 1 kernel wake, 1 exit observation; 0 helper threads, otherwise 1 explicit unsupported-source record | P0; probe one host source before implementing PR2 or P15 |
 | Q2 / AC4 `test: probe macos kernel child wake source` | native macOS `child_reactor macos_exit_probe` -> same 4 fields or 1 explicit unsupported-source record | P0; probe before PR3 or P16 |
 | Q3 / AC5 `test: probe windows pipe and child handle completion` | native Windows `child_reactor windows_handle_probe` -> 1 pipe completion and 1 child completion, 0 helper threads; otherwise 1 explicit unsupported-handle record | P0; probe before PR4-PR5 or P17 |
@@ -298,12 +298,11 @@ not enter the shipped runtime graph.
 
 ## resume
 
-The current binary is C0 and imports `std` (E9). Proxima's current Windows
-facade wraps `std::process` (E4); its Pipe still uses child worker threads
-and `block_on` (E3). Neither discharges the new runtime requirement. Start
-with F0, P0, and Q1-Q6; they bind the missing API seams and platform
-feasibility. Do not start F1, PR1, P2, or any downstream implementation card
-until the relevant source-backed gate has been reviewed and the card's work is
-bounded. Before each platform card, bind its
-fixture to literal expected events; retain raw events and account for both
-success and failure. Never mark a prospective count as observed.
+F0 and P0 are recorded in commits `949262a` and the commit containing this
+update. Their source gaps show the current conflaguration and Proxima contracts
+cannot satisfy the no_std child session requirement. Next run Q1-Q6 as native
+platform probes, then implement only the OS seams each probe establishes.
+F1, PR1, P2, and downstream cargo-val work remain gated by those results.
+Before each platform card, bind its fixture to literal expected events; retain
+raw events and account for both success and failure. Never mark a prospective
+count as observed.

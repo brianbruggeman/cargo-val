@@ -1,0 +1,5 @@
+{"evidence":"the Unix child owner is a std process wrapper with blocking wait","id":"no_std_process_launch","line":94,"source":"proxima-process/src/spawn.rs"}
+{"evidence":"child stdio is serviced by helper threads around blocking I/O","id":"child_stdio_readiness","line":1335,"source":"proxima-process/src/command.rs"}
+{"evidence":"Windows child lifecycle wraps std::process without a reactor exit event","id":"windows_process_wrapper","line":4,"source":"proxima-process/src/spawn_windows.rs"}
+{"evidence":"Windows reactor registration accepts sockets; child pipe/process handles are not exposed","id":"no_std_handle_reactor","line":1,"source":"prime/src/os/reactor_windows.rs"}
+{"api_signature":"pub struct ChildSession<In, Out, Err> { /* persistent native state */ }"}
