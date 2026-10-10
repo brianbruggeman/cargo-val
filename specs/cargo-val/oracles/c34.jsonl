@@ -1,0 +1,2 @@
+{"case":"c34_fixture","input":{"records":["pass","fail"],"color_modes":[true,false],"expected":{"ansi_records_true":2,"ansi_records_false":0,"short_buffer_errors":1,"allocations":0}},"status":"observed"}
+{"case":"c34_negative_control","control":{"mutation":"output buffer one byte short; truncate record","expected_rejected":true},"status":"observed"}
