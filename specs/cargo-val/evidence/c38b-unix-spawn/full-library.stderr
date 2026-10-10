@@ -1,0 +1,3 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src/lib.rs (/tmp/cargo_val_target/debug/deps/cargo_val-bb9c09bb76fef032)

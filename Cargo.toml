@@ -5,6 +5,7 @@ edition = "2024"
 
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+tempfile = "3.27.0"
 
 [features]
 proxima-codec = ["dep:proxima-codec"]
