@@ -1,0 +1,33 @@
+0cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+1thiserror v2.0.21
+2thiserror-impl feature "default"
+3thiserror-impl v2.0.21 (proc-macro)
+4proc-macro2 feature "default"
+5proc-macro2 v1.0.107
+6unicode-ident feature "default"
+7unicode-ident v1.0.26
+5proc-macro2 feature "proc-macro"
+6proc-macro2 v1.0.107 (*)
+4quote feature "default"
+5quote v1.0.47
+6proc-macro2 v1.0.107 (*)
+5quote feature "proc-macro"
+6quote v1.0.47 (*)
+6proc-macro2 feature "proc-macro" (*)
+4syn feature "default"
+5syn v3.0.6
+6proc-macro2 v1.0.107 (*)
+6quote v1.0.47 (*)
+6unicode-ident feature "default" (*)
+5syn feature "clone-impls"
+6syn v3.0.6 (*)
+5syn feature "derive"
+6syn v3.0.6 (*)
+5syn feature "parsing"
+6syn v3.0.6 (*)
+5syn feature "printing"
+6syn v3.0.6 (*)
+5syn feature "proc-macro"
+6syn v3.0.6 (*)
+6proc-macro2 feature "proc-macro" (*)
+6quote feature "proc-macro" (*)
