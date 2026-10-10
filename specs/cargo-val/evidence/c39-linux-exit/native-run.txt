@@ -1,0 +1,10 @@
+command: cargo test --target aarch64-unknown-linux-musl --no-default-features --features proxima-codec,proxima-primitives --lib c39_wakes_for_exit_and_control_without_semaphore_mode --no-run
+result: exit 0; test executable: /tmp/cargo_target/aarch64-unknown-linux-musl/debug/deps/cargo_val-17c098b7609a785c
+
+linux guest command:
+qemu-system-aarch64 -machine virt,accel=hvf -cpu host -m 1G -nographic -kernel /tmp/cargo-val-linux-vm/vmlinuz-virt -initrd /tmp/cargo-val-linux-vm/initramfs.cpio.gz -append 'console=ttyAMA0 rdinit=/init panic=1' -no-reboot
+
+kernel source: Alpine latest-stable aarch64 netboot vmlinuz-virt; boot output identifies Linux 6.18.52-0-virt.
+userspace: Alpine aarch64 minirootfs 3.24.0; test executable is statically linked musl aarch64.
+runtime output: `arm64-linux-qemu.stdout`.
+qemu stderr: empty; qemu process exit: 0; guest test marker: `C39_TEST_STATUS=0`.

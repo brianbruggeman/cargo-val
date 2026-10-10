@@ -53,6 +53,7 @@ impl UnixPipePair {
         &self.stderr
     }
 
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     pub(crate) fn into_parent_reads(self) -> (OwnedDescriptor, OwnedDescriptor) {
         (
             self.stdout.into_parent_read(),
@@ -74,6 +75,7 @@ impl OwnedPipe {
         &self.child_write
     }
 
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     fn into_parent_read(self) -> OwnedDescriptor {
         self.parent_read
     }
