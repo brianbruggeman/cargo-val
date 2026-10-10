@@ -1,0 +1,14 @@
+focused native command:
+CARGO_TARGET_DIR=/tmp/cargo_val_c42_target cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib c42_ -- --nocapture --test-threads=1
+observed: 1 passed, 0 failed; the payload record is focused-tests.txt.
+
+full native library suite:
+CARGO_TARGET_DIR=/tmp/cargo_val_c42_target cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib -- --test-threads=1
+observed: 22 passed, 0 failed, 0 ignored/filtered; full output is native-tests.txt.
+
+no_std target check:
+CARGO_TARGET_DIR=/tmp/cargo_val_c42_target cargo check --target aarch64-apple-darwin --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib
+observed: 1 cargo-val library check, 0 compiler errors, 1 dead-code warning for MacosPipeReader::new; output is no-std-check.txt.
+
+source inspection:
+src/host/macos_pipe.rs passes the caller's buffer pointer directly to libc::read. MacosExitPort owns the shared kqueue and handles both EVFILT_PROC and EVFILT_READ records. EOF removes the read filter.
