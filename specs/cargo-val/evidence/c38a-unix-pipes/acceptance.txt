@@ -1,0 +1,17 @@
+C38a native macOS fixture
+command: CARGO_TARGET_DIR=/tmp/cargo_val_target cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --lib host::unix_pipe_pair::tests::c38a_ -- --nocapture --test-threads=1
+observed: 2 passed, 0 failed, 14 filtered
+payload: 2 parent reads, 2 child writes, 4 close-on-exec descriptors, 2 nonblocking parent reads, 2 blocking child writes
+negative control: injected EMFILE on second pair; both first-pair descriptors returned EBADF
+source: native-macos-tests.txt
+
+Full library
+command: CARGO_TARGET_DIR=/tmp/cargo_val_target cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --lib -- --nocapture --test-threads=1
+observed: 16 passed, 0 failed, 0 ignored, 0 filtered; no warnings
+source: full-library.stdout.txt, full-library.stderr.txt
+
+No-std build graphs after adding libc
+x86_64-unknown-none: 1 cargo-val library artifact, 0 cargo-val compiler errors, successful build; evidence copied from the C30a graph rerun
+native aarch64-apple-darwin: 1 cargo-val library artifact, 0 cargo-val compiler errors, successful build; evidence copied from the C30c graph rerun
+cross aarch64-unknown-linux-gnu: 1 cargo-val library artifact, 0 cargo-val compiler errors, successful build; cross-compile only, not a native Linux fixture
+normal macOS feature tree: 0 rows containing the std feature token; Proxima's alloc feature is present, so this is not a whole-runner no-alloc claim

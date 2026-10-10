@@ -18,6 +18,7 @@ pub mod coordinator;
 pub mod discovery_stream;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod dispatch_stream;
+pub mod host;
 #[cfg(feature = "prime")]
 pub mod host_drive;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]

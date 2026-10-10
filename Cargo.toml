@@ -18,3 +18,6 @@ proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", re
 
 [build-dependencies]
 conflaguration = { git = "https://github.com/brianbruggeman/conflaguration.git", rev = "3eb325d84fc291df35528e6781b5b814884e2d28", version = "2.0.0", features = ["derive", "codegen"] }
+
+[target."cfg(unix)".dependencies]
+libc = { version = "0.2.190", default-features = false }
