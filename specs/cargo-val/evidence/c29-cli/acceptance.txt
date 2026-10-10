@@ -1,0 +1,12 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `release` profile [optimized] target(s) in 0.32s
+     Running tests/cli_arguments.rs (/tmp/cargo_target/release/deps/cli_arguments-32c4dbcdbb1f9235)
+
+running 4 tests
+test argv_parsing_allocates_nothing_and_probe_detects_allocation ... {"event":"cli_allocation_probe","parser_allocations":0,"positive_control_allocations":1}
+ok
+test help_and_version_select_top_level_actions ... ok
+test missing_or_empty_manifest_path_is_rejected ... ok
+test test_arguments_after_separator_are_not_cargo_val_options ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

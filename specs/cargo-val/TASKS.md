@@ -307,4 +307,9 @@ C4/AC66 implements the borrowed libtest listing parser; commit `251f523`. Its fo
 C28/AC114 parses `--manifest-path`, the first positional filter, `--exact`, and
 the `--` test-argument boundary from borrowed argv bytes. Its focused release
 run observed 4 passed tests and 0 parser allocations with a 1-allocation
-positive control; literal oracle and output are in `oracles/c28.jsonl` and
+positive control; literal oracle and output are in `oracles/c28.jsonl` and `evidence/c28-cli/acceptance.txt`; commit `cebac20`.
+
+C29/AC115 skips package and test-target argument values before taking the
+positional filter. The focused release run observed 4 passed tests, 0 parser
+allocations with a 1-allocation positive control, and 1 exact fixture test
+passing; records are in `oracles/c29.jsonl` and `evidence/c29-cli/`.
