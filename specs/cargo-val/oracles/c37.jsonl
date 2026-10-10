@@ -1,0 +1,2 @@
+{"case":"c37_fixture","input":{"argv":["--exact","alpha"],"env":{"PARENT":"kept","CHILD":"override"},"expected":{"tests_passed":4,"inherited_entries":1,"child_overrides":1,"argv_pairs":1,"allocations":0}},"status":"observed"}
+{"case":"c37_negative_controls","controls":[{"mutation":"put an interior NUL in the test name","expected_rejected":true},{"mutation":"truncate argv byte storage by one byte","expected_rejected":true},{"mutation":"truncate argv pointer storage by one entry","expected_rejected":true}],"status":"observed"}
