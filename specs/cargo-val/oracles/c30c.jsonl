@@ -1,0 +1,2 @@
+{"case":"c30c_fixture","input":{"target":"aarch64-apple-darwin","expected":{"cargo_val_library_artifacts":1,"product_compiler_errors":0,"exit":0},"features":["proxima-codec","proxima-primitives"]},"status":"observed"}
+{"case":"c30c_negative_control","control":{"mutation":"remove target from installed-target preflight list","expected_rejected":true},"status":"observed"}
