@@ -1,0 +1,2 @@
+command: git diff --cached --check
+observed output: empty
