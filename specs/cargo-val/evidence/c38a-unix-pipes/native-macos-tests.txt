@@ -1,0 +1,8 @@
+
+running 2 tests
+test host::unix_pipe_pair::tests::c38a_creates_two_owned_nonblocking_pipe_pairs ... {"parent_reads":2,"child_writes":2,"ownership_checks":4,"closed_after_drop":4}
+ok
+test host::unix_pipe_pair::tests::c38a_second_pipe_failure_drops_first_pair ... {"second_pair_failure":1,"first_pair_descriptors_closed":2}
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s

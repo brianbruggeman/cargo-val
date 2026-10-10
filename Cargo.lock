@@ -52,6 +52,7 @@ name = "cargo-val"
 version = "0.1.0"
 dependencies = [
  "conflaguration",
+ "libc",
  "prime",
  "proxima-codec",
  "proxima-primitives",
