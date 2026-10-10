@@ -11,10 +11,12 @@ tempfile = "3.27.0"
 proxima-codec = ["dep:proxima-codec"]
 proxima-primitives = ["dep:proxima-primitives"]
 prime = ["dep:prime"]
+proxima-core = ["dep:proxima-core"]
 
 [dependencies]
 prime = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, features = ["runtime-prime-executor"], optional = true }
 proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
+proxima-core = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, features = ["io-async"], optional = true }
 proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
 
 [build-dependencies]

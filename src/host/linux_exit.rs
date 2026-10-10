@@ -1,6 +1,8 @@
 //! Linux child-exit readiness over pidfds and one coordinator-owned epoll port.
 
 use core::ffi::c_int;
+use core::mem::{MaybeUninit, size_of};
+use core::ptr::null_mut;
 
 /// One event returned by the coordinator's Linux event port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,8 +85,7 @@ impl LinuxExitPort {
         if process_id <= 0 {
             return Err(libc::EINVAL);
         }
-        let token = self.next_token;
-        self.next_token = token.checked_add(1).ok_or(libc::EOVERFLOW)?;
+        let token = self.allocate_token()?;
         let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as c_int };
         if descriptor < 0 {
             return Err(last_error());
@@ -107,6 +108,38 @@ impl LinuxExitPort {
         })
     }
 
+    /// Registers a nonblocking descriptor with the same child-exit reactor.
+    pub fn watch_descriptor(&mut self, descriptor: c_int) -> Result<u64, c_int> {
+        if descriptor < 0 {
+            return Err(libc::EBADF);
+        }
+        let token = self.allocate_token()?;
+        let mut event = libc::epoll_event {
+            events: (libc::EPOLLIN | libc::EPOLLHUP | libc::EPOLLERR) as u32,
+            u64: token,
+        };
+        if unsafe { libc::epoll_ctl(self.epoll.0, libc::EPOLL_CTL_ADD, descriptor, &mut event) } < 0
+        {
+            return Err(last_error());
+        }
+        Ok(token)
+    }
+
+    /// Removes a descriptor after EOF so level-triggered hangup cannot spin.
+    pub fn unwatch_descriptor(&self, descriptor: c_int) -> Result<(), c_int> {
+        if unsafe { libc::epoll_ctl(self.epoll.0, libc::EPOLL_CTL_DEL, descriptor, null_mut()) } < 0
+        {
+            return Err(last_error());
+        }
+        Ok(())
+    }
+
+    fn allocate_token(&mut self) -> Result<u64, c_int> {
+        let token = self.next_token;
+        self.next_token = token.checked_add(1).ok_or(libc::EOVERFLOW)?;
+        Ok(token)
+    }
+
     /// Parks the coordinator until a watched child exits or a remote wake arrives.
     ///
     /// `epoll_wait` is the single reactor wait; child wait/read/write operations are
@@ -124,8 +157,8 @@ impl LinuxExitPort {
         if events.is_empty() || events.len() > i32::MAX as usize {
             return Err(libc::EINVAL);
         }
-        let mut kernel_events: [core::mem::MaybeUninit<libc::epoll_event>; 64] =
-            [const { core::mem::MaybeUninit::uninit() }; 64];
+        let mut kernel_events: [MaybeUninit<libc::epoll_event>; 64] =
+            [const { MaybeUninit::uninit() }; 64];
         let limit = events.len().min(kernel_events.len()) as c_int;
         let ready = unsafe {
             libc::epoll_wait(
@@ -154,14 +187,9 @@ impl LinuxExitPort {
         let value = 1_u64;
         loop {
             let written = unsafe {
-                libc::write(
-                    self.wake.0,
-                    (&value as *const u64).cast(),
-                    core::mem::size_of::<u64>(),
-                )
+                libc::write(self.wake.0, (&value as *const u64).cast(), size_of::<u64>())
             };
-            if written == core::mem::size_of::<u64>() as isize
-                || (written < 0 && last_error() == libc::EAGAIN)
+            if written == size_of::<u64>() as isize || (written < 0 && last_error() == libc::EAGAIN)
             {
                 return Ok(());
             }
@@ -184,10 +212,10 @@ impl LinuxExitPort {
                 libc::read(
                     self.wake.0,
                     (&mut value as *mut u64).cast(),
-                    core::mem::size_of::<u64>(),
+                    size_of::<u64>(),
                 )
             };
-            if read == core::mem::size_of::<u64>() as isize {
+            if read == size_of::<u64>() as isize {
                 return Ok(value);
             }
             if read < 0 {
@@ -251,6 +279,9 @@ fn last_error() -> c_int {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::size_of_val;
+    use core::ptr::null_mut;
+
     use std::format;
 
     use super::{LinuxExitEvent, LinuxExitPort};
@@ -352,7 +383,7 @@ mod tests {
                 libc::write(
                     self.release.0,
                     (&byte as *const u8).cast(),
-                    core::mem::size_of_val(&byte),
+                    size_of_val(&byte),
                 )
             };
             if written == 1 {
@@ -368,7 +399,7 @@ mod tests {
             if !self.reaped {
                 unsafe {
                     libc::kill(self.process_id, libc::SIGKILL);
-                    libc::waitpid(self.process_id, core::ptr::null_mut(), 0);
+                    libc::waitpid(self.process_id, null_mut(), 0);
                 }
             }
         }

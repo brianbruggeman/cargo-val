@@ -1,0 +1,86 @@
+    Checking cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+warning: struct `UnixPipePair` is never constructed
+ --> src/host/unix_pipe_pair.rs:7:19
+  |
+7 | pub(crate) struct UnixPipePair {
+  |                   ^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `OwnedPipe` is never constructed
+  --> src/host/unix_pipe_pair.rs:14:19
+   |
+14 | pub(crate) struct OwnedPipe {
+   |                   ^^^^^^^^^
+
+warning: struct `UnixPipeError` is never constructed
+  --> src/host/unix_pipe_pair.rs:25:19
+   |
+25 | pub(crate) struct UnixPipeError {
+   |                   ^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_factory`, `stdout`, `stderr`, and `into_parent_reads` are never used
+  --> src/host/unix_pipe_pair.rs:32:19
+   |
+30 | impl UnixPipePair {
+   | ----------------- associated items in this implementation
+31 |     /// Creates stdout and stderr pipes, closing stdout if stderr creation fails.
+32 |     pub(crate) fn new() -> Result<Self, UnixPipeError> {
+   |                   ^^^
+...
+36 |     fn with_factory(
+   |        ^^^^^^^^^^^^
+...
+46 |     pub(crate) fn stdout(&self) -> &OwnedPipe {
+   |                   ^^^^^^
+...
+52 |     pub(crate) fn stderr(&self) -> &OwnedPipe {
+   |                   ^^^^^^
+...
+57 |     pub(crate) fn into_parent_reads(self) -> (OwnedDescriptor, OwnedDescriptor) {
+   |                   ^^^^^^^^^^^^^^^^^
+
+warning: methods `parent_read`, `child_write`, and `into_parent_read` are never used
+  --> src/host/unix_pipe_pair.rs:68:19
+   |
+65 | impl OwnedPipe {
+   | -------------- methods in this implementation
+...
+68 |     pub(crate) fn parent_read(&self) -> &OwnedDescriptor {
+   |                   ^^^^^^^^^^^
+...
+74 |     pub(crate) fn child_write(&self) -> &OwnedDescriptor {
+   |                   ^^^^^^^^^^^
+...
+79 |     fn into_parent_read(self) -> OwnedDescriptor {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: function `create_pipe` is never used
+   --> src/host/unix_pipe_pair.rs:101:4
+    |
+101 | fn create_pipe() -> Result<OwnedPipe, UnixPipeError> {
+    |    ^^^^^^^^^^^
+
+warning: function `move_above_stdio` is never used
+   --> src/host/unix_pipe_pair.rs:141:4
+    |
+141 | fn move_above_stdio(descriptor: OwnedDescriptor) -> Result<OwnedDescriptor, UnixPipeError> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `last_error` is never used
+   --> src/host/unix_pipe_pair.rs:178:4
+    |
+178 | fn last_error() -> UnixPipeError {
+    |    ^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/host/linux_pipe.rs:25:19
+   |
+22 | impl<'port> LinuxPipeReader<'port> {
+   | ---------------------------------- associated function in this implementation
+...
+25 |     pub(crate) fn new(descriptor: OwnedDescriptor, port: &'port LinuxExitPort, token: u64) -> Self {
+   |                   ^^^
+
+warning: `cargo-val` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
