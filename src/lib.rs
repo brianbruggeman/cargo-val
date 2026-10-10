@@ -21,6 +21,8 @@ pub mod libtest_listing;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod outcomes;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod reporter;
+#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod selection;
 pub mod session_slots;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
