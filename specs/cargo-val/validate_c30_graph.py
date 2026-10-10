@@ -48,6 +48,11 @@ def is_cargo_val_package(package_id: object) -> bool:
     )
 
 
+def require_installed_target(target: str, installed_targets: list[str]) -> None:
+    if target not in installed_targets:
+        raise RuntimeError(f"target {target} is not installed")
+
+
 def product_error_count(records: list[dict[str, object]]) -> int:
     return sum(
         record.get("reason") == "compiler-message"
@@ -125,7 +130,29 @@ def replay(path: Path) -> None:
     print(json.dumps({"rejected_unexpected_event_controls": 1}))
 
 
-def check_target(target: str) -> None:
+def check_target(target: str, oracle_path: Path) -> None:
+    oracle_records = read_records(oracle_path)
+    fixtures = [record for record in oracle_records if record.get("case") == "c30a_fixture"]
+    controls = [record for record in oracle_records if record.get("case") == "c30a_negative_control"]
+    if len(oracle_records) != 2 or len(fixtures) != 1 or len(controls) != 1:
+        raise RuntimeError("C30a oracle must contain exactly one fixture and one control")
+    fixture = fixtures[0].get("input")
+    control = controls[0].get("control")
+    if not isinstance(fixture, dict) or not isinstance(control, dict):
+        raise RuntimeError("C30a oracle fixture and control must be objects")
+    expected = fixture.get("expected")
+    if not isinstance(expected, dict) or fixture.get("target") != target:
+        raise RuntimeError("target differs from the C30a fixture")
+    if fixture.get("features") != ["proxima-codec", "proxima-primitives"]:
+        raise RuntimeError("features differ from the C30a fixture")
+    if expected != {"cargo_val_library_artifacts": 1, "product_compiler_errors": 0, "exit": 0}:
+        raise RuntimeError("expected product graph differs from the C30a fixture")
+    if control != {
+        "mutation": "remove target from installed-target preflight list",
+        "expected_rejected": True,
+    }:
+        raise RuntimeError("negative control differs from the C30a oracle")
+
     installed = subprocess.run(
         ["rustup", "target", "list", "--installed"],
         cwd=ROOT,
@@ -135,9 +162,19 @@ def check_target(target: str) -> None:
     )
     if installed.returncode != 0:
         raise RuntimeError(f"rustup target preflight failed:\n{installed.stderr}")
-    if target not in installed.stdout.splitlines():
-        raise RuntimeError(f"target {target} is not installed")
+    installed_targets = installed.stdout.splitlines()
+    require_installed_target(target, installed_targets)
+    control_targets = [installed_target for installed_target in installed_targets if installed_target != target]
+    try:
+        require_installed_target(target, control_targets)
+    except RuntimeError as error:
+        control_rejected = str(error) == f"target {target} is not installed"
+    else:
+        control_rejected = False
+    if control.get("expected_rejected") is not control_rejected:
+        raise RuntimeError("missing-target preflight control did not match its oracle")
 
+    features = ",".join(fixture["features"])
     command = [
         "cargo",
         "check",
@@ -146,12 +183,16 @@ def check_target(target: str) -> None:
         "--lib",
         "--no-default-features",
         "--features",
-        "proxima-codec,proxima-primitives",
+        features,
         "--target",
         target,
         "--message-format=json",
     ]
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    evidence_directory = ROOT / "specs" / "cargo-val" / "evidence" / "c30-graph"
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    (evidence_directory / f"{target}.cargo.jsonl").write_text(result.stdout)
+    (evidence_directory / f"{target}.stderr.txt").write_text(result.stderr)
     messages: list[dict[str, object]] = []
     for line_number, line in enumerate(result.stdout.splitlines(), start=1):
         try:
@@ -192,20 +233,29 @@ def check_target(target: str) -> None:
             f"product_errors={len(errors)}, successful_build_records={len(finished)}\n{result.stderr}"
         )
 
+    if (len(artifacts), len(errors), result.returncode) != (
+        expected["cargo_val_library_artifacts"],
+        expected["product_compiler_errors"],
+        expected["exit"],
+    ):
+        raise RuntimeError("Cargo target graph differs from the C30a literal oracle")
+
     print(json.dumps({"target": target, "library_artifacts": len(artifacts), "product_errors": len(errors)}))
+    print(json.dumps({"rejected_missing_target_preflight_controls": int(control_rejected)}))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--replay", type=Path)
     parser.add_argument("--target")
+    parser.add_argument("--oracle", type=Path)
     parser.add_argument("--product-only", action="store_true")
     arguments = parser.parse_args()
     if arguments.replay is not None and arguments.target is None and not arguments.product_only:
         replay(arguments.replay)
         return 0
-    if arguments.target is not None and arguments.product_only and arguments.replay is None:
-        check_target(arguments.target)
+    if arguments.target is not None and arguments.product_only and arguments.replay is None and arguments.oracle is not None:
+        check_target(arguments.target, arguments.oracle)
         return 0
     parser.error("select --replay PATH or --target TARGET --product-only")
     return 2
