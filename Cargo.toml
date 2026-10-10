@@ -13,3 +13,6 @@ proxima-primitives = ["dep:proxima-primitives"]
 [dependencies]
 proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
 proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
+
+[build-dependencies]
+conflaguration = { git = "https://github.com/brianbruggeman/conflaguration.git", rev = "3eb325d84fc291df35528e6781b5b814884e2d28", version = "2.0.0", features = ["derive", "codegen"] }
