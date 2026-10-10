@@ -52,9 +52,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.6.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
+checksum = "50a649af8a827553c29fb0cb4bd4a6f1a0dd695bd3232b9bc98bd9c8a3ffbb8b"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -409,7 +409,7 @@ dependencies = [
 [[package]]
 name = "proxima-build"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b#5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
 dependencies = [
  "conflaguration",
  "serde",
@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "proxima-codec"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b#5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
 dependencies = [
  "bytes",
  "memchr",
@@ -431,7 +431,7 @@ dependencies = [
 [[package]]
 name = "proxima-core"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b#5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
 dependencies = [
  "futures",
  "pin-project-lite",
@@ -443,7 +443,7 @@ dependencies = [
 [[package]]
 name = "proxima-primitives"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b#5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
 dependencies = [
  "async-lock",
  "bytes",

@@ -11,5 +11,5 @@ proxima-codec = ["dep:proxima-codec"]
 proxima-primitives = ["dep:proxima-primitives"]
 
 [dependencies]
-proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b", version = "0.1.0", default-features = false, optional = true }
-proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b", version = "0.1.0", default-features = false, optional = true }
+proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
+proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
