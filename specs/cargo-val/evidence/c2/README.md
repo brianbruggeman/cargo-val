@@ -42,8 +42,8 @@ fields, invalid UTF-8, over-byte records, over-depth records, and insufficient
 scratch. It performs no runtime allocation. Proxima's current JSON codec is
 std-gated (`proxima/proxima-codec/Cargo.toml:30-46` and
 `proxima/proxima-codec/src/lib.rs:213-246`), so this specific record FSM stays
-in cargo-val. C3 will use Proxima delimiter framing in a fixed-buffer stream
-adapter. The caller must bound storage before supplying complete lines; this
+in cargo-val. C3 uses Proxima delimiter framing in a fixed-buffer stream
+adapter. The caller bounds storage before supplying complete lines; this
 parser's per-record limit then validates the supplied record. The OS child
 stdout source remains a later process-integration slice.
 
@@ -62,6 +62,6 @@ in `parser-test-noalloc.txt`, `no-std-check-latest.txt`, and
 
 These checks cover the library and its normal dependency graph. They do not
 establish the shipped binary's no_std status: `src/main.rs` still uses std,
-and C0e-C0g cover that separate entry boundary. C3 will stream bounded input
-from a caller-owned fixed buffer; a later process card must connect that buffer
-to an OS child stdout source.
+and C0e-C0g cover that separate entry boundary. C3 streams bounded input from
+a caller-owned fixed buffer; a later process card must connect that buffer to
+an OS child stdout source.

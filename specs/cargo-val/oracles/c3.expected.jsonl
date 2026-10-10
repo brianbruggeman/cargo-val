@@ -1,0 +1,4 @@
+{"after_event":0,"producer_open":true,"paths":[],"partial_lines":1}
+{"after_event":1,"producer_open":true,"paths":["/fixture/first"],"partial_lines":1}
+{"after_event":2,"producer_open":true,"paths":["/fixture/first","/fixture/second"],"partial_lines":0}
+{"after_event":3,"producer_open":false,"paths":["/fixture/first","/fixture/second"],"partial_lines":0}
