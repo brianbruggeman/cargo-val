@@ -50,6 +50,10 @@ fn test_arguments_after_separator_are_not_cargo_val_options() {
     let mut parser = CliParser::new();
     parser.push(b"--manifest-path");
     parser.push(b"tests/fixtures/workspace/Cargo.toml");
+    parser.push(b"--package");
+    parser.push(b"cargo_val_fixture");
+    parser.push(b"--test");
+    parser.push(b"integration_fixture");
     parser.push(b"fixture::passes");
     parser.push(b"--exact");
     parser.push(b"--");
@@ -63,6 +67,7 @@ fn test_arguments_after_separator_are_not_cargo_val_options() {
     assert_eq!(parser.filter(), Some(&b"fixture::passes"[..]));
     assert!(parser.exact());
     assert!(!parser.has_invalid_manifest_path());
+    assert!(!parser.has_invalid_cargo_option_value());
 }
 
 #[test]
@@ -74,6 +79,10 @@ fn missing_or_empty_manifest_path_is_rejected() {
     let mut empty_parser = CliParser::new();
     empty_parser.push(b"--manifest-path=");
     assert!(empty_parser.has_invalid_manifest_path());
+
+    let mut missing_target_parser = CliParser::new();
+    missing_target_parser.push(b"--test");
+    assert!(missing_target_parser.has_invalid_cargo_option_value());
 }
 
 #[test]

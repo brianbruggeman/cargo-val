@@ -1,0 +1,7 @@
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running tests/integration_fixture.rs (/tmp/cargo_target/release/deps/integration_fixture-c76712aa00b336af)
+
+running 1 test
+test fixture::passes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

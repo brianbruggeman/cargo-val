@@ -23,6 +23,8 @@ pub struct CliParser<'argument> {
     exact: bool,
     expects_manifest_path: bool,
     invalid_manifest_path: bool,
+    expects_cargo_option_value: bool,
+    invalid_cargo_option_value: bool,
 }
 
 impl<'argument> CliParser<'argument> {
@@ -37,6 +39,8 @@ impl<'argument> CliParser<'argument> {
             exact: false,
             expects_manifest_path: false,
             invalid_manifest_path: false,
+            expects_cargo_option_value: false,
+            invalid_cargo_option_value: false,
         }
     }
 
@@ -54,6 +58,11 @@ impl<'argument> CliParser<'argument> {
             self.expects_manifest_path = false;
             return;
         }
+        if self.expects_cargo_option_value {
+            self.invalid_cargo_option_value |= argument.is_empty();
+            self.expects_cargo_option_value = false;
+            return;
+        }
         if self.action.is_some() {
             return;
         }
@@ -63,6 +72,9 @@ impl<'argument> CliParser<'argument> {
             b"--version" | b"-V" => self.action = Some(CliAction::Version),
             b"--exact" => self.exact = true,
             b"--manifest-path" => self.expects_manifest_path = true,
+            b"--package" | b"-p" | b"--test" | b"--bin" | b"--example" | b"--bench"
+            | b"--target" | b"--target-dir" | b"--profile" | b"--features" | b"--config"
+            | b"--jobs" | b"-j" => self.expects_cargo_option_value = true,
             value if value.starts_with(b"--manifest-path=") => {
                 let path = &value[b"--manifest-path=".len()..];
                 if path.is_empty() {
@@ -111,5 +123,11 @@ impl<'argument> CliParser<'argument> {
     #[must_use]
     pub const fn has_invalid_manifest_path(&self) -> bool {
         self.invalid_manifest_path || self.expects_manifest_path
+    }
+
+    /// Whether a Cargo option ended without its required value.
+    #[must_use]
+    pub const fn has_invalid_cargo_option_value(&self) -> bool {
+        self.invalid_cargo_option_value || self.expects_cargo_option_value
     }
 }
