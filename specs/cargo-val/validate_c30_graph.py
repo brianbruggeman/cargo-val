@@ -138,26 +138,42 @@ def replay(path: Path) -> None:
 
 def check_target(target: str, oracle_path: Path) -> None:
     oracle_records = read_records(oracle_path)
-    fixtures = [record for record in oracle_records if record.get("case") == "c30a_fixture"]
-    controls = [record for record in oracle_records if record.get("case") == "c30a_negative_control"]
+    fixtures = [
+        record
+        for record in oracle_records
+        if isinstance(record.get("input"), dict) and record["input"].get("target") == target
+    ]
+    if len(fixtures) != 1:
+        raise RuntimeError(f"expected one target fixture for {target}, found {len(fixtures)}")
+    fixture_case = fixtures[0].get("case")
+    if not isinstance(fixture_case, str) or not fixture_case.endswith("_fixture"):
+        raise RuntimeError("target fixture case must end in _fixture")
+    control_case = f"{fixture_case.removesuffix('_fixture')}_negative_control"
+    controls = [record for record in oracle_records if record.get("case") == control_case]
     if len(oracle_records) != 2 or len(fixtures) != 1 or len(controls) != 1:
-        raise RuntimeError("C30a oracle must contain exactly one fixture and one control")
+        raise RuntimeError("target oracle must contain exactly one fixture and one control")
     fixture = fixtures[0].get("input")
     control = controls[0].get("control")
     if not isinstance(fixture, dict) or not isinstance(control, dict):
-        raise RuntimeError("C30a oracle fixture and control must be objects")
+        raise RuntimeError("target oracle fixture and control must be objects")
     expected = fixture.get("expected")
-    if not isinstance(expected, dict) or fixture.get("target") != target:
-        raise RuntimeError("target differs from the C30a fixture")
-    if fixture.get("features") != ["proxima-codec", "proxima-primitives"]:
-        raise RuntimeError("features differ from the C30a fixture")
-    if expected != {"cargo_val_library_artifacts": 1, "product_compiler_errors": 0, "exit": 0}:
-        raise RuntimeError("expected product graph differs from the C30a fixture")
+    if not isinstance(expected, dict):
+        raise RuntimeError("target oracle expected result must be an object")
+    if "features" not in fixture or "exit" not in expected:
+        raise RuntimeError("target oracle must bind features and exit explicitly")
+    expected_artifacts = expected.get("cargo_val_library_artifacts")
+    expected_errors = expected.get("product_compiler_errors")
+    expected_exit = expected.get("exit")
+    if expected_artifacts != 1 or expected_errors != 0 or expected_exit != 0:
+        raise RuntimeError("expected target graph differs from the oracle contract")
+    features = fixture.get("features")
+    if not isinstance(features, list) or not all(isinstance(feature, str) for feature in features):
+        raise RuntimeError("target features must be a string list")
     if control != {
         "mutation": "remove target from installed-target preflight list",
         "expected_rejected": True,
     }:
-        raise RuntimeError("negative control differs from the C30a oracle")
+        raise RuntimeError("negative control differs from the target oracle")
 
     installed = subprocess.run(
         ["rustup", "target", "list", "--installed"],
@@ -180,7 +196,7 @@ def check_target(target: str, oracle_path: Path) -> None:
     if control.get("expected_rejected") is not control_rejected:
         raise RuntimeError("missing-target preflight control did not match its oracle")
 
-    features = ",".join(fixture["features"])
+    feature_argument = ",".join(features)
     command = [
         "cargo",
         "check",
@@ -189,7 +205,7 @@ def check_target(target: str, oracle_path: Path) -> None:
         "--lib",
         "--no-default-features",
         "--features",
-        features,
+        feature_argument,
         "--target",
         target,
         "--message-format=json",
@@ -240,11 +256,11 @@ def check_target(target: str, oracle_path: Path) -> None:
         )
 
     if (len(artifacts), len(errors), result.returncode) != (
-        expected["cargo_val_library_artifacts"],
-        expected["product_compiler_errors"],
-        expected["exit"],
+        expected_artifacts,
+        expected_errors,
+        expected_exit,
     ):
-        raise RuntimeError("Cargo target graph differs from the C30a literal oracle")
+        raise RuntimeError("Cargo target graph differs from its literal oracle")
 
     print(json.dumps({"target": target, "library_artifacts": len(artifacts), "product_errors": len(errors)}))
     print(json.dumps({"rejected_missing_target_preflight_controls": int(control_rejected)}))
