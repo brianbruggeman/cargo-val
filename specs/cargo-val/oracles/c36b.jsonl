@@ -1,0 +1,2 @@
+{"case":"c36b_fixture","input":{"tasks_polled_after_wake":1,"remote_wakes":1,"control_tokens_before_park":1,"resumed_tasks":1,"comparator_accepted":1},"status":"observed"}
+{"case":"c36b_negative_control","control":{"mutation":"suppress kernel control token after remote wake","observed":{"remote_wakes":1,"control_tokens_before_park":0,"resumed_tasks":0,"comparator_rejected":1},"expected_rejected":true},"status":"observed"}
