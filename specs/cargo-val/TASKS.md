@@ -1,30 +1,129 @@
 # cargo-val -- implementation cards
 
-Status: prospective after C0. Each admitted card changes one small behavior,
-carries one count-bearing acceptance check, and is one coherent conventional
-commit. F0, P0, and Q1-Q6 are the first admission probes. Every proposed card
-has a separately specified literal oracle and incumbent/negative control in
-the oracle ledger below. Platform implementation waits for its Q probe. If a
-card is larger than one Luna session under 20 minutes, split it before work.
+Status: active; cargo-val branch HEAD is C29/AC115 (`9e9aab0`) on
+`feat/cargo-val`. C0-C5 and C28-C29 are committed; C6 and C27 are implemented
+and validated in the worktree but remain uncommitted. The counted-admission C6
+and retry-fixture C7 have been withdrawn. Replacement C6 provides fixed,
+generation-checked session slots; C27 gates an incremental listing pull on that
+table and returns one borrowed launch intent. The process launch and completion
+loop remains unsupported by the pinned Proxima API. The active cargo-val-only
+cards are below; the older cross-repository cards are a conditional record, not
+the current implementation path.
+
+Each admitted card changes one small behavior, carries one count-bearing
+acceptance check, and is one coherent conventional commit. F0, P0, and Q1-Q6
+remain historical admission-probe records. The ledger below distinguishes literal oracle contracts
+from oracle files that have actually been written; a card is not admitted until
+its file, independent control, and bounded work packet exist.
+Each admitted packet is limited to one behavior, one host when host-specific,
+and its named source and test files, with a work budget below 20 minutes for
+Luna. Conditional native platform cards require native lifecycle evidence.
 The prospective counts are targets, never evidence.
 Every commit updates this file with its actual command, counts,
 artifact, and hash. The card-specific check and affected crate tests must pass
-at that commit. This document does not authorize a commit or push.
+at that commit. The owner requested that completed cards land on `main` and be
+pushed. The cargo-val repository has no configured remote or push destination;
+an earlier lookup did not find `git@github.com:brianbruggeman/cargo-val.git`.
+
+## execution frontier — cargo-val runner
+
+The cargo-val library currently reaches C5/AC67: it parses Cargo JSON and
+libtest listing data incrementally, and its first discovery Pipe can dispatch
+before listing EOF. The prior C6/AC68 counted-admission experiment and C7/AC69
+retry fixture are rejected as an architecture: they tested a permit pool,
+which violates the no-semaphore requirement. Their retained evidence is
+historical only. Replacement C6/AC68 adds `SessionSlots`; its observed checks
+are recorded in `evidence/c6-slots/acceptance-summary.txt`. The no_std release
+binary installs as `cargo-val` and resolves as `cargo val`; help and version
+work. Test-run invocations still return status 2 with a not-implemented
+message, so the nextest replacement is not usable yet.
+
+The current Proxima process API audit is
+`evidence/c28-process-gap/current-api.txt`. It records that process modules are
+gated on `std`; `CommandPipe::call` starts a dispatch thread and a separate
+reaper thread; direct `Command::output` and `status` drain or wait synchronously;
+and Unix spawn builds argv and environment vectors before `fork`. The source
+search in `windows-backend-search.txt` returned zero Windows backend matches.
+This API does not provide the poll-driven, no_std child session cargo-val
+requires. cargo-val must not hide these behaviors behind an async wrapper or
+copy the process backend into this repository.
+
+The next cargo-val work lands C6/C27 coherently, then completes the pure
+selection, exact-intent, accounting, and formatting boundaries listed below.
+These consume borrowed data and Proxima Pipes without constructing a suite
+queue. An executable runner cannot be connected to a compatible Proxima child
+session at the pinned revision: none exposes no_std launch plus poll-driven
+stdout, stderr, exit, cancellation, and reaping on all three hosts. That is an
+unmet external API dependency, not an admitted cargo-val implementation card.
+Keep the no_std library and Proxima Pipe/state-machine boundaries; measure
+allocation sites in the actual runner before selecting an arena or storage
+change. C6 adds runner-owned session storage only; it does not alter Proxima.
 
 The shipped cargo-val binary and **every normal runtime dependency** must
 exclude `std`. A `#![no_std]` marker on the top crate alone is insufficient.
 Cargo, build scripts, and test harnesses run on the host and are audited
-separately. A raw OS create-process call is bounded launch submission;
+separately. A future Proxima child session may use a bounded OS launch call;
 readiness, stdio, exit, cancellation, and reaping are poll-driven thereafter.
 No blocking wait/read/write, `block_on`, per-child helper threads, or busy-poll
-fallback is admitted. Reuse Proxima Pipe, AsyncRead/AsyncWrite, reactor,
-semaphore, and fan-in surfaces; do not duplicate them in cargo-val.
+fallback is admitted. Reuse the existing Proxima Pipe and no_std AsyncRead /
+AsyncWrite contracts where applicable; the pinned reactor and process APIs do
+not satisfy this runtime boundary. Do not introduce a semaphore, permit, wait
+queue, or cargo-val process/reactor backend.
+The existing pure parser and slot operations are no-alloc; the optional
+`proxima-codec` feature and the audited Proxima dependency graph still contain
+`alloc` features, so an allocation-free production graph is not established.
+The guiding-principle exclusions are concrete: the counted permit experiment
+was replaced by directly owned `SessionSlots`; a cargo-val OS child backend
+would duplicate Proxima's process responsibility; Proxima `FanIn` owns its
+items (`proxima-primitives/src/pipe/fan_in.rs:33-49`), while `DrainFanIn` lends
+borrowed items but has no waker (`drain_source.rs:22-29`). Neither merge is a
+substitute for a missing async child-event source. An arena is deferred until
+per-child allocation-site traces identify repeated ownership costs.
+
+## active cargo-val-only roadmap
+
+Each row is one behavior, one source module and focused test, a separate green
+conventional commit, and a Luna packet bounded below 20 minutes. Commands and
+counts are **prospective acceptance targets**, not observed results. The test
+fixture and negative control are written before implementation. Every packet
+also runs `cargo fmt --check` and the affected crate tests before commit.
+
+| card / commit | Luna packet and executable acceptance | dependency and negative control |
+|---|---|---|
+| C6 / `feat: store child sessions in fixed slots` | Land the already measured `src/session_slots.rs` plus `tests/session_slots.rs`; run the C6 command at the ledger row below -> 3 tests, 1 full-table rejection, 1 recycled slot, 1 stale completion rejected, 0 measured slot allocations and 1 positive-control allocation. | C5; no permit pool or wait queue. |
+| C27 / `feat: gate listing pulls on live session slots` | Land `src/dispatch_stream.rs` and its focused test; run the C27 command below -> 3 tests, 1 full-slot pull consuming 0 bytes, 1 resumed borrowed name, 0 measured Pipe allocations and 1 positive-control allocation. | C6; a full table must leave the source bytes untouched. |
+| C30 / AC116 `build: bake bounded defaults with conflaguration` | Add only `build.rs`, one generated-constant include, and one focused test. Use conflaguration `ConfigCodegen` as a build dependency; run `cargo test -p cargo-val --no-default-features --test build_config -- --test-threads=1` -> 2 generated scalar constants, 1 invalid configured capacity rejected, 0 runtime `std` edges. | C27; a deliberately injected normal `std` edge must fail the graph checker. Runtime `NO_COLOR` remains pending a host environment source. |
+| C31 / AC117 `feat: select borrowed test names` | Add one selector Pipe and one focused library unit test over `DispatchStep`; run `cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --lib selection -- --test-threads=1` -> 2 substring selections, 1 exact selection, 1 exact nonmatch, 0 owned name copies. | C27/C28/C29; the nonmatch must remain rejected and the selected name pointer must equal the input pointer. |
+| C32 / AC118 `feat: form borrowed exact-test intent` | Add one typed sans-IO intent constructor and one focused test; run `cargo test -p cargo-val --no-default-features --test exact_intent -- --test-threads=1` -> 1 borrowed executable path, 1 borrowed test name, 2 exact-mode arguments in order, 0 measured allocations. | C31; an intentionally transposed argument pair must fail the literal-argv comparator. This is data for a future Proxima child session, not a launch adapter. |
+| C33 / AC119 `feat: account typed test outcomes` | Add one fixed-count outcome FSM and one focused test; run `cargo test -p cargo-val --no-default-features --test accounting -- --test-threads=1` -> 5 discovered = 1 filtered + 1 ignored + 2 passed + 1 failed, 0 unaccounted. | C6/C31; a duplicate terminal event for a retired `SessionSlotId` must be rejected rather than counted twice. Host events are injected by the test fixture. |
+| C34 / AC120 `feat: format outcomes into caller storage` | Add one reporter Pipe and one focused library unit test with caller-owned output storage; run `cargo test -p cargo-val --no-default-features --features proxima-primitives --lib reporter -- --test-threads=1` -> 2 ANSI-bearing records when color is true, 2 ANSI-free records when false, 1 short-buffer rejection, 0 measured allocations. | C30/C33; a one-byte-short buffer must reject without truncating a record. Runtime `NO_COLOR` input is not claimed by this formatter. |
+
+The literal card fixtures are fixed before implementation: C30 uses jobs `2`,
+color `true`, and invalid jobs `0`; C31 uses names `alpha`, `alphabet`, and
+`beta` with filter `alpha` (substring then exact); C32 uses executable `fixture`
+and name `alpha` with argv `["--exact", "alpha"]`; C33 uses the five distinct
+names `filtered`, `ignored`, `pass_a`, `pass_b`, and `fail`; C34 formats two
+pass/fail records in each color mode. Each new card stores its literal fixture
+and mutation in `oracles/c30.jsonl` through `oracles/c34.jsonl` before code is
+written; those files do not exist yet, so these rows remain prospective.
+
+The child-session gate for C8-C26 and native C19 acceptance is explicit: the
+pinned Proxima revision must expose a no_std, poll-driven child session with
+borrowed launch input, readiness-driven stdio and exit, cancel/reap, and native
+Windows/macOS/Linux behavior. `proxima-process` is `std`-gated and its current
+wait/stdio paths block; Prime OS readiness is `std`-gated and its Windows
+registration accepts sockets, not process or pipe handles. The cargo-val cards
+above do not satisfy or silently substitute that gate. Cross-compilation is a
+compile check, never native lifecycle evidence. No C8/C26 completion claim is
+admissible while `cargo val` test-run still exits status 2.
 
 ## opened source that determines the split
 
-Read Proxima `main` at `5207d66e` with
-`git -C ../proxima show 5207d66e:<path>` (the shared `../proxima` working
-tree is on another branch) and conflaguration 2.0.0 at
+Read the cargo-val-pinned Proxima revision
+`6cffdc693bbd34483f1349f99b0ebd282c92fca4` with
+`git -C ../proxima show 6cffdc693bbd34483f1349f99b0ebd282c92fca4:<path>`;
+current Proxima `main` at `151d2dc0ee330838c4b95c3d84d4062a9028af01`
+is read-only context. Read conflaguration 2.0.0 at
 `/Users/brianbruggeman/repos/mine/conflaguration`. These pointers describe
 existing code; they do not assert that the proposed API exists.
 
@@ -36,21 +135,32 @@ existing code; they do not assert that the proposed API exists.
 | E4 | `../proxima/proxima-process/src/spawn_windows.rs:1,4,38,70` | Windows Child wraps `std::process` |
 | E5 | `../proxima/prime/src/lib.rs:9,19`; `../proxima/prime/src/os/readiness.rs:17,25,72,87,136` | host readiness is `std`-gated; Windows constructor accepts sockets, and off-worker path busy-polls |
 | E6 | `../proxima/proxima-core/src/io.rs:57,76`; `../proxima/proxima-primitives/src/pipe/primitives.rs:99` | no_std poll I/O and typed Pipe already exist |
-| E7 | `../proxima/proxima-primitives/src/sync/semaphore.rs:34,78`; `../proxima/proxima-primitives/src/pipe/demand.rs:124` | async permit admission exists; disarmed Demand consumes input |
+| E7 | pinned Proxima `proxima-primitives/src/sync/atomic_permits.rs:17-61`; `proxima-primitives/src/pipe/primitives.rs:91-101` | the credit pool exists but is rejected because it is a counted admission gate; the Pipe primitive remains the async composition surface |
 | E8 | `../proxima/proxima-primitives/src/pipe/fan_in.rs:1,253`; `../proxima/proxima-primitives/src/pipe/scatter_gather.rs:1,78` | FanIn merges ready sources; ScatterGather collects all results |
 | E9 | `src/main.rs:1,5,12`; `Cargo.toml:1,6` | C0 binary imports `std` |
+| E10 | pinned Proxima `6cffdc693bbd34483f1349f99b0ebd282c92fca4`: `proxima-primitives/src/sync/atomic_permits.rs:17-61` | `AtomicPermitPool` is a counted capacity gate with `try_acquire` and RAII release; despite having no waiter queue, using it would violate the no-semaphore requirement |
+| E11 | current Proxima main audit `151d2dc0ee330838c4b95c3d84d4062a9028af01`, `proxima-core/src/per_core.rs:83-110` | `StaticPerCore` is an inline fixed array but returns immutable references only; it cannot own mutable sessions or generation-check completion events |
+| E12 | `evidence/c6-slots/proxima-main-audit.txt` | current main's process/reaction/Pipe/IO source audit matches cargo-val's pinned process and reactor source at the audited paths; process execution remains std-gated and blocking paths remain present |
+| E13 | `prime/src/lib.rs:19-20,39-55`; `prime/Cargo.toml:101` | Prime OS driver and reactor feature currently require `std` |
+| E14 | `proxima-process/src/descriptor.rs:181-193` | child descriptors default to an empty environment; inheritance and child-only overlay semantics need an explicit contract |
+| E15 | `evidence/c27/normal-feature-tree.txt`; `../proxima/proxima-primitives/Cargo.toml:118-119,147-156`; `../proxima/proxima-codec/Cargo.toml` | the no-std Pipe feature graph has no `std` edge, but Proxima enables `futures/alloc`, `crossbeam-queue/alloc`, and serde allocation support; C27's zero-call allocation probe does not establish an allocation-free dependency graph |
 
 All tests named below are prospective. Their fixtures must emit the listed
 counts from independently specified input bytes. Build checks also require
 one target artifact and zero compiler errors. Native cards run on their host;
 cross-compilation alone cannot establish child lifecycle behavior.
-In the tables, a bare `test_binary filter` is command shorthand for
-`cargo test -p <table-owner> --test test_binary -- filter`. The table owners
-are `conflaguration`, `proxima-process` (except `child_reactor`, whose owner is
-`prime`), and `cargo-val`, respectively. The first fully spelled command in
-each table shows the expansion; a native-host qualifier is part of the check.
+Every prospective card below spells its command and binds it to an exact
+count-bearing output, independent literal oracle, and control. A native-host
+qualifier is part of the check. Prospective commands require their named test
+fixtures to be implemented before the card can be admitted or marked observed.
 
-## conflaguration prerequisites
+## historical cross-repository proposals (inactive)
+
+F/H/P/PR/Q rows below preserve prior proposed work and evidence. They are not
+admitted cargo-val work packets and do not authorize changes to conflaguration,
+Proxima, or Prime. Their acceptance commands are not current cargo-val gates.
+
+### conflaguration prerequisites
 
 F0 lands in cargo-val as a source-backed gap register; F1-F9, if admitted,
 land in `conflaguration`. Its no_std typed source accepts borrowed
@@ -59,21 +169,21 @@ platform environment pairs. Keep key naming, defaults, validation, and
 cargo-val. The existing `std` env/file convenience API stays outside the
 shipped feature graph.
 
-| card / AC / commit | acceptance command and exact count | depends / evidence |
-|---|---|---|
-| F0 / AC1 `docs: inventory conflaguration no_std api gaps` | `python3 specs/cargo-val/validate_conflag_gap.py` -> 5 source-backed gap rows and 1 concrete borrowed-pair API signature, 0 unbound runtime dependencies; observed 5 / 1 / 0 | E1 plus `/Users/brianbruggeman/repos/mine/conflaguration/Cargo.toml:12-16` and `src/lib.rs:276-388,512-565`; artifact `oracles/f0.jsonl` SHA-256 `74207a43a1a48dd97d19545925aa8a6ffa24e0caf3a228ab3a1cafd8a47cf007`; committed `949262a` |
-| F1 / AC9 `feat: add a no_std settings leaf crate` | `cargo check -p conflaguration-core --no-default-features --lib --message-format=json` -> 1 library artifact, 0 errors; shared harness -> 1 core-only incumbent accepted, 1 `std::env` fixture rejected | F0's admitted API seam; E1; empty typed source surface, no root crate flip |
-| F2 / AC10 `feat: look up borrowed setting keys` | `cargo test -p conflaguration-core --test borrowed_settings one_key` -> 1 present, 1 absent, 0 owned copies | F1; E1 |
-| F3 / AC11 `feat: distinguish empty setting from absence` | `borrowed_settings present_empty_absent` -> 3 distinct states, 0 collapsed | F2; E1 |
-| F4 / AC12 `feat: parse one scalar from borrowed pairs` | `borrowed_settings one_scalar` -> 2 parsed values, 1 invalid rejected | F3; E1 |
-| F5 / AC13 `feat: retain validation errors in alloc` | `borrowed_settings validation_failure` -> 1 typed validation failure, 0 panics | F4; `conflaguration/src/lib.rs:298-388` |
-| F6 / AC14 `feat: derive two fields from borrowed pairs` | `cargo test -p conflaguration-core --test borrowed_settings derive_two_fields` -> 2 fields resolved, 1 invalid rejected | F5; E1 derive uses generated `::std` |
-| F7 / AC15 `refactor: gate conflaguration display behind std` | `cargo test -p conflaguration --test std_compat display_unchanged` -> 1 old display payload unchanged, 0 formatting diffs | F6; `conflaguration/src/lib.rs:512-565` |
-| F8 / AC16 `refactor: gate environment helpers behind std` | `cargo test -p conflaguration --test std_compat env_unchanged` -> 1 old env source path unchanged, 0 value diffs | F7; E1; `conflaguration/src/lib.rs:390-489` |
-| F8a / AC17 `refactor: gate file helpers behind std` | `cargo test -p conflaguration --test std_compat file_unchanged` -> 1 old file source path unchanged, 0 precedence diffs | F8; E1; `conflaguration/src/lib.rs:250-277` |
-| F9 / AC18 `feat: reexport typed core from no_std facade` | `cargo check -p conflaguration --no-default-features --features derive --lib --message-format=json` -> 1 library artifact, 0 errors; normal feature tree -> 0 `std` edges | F8a; E1; end-state named crate remains `conflaguration` |
+| card / AC / commit | acceptance command and exact count | depends / evidence | independent oracle and control |
+|---|---|---|---|
+| F0 / AC1 `docs: inventory conflaguration no_std api gaps` | `python3 specs/cargo-val/validate_conflag_gap.py` -> 5 source-backed gap rows, 1 concrete borrowed-pair API signature, 8 inventoried direct dependency names, 0 unclassified names, 1 negative control rejected; observed 5 / 1 / 8 / 0 / 1 | E1 plus `/Users/brianbruggeman/repos/mine/conflaguration/Cargo.toml:12-16` and `src/lib.rs:276-388,512-565`; artifact `oracles/f0.jsonl` SHA-256 `9caa1da056ca9795fc08996696bafbbdc51e077ef8d6026e18103dc59ad3beb0`; committed `949262a` | `oracles/f0.jsonl`: five source gaps, one borrowed-pair signature, eight direct dependency names, one negative control; control: the missing borrowed-pair anchor control must be rejected |
+| F1 / AC9 `feat: add a no_std settings leaf crate` | `cargo check -p conflaguration-core --no-default-features --lib --message-format=json` -> 1 library artifact, 0 errors; `cargo test -p conflaguration-core --test no_std_compile_harness core_only_and_std_rejected -- --exact --nocapture --test-threads=1` -> 1 passed test, 1 core-only incumbent accepted, 1 `std::env` fixture rejected | F0's admitted API seam; E1; empty typed source surface, no root crate flip | `oracles/f1.jsonl`: one no_std library symbol list; control: run the leaf's `core`-only API fixture and the deliberate `std::env` fixture through the same compile-check harness; require the incumbent fixture accepted and the std fixture rejected |
+| F2 / AC10 `feat: look up borrowed setting keys` | `cargo test -p conflaguration-core --test borrowed_settings one_key` -> 1 present, 1 absent, 0 owned copies | F1; E1 | `oracles/f2.jsonl`: `COLOR=always` present, `MISSING` absent; control: current conflaguration env lookup over the same two keys |
+| F3 / AC11 `feat: distinguish empty setting from absence` | `cargo test -p conflaguration-core --test borrowed_settings present_empty_absent -- --exact --nocapture --test-threads=1` -> 3 distinct states, 0 collapsed | F2; E1 | `oracles/f3.jsonl`: absent, empty, nonempty values; control: current `std::env::var_os` control distinguishes all three states |
+| F4 / AC12 `feat: parse one scalar from borrowed pairs` | `cargo test -p conflaguration-core --test borrowed_settings one_scalar -- --exact --nocapture --test-threads=1` -> 2 parsed values, 1 invalid rejected | F3; E1 | `oracles/f4.jsonl`: `WORKERS=2`, `WORKERS=7`, `WORKERS=x`; control: current Settings scalar resolver receives the same UTF-8 values |
+| F5 / AC13 `feat: retain validation errors in alloc` | `cargo test -p conflaguration-core --test borrowed_settings validation_failure -- --exact --nocapture --test-threads=1` -> 1 typed validation failure, 0 panics | F4; `conflaguration/src/lib.rs:298-388` | `oracles/f5.jsonl`: invalid capacity maps to field `workers`; control: current Validate reports that field from the same value |
+| F6 / AC14 `feat: derive two fields from borrowed pairs` | `cargo test -p conflaguration-core --test borrowed_settings derive_two_fields` -> 2 fields resolved, 1 invalid rejected | F5; E1 derive uses generated `::std` | `oracles/f6.jsonl`: `WORKERS=2`, `COLOR=always`, bad `WORKERS=x`; control: existing Settings derive resolves equivalent process env in test control |
+| F7 / AC15 `refactor: gate conflaguration display behind std` | `cargo test -p conflaguration --test std_compat display_unchanged` -> 1 old display payload unchanged, 0 formatting diffs | F6; `conflaguration/src/lib.rs:512-565` | `oracles/f7.jsonl`: exact old display bytes; control: run old display fixture against pinned conflaguration revision |
+| F8 / AC16 `refactor: gate environment helpers behind std` | `cargo test -p conflaguration --test std_compat env_unchanged` -> 1 old env source path unchanged, 0 value diffs | F7; E1; `conflaguration/src/lib.rs:390-489` | `oracles/f8.jsonl`: exact env override value; control: run old env fixture against pinned conflaguration revision |
+| F8a / AC17 `refactor: gate file helpers behind std` | `cargo test -p conflaguration --test std_compat file_unchanged` -> 1 old file source path unchanged, 0 precedence diffs | F8; E1; `conflaguration/src/lib.rs:250-277` | `oracles/f8a.jsonl`: exact file base value and overlay order; control: run old file fixture against pinned conflaguration revision |
+| F9 / AC18 `feat: reexport typed core from no_std facade` | `cargo check -p conflaguration --no-default-features --features derive --lib --message-format=json` -> 1 library artifact, 0 errors; `cargo test -p conflaguration --test no_std_graph no_std_export -- --exact --nocapture --test-threads=1` -> 1 passed test, 0 `std` edges | F8a; E1; end-state named crate remains `conflaguration` | `oracles/f9.jsonl`: one core export, zero std symbols; control: run the existing `proxima-primitives` no_std artifact through the same export/feature-graph checker and require acceptance; compile a deliberate `std::env` import in no_std mode through that checker and require rejection |
 
-## Proxima host and process prerequisites
+### Proxima host and process prerequisites
 
 P0 lands in cargo-val as a source-backed gap register; H/R/P1-P21, if
 admitted, land in Proxima. Platform bytes and handles belong to its host layer,
@@ -81,96 +191,125 @@ readiness to Prime, and the child session to `proxima-process`. P1's existing
 target gate at `6cb786ea` remains useful; the subsequent synchronous Windows
 tests are only independent child-behavior oracles.
 
-| card / AC / commit | acceptance command and exact count | depends / evidence |
-|---|---|---|
-| H1 / AC19 `feat: expose linux environment pairs` | native Linux `cargo test -p proxima-process --test host_env linux_pairs` -> 2 borrowed pairs, 0 retained copies | F9; E1,E2 |
-| H2 / AC20 `feat: expose macos environment pairs` | native macOS `host_env macos_pairs` -> 2 borrowed pairs, 0 retained copies | H1 contract; E1,E2 |
-| H3 / AC21 `feat: expose windows environment units` | native Windows `host_env windows_wide_pairs` -> 2 borrowed wide pairs, 1 empty value distinguished from absence | H1 contract; E1,E4 |
-| P0 / AC2 `docs: inventory no_std child reactor seams` | `python3 specs/cargo-val/validate_process_gap.py` -> 4 source-backed gaps, 1 typed session signature, 0 blocking calls admitted; observed 4 / 1 / 0 | F0; E2-E6; exact Proxima revision `5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b`; oracle `oracles/p0.jsonl` SHA-256 `a2b2a0d4a9dc5caf1147931fa296fd133987d87bab78711ee08014d71ed030b2` |
-| Q1 / AC3 `test: probe linux kernel child wake source` | native Linux `child_reactor linux_exit_probe` -> 1 Pending, 1 kernel wake, 1 exit observation; 0 helper threads, otherwise 1 explicit unsupported-source record | P0; probe one host source before implementing PR2 or P15 |
-| Q2 / AC4 `test: probe macos kernel child wake source` | native macOS `child_reactor macos_exit_probe` -> same 4 fields or 1 explicit unsupported-source record | P0; probe before PR3 or P16 |
-| Q3 / AC5 `test: probe windows pipe and child handle completion` | native Windows `child_reactor windows_handle_probe` -> 1 pipe completion and 1 child completion, 0 helper threads; otherwise 1 explicit unsupported-handle record | P0; probe before PR4-PR5 or P17 |
-| Q4 / AC6 `test: probe linux no_std child launch` | native Linux `child_spawn linux_launch_probe` -> 1 raw child handle, 1 status 0; otherwise 1 explicit unsupported-launch record | P0; fixed literal program only, before P6 |
-| Q5 / AC7 `test: probe macos no_std child launch` | native macOS `child_spawn macos_launch_probe` -> same 2 counts or 1 unsupported-launch record | P0; fixed literal program only, before P7 |
-| Q6 / AC8 `test: probe windows no_std child launch` | native Windows `child_spawn windows_launch_probe` -> same 2 counts or 1 unsupported-launch record | P0; fixed literal program only, before P8 |
-| PR1 / AC22 `feat: retain no_std reactor registration state` | `cargo test -p prime --test child_reactor registration_lifecycle` -> 1 register, 1 wake, 1 retire, 0 stale wakes | P0's admitted reactor seam; E5; core owner only |
-| PR2 / AC23 `feat: wake linux pipe readiness` | native Linux `child_reactor linux_pipe_ready` -> 1 Pending, 1 kernel wake, 1 drained pipe | PR1,Q1; E5 |
-| PR3 / AC24 `feat: wake macos pipe readiness` | native macOS `child_reactor macos_pipe_ready` -> same 3 counts | PR1,Q2; E5 |
-| PR4 / AC25 `feat: register windows pipe completions` | native Windows `child_reactor windows_pipe_completion` -> 1 completion, 1 wake, 0 stale wakes | PR1,Q3; E4,E5 |
-| PR5 / AC26 `feat: wake windows process completion` | native Windows `child_reactor windows_exit_completion` -> 1 completion, 1 wake, 0 per-child waiter threads | PR1,Q3; E4,E5 |
-| P1 / AC27 `fix: gate unix process backend by target` | `cargo test -p proxima-process --test windows_target_gate -- unix_only_negative_control` -> 1 Windows fixture accepted, 1 Unix control rejected | recorded `6cb786ea`; E2; native target support gate |
-| P2 / AC28 `docs: bind async child session contract` | `cargo test -p proxima-process --test async_session_contract` -> 4 lifecycle sequences, 0 blocking operations admitted | P0,P1; E2-E6 |
-| P3 / AC29 `feat: retain one terminal state across polls` | `async_session_state terminal_once` -> 3 exit/cancel/error cases, 1 terminal event each | P2; E6 |
-| P4 / AC30 `feat: poll child output through proxima io` | `async_session_state output_poll` -> 1 Pending, 1 Ready payload, 0 duplicates | P3; E6 |
-| P5 / AC31 `feat: poll child input through proxima io` | `async_session_state input_poll` -> 1 partial write, 1 wake, 1 completion | P3; E6 |
-| P6 / AC32 `feat: submit linux child creation without std` | native Linux `child_spawn linux_submit` -> 1 child handle, 1 status 0, 0 `std` edges | P3,Q4; raw launch submission |
-| P6a / AC33 `feat: pass one linux child environment pair` | native Linux `child_spawn linux_env` -> 1 literal env value in child, 0 leaked parent-only keys | P6,H1; E2 |
-| P6b / AC34 `feat: set linux child working directory` | native Linux `child_spawn linux_cwd` -> 1 literal cwd observed by child, 0 parent cwd changes | P6a; E2 |
-| P7 / AC35 `feat: submit macos child creation without std` | native macOS `child_spawn macos_submit` -> 1 child handle, 1 status 0, 0 `std` edges | P3,Q5; raw launch submission |
-| P7a / AC36 `feat: pass one macos child environment pair` | native macOS `child_spawn macos_env` -> 1 literal env value in child, 0 leaked parent-only keys | P7,H2; E2 |
-| P7b / AC37 `feat: set macos child working directory` | native macOS `child_spawn macos_cwd` -> 1 literal cwd observed by child, 0 parent cwd changes | P7a; E2 |
-| P8 / AC38 `feat: submit windows child creation without std` | native Windows `child_spawn windows_submit` -> 1 child handle, 1 status 0, 0 `std` edges | P3,Q6; E4; raw launch submission |
-| P8a / AC39 `feat: pass one windows child environment pair` | native Windows `child_spawn windows_env` -> 1 literal env value in child, 0 leaked parent-only keys | P8,H3; E4 |
-| P8b / AC40 `feat: set windows child working directory` | native Windows `child_spawn windows_cwd` -> 1 literal cwd observed by child, 0 parent cwd changes | P8a; E4 |
-| P9 / AC41 `feat: drain linux child stdout on readiness` | native Linux `async_stdio linux_stdout` -> 2 chunks, 1 EOF, 0 helper threads | P4,P6b,PR2; E3,E5 |
-| P10 / AC42 `feat: drain macos child stdout on readiness` | native macOS `async_stdio macos_stdout` -> same counts | P4,P7b,PR3; E3,E5 |
-| P11 / AC43 `feat: drain windows child stdout on completion` | native Windows `async_stdio windows_stdout` -> same counts | P4,P8b,PR4; E4,E5 |
-| P12 / AC44 `feat: write linux child stdin on readiness` | native Linux `async_stdio linux_stdin` -> 2 partial writes, 1 EOF, 0 helper threads | P5,P6,PR2; E3 |
-| P13 / AC45 `feat: write macos child stdin on readiness` | native macOS `async_stdio macos_stdin` -> same counts | P5,P7,PR3; E3 |
-| P14 / AC46 `feat: write windows child stdin on completion` | native Windows `async_stdio windows_stdin` -> same counts | P5,P8,PR4; E4 |
-| P15 / AC47 `feat: wake linux child exit without wait thread` | native Linux `async_exit linux_exit` -> 1 wake, 1 reap, 0 wait threads | P6,PR2; E3; kernel completion source |
-| P16 / AC48 `feat: wake macos child exit without wait thread` | native macOS `async_exit macos_exit` -> same counts | P7,PR3; E3; kernel completion source |
-| P17 / AC49 `feat: wake windows child exit without wait thread` | native Windows `async_exit windows_exit` -> same counts | P8,PR5; E4 |
-| P18a / AC50 `feat: cancel and reap one linux child session` | native Linux `async_session_state linux_cancel_reap` -> 1 cancelled, 1 reaped, 0 unrelated signals | P9,P12,P15; E6 |
-| P18b / AC51 `feat: cancel and reap one macos child session` | native macOS `async_session_state macos_cancel_reap` -> same 3 counts | P10,P13,P16; E6 |
-| P18c / AC52 `feat: cancel and reap one windows child session` | native Windows `async_session_state windows_cancel_reap` -> same 3 counts | P11,P14,P17; E6 |
-| P19a / AC53 `feat: expose linux child session as typed pipe` | native Linux `async_process_pipe linux_child_payload` -> 1 request, 1 output payload, 1 exit, 0 helper threads | P18a; E6 |
-| P19b / AC54 `feat: expose macos child session as typed pipe` | native macOS `async_process_pipe macos_child_payload` -> same 4 counts | P18b,P19a contract; E6 |
-| P19c / AC55 `feat: expose windows child session as typed pipe` | native Windows `async_process_pipe windows_child_payload` -> same 4 counts | P18c,P19a contract; E6 |
-| P20 / AC56 `build: close no_std process feature graph` | `cargo check -p proxima-process --no-default-features --features async-process --lib --message-format=json` -> 1 library artifact, 0 errors; normal tree -> 0 `std` edges | P19a-P19c; E2 |
-| P21 / AC57 `test: reject blocking process substitutions` | `async_contract_audit` -> 4 negative controls rejected: blocking wait, read/write, `block_on`, child thread; 0 admitted | P20; E3-E5 |
+| card / AC / commit | acceptance command and exact count | depends / evidence | independent oracle and control |
+|---|---|---|---|
+| H1 / AC19 `feat: expose linux environment pairs` | native Linux `cargo test -p proxima-process --test host_env linux_pairs` -> 2 borrowed pairs, 0 retained copies | F9; E1,E2 | `oracles/h1.jsonl`: two literal Linux environment entries; control: compare borrowed bytes to libc `environ` in test control |
+| H2 / AC20 `feat: expose macos environment pairs` | native macOS `cargo test -p proxima-process --test host_env macos_pairs -- --exact --nocapture --test-threads=1` -> 2 borrowed pairs, 0 retained copies | H1 contract; E1,E2 | `oracles/h2.jsonl`: two literal macOS environment entries; control: compare borrowed bytes to platform `environ` in test control |
+| H3 / AC21 `feat: expose windows environment units` | native Windows `cargo test -p proxima-process --test host_env windows_wide_pairs -- --exact --nocapture --test-threads=1` -> 2 borrowed wide pairs, 1 empty value distinguished from absence | H1 contract; E1,E4 | `oracles/h3.jsonl`: two literal wide Windows entries, including empty; control: compare units to Win32 environment block in test control |
+| H4 / AC95 `feat: preserve windows wide process arguments` | native Windows `cargo test -p proxima-process --test child_spawn windows_wide_arguments -- --exact --nocapture --test-threads=1` -> 2 literal UTF-16 arguments preserved, 1 empty argument preserved, 1 inherited key retained, 1 child override observed, 0 sibling overrides leaked | H3; compare child-reported UTF-16 units and environment to literal oracle; E4 | `oracles/h4.jsonl`: UTF-16 argv units, inherited env, child override, sibling isolation; control: child reports exact units and values; parent environment remains unchanged |
+| P0 / AC2 `docs: inventory no_std child reactor seams` | `python3 specs/cargo-val/validate_process_gap.py` -> 6 source-backed gaps, 1 candidate session signature, 1 missing-anchor negative control rejected; observed 6 / 1 / 1 | F0; E2-E6,E10-E14; exact Proxima revision `5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b`; oracle `oracles/p0.jsonl` SHA-256 `e9343f7f29768e8fae3187319fe6a421daa1e04d30296ebbf5c3b074feb32aac`; committed `bb05fce` plus this evidence update | `oracles/p0.jsonl`: six missing source seams, one candidate session signature, one negative control; control: pinned-source anchor control; a fixture missing the blocking-wait anchor must be rejected |
+| PR0 / AC91, PR0a / AC111, PR0b / AC112 | withdrawn from cargo-val | not applicable; historical Proxima changes are outside this repository's implementation scope | historical semaphore source and measurements are retained only; they are not cargo-val dependencies, acceptance criteria, or implementation cards |
+| PR1a / AC92 `feat: expose Prime host driver contract without std` | `cargo check -p prime --no-default-features --features alloc,runtime-prime-executor,runtime-prime-inbox-alloc --lib --message-format=json` -> 1 library artifact, 0 errors; API audit -> 1 poll-driven host-driver entry, 0 std imports | P0; E13; contract-only stage before each OS backend | `oracles/pr1a.jsonl`: alloc-only Prime host-driver API surface; control: existing alloc-only LocalExecutor fixture is the behavior control; enabling std must not be required |
+| Q1 / AC3 `test: probe linux kernel child wake source` | native Linux `cargo test -p prime --test child_reactor -- linux_exit_probe` -> 1 Pending, 1 pidfd+epoll wake, 1 exit/reap status 0, 0 helper threads; observed 1 / 1 / 1 / 0 | source commit `b353dd7a2780e2cfa96ce33a19f0a14614ec27c4` landed and pushed on Proxima `main`; raw host/kernel and output at `evidence/q1-linux.md:9-33`; `oracles/q1.jsonl` SHA-256 `458bfc306007549fb0c7d81fd9c8596ec246df8a751bb7c0e2fe728d01c50281`; native host was `versailles`, kernel `Linux 7.2.6-zen2-1-zen` | `oracles/q1.jsonl`: Pending before release, one wake and one exit; control: child held behind an independent release pipe; closed source must not wake twice |
+| Q2 / AC4 `test: probe macos kernel child wake source` | native macOS `cargo test -p prime --test child_reactor macos_exit_probe -- --exact --nocapture --test-threads=1` -> 1 Pending, 1 kernel wake, 1 exit observation, 0 helper threads | P0; unsupported source falsifies feasibility; probe before PR3 or P16 | `oracles/q2.jsonl`: Pending before release, one wake and one exit; control: same barrier oracle on native macOS; closed source must not wake twice |
+| Q3 / AC5 `test: probe windows pipe and child handle completion` | native Windows `cargo test -p prime --test child_reactor windows_handle_probe -- --exact --nocapture --test-threads=1` -> 1 pipe completion, 1 child completion, 0 helper threads | P0; unsupported handles falsify feasibility; probe before PR4-PR5 or P17 | `oracles/q3.jsonl`: one pipe and one process completion after release; control: one non-overlapped negative handle must emit unsupported, not a fake completion |
+| Q4 / AC6 `test: probe linux no_std child launch` | native Linux `cargo test -p proxima-process --test child_spawn linux_launch_probe -- --exact --nocapture --test-threads=1` -> 1 raw child handle, 1 status 0 | P0; unsupported launch falsifies feasibility; fixed literal program before P6 | `oracles/q4.jsonl`: fixed Linux child program, one handle and exit 0; control: libc launch in the test harness supplies the child result control; missing no_std symbol emits unsupported |
+| Q5 / AC7 `test: probe macos no_std child launch` | native macOS `cargo test -p proxima-process --test child_spawn macos_launch_probe -- --exact --nocapture --test-threads=1` -> 1 raw child handle, 1 status 0 | P0; unsupported launch falsifies feasibility; fixed literal program before P7 | `oracles/q5.jsonl`: fixed macOS child program, one handle and exit 0; control: libc launch in the test harness supplies the child result control; missing no_std symbol emits unsupported |
+| Q6 / AC8 `test: probe windows no_std child launch` | native Windows `cargo test -p proxima-process --test child_spawn windows_launch_probe -- --exact --nocapture --test-threads=1` -> 1 raw child handle, 1 status 0 | P0; unsupported launch falsifies feasibility; fixed literal program before P8 | `oracles/q6.jsonl`: fixed Windows child program, one handle and exit 0; control: Win32 CreateProcess test control supplies the child result; missing no_std import emits unsupported |
 
-## cargo-val cards
+| PR1 / AC22 `feat: retain no_std reactor registration state` | `cargo test -p prime --test child_reactor registration_lifecycle` -> 1 register, 1 wake, 1 retire, 0 stale wakes | PR1a,Q1-Q3; E5; core owner only | `oracles/r1.jsonl`: register/wake/retire event order; control: run Prime's existing readiness registration fixture through the same lifecycle checker and require one register/wake/retire; stale-generation injection must deliver zero wakes |
+| PR2 / AC23 `feat: wake linux pipe readiness` | native Linux `cargo test -p prime --test child_reactor linux_pipe_ready -- --exact --nocapture --test-threads=1` -> 1 Pending, 1 kernel wake, 1 drained pipe | PR1,Q1; E5 | `oracles/r2.jsonl`: pending/drain/wake sequence; control: run Prime's existing Linux socket-readiness fixture through the same readiness comparator and require one payload wake; barrier-before-release emits zero bytes and stale registration gets zero wakes |
+| PR3 / AC24 `feat: wake macos pipe readiness` | native macOS `cargo test -p prime --test child_reactor macos_pipe_ready -- --exact --nocapture --test-threads=1` -> 1 Pending, 1 kernel wake, 1 drained pipe | PR1,Q2; E5 | `oracles/r3.jsonl`: pending/drain/wake sequence; control: run Prime's existing macOS socket-readiness fixture through the same readiness comparator and require one payload wake; barrier control emits zero premature bytes |
+| PR4 / AC25 `feat: register windows pipe completions` | native Windows `cargo test -p prime --test child_reactor windows_pipe_completion -- --exact --nocapture --test-threads=1` -> 1 completion, 1 wake, 0 stale wakes | PR1,Q3; E4,E5 | `oracles/r4.jsonl`: completion key and generation; control: run an existing Windows socket completion through the same completion comparator and require one wake; cancelled operation delivers zero later wakes |
+| PR5 / AC26 `feat: wake windows process completion` | native Windows `cargo test -p prime --test child_reactor windows_exit_completion -- --exact --nocapture --test-threads=1` -> 1 completion, 1 wake, 0 per-child waiter threads | PR1,Q3; E4,E5 | `oracles/r5.jsonl`: child exit code and completion key; control: run an existing Windows completion registration through the same completion comparator and require one event; cancelled registration delivers zero later wakes |
+| P1 / AC27 `fix: gate unix process backend by target` | `cargo test -p proxima-process --test windows_target_gate -- unix_only_negative_control` -> 1 Windows fixture accepted, 1 Unix control rejected | recorded `6cb786ea`; E2; native target support gate | `oracles/p1.jsonl`: Windows accepted and Unix rejected target records; control: run existing Windows fixture and Unix target control through the same target-gate checker; Windows is accepted and Unix-only fixture is rejected |
+| P2 / AC28 `docs: bind async child session contract` | `cargo test -p proxima-process --test async_session_contract` -> 4 lifecycle sequences, 0 blocking operations admitted | P0,P1; E2-E6 | `oracles/p2.jsonl`: open, running, cancelled, reaped transitions; control: run the existing synchronous child command through the same lifecycle comparator and require open/running/reaped; reject an illegal second terminal transition |
+| P3 / AC29 `feat: retain one terminal state across polls` | `cargo test -p proxima-process --test async_session_state terminal_once -- --exact --nocapture --test-threads=1` -> 3 exit/cancel/error cases, 1 terminal event each | P2; E6 | `oracles/p3.jsonl`: exit, cancel, error each terminate once; control: run the existing synchronous child status through the same terminal-event comparator and require one exit event; polling a terminated session twice emits zero extra events |
+| P4 / AC30 `feat: poll child output through proxima io` | `cargo test -p proxima-process --test async_session_state output_poll -- --exact --nocapture --test-threads=1` -> 1 Pending, 1 Ready payload, 0 duplicates | P3; E6 | `oracles/p4.jsonl`: pending then literal `out` payload; control: run the existing Proxima async socket-read fixture through the same poll comparator and require the literal payload; wake before source release emits zero bytes |
+| P5 / AC31 `feat: poll child input through proxima io` | `cargo test -p proxima-process --test async_session_state input_poll -- --exact --nocapture --test-threads=1` -> 1 partial write, 1 wake, 1 completion | P3; E6 | `oracles/p5.jsonl`: first partial write, wake, final bytes; control: run the existing Proxima async socket-write fixture through the same poll comparator and require exact bytes; held sink remains pending without spinning |
+| P6 / AC32 `feat: submit linux child creation without std` | native Linux `cargo test -p proxima-process --test child_spawn linux_submit -- --exact --nocapture --test-threads=1` -> 1 child handle, 1 status 0, 0 `std` edges | P3,Q4; raw launch submission | `oracles/p6.jsonl`: fixed Linux argv and status 0; control: pinned synchronous Command runs same child in test control |
+| P6a / AC33 `feat: overlay one linux child environment pair` | native Linux `cargo test -p proxima-process --test child_spawn linux_env -- --exact --nocapture --test-threads=1` -> 1 inherited parent key retained, 1 child override observed, 0 sibling overrides leaked | P6,H1; E2; parent environment remains unchanged | `oracles/p6a.jsonl`: exact Linux child environment value; control: pinned synchronous Command sends same env pair in test control |
+| P6b / AC34 `feat: set linux child working directory` | native Linux `cargo test -p proxima-process --test child_spawn linux_cwd -- --exact --nocapture --test-threads=1` -> 1 literal cwd observed by child, 0 parent cwd changes | P6a; E2 | `oracles/p6b.jsonl`: exact Linux child cwd and parent cwd; control: pinned synchronous Command runs same cwd child in test control |
+| P7 / AC35 `feat: submit macos child creation without std` | native macOS `cargo test -p proxima-process --test child_spawn macos_submit -- --exact --nocapture --test-threads=1` -> 1 child handle, 1 status 0, 0 `std` edges | P3,Q5; raw launch submission | `oracles/p7.jsonl`: fixed macOS argv and status 0; control: pinned synchronous Command runs same child in test control |
+| P7a / AC36 `feat: overlay one macos child environment pair` | native macOS `cargo test -p proxima-process --test child_spawn macos_env -- --exact --nocapture --test-threads=1` -> 1 inherited parent key retained, 1 child override observed, 0 sibling overrides leaked | P7,H2; E2; parent environment remains unchanged | `oracles/p7a.jsonl`: exact macOS child environment value; control: pinned synchronous Command sends same env pair in test control |
+| P7b / AC37 `feat: set macos child working directory` | native macOS `cargo test -p proxima-process --test child_spawn macos_cwd -- --exact --nocapture --test-threads=1` -> 1 literal cwd observed by child, 0 parent cwd changes | P7a; E2 | `oracles/p7b.jsonl`: exact macOS child cwd and parent cwd; control: pinned synchronous Command runs same cwd child in test control |
+| P8 / AC38 `feat: submit windows child creation without std` | native Windows `cargo test -p proxima-process --test child_spawn windows_submit -- --exact --nocapture --test-threads=1` -> 1 child handle, 1 status 0, 0 `std` edges | P3,Q6; E4; raw launch submission | `oracles/p8.jsonl`: fixed Windows argv and status 0; control: pinned synchronous Command runs same child in test control |
+| P8a / AC39 `feat: overlay one windows child environment pair` | native Windows `cargo test -p proxima-process --test child_spawn windows_env -- --exact --nocapture --test-threads=1` -> 1 inherited parent key retained, 1 child override observed, 0 sibling overrides leaked | P8,H3; E4; parent environment remains unchanged | `oracles/p8a.jsonl`: exact Windows child environment value; control: pinned synchronous Command sends same env pair in test control |
+| P8b / AC40 `feat: set windows child working directory` | native Windows `cargo test -p proxima-process --test child_spawn windows_cwd -- --exact --nocapture --test-threads=1` -> 1 literal cwd observed by child, 0 parent cwd changes | P8a; E4 | `oracles/p8b.jsonl`: exact Windows child cwd and parent cwd; control: pinned synchronous Command runs same cwd child in test control |
+| P9 / AC41 `feat: drain linux child stdout on readiness` | native Linux `cargo test -p proxima-process --test async_stdio linux_stdout -- --exact --nocapture --test-threads=1` -> 2 chunks, 1 EOF, 0 helper threads | P4,P6b,PR2; E3,E5 | `oracles/p9.jsonl`: two literal stdout chunks and EOF; control: pinned synchronous child fixture yields the concatenated bytes |
+| P10 / AC42 `feat: drain macos child stdout on readiness` | native macOS `cargo test -p proxima-process --test async_stdio macos_stdout -- --exact --nocapture --test-threads=1` -> 2 chunks, 1 EOF, 0 helper threads | P4,P7b,PR3; E3,E5 | `oracles/p10.jsonl`: same payload with macOS chunk boundaries; control: pinned synchronous child fixture yields the concatenated bytes |
+| P11 / AC43 `feat: drain windows child stdout on completion` | native Windows `cargo test -p proxima-process --test async_stdio windows_stdout -- --exact --nocapture --test-threads=1` -> 2 chunks, 1 EOF, 0 helper threads | P4,P8b,PR4; E4,E5 | `oracles/p11.jsonl`: same payload with Windows completion order; control: pinned synchronous child fixture yields the concatenated bytes |
+| P12 / AC44 `feat: write linux child stdin on readiness` | native Linux `cargo test -p proxima-process --test async_stdio linux_stdin -- --exact --nocapture --test-threads=1` -> 2 partial writes, 1 EOF, 0 helper threads | P5,P6,PR2; E3 | `oracles/p12.jsonl`: exact stdin bytes and child-observed EOF; control: pinned synchronous child fixture receives the same bytes |
+| P13 / AC45 `feat: write macos child stdin on readiness` | native macOS `cargo test -p proxima-process --test async_stdio macos_stdin -- --exact --nocapture --test-threads=1` -> 2 partial writes, 1 EOF, 0 helper threads | P5,P7,PR3; E3 | `oracles/p13.jsonl`: exact stdin bytes and child-observed EOF; control: same synchronous control on native macOS |
+| P14 / AC46 `feat: write windows child stdin on completion` | native Windows `cargo test -p proxima-process --test async_stdio windows_stdin -- --exact --nocapture --test-threads=1` -> 2 partial writes, 1 EOF, 0 helper threads | P5,P8,PR4; E4 | `oracles/p14.jsonl`: exact stdin bytes and child-observed EOF; control: same synchronous control on native Windows |
+| P15 / AC47 `feat: wake linux child exit without wait thread` | native Linux `cargo test -p proxima-process --test async_exit linux_exit -- --exact --nocapture --test-threads=1` -> 1 wake, 1 reap, 0 wait threads | P6,PR2; E3; kernel completion source | `oracles/p15.jsonl`: child exit code and one reap record; control: pinned synchronous wait reports same exit code; held child must not wake early |
+| P16 / AC48 `feat: wake macos child exit without wait thread` | native macOS `cargo test -p proxima-process --test async_exit macos_exit -- --exact --nocapture --test-threads=1` -> 1 wake, 1 reap, 0 wait threads | P7,PR3; E3; kernel completion source | `oracles/p16.jsonl`: child exit code and one reap record; control: same control on native macOS |
+| P17 / AC49 `feat: wake windows child exit without wait thread` | native Windows `cargo test -p proxima-process --test async_exit windows_exit -- --exact --nocapture --test-threads=1` -> 1 wake, 1 reap, 0 wait threads | P8,PR5; E4 | `oracles/p17.jsonl`: child exit code and one reap record; control: same control on native Windows |
+| P18a / AC50 `feat: cancel and reap one linux child session` | native Linux `cargo test -p proxima-process --test async_session_state linux_cancel_reap -- --exact --nocapture --test-threads=1` -> 1 cancelled, 1 reaped, 0 unrelated signals | P9,P12,P15; E6 | `oracles/p18a.jsonl`: Linux cancelled PID, reaped PID, live sibling; control: sibling output/exit identical under cancelled and uncancelled arms |
+| P18b / AC51 `feat: cancel and reap one macos child session` | native macOS `cargo test -p proxima-process --test async_session_state macos_cancel_reap -- --exact --nocapture --test-threads=1` -> 1 cancelled, 1 reaped, 0 unrelated signals | P10,P13,P16; E6 | `oracles/p18b.jsonl`: macOS cancelled PID, reaped PID, live sibling; control: same control on native macOS |
+| P18c / AC52 `feat: cancel and reap one windows child session` | native Windows `cargo test -p proxima-process --test async_session_state windows_cancel_reap -- --exact --nocapture --test-threads=1` -> 1 cancelled, 1 reaped, 0 unrelated signals | P11,P14,P17; E6 | `oracles/p18c.jsonl`: Windows cancelled PID, reaped PID, live sibling; control: same control on native Windows |
+| P19a / AC53 `feat: expose linux child session as typed pipe` | native Linux `cargo test -p proxima-process --test async_process_pipe linux_child_payload -- --exact --nocapture --test-threads=1` -> 1 request, 1 output payload, 1 exit, 0 helper threads | P18a; E6 | `oracles/p19a.jsonl`: one Linux request/output/exit triplet; control: direct no_std session call yields identical payload without Pipe wrapper |
+| P19b / AC54 `feat: expose macos child session as typed pipe` | native macOS `cargo test -p proxima-process --test async_process_pipe macos_child_payload -- --exact --nocapture --test-threads=1` -> 1 request, 1 output payload, 1 exit, 0 helper threads | P18b,P19a contract; E6 | `oracles/p19b.jsonl`: one macOS request/output/exit triplet; control: direct no_std session call yields identical payload |
+| P19c / AC55 `feat: expose windows child session as typed pipe` | native Windows `cargo test -p proxima-process --test async_process_pipe windows_child_payload -- --exact --nocapture --test-threads=1` -> 1 request, 1 output payload, 1 exit, 0 helper threads | P18c,P19a contract; E6 | `oracles/p19c.jsonl`: one Windows request/output/exit triplet; control: direct no_std session call yields identical payload |
+| P20 / AC56 `build: close no_std process feature graph` | `cargo check -p proxima-process --no-default-features --features async-process --lib --message-format=json` -> 1 library artifact, 0 errors; normal tree -> 0 `std` edges | P19a-P19c; E2 | `oracles/p20.jsonl`: expected normal dependency identities; control: run the pinned `proxima-primitives` no_std dependency graph through the same graph checker and require acceptance; enabling one `std` feature must make it reject |
+| P21 / AC57 `test: reject blocking process substitutions` | `cargo test -p proxima-process --test async_contract_audit -- --nocapture --test-threads=1` -> 4 negative controls rejected: blocking wait, read/write, `block_on`, child thread; 0 admitted | P20; E3-E5 | `oracles/p21.jsonl`: four forbidden call patterns; control: run the audited Proxima process-session source through the same call-pattern checker and require its allowed baseline accepted; inject each forbidden pattern and require all four rejected |
+
+## cargo-val card ledger
+
+C0-C7 and C27-C29 retain observed/historical records here. C8-C26 are
+conditional integration targets, not active packets; their Proxima child-session
+dependencies are unmet at the pinned revision. The active packets are listed
+above. A withdrawn C7 is not a dependency for any implementation.
 
 C0 at `57cb50f` is a help-only `std` scaffold. C0a-C0d replace its shipped
 entry. `NO_COLOR` comes from H1-H3 and F3-F5, never `std::env`. A host test
 harness may use `std`; normal executable dependencies may not.
 
-| card / AC / commit | acceptance command and exact count | depends / evidence |
-|---|---|---|
-| C0 / AC58 `chore: scaffold cargo-val fixture workspace` | `cargo run -- --help` -> 1 help banner, 1 exit status 0 | `57cb50f`; E9; baseline smoke only |
-| C0a / AC59 `build: make cargo-val core no_std` | `cargo check -p cargo-val --lib --no-default-features --message-format=json` -> 1 artifact, 0 errors, 0 normal `std` edges | P20,F9; E9 |
-| C0b / AC60 `feat: enter cargo-val on linux without std` | native Linux `native_entry linux_help` -> 1 banner, 1 exit status 0 | C0a; E9 |
-| C0c / AC61 `feat: enter cargo-val on macos without std` | native macOS `native_entry macos_help` -> same 2 counts | C0b contract; E9 |
-| C0d / AC62 `feat: enter cargo-val on windows without std` | native Windows `native_entry windows_help` -> same 2 counts | C0b contract; E9 |
-| C1 / AC63 `build: pin no_std dependencies` | `dependency_source pinned_revisions` -> 4 identities match pins; `cargo tree -p cargo-val --target all --no-default-features -e normal,features --prefix depth | python3 specs/cargo-val/assert_no_std_graph.py` -> 0 normal `std` edges across 3 target families | P21,F9,C0d; scan the real graph, not a fixture |
-| C2 / AC64 `feat: decode one cargo artifact record` | oracle gate: `python3 specs/cargo-val/validate_c2_oracle.py` -> 2 literal executables, 1 ignored literal non-test, 2 retained/live Cargo test artifacts, 1 retained/live non-test, 2 naive selectors rejected, 1 escaped-field spelling control, and 1 each escaped-path/borrowed/over-byte/over-depth/short-scratch oracle control; implementation: `cargo test -p cargo-val --no-default-features --test artifact_stream` -> 1 integration test, 4 executable outcomes, 2 ignored records (production and null executable), 3 input-borrowed outcomes, 1 scratch-decoded path, 0 allocations across 10 measured parser calls (4 executable, 2 ignored, 4 limit cases), 1 deliberate allocation detected, 1 nested unknown field skipped, 1 truncation rejection, 4 root/nested trailing-comma rejections, 1 duplicate-field rejection, 1 invalid-UTF8 rejection, and 1 rejection each for byte overflow, depth overflow, invalid depth limit, and short scratch | C1; `oracles/c2*.jsonl`, `evidence/c2/cargo-all-targets.jsonl`; parser depth cap 16; fixture caller limits 629 bytes / depth 4; runtime settings remain conflaguration-owned; commit a1d4929; Proxima JSON codec is std-gated; C3 bounds line storage with a caller-owned fixed buffer |
-| C3 / AC65 `feat: emit cargo artifact before eof` (commit `ad86d6f`) | Luna work packet: one framing adapter plus focused tests; no process lifecycle, CLI, or settings. Oracle gate: `python3 specs/cargo-val/validate_c3_oracle.py` -> 2 literal ordered executables, 1 held-open first-emission checkpoint, 2 retained Cargo test-artifact controls, 1 reversed-order rejection, 1 missing-newline rejection; focused implementation: `cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test cargo_artifact_framing two_artifacts_emit_before_source_eof -- --exact --nocapture --test-threads=1` -> exactly 1 test, 2 ordered paths, 1 first path delivered while source is open, 1 partial line withheld, 0 allocator calls during three pipe polls, 1 deliberate allocation detected; full target `cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test cargo_artifact_framing -- --test-threads=1` -> 7 tests; default-parallel control failed only the allocation assertion at 5 calls with 6 tests passing; serial rerun passed 7 tests; includes 1 one-byte-chunk framing test, 1 ignored-record progress test, 1 short-tail replay test, 1 post-EOF input rejection, and 1 terminal parse-failure test. One conventional commit must pass the focused command, full target, and `cargo fmt --check`; retain exact outputs in `evidence/c3/` | C2; E6; `oracles/c3.jsonl`, `oracles/c3.expected.jsonl`; use Proxima `DelimiterCodec::parse_frame` at the pinned `5207d66e` for complete-frame validation and C2 `parse_artifact`; mirror Proxima `DelimiterFraming`'s enum scan-cursor invariant over fixed caller-owned storage, avoiding its growing `BytesMut`; output is a Proxima `Pipe<In=chunk+framer, Out=borrowed path+progress, Err=framing/parser failure>`; one stream adapter behavior only, no process lifecycle; gated adapter retains `#![no_std]`, uses no std APIs or suite vector, signals consumed bytes for caller replay, and returns typed full-buffer errors before copying beyond capacity |
-| C4 / AC66 `feat: parse one libtest listing line` | Luna packet: one bounded borrowed-line FSM plus focused test, no stream source, launch, or admission. Oracle: `python3 specs/cargo-val/validate_c4_oracle.py` -> 1 literal name, 1 summary ignored, 1 suffix mutation rejected, 1 live libtest name control, 1 live summary control. Focused implementation: `CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test libtest_listing parse_one_listing_line -- --exact --nocapture --test-threads=1` -> 1 test, 1 borrowed name with pointer identity, 1 summary ignored, 1 suffix mutation ignored, 1 missing-newline `Incomplete`, 1 trailing-bytes rejection, 1 invalid-UTF8 rejection, 1 empty-name ignored, 1 caller byte-limit rejection, 1 CRLF name, 0 allocator calls across 9 parser calls, 1 deliberate allocation detected. Also pass the no-default-features library check and `cargo fmt --check`; retain exact output and cache-rebuild trace in `evidence/c4/`. | C3; R3; E6; `oracles/c4.jsonl`; Proxima borrowed newline `DelimiterCodec` + typed `Pipe`; caller-provided finite line limit; `no_std`, no parser allocation, no locks |
-| C5 / AC67 `feat: dispatch first test before listing eof` | Luna packet: one bounded discovery Pipe composed from C3 framing and C4 line parsing, with nine focused cases; no child launch or admission. Oracle: `python3 specs/cargo-val/validate_c5_oracle.py` -> 1 gated dispatch before EOF, 3 names after first dispatch, 4 literal names in order, 1 EOF after the names, and 0 production suite-vector tokens. Implementation: `CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test discovery_stream -- --test-threads=1` -> 9 tests, 1 held-open producer gate, 1 dispatch before release, 3 later names, 1 summary ignored, 1 over-limit rejection with 4 accepted bytes, 1 bytewise split control, 1 buffered-frame replay control, 1 short-copy tail replay, 1 parser-error progress/poisoning control, and empty/nonempty EOF poll controls. `CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo nextest run -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test discovery_stream --no-capture dispatches_first_name_before_listing_eof` -> 1 same-fixture gate test; no-default-features library check and `cargo fmt --all -- --check` also ran. Exact outputs: `evidence/c5/`. | C4; R3; E6; `oracles/c5.jsonl`; compose `ArtifactFramer` with `LibtestFramePipe`; one borrowed line per call; caller replays unconsumed bytes; bounded storage, no queue or suite vector |
-| C6 / AC68 `feat: await proxima permit before pulling intent` | `async_admission two_permits` -> 2 permits held, third intent unread, 0 dropped | C5; E7 |
-| C7 / AC69 `feat: resume discovery after permit return` | `async_admission seven_two_slots` -> 7 intents completed once, peak 2 sessions, 0 lost | C6; E7 |
-| C8 / AC70 `feat: run one exact test through child session` | `exact_process one_selected_test` -> 1 exact argv, 1 env value, 1 working-directory value, 1 child exit record | C1,C7; P19a-P19c; PR4 |
-| C9 / AC71 `feat: isolate three exact test children` | `exact_process selected_tests_once` -> 3 names, 3 children, 0 duplicates | C8; P19a-P19c |
-| C10 / AC72 `feat: stream stdout and stderr payloads` | `child_output stdout_stderr_payloads` -> 2 byte-identical streams, 0 blocking adapters | C8; P9-P14 |
-| C11 / AC73 `feat: classify child exit separately` | `child_lifecycle pass_failure_abort` -> 1 pass, 1 assertion failure, 1 abnormal abort, 0 cross-test signals | C10; P15-P17; R6 |
-| C12 / AC74 `feat: cancel and reap one active child` | `child_lifecycle cancel_one_child` -> 1 cancelled, 1 reaped, 0 orphan | C11; P18a-P18c |
-| C13 / AC75 `feat: time out and reap one active child` | `child_lifecycle timeout_one_child` -> 1 timed out, 1 reaped, 0 orphan | C12; P18a-P18c |
-| C14 / AC76 `feat: resolve runner settings from platform pairs` | `settings two_fields_from_pairs` -> 2 typed fields from a real platform environment pair iterator, 1 invalid capacity rejected, 0 direct `std::env` reads | C1,H1-H3,F9; E1; R7 |
-| C14a / AC77 `feat: apply environment override to runner settings` | `settings env_override` -> 1 configured default, 1 environment override, 1 final value matching override | C14; F9,H1-H3; R7 |
-| C15 / AC78 `feat: honor no_color presence in reporter` | `color_policy no_color_matrix` -> 2 colored when absent, 2 ANSI-free when present | C14; E1; each TTY/pipe |
-| C16 / AC79 `feat: account every discovered outcome` | `accounting mixed_suite` -> 5 discovered = 1 filtered + 1 ignored + 2 passed + 1 failed; 0 unaccounted | C9-C15,C14a |
-| C17 / AC80 `perf: retain per-child allocation trace` | native `allocation_trace child_payload_record` -> 1 raw allocation-site record, 1 exact payload per host | C10; instrumentation only |
-| C18 / AC81 `perf: identify repeated windows allocation site` | Windows `allocation_trace repeated_site` -> 1 source-identified repeated site or 1 negative trace with 0 qualifying sites, 1 byte-identical payload control | C17; evidence gate for reuse |
-| C18a / AC82 `perf: reuse the identified allocation owner` (conditional) | Windows `allocation_trace site_toggle` -> 1 byte-identical off/on pair, 1 site-specific before/after allocation count pair, 0 unrelated site changes | C18 positive trace; modify existing Proxima owner only |
-| C19a / AC83 `ci: exercise linux lifecycle fixtures` | native Linux `platform_acceptance linux` -> 1 spawn/env/cwd, 1 stdout/stderr, 1 pass/fail/abort, 1 timeout, 1 cancellation; 0 orphans, 0 unaccounted | C16; five named categories |
-| C19b / AC84 `ci: exercise macos lifecycle fixtures` | native macOS `platform_acceptance macos` -> same five category counts, 0 orphans, 0 unaccounted | C19a contract; C16 |
-| C19c / AC85 `ci: exercise windows lifecycle fixtures` | native Windows `platform_acceptance windows` -> same five category counts, 0 orphans, 0 unaccounted | C19a contract; C16 |
-| C20 / AC86 `test: reject malformed comparison records` | `comparison_record malformed_control` -> 1 malformed rejected, 0 valid rejected | C19a-C19c |
-| C21 / AC87 `perf: retain paired nextest outcome payloads` | `comparison_record matched_outcomes` -> 1 paired raw record per host, 0 unexplained semantic mismatches | C19a-C19c,C20 |
-| C22 / AC88 `perf: retain latency and throughput samples` | `comparison_record latency_throughput` -> 1 raw set with latency, throughput, CoV, conditions per host | C21 |
-| C23 / AC89 `perf: retain cpu rss and error samples` | `comparison_record host_resources` -> 1 raw set with CPU, RSS, errors, conditions per host | C21 |
-| C24 / AC90 `docs: show native cargo val commands` | `python3 specs/cargo-val/validate_command_examples.py` -> 3 native examples, 1 command spelling, 0 missing fixture links | C19a-C19c; documents R1 native acceptance invocations |
+| card / AC / commit | acceptance command and exact count | depends / evidence | independent oracle and control |
+|---|---|---|---|
+| C0 / AC58 `chore: scaffold cargo-val fixture workspace` | `cargo run -- --help` -> 1 help banner, 1 exit status 0 | `57cb50f`; E9; baseline smoke only | `oracles/c0.jsonl`: exact checked-in help banner bytes; control: Cargo external-subcommand invocation reaches the same binary banner |
+| C0a / AC59 `build: make cargo-val core no_std` | `cargo check -p cargo-val --lib --no-default-features --message-format=json` -> 1 artifact, 0 errors; `cargo test -p cargo-val --test no_std_graph normal_edges -- --exact --nocapture --test-threads=1` -> 1 passed test, 0 normal `std` edges | P20,F9; E9 | `oracles/c0a.jsonl`: one no_std library artifact; control: run the pinned `proxima-primitives` no_std graph through the same graph checker and require acceptance; a deliberate normal `std` dependency must be rejected |
+| C0b / AC60 `feat: enter cargo-val on linux without std` | native Linux `cargo test -p cargo-val --test native_entry linux_help -- --exact --nocapture --test-threads=1` -> 1 banner, 1 exit status 0 | C0a; E9 | `oracles/c0b.jsonl`: exact Linux help bytes and status 0; control: old C0 help banner bytes are the output control |
+| C0c / AC61 `feat: enter cargo-val on macos without std` | native macOS `cargo test -p cargo-val --test native_entry macos_help -- --exact --nocapture --test-threads=1` -> 1 banner, 1 exit status 0 | C0b contract; E9 | `oracles/c0c.jsonl`: exact macOS help bytes and status 0; control: old C0 help banner bytes are the output control |
+| C0d / AC62 `feat: enter cargo-val on windows without std` | native Windows `cargo test -p cargo-val --test native_entry windows_help -- --exact --nocapture --test-threads=1` -> 1 banner, 1 exit status 0 | C0b contract; E9 | `oracles/c0d.jsonl`: exact Windows help bytes and status 0; control: old C0 help banner bytes are the output control |
+| C0e / AC94 `build: enter cargo-val on linux without std` | native Linux `cargo build -p cargo-val --release --no-default-features` -> 1 executable artifact, 0 std edges, 0 unresolved entry symbols; fixture entry writes 1 literal help banner | C0a; one Linux entry/startup boundary; E9 | `oracles/c0e.jsonl`: exact Linux startup help bytes and status 0; control: checked-in help fixture supplies exact bytes; std graph check is an independent reject control |
+| C0f / AC96 `build: enter cargo-val on macos without std` | native macOS release build -> 1 executable artifact, 0 compiler errors; installed help output matches the literal fixture byte-for-byte | C0a,C0e; one macOS entry/startup boundary; E9 | `oracles/c0f.jsonl`; raw build/install/runtime records in `evidence/command/no-std/acceptance-summary.txt`; independent byte comparison against `tests/fixtures/help-banner.txt` |
+| C0g / AC97 `build: enter cargo-val on windows without std` | native Windows `cargo build -p cargo-val --release --no-default-features` -> 1 executable artifact, 0 std edges, 0 unresolved entry symbols; fixture entry writes 1 literal help banner | C0a,C0e; one Windows CRT/UTF-16 argument boundary; E9,H4 | `oracles/c0g.jsonl`: exact Windows startup help bytes and status 0; control: checked-in help fixture supplies exact bytes; std graph check is an independent reject control |
+| C1 / AC63 `build: pin no_std dependencies` | `cargo test -p cargo-val --test dependency_source pinned_revisions -- --exact --nocapture --test-threads=1` -> 4 identities match pins; `cargo tree -p cargo-val --target all --no-default-features -e normal,features --prefix depth > cargo-val-normal-tree.txt`; `python3 specs/cargo-val/assert_no_std_graph.py cargo-val-normal-tree.txt` -> 0 normal `std` edges across 3 target families | P21,F9,C0d; scan the real graph, not a fixture | `oracles/c1.jsonl`: four pinned package IDs plus zero std features; control: run the pinned baseline graph through the same graph checker and require four identities accepted; inject one normal `std` edge and one mismatched pin and require each rejected |
+| C2 / AC64 `feat: decode one cargo artifact record` | oracle gate: `python3 specs/cargo-val/validate_c2_oracle.py` -> 2 literal executables, 1 ignored literal non-test, 2 retained/live Cargo test artifacts, 1 retained/live non-test, 2 naive selectors rejected, 1 escaped-field spelling control, and 1 each escaped-path/borrowed/over-byte/over-depth/short-scratch oracle control; implementation: `cargo test -p cargo-val --no-default-features --test artifact_stream` -> 1 integration test, 4 executable outcomes, 2 ignored records (production and null executable), 3 input-borrowed outcomes, 1 scratch-decoded path, 0 allocations across 10 measured parser calls (4 executable, 2 ignored, 4 limit cases), 1 deliberate allocation detected, 1 nested unknown field skipped, 1 truncation rejection, 4 root/nested trailing-comma rejections, 1 duplicate-field rejection, 1 invalid-UTF8 rejection, and 1 rejection each for byte overflow, depth overflow, invalid depth limit, and short scratch | C1; `oracles/c2*.jsonl`, `evidence/c2/cargo-all-targets.jsonl`; parser depth cap 16; fixture caller limits 629 bytes / depth 4; runtime settings remain conflaguration-owned; commit a1d4929; Proxima JSON codec is std-gated; C3 bounds line storage with a caller-owned fixed buffer | `oracles/c2.jsonl`: 1 `kind=bin` test harness, 1 normal binary, 1 `kind=test` harness; `c2-windows-escaped.jsonl`: 1 escaped executable with nested unknown field; `c2-over-depth.jsonl`: 1 depth-5 record; expected files bind decoded bytes and Cargo escaped-field semantics; parser limits are 629 bytes/depth 4 with a depth ceiling of 16; control: `validate_c2_oracle.py` compares 3 literal record shapes with retained and live Cargo JSON, decodes the escaped string with independent Python JSON, and rejects `target.test`-only and `kind=test`-only selectors; a corrupted decoded-path expected value is rejected; parser integration test must prove storage pointers, 10 zero-allocation calls with a positive allocation control, and four limit rejections plus malformed JSON controls |
+| C3 / AC65 `feat: emit cargo artifact before eof` | Luna work packet: one framing adapter plus focused tests; no process lifecycle, CLI, or settings. Oracle gate: `python3 specs/cargo-val/validate_c3_oracle.py` -> 2 literal ordered executables, 1 held-open first-emission checkpoint, 2 retained Cargo test-artifact controls, 1 reversed-order rejection, 1 missing-newline rejection; focused implementation: `cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test cargo_artifact_framing two_artifacts_emit_before_source_eof -- --exact --nocapture --test-threads=1` -> exactly 1 test, 2 ordered paths, 1 first path delivered while source is open, 1 partial line withheld, 0 allocator calls during three pipe polls, 1 deliberate allocation detected; full target `cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test cargo_artifact_framing -- --test-threads=1` -> 7 tests; default-parallel control failed only the allocation assertion at 5 calls with 6 tests passing; serial rerun passed 7 tests; includes 1 one-byte-chunk framing test, 1 ignored-record progress test, 1 short-tail replay test, 1 post-EOF input rejection, and 1 terminal parse-failure test. One conventional commit must pass the focused command, full target, and `cargo fmt --check`; retain exact outputs in `evidence/c3/` | C2; E6; `oracles/c3.jsonl`, `oracles/c3.expected.jsonl`; use Proxima `DelimiterCodec::parse_frame` at the pinned `5207d66e` for complete-frame validation and C2 `parse_artifact`; mirror Proxima `DelimiterFraming`'s enum scan-cursor invariant over fixed caller-owned storage, avoiding its growing `BytesMut`; output is a Proxima `Pipe<In=chunk+framer, Out=borrowed path+progress, Err=framing/parser failure>`; one stream adapter behavior only, no process lifecycle; gated adapter retains `#![no_std]`, uses no std APIs or suite vector, signals consumed bytes for caller replay, and returns typed full-buffer errors before copying beyond capacity | `oracles/c3.jsonl`: 3 literal byte chunks (two partial records and the completing newline bytes) plus EOF; `oracles/c3.expected.jsonl`: 1 no-emission checkpoint, 1 held-open first-emission checkpoint, 1 final two-path checkpoint; control: `validate_c3_oracle.py` compares decoded literal records with 2 actual Cargo test-artifact records in `evidence/c2/cargo-all-targets.jsonl`, asserts that the first emission is required while producer remains open, and rejects reversed output and a missing first newline; implementation test uses a producer/consumer rendezvous barrier, not wall-clock sleeps |
+| C4 / AC66 `feat: parse one libtest listing line` | Luna work packet below 20 minutes: one borrowed-line FSM and one focused test; no stream source, launch, or admission. Oracle gate: `python3 specs/cargo-val/validate_c4_oracle.py` -> 1 literal name, 1 summary ignored, 1 suffix mutation rejected, 1 live libtest name control, 1 live libtest summary control. Implementation: `cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test libtest_listing parse_one_listing_line -- --nocapture` -> exactly 1 test, 1 borrowed name with input pointer identity, 1 summary ignored, 1 suffix mutation ignored, 1 missing-newline rejection (`Incomplete`), 1 trailing-bytes rejection, 1 invalid-UTF8 rejection, 1 empty-name ignored, 1 caller byte-limit rejection, 1 CRLF name, 0 allocations across 9 parser calls, 1 deliberate allocation detected. One coherent `feat: parse one libtest listing line` commit must pass this command and `cargo fmt --check`, with exact outputs recorded in `evidence/c4/` | C3; R3; E6; `oracles/c4.jsonl`, `oracles/c4-libtest-control.rs`; use Proxima newline `DelimiterCodec::parse_frame` on a complete borrowed line (`proxima-codec/src/lib.rs:426-505` at `5207d66e`) and typed `Pipe<In=borrowed frame, Out=borrowed name or ignored, Err=parse failure>` (`proxima-primitives/src/pipe/primitives.rs:91-101`); retain the FSM × sans-IO &#124; Pipe boundary; line limit is caller-provided, no hidden default; no std/alloc/locks in the parser | `oracles/c4.jsonl`: `suite::alpha: test`, `1 test, 0 benchmarks`, and a mutated `: benchmark` suffix with independent expected names; `oracles/c4-libtest-control.rs`: one nested test; control: `validate_c4_oracle.py` compiles the Rust fixture with `rustc --test`, compares live `--list` bytes with the literal name and summary, and rejects the mutated suffix; implementation returns borrowed names, not owned `String`s. The no_std/no-alloc/no-lock constraints rule out `std::io::BufRead`, a `Vec<String>` suite accumulator, and a mutex-held name registry; C5 owns incremental source pulling |
+| C5 / AC67 `feat: dispatch first test before listing eof` | `cargo test -p cargo-val --test discovery_stream dispatch_before_eof -- --exact --nocapture --test-threads=1` -> 1 dispatch before EOF, 3 names later, 0 suite vectors | C4; E6 | `oracles/c5.jsonl`: first-name dispatch before a gated listing EOF; control: barrier release after observed dispatch; cargo-nextest runs same three-name outcome fixture |
+| C6 / AC68 `feat: store child sessions in fixed slots` | `cargo test -p cargo-val --no-default-features --test session_slots -- --test-threads=1 --nocapture` -> 3 tests, 1 full-table rejection, 1 zero-capacity rejection, 1 recycled slot, 1 stale completion rejected, 0 slot-operation allocations with 1 allocation positive control; `cargo check -p cargo-val --lib --no-default-features --features proxima-primitives --message-format=json` -> 1 library artifact, 0 errors | C5; coordinator-owned session state | `oracles/c6-slots.jsonl`; observed output in `evidence/c6-slots/acceptance-summary.txt`; no semaphore/control queue |
+| C27 / AC113 `feat: gate listing pulls on live session slots` | `cargo test -p cargo-val --lib --no-default-features --features proxima-codec,proxima-primitives --release dispatch_stream::tests -- --test-threads=1 --nocapture` -> 3 passed, 1 full-slot pull consumes 0 bytes, 1 completion frees a slot and returns borrowed `beta`, 0 allocation calls in one measured Pipe operation with a 1-allocation positive control; full library suite -> 3 passed; no-feature release all-target suite -> 13 passed; `cargo build -p cargo-val --release --no-default-features` -> 1 executable; Proxima feature library check -> 1 library artifact, 0 errors; format check -> 0 diffs | C5,C6; `src/dispatch_stream.rs`; output in `evidence/c27/`; feature paths in `futures-feature-path.txt` and `queue-feature-path.txt` | `oracles/c27.jsonl`: full slot leaves listing bytes untouched and active child intact; freed slot resumes with exact borrowed test name; control: same `DispatchPipe` emits `Full` with a live child and `Test` after its completion record is removed; allocation control proves the counter detects one allocation |
+| C7 / AC69 | withdrawn with C6: this fixture tests permit retry, not coordinator-owned child sessions |
+| C8 / AC70 `feat: run one exact test through child session` (conditional) | `cargo test -p cargo-val --test exact_process one_selected_test -- --exact --nocapture --test-threads=1` -> 1 exact argv, 1 env value, 1 working-directory value, 1 child exit record | C27,C31,C32; compatible pinned Proxima child-session API absent; no C7 dependency | `oracles/c8.jsonl`: exact argv, env, cwd, exit tuple; control: direct Proxima child session runs same literal test fixture; nextest outcome agrees |
+| C9 / AC71 `feat: isolate three exact test children` | `cargo test -p cargo-val --test exact_process selected_tests_once -- --exact --nocapture --test-threads=1` -> 3 names, 3 children, 0 duplicates | C8; P19a-P19c | `oracles/c9.jsonl`: three exact names and per-child marker IDs; control: cargo-nextest runs same selected names; nonselected marker remains absent |
+| C10 / AC72 `feat: stream stdout and stderr payloads` | `cargo test -p cargo-val --test child_output stdout_stderr_payloads -- --exact --nocapture --test-threads=1` -> 2 byte-identical streams, 0 blocking adapters | C8; P9-P14 | `oracles/c10.jsonl`: exact stdout and stderr byte arrays; control: direct Proxima session and nextest control yield same bytes |
+| C11 / AC73 `feat: classify child exit separately` | `cargo test -p cargo-val --test child_lifecycle pass_failure_abort -- --exact --nocapture --test-threads=1` -> 1 pass, 1 assertion failure, 1 abnormal abort, 0 cross-test signals | C10; P15-P17; R6 | `oracles/c11.jsonl`: one pass, one assertion failure, one abort code; control: direct child exit records and nextest semantic outcome classify same three fixtures |
+| C12 / AC74 `feat: cancel and reap one active child` | `cargo test -p cargo-val --test child_lifecycle cancel_one_child -- --exact --nocapture --test-threads=1` -> 1 cancelled, 1 reaped, 0 orphan | C11; P18a-P18c | `oracles/c12.jsonl`: cancelled PID and later reaped PID; control: direct Proxima session cancels same barrier child; sibling PID stays live |
+| C13 / AC75 `feat: time out and reap one active child` | `cargo test -p cargo-val --test child_lifecycle timeout_one_child -- --exact --nocapture --test-threads=1` -> 1 timed out, 1 reaped, 0 orphan | C12; P18a-P18c | `oracles/c13.jsonl`: fake-clock deadline and one child PID; control: deadline-disabled arm completes same child; nextest outcome control retains fixture identity |
+| C14 / AC76 `feat: resolve runner settings from platform pairs` | `cargo test -p cargo-val --test settings two_fields_from_pairs -- --exact --nocapture --test-threads=1` -> 2 typed fields from a real platform environment pair iterator, 1 invalid capacity rejected, 0 direct `std::env` reads | C1,H1-H3,F9; E1; R7 | `oracles/c14.jsonl`: two platform pairs, two typed values, one invalid capacity; control: conflaguration borrowed-pair API resolves same literal pairs directly |
+| C14a / AC77 `feat: apply environment override to runner settings` | `cargo test -p cargo-val --test settings env_override -- --exact --nocapture --test-threads=1` -> 1 configured default, 1 environment override, 1 final value matching override | C14; F9,H1-H3; R7 | `oracles/c14a.jsonl`: default 2, env 3, result 3; control: conflaguration direct call over the same platform pair yields 3 |
+| C15 / AC78 `feat: honor no_color presence in reporter` | `cargo test -p cargo-val --test color_policy no_color_matrix -- --exact --nocapture --test-threads=1` -> 2 colored when absent, 2 ANSI-free when present | C14; E1; each TTY/pipe | `oracles/c15.jsonl`: four exact ANSI byte-presence records; control: direct conflaguration presence query supplies NO_COLOR state; nextest runs same output fixture |
+| C16 / AC79 `feat: account every discovered outcome` | `cargo test -p cargo-val --test accounting mixed_suite -- --exact --nocapture --test-threads=1` -> 5 discovered = 1 filtered + 1 ignored + 2 passed + 1 failed; 0 unaccounted | C9-C15,C14a | `oracles/c16.jsonl`: five hand-counted name/outcome records; control: cargo-nextest runs same five fixtures and passes the shared outcome comparator |
+| C17 / AC80 `perf: retain per-child allocation trace` | native `cargo test -p cargo-val --test allocation_trace child_payload_record -- --exact --nocapture --test-threads=1` -> 1 raw allocation-site record, 1 exact payload per host | C10; instrumentation only | `oracles/c17.jsonl`: one output payload and one child identity; control: run the pinned cargo-nextest child under the same host profiler and allocation-record comparator; require one raw allocation record for the matching PID and identical literal payload |
+| C18 / AC81 `perf: identify repeated windows allocation site` | Windows `cargo test -p cargo-val --test allocation_trace repeated_site -- --exact --nocapture --test-threads=1` -> 1 source-identified repeated site or 1 negative trace with 0 qualifying sites, 1 byte-identical payload control | C17; evidence gate for reuse | `oracles/c18.jsonl`: one raw repeated allocation site or negative-site record; control: run the pinned cargo-nextest child under the same profiler and site comparator; require a matching PID-tagged allocation record or an explicit zero-site record, with byte-identical payload |
+| C18a / AC82 `perf: reuse the identified allocation owner` (conditional) | Windows `cargo test -p cargo-val --test allocation_trace site_toggle -- --exact --nocapture --test-threads=1` -> 1 byte-identical off/on pair, 1 site-specific before/after allocation count pair, 0 unrelated site changes | C18 positive trace; modify existing Proxima owner only | `oracles/c18a.jsonl`: site ID, off/on count fields, exact payload bytes; control: off/on toggle changes only the traced site and retains bytes; unrelated-site change voids the comparison |
+| C19a / AC83 `ci: exercise linux child launch` | native Linux `cargo test -p cargo-val --test platform_acceptance linux_spawn -- --exact --nocapture --test-threads=1` -> 1 child launch, 1 inherited environment, 1 cwd observation, 0 parent mutations | C16; launch category only | `oracles/c19a.jsonl`: Linux launch, inherited env, cwd, parent unchanged; control: native cargo test runs the same launch fixture and compares child record |
+| C19b / AC84 `ci: exercise macos child launch` | native macOS `cargo test -p cargo-val --test platform_acceptance macos_spawn -- --exact --nocapture --test-threads=1` -> 1 child launch, 1 inherited environment, 1 cwd observation, 0 parent mutations | C19a contract; launch category only | `oracles/c19b.jsonl`: macOS launch, inherited env, cwd, parent unchanged; control: same launch fixture on native macOS |
+| C19c / AC85 `ci: exercise windows child launch` | native Windows `cargo test -p cargo-val --test platform_acceptance windows_spawn -- --exact --nocapture --test-threads=1` -> 1 child launch, 1 inherited environment, 1 cwd observation, 0 parent mutations | C19a contract; launch category only | `oracles/c19c.jsonl`: Windows launch, inherited env, cwd, parent unchanged; control: same launch fixture on native Windows |
+| C19d / AC99 `ci: exercise linux child output` | native Linux `cargo test -p cargo-val --test platform_acceptance linux_output -- --exact --nocapture --test-threads=1` -> 1 stdout payload, 1 stderr payload, 0 byte mismatches | C10; output category only | `oracles/c19d.jsonl`: Linux stdout bytes `out` and stderr bytes `err`; control: native child fixture writes the exact bytes |
+| C19e / AC100 `ci: exercise linux exit classification` | native Linux `cargo test -p cargo-val --test platform_acceptance linux_exit -- --exact --nocapture --test-threads=1` -> 1 pass, 1 assertion failure, 1 abort, 0 cross-test signals | C11; exit category only | `oracles/c19e.jsonl`: Linux pass, assertion failure, and abort; control: native libtest fixtures emit the same three exit classes |
+| C19f / AC101 `ci: exercise linux child timeout` | native Linux `cargo test -p cargo-val --test platform_acceptance linux_timeout -- --exact --nocapture --test-threads=1` -> 1 timed out, 1 reaped, 0 orphan | C13; timeout category only | `oracles/c19f.jsonl`: Linux timeout, reap, and orphan counts; control: held-child barrier remains live before deadline and is reaped once after |
+| C19g / AC102 `ci: exercise linux child cancellation` | native Linux `cargo test -p cargo-val --test platform_acceptance linux_cancel -- --exact --nocapture --test-threads=1` -> 1 cancelled, 1 reaped, 0 sibling changes | C12; cancellation category only | `oracles/c19g.jsonl`: Linux cancellation, reap, and sibling isolation; control: uncancelled sibling retains identical output and exit |
+| C19h / AC103 `ci: exercise macos child output` | native macOS `cargo test -p cargo-val --test platform_acceptance macos_output -- --exact --nocapture --test-threads=1` -> 1 stdout payload, 1 stderr payload, 0 byte mismatches | C10; output category only | `oracles/c19h.jsonl`: macOS stdout bytes `out` and stderr bytes `err`; control: native child fixture writes the exact bytes |
+| C19i / AC104 `ci: exercise macos exit classification` | native macOS `cargo test -p cargo-val --test platform_acceptance macos_exit -- --exact --nocapture --test-threads=1` -> 1 pass, 1 assertion failure, 1 abort, 0 cross-test signals | C11; exit category only | `oracles/c19i.jsonl`: macOS pass, assertion failure, and abort; control: native libtest fixtures emit the same three exit classes |
+| C19j / AC105 `ci: exercise macos child timeout` | native macOS `cargo test -p cargo-val --test platform_acceptance macos_timeout -- --exact --nocapture --test-threads=1` -> 1 timed out, 1 reaped, 0 orphan | C13; timeout category only | `oracles/c19j.jsonl`: macOS timeout, reap, and orphan counts; control: held-child barrier remains live before deadline and is reaped once after |
+| C19k / AC106 `ci: exercise macos child cancellation` | native macOS `cargo test -p cargo-val --test platform_acceptance macos_cancel -- --exact --nocapture --test-threads=1` -> 1 cancelled, 1 reaped, 0 sibling changes | C12; cancellation category only | `oracles/c19k.jsonl`: macOS cancellation, reap, and sibling isolation; control: uncancelled sibling retains identical output and exit |
+| C19l / AC107 `ci: exercise windows child output` | native Windows `cargo test -p cargo-val --test platform_acceptance windows_output -- --exact --nocapture --test-threads=1` -> 1 stdout payload, 1 stderr payload, 0 byte mismatches | C10; output category only | `oracles/c19l.jsonl`: Windows stdout bytes `out` and stderr bytes `err`; control: native child fixture writes the exact bytes |
+| C19m / AC108 `ci: exercise windows exit classification` | native Windows `cargo test -p cargo-val --test platform_acceptance windows_exit -- --exact --nocapture --test-threads=1` -> 1 pass, 1 assertion failure, 1 abort, 0 cross-test signals | C11; exit category only | `oracles/c19m.jsonl`: Windows pass, assertion failure, and abort; control: native libtest fixtures emit the same three exit classes |
+| C19n / AC109 `ci: exercise windows child timeout` | native Windows `cargo test -p cargo-val --test platform_acceptance windows_timeout -- --exact --nocapture --test-threads=1` -> 1 timed out, 1 reaped, 0 orphan | C13; timeout category only | `oracles/c19n.jsonl`: Windows timeout, reap, and orphan counts; control: held-child barrier remains live before deadline and is reaped once after |
+| C19o / AC110 `ci: exercise windows child cancellation` | native Windows `cargo test -p cargo-val --test platform_acceptance windows_cancel -- --exact --nocapture --test-threads=1` -> 1 cancelled, 1 reaped, 0 sibling changes | C12; cancellation category only | `oracles/c19o.jsonl`: Windows cancellation, reap, and sibling isolation; control: uncancelled sibling retains identical output and exit |
+| C20 / AC86 `test: reject malformed comparison records` | `cargo test -p cargo-val --test comparison_record malformed_control -- --exact --nocapture --test-threads=1` -> 1 malformed rejected, 0 valid rejected | C19a-C19c | `oracles/c20.jsonl`: one missing-required-field record; control: schema validator accepts one complete literal record and rejects malformed one |
+| C21 / AC87 `perf: retain paired nextest outcome payloads` | `cargo test -p cargo-val --test comparison_record matched_outcomes -- --exact --nocapture --test-threads=1` -> 1 paired raw record per host, 0 unexplained semantic mismatches | C19a-C19c,C20 | `oracles/c21.jsonl`: exact selected test IDs and outcomes; control: cargo-nextest and cargo-val each compared separately against literal records |
+| C22 / AC88 `perf: retain latency and throughput samples` | `cargo test -p cargo-val --test comparison_record latency_throughput -- --exact --nocapture --test-threads=1` -> 1 raw set with latency, throughput, CoV, conditions per host | C21 | `oracles/c22.jsonl`: sample field names, units, host/profile/corpus labels; control: raw timer samples independently recompute the reported latency/throughput/CoV; nextest arm uses same schema |
+| C23 / AC89 `perf: retain cpu rss and error samples` | `cargo test -p cargo-val --test comparison_record host_resources -- --exact --nocapture --test-threads=1` -> 1 raw set with CPU, RSS, errors, conditions per host | C21 | `oracles/c23.jsonl`: CPU/RSS/error event field names and labels; control: raw host monitor samples independently recompute summaries; nextest arm uses same schema |
+| C24 / AC90 `docs: show native cargo val commands` | `python3 specs/cargo-val/validate_command_examples.py` -> 3 native examples, 1 command spelling, 0 missing fixture links | C19a-C19c; documents R1 native acceptance invocations | `oracles/c24.jsonl`: three literal command invocations and fixture links; control: run the existing README command example through the same docs checker and require acceptance; check the three new examples and require each command and fixture link to name its matching native acceptance case |
+| C28 / AC114 `feat: parse cargo val manifest and filter arguments` | `cargo test -p cargo-val --test cli_arguments --no-default-features --release -- --test-threads=1 --nocapture` -> 4 passed; 1 borrowed manifest path, 1 borrowed filter, 1 exact flag, 1 `--` boundary, 1 missing and 1 empty manifest rejected, 0 allocations in one parser operation with a 1-allocation positive control; format check -> 0 diffs | C25; commit `cebac20`; `src/cli.rs`, `tests/cli_arguments.rs`; observed output in `evidence/c28-cli/acceptance.txt` | `oracles/c28.jsonl`: manifest/filter/exact parse, test args after separator do not trigger help, missing/empty path rejected; allocator positive control counts 1 |
+| C29 / AC115 `fix: skip cargo target arguments before the filter` | `cargo test -p cargo-val --test cli_arguments --no-default-features --release -- --test-threads=1 --nocapture` -> 4 passed; 1 package value and 1 target value skipped, 1 `fixture::passes` filter retained, 1 missing target value rejected, 0 parser allocations with a 1-allocation positive control; fixture control `cargo test --manifest-path tests/fixtures/workspace/Cargo.toml --package cargo_val_fixture --test integration_fixture --release -- --exact fixture::passes --nocapture` -> 1 exact test passed; format check -> 0 diffs | C28; commit `9e9aab0`; `src/cli.rs`, `tests/cli_arguments.rs`, `tests/fixtures/workspace/`; evidence in `evidence/c29-cli/` | `oracles/c29.jsonl`: real fixture package/target/filter argument sequence and one exact passing fixture control; missing target value rejected; allocator positive control counts 1 |
+| C25 / AC93 `feat: install cargo-val as a cargo subcommand` | install from a checkout outside its current directory -> 1 executable; `cargo val --help` -> 203 stdout bytes, status 0, stderr 0; `cargo val --version` -> 16 stdout bytes, status 0, stderr 0; help bytes match the fixture; test-run invocation -> status 2 because execution is not implemented | C0f; `evidence/command/no-std/acceptance-summary.txt` | `oracles/c25.jsonl`: exact help output and status; direct executable and Cargo subcommand output must match |
+| C26 / AC98 `feat: run one fixture through cargo val` | invoke `cargo val --manifest-path tests/fixtures/workspace/Cargo.toml --exact fixture::passes` -> 1 selected test, 1 child pass record, 0 unexpected output bytes | C25,C8; compare against the fixture literal child record; one test only | `oracles/c26.jsonl`: one selected test and one passing child record; control: direct Proxima child session runs same test fixture and yields the same exit/payload record |
 
 ## independent oracle and incumbent control ledger
 
@@ -179,14 +318,13 @@ implementation. The expected bytes/events are entered by hand from the
 specified external contract or source hunk, never copied from candidate output.
 `oracles/<id>.jsonl` is relative to `specs/cargo-val/` for cargo-val cards;
 the same basename is copied into the owning repository's test fixtures for
-upstream cards. A source probe may report its explicit unsupported record;
-that is a falsification, not a passing implementation outcome. Existing
+upstream cards. A source probe may report unsupported capability as a falsification, not a passing implementation outcome. Existing
 `std` process commands appear only in separate test/control programs and do
 not enter the shipped runtime graph.
 
 | card | independent literal oracle | incumbent or negative control |
 |---|---|---|
-| F0 | `oracles/f0.jsonl`: five `file:line` gaps, one borrowed-pair signature | reopen each pinned source hunk; current `Settings::from_env` behavior remains baseline |
+| F0 | `oracles/f0.jsonl`: five source gaps, one borrowed-pair signature, eight direct dependency names, one negative control | the missing borrowed-pair anchor control must be rejected |
 | F1 | `oracles/f1.jsonl`: one no_std library symbol list | run the leaf's `core`-only API fixture and the deliberate `std::env` fixture through the same compile-check harness; require the incumbent fixture accepted and the std fixture rejected |
 | F2 | `oracles/f2.jsonl`: `COLOR=always` present, `MISSING` absent | current conflaguration env lookup over the same two keys |
 | F3 | `oracles/f3.jsonl`: absent, empty, nonempty values | current `std::env::var_os` control distinguishes all three states |
@@ -199,14 +337,17 @@ not enter the shipped runtime graph.
 | F9 | `oracles/f9.jsonl`: one core export, zero std symbols | run the existing `proxima-primitives` no_std artifact through the same export/feature-graph checker and require acceptance; compile a deliberate `std::env` import in no_std mode through that checker and require rejection |
 | H1 | `oracles/h1.jsonl`: two literal Linux environment entries | compare borrowed bytes to libc `environ` in test control |
 | H2 | `oracles/h2.jsonl`: two literal macOS environment entries | compare borrowed bytes to platform `environ` in test control |
+| H4 | `oracles/h4.jsonl`: UTF-16 argv units, inherited env, child override, sibling isolation | child reports exact units and values; parent environment remains unchanged |
 | H3 | `oracles/h3.jsonl`: two literal wide Windows entries, including empty | compare units to Win32 environment block in test control |
-| P0 | `oracles/p0.jsonl`: four missing source seams and one session signature | reread pinned Proxima hunks; old synchronous child fixture supplies output control |
+| P0 | `oracles/p0.jsonl`: six missing source seams, one candidate session signature, one negative control | pinned-source anchor control; a fixture missing the blocking-wait anchor must be rejected |
 | Q1 | `oracles/q1.jsonl`: Pending before release, one wake and one exit | child held behind an independent release pipe; closed source must not wake twice |
 | Q2 | `oracles/q2.jsonl`: Pending before release, one wake and one exit | same barrier oracle on native macOS; closed source must not wake twice |
 | Q3 | `oracles/q3.jsonl`: one pipe and one process completion after release | one non-overlapped negative handle must emit unsupported, not a fake completion |
 | Q4 | `oracles/q4.jsonl`: fixed Linux child program, one handle and exit 0 | libc launch in the test harness supplies the child result control; missing no_std symbol emits unsupported |
 | Q5 | `oracles/q5.jsonl`: fixed macOS child program, one handle and exit 0 | libc launch in the test harness supplies the child result control; missing no_std symbol emits unsupported |
 | Q6 | `oracles/q6.jsonl`: fixed Windows child program, one handle and exit 0 | Win32 CreateProcess test control supplies the child result; missing no_std import emits unsupported |
+| PR0, PR0a, PR0b | historical Proxima semaphore artifacts are excluded from the cargo-val requirement map and do not inform session admission, allocation, or lifecycle design |
+| PR1a | `oracles/pr1a.jsonl`: alloc-only Prime host-driver API surface | existing alloc-only LocalExecutor fixture is the behavior control; enabling std must not be required |
 | PR1 | `oracles/r1.jsonl`: register/wake/retire event order | run Prime's existing readiness registration fixture through the same lifecycle checker and require one register/wake/retire; stale-generation injection must deliver zero wakes |
 | PR2 | `oracles/r2.jsonl`: pending/drain/wake sequence | run Prime's existing Linux socket-readiness fixture through the same readiness comparator and require one payload wake; barrier-before-release emits zero bytes and stale registration gets zero wakes |
 | PR3 | `oracles/r3.jsonl`: pending/drain/wake sequence | run Prime's existing macOS socket-readiness fixture through the same readiness comparator and require one payload wake; barrier control emits zero premature bytes |
@@ -248,13 +389,30 @@ not enter the shipped runtime graph.
 | C0b | `oracles/c0b.jsonl`: exact Linux help bytes and status 0 | old C0 help banner bytes are the output control |
 | C0c | `oracles/c0c.jsonl`: exact macOS help bytes and status 0 | old C0 help banner bytes are the output control |
 | C0d | `oracles/c0d.jsonl`: exact Windows help bytes and status 0 | old C0 help banner bytes are the output control |
+| C0e | `oracles/c0e.jsonl`: exact Linux startup help bytes and status 0 | checked-in help fixture supplies exact bytes; std graph check is an independent reject control |
+| C0f | `oracles/c0f.jsonl`: exact macOS startup help bytes and status 0 | checked-in help fixture supplies exact bytes; std graph check is an independent reject control |
+| C0g | `oracles/c0g.jsonl`: exact Windows startup help bytes and status 0 | checked-in help fixture supplies exact bytes; std graph check is an independent reject control |
+| C25 | `oracles/c25.jsonl`: exact `cargo val --help` output and status | invoke installed executable directly with the same args; both outputs must match fixture bytes |
+| C26 | `oracles/c26.jsonl`: one selected test and one passing child record | direct Proxima child session runs same test fixture and yields the same exit/payload record |
+| C19d | `oracles/c19d.jsonl`: Linux stdout bytes `out` and stderr bytes `err` | native child fixture writes the exact bytes |
+| C19e | `oracles/c19e.jsonl`: Linux pass, assertion failure, and abort | native libtest fixtures emit the same three exit classes |
+| C19f | `oracles/c19f.jsonl`: Linux timeout, reap, and orphan counts | held-child barrier remains live before deadline and is reaped once after |
+| C19g | `oracles/c19g.jsonl`: Linux cancellation, reap, and sibling isolation | uncancelled sibling retains identical output and exit |
+| C19h | `oracles/c19h.jsonl`: macOS stdout bytes `out` and stderr bytes `err` | native child fixture writes the exact bytes |
+| C19i | `oracles/c19i.jsonl`: macOS pass, assertion failure, and abort | native libtest fixtures emit the same three exit classes |
+| C19j | `oracles/c19j.jsonl`: macOS timeout, reap, and orphan counts | held-child barrier remains live before deadline and is reaped once after |
+| C19k | `oracles/c19k.jsonl`: macOS cancellation, reap, and sibling isolation | uncancelled sibling retains identical output and exit |
+| C19l | `oracles/c19l.jsonl`: Windows stdout bytes `out` and stderr bytes `err` | native child fixture writes the exact bytes |
+| C19m | `oracles/c19m.jsonl`: Windows pass, assertion failure, and abort | native libtest fixtures emit the same three exit classes |
+| C19n | `oracles/c19n.jsonl`: Windows timeout, reap, and orphan counts | held-child barrier remains live before deadline and is reaped once after |
+| C19o | `oracles/c19o.jsonl`: Windows cancellation, reap, and sibling isolation | uncancelled sibling retains identical output and exit |
 | C1 | `oracles/c1.jsonl`: four pinned package IDs plus zero std features | run the pinned baseline graph through the same graph checker and require four identities accepted; inject one normal `std` edge and one mismatched pin and require each rejected |
-| C2 | `oracles/c2.jsonl`: one Cargo compiler-artifact JSON line, one non-test line | Cargo's own JSON emitter supplies the field-shape control |
-| C3 | `oracles/c3.jsonl`: two artifacts separated by a held-open producer barrier | run Cargo's own JSON emitter through the same streaming comparator and require its first artifact before EOF; held-open producer preserves first emission and reversed lines reject |
-| C4 | `oracles/c4.jsonl`: one literal libtest name line and one header line | libtest `--list` on pinned fixture binary is the name control |
+| C2 | `oracles/c2.jsonl`: 1 `kind=bin` test harness, 1 normal binary, 1 `kind=test` harness; `c2-windows-escaped.jsonl`: 1 escaped executable with nested unknown field; `c2-over-depth.jsonl`: 1 depth-5 record; expected files bind decoded bytes and Cargo escaped-field semantics; parser limits are 629 bytes/depth 4 with a depth ceiling of 16 | `validate_c2_oracle.py` compares 3 literal record shapes with retained and live Cargo JSON, decodes the escaped string with independent Python JSON, and rejects `target.test`-only and `kind=test`-only selectors; a corrupted decoded-path expected value is rejected; parser integration test must prove storage pointers, 10 zero-allocation calls with a positive allocation control, and four limit rejections plus malformed JSON controls |
+| C3 | `oracles/c3.jsonl`: 3 literal byte chunks (two partial records and the completing newline bytes) plus EOF; `oracles/c3.expected.jsonl`: 1 no-emission checkpoint, 1 held-open first-emission checkpoint, 1 final two-path checkpoint | `validate_c3_oracle.py` compares decoded literal records with 2 actual Cargo test-artifact records in `evidence/c2/cargo-all-targets.jsonl`, asserts that the first emission is required while producer remains open, and rejects reversed output and a missing first newline; implementation test uses a producer/consumer rendezvous barrier, not wall-clock sleeps |
+| C4 | `oracles/c4.jsonl`: `suite::alpha: test`, `1 test, 0 benchmarks`, and a mutated `: benchmark` suffix with independent expected names; `oracles/c4-libtest-control.rs`: one nested test | `validate_c4_oracle.py` compiles the Rust fixture with `rustc --test`, compares live `--list` bytes with the literal name and summary, and rejects the mutated suffix; implementation returns borrowed names, not owned `String`s. The no_std/no-alloc/no-lock constraints rule out `std::io::BufRead`, a `Vec<String>` suite accumulator, and a mutex-held name registry; C5 owns incremental source pulling |
 | C5 | `oracles/c5.jsonl`: first-name dispatch before a gated listing EOF | barrier release after observed dispatch; cargo-nextest runs same three-name outcome fixture |
-| C6 | `oracles/c6.jsonl`: two permits and third intent still unread | run the existing Proxima semaphore permit path through the same admission comparator and require two admitted identities; no-permit control performs zero source reads |
-| C7 | `oracles/c7.jsonl`: seven identity records and capacity two | cargo-nextest executes same seven fixture names; overflow arm loses zero identities |
+| C6 | `oracles/c6-slots.jsonl`: direct session-slot lifecycle and generation checked stale-event rejection | full-table and zero-capacity transitions retain the identity; stale generation cannot remove a later session |
+| C7 | withdrawn with C6; replace with the session-slot lifecycle oracle |
 | C8 | `oracles/c8.jsonl`: exact argv, env, cwd, exit tuple | direct Proxima child session runs same literal test fixture; nextest outcome agrees |
 | C9 | `oracles/c9.jsonl`: three exact names and per-child marker IDs | cargo-nextest runs same selected names; nonselected marker remains absent |
 | C10 | `oracles/c10.jsonl`: exact stdout and stderr byte arrays | direct Proxima session and nextest control yield same bytes |
@@ -268,9 +426,12 @@ not enter the shipped runtime graph.
 | C17 | `oracles/c17.jsonl`: one output payload and one child identity | run the pinned cargo-nextest child under the same host profiler and allocation-record comparator; require one raw allocation record for the matching PID and identical literal payload |
 | C18 | `oracles/c18.jsonl`: one raw repeated allocation site or negative-site record | run the pinned cargo-nextest child under the same profiler and site comparator; require a matching PID-tagged allocation record or an explicit zero-site record, with byte-identical payload |
 | C18a | `oracles/c18a.jsonl`: site ID, off/on count fields, exact payload bytes | off/on toggle changes only the traced site and retains bytes; unrelated-site change voids the comparison |
-| C19a | `oracles/c19a.jsonl`: five named Linux classes and expected IDs | cargo-nextest runs same five classes on native Linux |
-| C19b | `oracles/c19b.jsonl`: five named macOS classes and expected IDs | cargo-nextest runs same five classes on native macOS |
-| C19c | `oracles/c19c.jsonl`: five named Windows classes and expected IDs | cargo-nextest runs same five classes on native Windows |
+
+
+
+| C19a | `oracles/c19a.jsonl`: Linux launch, inherited env, cwd, parent unchanged | native cargo test runs the same launch fixture and compares child record |
+| C19b | `oracles/c19b.jsonl`: macOS launch, inherited env, cwd, parent unchanged | same launch fixture on native macOS |
+| C19c | `oracles/c19c.jsonl`: Windows launch, inherited env, cwd, parent unchanged | same launch fixture on native Windows |
 | C20 | `oracles/c20.jsonl`: one missing-required-field record | schema validator accepts one complete literal record and rejects malformed one |
 | C21 | `oracles/c21.jsonl`: exact selected test IDs and outcomes | cargo-nextest and cargo-val each compared separately against literal records |
 | C22 | `oracles/c22.jsonl`: sample field names, units, host/profile/corpus labels | raw timer samples independently recompute the reported latency/throughput/CoV; nextest arm uses same schema |
@@ -279,37 +440,46 @@ not enter the shipped runtime graph.
 
 ## requirement coverage
 
+This is the historical full-product candidate map, not an active work queue.
+The active cargo-val-only cards establish only pure dataflow prerequisites;
+R1/R4/R6/R7 runtime/R8 `NO_COLOR`/R12/R14 remain undischarged at the pinned
+Proxima API and must not be inferred from a row in this table.
+
 | SPEC requirement | candidate cards |
 |---|---|
-| R1 native Windows/macOS/Linux | Q1-Q6, H1-H3, PR2-PR5, P6-P21, C0b-C0d, C19a-C19c; C0 is a help-only shell and does not discharge R1 |
+| R1 native Windows/macOS/Linux | Q1-Q6, H1-H4, PR2-PR5, P6-P21, C0b-C0g, C19a-C19c; C0 is a help-only shell and does not discharge R1 |
 | R2 Cargo artifact streaming | C2-C3 |
 | R3 line discovery and early dispatch | C4-C5 |
-| R4 exact isolated process, env, cwd, exit | P6-P8b, P15-P19c, C8-C9 |
-| R5 bounded admission | C6-C7 |
-| R6 output, pass/fail/abort, timeout, cancellation | P9-P19c, C10-C13 |
+| R4 exact isolated process, env, cwd, exit | P6-P8b, P15-P19c, H4, C8-C9 |
+| R5 bounded live child sessions | C6,C27 |
+| R6 output, pass/fail/abort, timeout, cancellation | P9-P19c, C10-C13, C19d-C19o |
 | R7 typed settings through conflaguration | F0-F9, H1-H3, C14-C14a |
 | R8 default color and `NO_COLOR` | F3-F6, C15 |
 | R9 complete outcome counts | C16 |
 | R10 allocation payload evidence | C17-C18a |
 | R11 nextest comparison evidence | C20-C23; C24 documents commands and does not discharge R11 |
-| R12 async child lifecycle | P0, Q1-Q3, PR1-PR5, P2-P21, C6-C13 |
-| R13 no `std` in shipped graph | F0-F9, P0, P20-P21, C0a-C1 |
-| R14 native command documentation | C24 |
+| R12 async child lifecycle | P0, Q1-Q3, PR1a, PR1, PR2-PR5, P2-P21, C6-C13, C19d-C19o |
+| R13 no `std` in shipped graph | F0-F9, P0, PR1a, P20-P21, C0a-C1, C0e-C0g |
+| R14 native command documentation and command execution | C24-C26 |
 
 ## resume
 
-C2/AC64 landed as unsigned commit `a1d4929` after the configured 1Password signer failed to produce a signature. Its focused parser test, no_std library check, and literal/retained/live oracle are in `evidence/c2/`; the commit contains the updated command output and removes superseded output files.
-
-C3/AC65 adds a caller-owned bounded framing adapter and emits two records before producer EOF; commit `ad86d6f`. The focused serial test measured zero allocator calls with one positive-control allocation; the serial full target observed 7 passing tests. The default-parallel target observed 6 passes and one allocation-counter failure at 5 calls. The process-global counter trace does not identify sibling allocation sites; see `evidence/c3/README.md` and `parallel-allocation-control.txt`.
-
-C4/AC66 implements the borrowed libtest listing parser; commit `251f523`. Its focused run observed 1 passing test, 9 parser calls, 0 counted allocator calls, and 1 positive-control allocation. The five oracle counts and cache-clean reproduction trace are retained in `evidence/c4/`. C5 composes that parser with C3's fixed-capacity newline framer to produce one borrowed name per call. Its focused target printed 9 passing tests; cargo-nextest ran the gated four-name dispatch fixture with 1 passed and 8 filtered, and the literal oracle recorded first dispatch before producer release plus 3 later names. Parse progress, poisoning, EOF validation, short-copy replay, and the producer gate are covered in `evidence/c5/`.
-
-C28/AC114 parses `--manifest-path`, the first positional filter, `--exact`, and
-the `--` test-argument boundary from borrowed argv bytes. Its focused release
-run observed 4 passed tests and 0 parser allocations with a 1-allocation
-positive control; literal oracle and output are in `oracles/c28.jsonl` and `evidence/c28-cli/acceptance.txt`; commit `cebac20`.
-
-C29/AC115 skips package and test-target argument values before taking the
-positional filter. The focused release run observed 4 passed tests, 0 parser
-allocations with a 1-allocation positive control, and 1 exact fixture test
-passing; records are in `oracles/c29.jsonl` and `evidence/c29-cli/`.
+F0 is recorded in `949262a`; P0's six-gap update is in the current working
+diff. C2/AC64 parses bounded Cargo records in the no_std library, including
+escaped Windows paths, null executables, caller scratch, and allocation checks;
+its literal, retained Cargo, and live Cargo controls plus one integration test
+are recorded in `evidence/c2/README.md`. C3/AC65 now frames borrowed artifact
+lines into a caller-owned fixed buffer, applies the C2 parser through Proxima's
+async `Pipe`, and delivers each path before EOF. Its oracle, focused test,
+six-case edge suite, no_std library check, normal feature graph, and macOS
+allocation trace are in `evidence/c3/`; the literal two-record run observed 0
+allocator calls with a 1-call positive control. The process-backed Cargo
+stdout source is not part of C3. Q1 is retained on Proxima `main` as a
+standalone probe, not a cargo-val runtime API. Historical PR0/PR0a/PR0b
+semaphore artifacts are excluded from the cargo-val roadmap and do not inform
+its session admission or allocation design. The active next packets are C6/C27,
+then C30-C34 in dependency order. C8-C26 and native platform acceptance cannot
+run against the pinned Proxima process API; their exact unmet dependency is
+recorded at the active frontier. Before each active card, bind its fixture to
+literal expected events, retain raw events, and account for both success and
+failure. Never mark a prospective count as observed.
