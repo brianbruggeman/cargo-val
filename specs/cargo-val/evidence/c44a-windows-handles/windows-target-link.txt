@@ -1,0 +1,4 @@
+$ cargo test --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --lib --no-run
+error: linker `link.exe` not found
+note: the msvc targets depend on the msvc linker but `link.exe` was not found
+exit status: 101
