@@ -1,12 +1,13 @@
 # cargo-val -- implementation cards
 
-Status: active; latest committed code card is C6/AC68 (`70fac56`) on
-`feat/cargo-val`, with slot availability fix `700ac62` and focused reruns recorded in `evidence/c6-slots/availability-fix.txt`. C0-C6 and C28-C29 are committed; C27 is implemented and
-validated in the worktree but remains uncommitted. The counted-admission C6
-and retry-fixture C7 have been withdrawn. Replacement C6 provides fixed,
-generation-checked session slots; C27 gates an incremental listing pull on that
-table and returns one borrowed launch intent. The process launch and completion
-loop remains unsupported by the pinned Proxima API. The active cargo-val-only
+Status: active; C27/AC113 (`c5f5650`) and its fixed-slot prerequisite C6/AC68
+(`70fac56`, availability correction `700ac62`) are committed on `main`. Focused
+C6 correction outputs are recorded in `evidence/c6-slots/availability-fix.txt`.
+C0-C6 and C27-C29 are committed. The counted-admission C6 and retry-fixture C7
+have been withdrawn. Replacement C6 provides fixed, generation-checked session
+slots; C27 gates incremental listing pulls on actual slot availability and
+returns one borrowed launch intent. The process launch and completion loop
+remains unsupported by the pinned Proxima API. The active cargo-val-only
 cards are below; the older cross-repository cards are a conditional record, not
 the current implementation path.
 
@@ -27,9 +28,10 @@ an earlier lookup did not find `git@github.com:brianbruggeman/cargo-val.git`.
 
 ## execution frontier — cargo-val runner
 
-The cargo-val library currently reaches C5/AC67: it parses Cargo JSON and
-libtest listing data incrementally, and its first discovery Pipe can dispatch
-before listing EOF. The prior C6/AC68 counted-admission experiment and C7/AC69
+The cargo-val library currently reaches C27/AC113: it parses Cargo JSON and
+libtest listing data incrementally, and its dispatch Pipe yields borrowed test
+intents as soon as a complete listing line is available, subject to free child
+slots. The prior C6/AC68 counted-admission experiment and C7/AC69
 retry fixture are rejected as an architecture: they tested a permit pool,
 which violates the no-semaphore requirement. Their retained evidence is
 historical only. Replacement C6/AC68 adds `SessionSlots`; its observed checks
@@ -49,8 +51,8 @@ blocking `wait` and `wait_with_output`. The source payload is recorded in
 child session cargo-val requires. cargo-val must not hide these behaviors
 behind an async wrapper or copy the process backend into this repository.
 
-The next cargo-val work lands C27 coherently, then completes the pure
-selection, exact-intent, accounting, and formatting boundaries listed below.
+The next cargo-val work completes the pure selection, exact-intent, accounting,
+and formatting boundaries listed below.
 These consume borrowed data and Proxima Pipes without constructing a suite
 queue. An executable runner cannot be connected to a compatible Proxima child
 session at the pinned revision: none exposes no_std launch plus poll-driven
@@ -478,8 +480,8 @@ allocator calls with a 1-call positive control. The process-backed Cargo
 stdout source is not part of C3. Q1 is retained on Proxima `main` as a
 standalone probe, not a cargo-val runtime API. Historical PR0/PR0a/PR0b
 semaphore artifacts are excluded from the cargo-val roadmap and do not inform
-its session admission or allocation design. The active next packets are C6/C27,
-then C30-C34 in dependency order. C8-C26 and native platform acceptance cannot
+its session admission or allocation design. C6/C27 are committed; the active next packets are C30-C34 in dependency
+order. C8-C26 and native platform acceptance cannot
 run against the pinned Proxima process API; their exact unmet dependency is
 recorded at the active frontier. Before each active card, bind its fixture to
 literal expected events, retain raw events, and account for both success and
