@@ -1,0 +1,53 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 114312785496,
+      "name": "test (macos-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "2fac3f878a34e240d4a403c86bd98d11f4868c0e",
+      "test_step": [
+        {
+          "name": "Run cargo test with failure payload",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-10T21:02:53Z",
+          "completed_at": "2026-10-10T21:03:35Z"
+        }
+      ]
+    },
+    {
+      "id": 114312785663,
+      "name": "test (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "2fac3f878a34e240d4a403c86bd98d11f4868c0e",
+      "test_step": [
+        {
+          "name": "Run cargo test with failure payload",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-10T21:02:38Z",
+          "completed_at": "2026-10-10T21:03:10Z"
+        }
+      ]
+    },
+    {
+      "id": 114312785693,
+      "name": "test (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "2fac3f878a34e240d4a403c86bd98d11f4868c0e",
+      "test_step": [
+        {
+          "name": "Run cargo test with failure payload",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-10-10T21:03:07Z",
+          "completed_at": "2026-10-10T21:03:57Z"
+        }
+      ]
+    }
+  ]
+}
