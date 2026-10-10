@@ -1,0 +1,14 @@
+command: cargo test -p cargo-val --lib --no-default-features --features proxima-codec,proxima-primitives --release dispatch_stream::tests -- --test-threads=3 --nocapture
+exit: 0
+    Finished `release` profile [optimized] target(s) in 0.16s
+     Running unittests src/lib.rs (/tmp/cargo_target/release/deps/cargo_val-20f62d62c8d6383a)
+
+running 3 tests
+{"borrowed_name":"beta","consumed_bytes":11,"event":"pull_after_retire","listing_record":"beta: test\n","result":"Test"}
+{"active_child":"alpha child","consumed_bytes":0,"event":"pull_while_full","listing_record":"beta: test\n","result":"Full"}
+{"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
+test dispatch_stream::tests::resumes_listing_after_child_slot_is_retired ... ok
+test dispatch_stream::tests::stops_consuming_listing_when_live_child_slots_are_full ... ok
+test dispatch_stream::tests::dispatch_pipe_does_not_allocate_and_probe_detects_allocation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

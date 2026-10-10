@@ -1,0 +1,139 @@
+cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+├── proxima-codec v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+│   ├── bytes v1.12.1
+│   ├── memchr v2.8.3
+│   ├── proxima-core v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+│   │   ├── smallvec v1.16.2
+│   │   ├── thiserror v2.0.21
+│   │   │   └── thiserror-impl feature "default"
+│   │   │       └── thiserror-impl v2.0.21 (proc-macro)
+│   │   │           ├── proc-macro2 feature "default"
+│   │   │           │   ├── proc-macro2 v1.0.107
+│   │   │           │   │   └── unicode-ident feature "default"
+│   │   │           │   │       └── unicode-ident v1.0.26
+│   │   │           │   └── proc-macro2 feature "proc-macro"
+│   │   │           │       └── proc-macro2 v1.0.107 (*)
+│   │   │           ├── quote feature "default"
+│   │   │           │   ├── quote v1.0.47
+│   │   │           │   │   └── proc-macro2 v1.0.107 (*)
+│   │   │           │   └── quote feature "proc-macro"
+│   │   │           │       ├── quote v1.0.47 (*)
+│   │   │           │       └── proc-macro2 feature "proc-macro" (*)
+│   │   │           └── syn feature "default"
+│   │   │               ├── syn v3.0.6
+│   │   │               │   ├── proc-macro2 v1.0.107 (*)
+│   │   │               │   ├── quote v1.0.47 (*)
+│   │   │               │   └── unicode-ident feature "default" (*)
+│   │   │               ├── syn feature "clone-impls"
+│   │   │               │   └── syn v3.0.6 (*)
+│   │   │               ├── syn feature "derive"
+│   │   │               │   └── syn v3.0.6 (*)
+│   │   │               ├── syn feature "parsing"
+│   │   │               │   └── syn v3.0.6 (*)
+│   │   │               ├── syn feature "printing"
+│   │   │               │   └── syn v3.0.6 (*)
+│   │   │               └── syn feature "proc-macro"
+│   │   │                   ├── syn v3.0.6 (*)
+│   │   │                   ├── proc-macro2 feature "proc-macro" (*)
+│   │   │                   └── quote feature "proc-macro" (*)
+│   │   ├── futures feature "alloc"
+│   │   │   ├── futures v0.3.34
+│   │   │   │   ├── futures-core v0.3.34
+│   │   │   │   ├── futures-io v0.3.34
+│   │   │   │   ├── futures-sink v0.3.34
+│   │   │   │   ├── futures-task v0.3.34
+│   │   │   │   ├── futures-channel feature "sink"
+│   │   │   │   │   ├── futures-channel v0.3.34
+│   │   │   │   │   │   ├── futures-core v0.3.34
+│   │   │   │   │   │   └── futures-sink v0.3.34
+│   │   │   │   │   └── futures-channel feature "futures-sink"
+│   │   │   │   │       └── futures-channel v0.3.34 (*)
+│   │   │   │   └── futures-util feature "sink"
+│   │   │   │       ├── futures-util v0.3.34
+│   │   │   │       │   ├── futures-core v0.3.34
+│   │   │   │       │   ├── futures-macro v0.3.34 (proc-macro)
+│   │   │   │       │   │   ├── proc-macro2 feature "default" (*)
+│   │   │   │       │   │   ├── quote feature "default" (*)
+│   │   │   │       │   │   ├── syn feature "default" (*)
+│   │   │   │       │   │   └── syn feature "full"
+│   │   │   │       │   │       └── syn v3.0.6 (*)
+│   │   │   │       │   ├── futures-sink v0.3.34
+│   │   │   │       │   ├── futures-task v0.3.34
+│   │   │   │       │   ├── slab v0.4.12
+│   │   │   │       │   └── pin-project-lite feature "default"
+│   │   │   │       │       └── pin-project-lite v0.2.17
+│   │   │   │       └── futures-util feature "futures-sink"
+│   │   │   │           └── futures-util v0.3.34 (*)
+│   │   │   ├── futures-channel feature "alloc"
+│   │   │   │   ├── futures-channel v0.3.34 (*)
+│   │   │   │   └── futures-core feature "alloc"
+│   │   │   │       └── futures-core v0.3.34
+│   │   │   ├── futures-core feature "alloc" (*)
+│   │   │   ├── futures-sink feature "alloc"
+│   │   │   │   └── futures-sink v0.3.34
+│   │   │   ├── futures-task feature "alloc"
+│   │   │   │   └── futures-task v0.3.34
+│   │   │   └── futures-util feature "alloc"
+│   │   │       ├── futures-util v0.3.34 (*)
+│   │   │       ├── futures-core feature "alloc" (*)
+│   │   │       ├── futures-task feature "alloc" (*)
+│   │   │       └── futures-util feature "slab"
+│   │   │           └── futures-util v0.3.34 (*)
+│   │   ├── futures feature "async-await"
+│   │   │   ├── futures v0.3.34 (*)
+│   │   │   ├── futures-util feature "async-await"
+│   │   │   │   └── futures-util v0.3.34 (*)
+│   │   │   └── futures-util feature "async-await-macro"
+│   │   │       ├── futures-util v0.3.34 (*)
+│   │   │       ├── futures-util feature "async-await" (*)
+│   │   │       └── futures-util feature "futures-macro"
+│   │   │           └── futures-util v0.3.34 (*)
+│   │   └── pin-project-lite feature "default" (*)
+│   └── thiserror v2.0.21 (*)
+├── proxima-primitives v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+│   ├── bytes v1.12.1
+│   ├── fastrand v2.5.0
+│   ├── heapless v0.9.3
+│   │   ├── stable_deref_trait v1.2.1
+│   │   └── hash32 feature "default"
+│   │       └── hash32 v0.3.1
+│   │           └── byteorder v1.5.0
+│   ├── proxima-core v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69) (*)
+│   ├── rustc-hash v2.1.3
+│   ├── thiserror v2.0.21 (*)
+│   ├── futures feature "alloc" (*)
+│   ├── futures feature "async-await" (*)
+│   ├── crossbeam-queue feature "alloc"
+│   │   └── crossbeam-queue v0.3.14
+│   │       └── crossbeam-utils v0.8.23
+│   ├── portable-atomic feature "fallback"
+│   │   └── portable-atomic v1.15.0
+│   ├── serde feature "alloc"
+│   │   ├── serde v1.0.229
+│   │   │   ├── serde_core feature "result"
+│   │   │   │   └── serde_core v1.0.229
+│   │   │   └── serde_derive feature "default"
+│   │   │       └── serde_derive v1.0.229 (proc-macro)
+│   │   │           ├── proc-macro2 feature "proc-macro" (*)
+│   │   │           ├── quote feature "proc-macro" (*)
+│   │   │           ├── syn feature "clone-impls" (*)
+│   │   │           ├── syn feature "derive" (*)
+│   │   │           ├── syn feature "parsing" (*)
+│   │   │           ├── syn feature "printing" (*)
+│   │   │           └── syn feature "proc-macro" (*)
+│   │   └── serde_core feature "alloc"
+│   │       └── serde_core v1.0.229
+│   ├── serde feature "derive"
+│   │   ├── serde v1.0.229 (*)
+│   │   └── serde feature "serde_derive"
+│   │       └── serde v1.0.229 (*)
+│   └── serde_json feature "alloc"
+│       ├── serde_json v1.0.151
+│       │   ├── memchr v2.8.3
+│       │   ├── serde_core v1.0.229
+│       │   ├── itoa feature "default"
+│       │   │   └── itoa v1.0.18
+│       │   └── zmij feature "default"
+│       │       └── zmij v1.0.23
+│       └── serde_core feature "alloc" (*)
+└── thiserror v2.0.21 (*)

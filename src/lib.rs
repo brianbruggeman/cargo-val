@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 use core::str;
 
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
@@ -7,6 +10,8 @@ pub mod artifact_stream;
 pub mod cli;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod discovery_stream;
+#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod dispatch_stream;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod libtest_listing;
 pub mod session_slots;
