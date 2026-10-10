@@ -1,0 +1,2 @@
+{"case":"c44c_fixture","input":{"inherited_environment":"SystemRoot","unicode_environment_override":"λ🚀","expected":{"inherited_values":1,"child_overrides":1,"parent_changes":0}},"status":"prospective"}
+{"case":"c44c_negative_control","control":{"mutation":"omit CARGO_VAL_C44C_CHILD_VALUE from the explicit child environment block","expected":{"child_value_present":0,"parent_changes":0}},"status":"prospective"}

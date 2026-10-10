@@ -1,0 +1,3 @@
+$ cargo check --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --tests
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+exit status: 0
