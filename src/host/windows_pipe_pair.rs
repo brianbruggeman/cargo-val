@@ -128,7 +128,7 @@ mod tests {
         ERROR_IO_PENDING, GetHandleInformation, GetLastError, HANDLE_FLAG_INHERIT,
         INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
     };
-    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::IO::{CancelIoEx, OVERLAPPED};
     use windows_sys::Win32::System::Threading::{
         CreateEventW, GetCurrentProcess, GetCurrentProcessId, GetProcessHandleCount,
@@ -137,6 +137,7 @@ mod tests {
 
     use super::{WindowsPipePair, WindowsPipePairError};
     use crate::host::windows_handles::WindowsOwnedHandle;
+    use crate::host::windows_handles::tests::create_pipe;
 
     static NEXT_PIPE_ID: AtomicU32 = AtomicU32::new(0);
 
@@ -215,12 +216,51 @@ mod tests {
             "test cleanup observes completion of the canceled read"
         );
         drop(event);
+
+        let (control_reader, control_writer) = create_pipe();
+        let control_input = [b'x'];
+        let mut control_bytes_written = 0;
+        assert_eq!(
+            unsafe {
+                WriteFile(
+                    control_writer.raw(),
+                    control_input.as_ptr(),
+                    control_input.len() as u32,
+                    &mut control_bytes_written,
+                    core::ptr::null_mut(),
+                )
+            },
+            1,
+            "anonymous control pipe receives its input before reading"
+        );
+        assert_eq!(control_bytes_written, 1);
+        let mut control_overlapped = OVERLAPPED::default();
+        let mut control_output = [0_u8; 1];
+        let mut control_bytes_read = 0;
+        assert_eq!(
+            unsafe {
+                ReadFile(
+                    control_reader.raw(),
+                    control_output.as_mut_ptr(),
+                    control_output.len() as u32,
+                    &mut control_bytes_read,
+                    &mut control_overlapped,
+                )
+            },
+            1,
+            "anonymous control pipe completes immediately with available data"
+        );
+        assert_eq!(control_output, control_input);
+        assert_eq!(control_bytes_read, 1);
+        drop(control_reader);
+        drop(control_writer);
+
         pipe_pair.close_child_write_handle();
         assert!(pipe_pair.child_write_handle().is_none());
         drop(pipe_pair);
         assert_eq!(current_process_handle_count(), handles_before);
         std::println!(
-            "{{\"named_pipe_pairs\":1,\"overlapped_parent_reads\":1,\"inheritable_child_writers\":1,\"handles_after_drop\":0}}"
+            "{{\"named_pipe_pairs\":1,\"overlapped_parent_reads\":1,\"anonymous_control_immediate_reads\":1,\"handles_after_drop\":0}}"
         );
     }
 
