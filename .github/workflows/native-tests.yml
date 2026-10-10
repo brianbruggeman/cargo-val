@@ -17,4 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib -- --test-threads=1
+      - name: Run cargo test with failure payload
+        shell: bash
+        run: |
+          set +e
+          cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib -- --test-threads=1 --show-output > cargo-test-output.txt 2>&1
+          test_status=$?
+          cat cargo-test-output.txt
+          if [ "$test_status" -ne 0 ]; then
+            failure_excerpt="$(tail -c 8000 cargo-test-output.txt | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/,/%2C/g' | awk '{ if (NR > 1) printf "%%0A"; printf "%s", $0 }')"
+            printf '::error title=native cargo test failure::exit status %s%%0A%s\n' "$test_status" "$failure_excerpt"
+          fi
+          exit "$test_status"
