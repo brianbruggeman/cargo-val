@@ -294,8 +294,10 @@ mod tests {
 
     #[test]
     fn c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix() {
+        report_stage("stdout_begin");
         let mut pipe_pair =
             WindowsPipePair::new(&unique_pipe_name()).expect("the named pipe pair is created");
+        report_stage("stdout_pipe_pair_created");
         let completion_port =
             unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) };
         assert!(!completion_port.is_null());
@@ -305,6 +307,7 @@ mod tests {
             CreateIoCompletionPort(pipe_pair.parent_read_handle(), completion_port, 7, 0)
         };
         assert_eq!(associated_port, completion_port);
+        report_stage("stdout_iocp_associated");
 
         let mut storage = [MaybeUninit::uninit(); 2];
         let storage_address = storage.as_mut_ptr().cast::<u8>();
@@ -323,6 +326,7 @@ mod tests {
         assert_eq!(reader.state(), WindowsPipeReadState::Pending);
         assert_eq!(wait_for_completion(completion_port, 0), None);
         assert_eq!(unsafe { GetLastError() }, WAIT_TIMEOUT);
+        report_stage("stdout_first_read_pending");
 
         write_child(
             pipe_pair
@@ -337,6 +341,7 @@ mod tests {
         assert_eq!(completion_allocations, 0);
         assert_eq!(completion_key, 7);
         assert_eq!(bytes_transferred, 2);
+        report_stage("stdout_first_read_completed");
         let (_, transition_allocations) =
             crate::dispatch_stream::tests::measure_allocations(|| unsafe {
                 reader
@@ -372,6 +377,7 @@ mod tests {
                 .expect("the borrowed payload is consumed before reuse")
         });
         assert_eq!(release_allocations, 0);
+        report_stage("stdout_first_payload_consumed");
 
         let (second_start_result, second_start_allocations) =
             crate::dispatch_stream::tests::measure_allocations(|| unsafe {
@@ -391,6 +397,7 @@ mod tests {
         assert_eq!(second_completion_allocations, 0);
         assert_eq!(completion_key, 7);
         assert_eq!(bytes_transferred, 1);
+        report_stage("stdout_suffix_completed");
         let (_, second_transition_allocations) =
             crate::dispatch_stream::tests::measure_allocations(|| unsafe {
                 reader
@@ -428,6 +435,7 @@ mod tests {
             });
         assert_eq!(second_release_allocations, 0);
 
+        report_stage("stdout_eof_starting");
         let (eof_start_result, eof_start_allocations) =
             crate::dispatch_stream::tests::measure_allocations(|| unsafe {
                 reader.as_mut().start(pipe_pair.parent_read_handle())
@@ -438,6 +446,7 @@ mod tests {
         ));
         assert_eq!(eof_start_allocations, 0);
         pipe_pair.close_child_write_handle();
+        report_stage("stdout_writer_closed");
         let (completed, completion_key, bytes_transferred, error_code) =
             wait_for_completion(completion_port, 5_000).expect("pipe closure completes the read");
         assert_eq!(completion_key, 7);
@@ -454,6 +463,7 @@ mod tests {
             });
         assert_eq!(eof_transition_allocations, 0);
         assert_eq!(reader.state(), WindowsPipeReadState::Eof);
+        report_stage("stdout_eof_completed");
         std::println!(
             "{{\"read_completions\":3,\"stdout_chunks\":[\"ou\",\"t\"],\"borrowed_payloads\":2,\"payload_copies\":0,\"eof_records\":1,\"slot_transition_allocations\":0,\"synchronous_reads\":0}}"
         );
@@ -461,8 +471,10 @@ mod tests {
 
     #[test]
     fn c45b_retains_storage_until_cancel_completion() {
+        report_stage("cancel_begin");
         let pipe_pair =
             WindowsPipePair::new(&unique_pipe_name()).expect("the named pipe pair is created");
+        report_stage("cancel_pipe_pair_created");
         let completion_port =
             unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) };
         assert!(!completion_port.is_null());
@@ -472,6 +484,7 @@ mod tests {
             CreateIoCompletionPort(pipe_pair.parent_read_handle(), completion_port, 9, 0)
         };
         assert_eq!(associated_port, completion_port);
+        report_stage("cancel_iocp_associated");
 
         let mut storage = [MaybeUninit::uninit(); 8];
         let mut reader = pin!(WindowsPipeReadSlot::new(&mut storage));
@@ -510,6 +523,7 @@ mod tests {
             super::WindowsPipeReadCompletion::Bytes { length: 1 }
         );
         assert_eq!(reader.as_ref().completed_bytes(), Some(&b"x"[..]));
+        report_stage("cancel_short_read_completed");
         reader
             .as_mut()
             .release_completed()
@@ -527,6 +541,7 @@ mod tests {
         assert_eq!(reader.state(), WindowsPipeReadState::Pending);
         assert_eq!(wait_for_completion(completion_port, 0), None);
         assert_eq!(unsafe { GetLastError() }, WAIT_TIMEOUT);
+        report_stage("cancel_second_read_pending");
 
         let (cancellation_result, cancellation_allocations) =
             crate::dispatch_stream::tests::measure_allocations(|| unsafe {
@@ -535,6 +550,7 @@ mod tests {
         cancellation_result.expect("cancellation is requested without waiting in the call");
         assert_eq!(cancellation_allocations, 0);
         assert_eq!(reader.state(), WindowsPipeReadState::Cancelling);
+        report_stage("cancel_requested");
         let busy = unsafe { reader.as_mut().start(pipe_pair.parent_read_handle()) };
         assert!(matches!(
             busy,
@@ -545,6 +561,7 @@ mod tests {
                 .expect("cancellation produces a completion");
         assert_eq!(completion_key, 9);
         assert_eq!(error_code, ERROR_OPERATION_ABORTED);
+        report_stage("cancel_packet_received");
         let (_, cancellation_completion_allocations) =
             crate::dispatch_stream::tests::measure_allocations(|| unsafe {
                 reader
@@ -561,8 +578,10 @@ mod tests {
 
     #[test]
     fn c45b_reports_synchronous_eof_without_an_iocp_packet() {
+        report_stage("immediate_eof_begin");
         let mut pipe_pair =
             WindowsPipePair::new(&unique_pipe_name()).expect("the named pipe pair is created");
+        report_stage("immediate_eof_pipe_pair_created");
         let completion_port =
             unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) };
         assert!(!completion_port.is_null());
@@ -573,6 +592,7 @@ mod tests {
         };
         assert_eq!(associated_port, completion_port);
         pipe_pair.close_child_write_handle();
+        report_stage("immediate_eof_writer_closed");
 
         let mut storage = [MaybeUninit::uninit(); 8];
         let mut reader = pin!(WindowsPipeReadSlot::new(&mut storage));
@@ -588,6 +608,7 @@ mod tests {
         );
         assert_eq!(start_allocations, 0);
         assert_eq!(reader.state(), WindowsPipeReadState::Eof);
+        report_stage("immediate_eof_observed");
         assert_eq!(wait_for_completion(completion_port, 0), None);
         assert_eq!(unsafe { GetLastError() }, WAIT_TIMEOUT);
         std::println!(
@@ -624,6 +645,10 @@ mod tests {
                 0
             },
         ))
+    }
+
+    fn report_stage(stage: &str) {
+        std::eprintln!("{{\"case\":\"c45b\",\"stage\":\"{stage}\"}}");
     }
 
     fn write_child(handle: HANDLE, bytes: &[u8]) {
