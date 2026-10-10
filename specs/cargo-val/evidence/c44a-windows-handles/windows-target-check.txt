@@ -1,0 +1,4 @@
+$ cargo check --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --tests
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.38s
+exit status: 0

@@ -1,0 +1,3 @@
+GET https://api.github.com/repos/brianbruggeman/cargo-val/actions/jobs/114307987466/logs
+HTTP 403: Must have admin rights to Repository.
+The public Jobs API returned completed/success for Windows, Ubuntu, and macOS. The logs endpoint did not expose individual test output; no test count or printed payload is inferred from this file.
