@@ -5,6 +5,8 @@ use core::str;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod artifact_stream;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod discovery_stream;
+#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod libtest_listing;
 
 /// One Cargo artifact outcome returned by the record state machine.

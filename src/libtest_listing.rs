@@ -42,6 +42,33 @@ pub struct LibtestListingPipe<'line> {
     line: PhantomData<&'line [u8]>,
 }
 
+/// Proxima [`Pipe`] that parses one already framed libtest line payload.
+pub struct LibtestFramePipe<'line> {
+    max_line_bytes: usize,
+    line: PhantomData<&'line [u8]>,
+}
+
+impl<'line> LibtestFramePipe<'line> {
+    /// Creates the parser with a maximum framed payload size in bytes.
+    #[must_use]
+    pub const fn new(max_line_bytes: usize) -> Self {
+        Self {
+            max_line_bytes,
+            line: PhantomData,
+        }
+    }
+}
+
+impl<'line> Pipe for LibtestFramePipe<'line> {
+    type In = &'line [u8];
+    type Out = ListingLine<'line>;
+    type Err = ListingError;
+
+    fn call(&self, input: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>> {
+        async move { parse_listing_content(input, self.max_line_bytes) }
+    }
+}
+
 impl<'line> LibtestListingPipe<'line> {
     /// Creates the parser with a maximum complete line size in bytes.
     #[must_use]
@@ -74,6 +101,19 @@ fn parse_listing_line(line: &[u8], max_line_bytes: usize) -> Result<ListingLine<
     let (frame, consumed) = codec.parse_frame(line)?;
     if consumed != line.len() {
         return Err(ListingError::TrailingBytes);
+    }
+    parse_listing_content(frame, max_line_bytes)
+}
+
+pub(crate) fn parse_listing_content(
+    frame: &[u8],
+    max_line_bytes: usize,
+) -> Result<ListingLine<'_>, ListingError> {
+    if frame.len() > max_line_bytes {
+        return Err(ListingError::LineTooLarge {
+            limit: max_line_bytes,
+            actual: frame.len(),
+        });
     }
     let line = match frame.strip_suffix(b"\r") {
         Some(line) => line,

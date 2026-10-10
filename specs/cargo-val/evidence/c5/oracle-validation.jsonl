@@ -1,0 +1,2 @@
+command: python3 specs/cargo-val/validate_c5_oracle.py
+{"dispatches_before_eof": 1, "names_after_first_dispatch": 3, "literal_name_order": 4, "eof_after_names": 1, "production_suite_vector_tokens": 0}
