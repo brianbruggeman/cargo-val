@@ -138,7 +138,7 @@ impl Drop for WindowsHandleList<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use core::ffi::c_void;
     use core::mem::{MaybeUninit, size_of};
 
@@ -163,9 +163,15 @@ mod tests {
     use crate::test_intent::{ExactTestIntentInput, ExactTestIntentPipe};
     use crate::windows_arguments::lower_windows_arguments;
 
-    const CHILD_PROBE_NAME: &str = "host::windows_handles::tests::child_handle_probe";
+    pub(crate) const CHILD_PROBE_NAME: &str = "host::windows_handles::tests::child_handle_probe";
 
-    struct TestHandle(HANDLE);
+    pub(crate) struct TestHandle(HANDLE);
+
+    impl TestHandle {
+        pub(crate) const fn raw(&self) -> HANDLE {
+            self.0
+        }
+    }
 
     impl Drop for TestHandle {
         fn drop(&mut self) {
@@ -175,7 +181,7 @@ mod tests {
         }
     }
 
-    fn create_pipe() -> (TestHandle, TestHandle) {
+    pub(crate) fn create_pipe() -> (TestHandle, TestHandle) {
         let mut security = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: core::ptr::null_mut(),
@@ -191,7 +197,7 @@ mod tests {
         (TestHandle(read_handle), TestHandle(write_handle))
     }
 
-    fn exact_test_intent<'executable, 'name>(
+    pub(crate) fn exact_test_intent<'executable, 'name>(
         executable: &'executable str,
         test_name: &'name str,
     ) -> crate::test_intent::ExactTestIntent<'executable, 'static, 'name> {

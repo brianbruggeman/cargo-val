@@ -1,0 +1,2 @@
+{"case":"c44b_fixture","input":{"executable":"fixture.exe","expected":{"children":1,"owned_process_handles":1,"leaked_adapter_handles":0}},"status":"prospective"}
+{"case":"c44b_negative_control","control":{"mutation":"use nonexistent executable","expected":{"launch_errors":1,"owned_handles":0}},"status":"prospective"}
