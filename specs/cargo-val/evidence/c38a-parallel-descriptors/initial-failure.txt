@@ -1,3 +1,4 @@
+$ cargo test --no-default-features --features proxima-codec,proxima-primitives --lib
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
      Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/cargo_val-bb9c09bb76fef032)
 
@@ -44,3 +45,4 @@ failures:
 test result: FAILED. 23 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
 error: test failed, to rerun pass `--lib`
+exit status: 101
