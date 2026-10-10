@@ -139,6 +139,8 @@ impl Drop for FileActions {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::MaybeUninit;
+
     use core::ffi::CStr;
     use std::ffi::CString;
     use std::format;
@@ -151,6 +153,13 @@ mod tests {
     use crate::host::unix_pipe_pair::UnixPipePair;
     use crate::test_intent::{ExactTestIntentInput, ExactTestIntentPipe};
     use crate::unix_arguments::{UnixArguments, lower_unix_arguments};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct DescriptorIdentity {
+        device: u64,
+        inode: u64,
+        mode: u32,
+    }
 
     #[test]
     fn c38b_launches_exact_child_in_requested_directory_and_owns_reads() {
@@ -195,6 +204,7 @@ mod tests {
             pipes.stderr().parent_read().raw(),
             pipes.stderr().child_write().raw(),
         ];
+        let pipe_identities = pipe_descriptors.map(descriptor_identity);
         let working_directory_cstr =
             CString::new(working_directory_text).expect("temporary directory has no NUL byte");
         let child = spawn_with_pipes(&arguments, &working_directory_cstr, pipes)
@@ -206,8 +216,8 @@ mod tests {
             let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
             assert!(flags >= 0, "captured descriptor must remain open");
         }
-        assert_closed(pipe_descriptors[1]);
-        assert_closed(pipe_descriptors[3]);
+        assert_closed(pipe_descriptors[1], pipe_identities[1]);
+        assert_closed(pipe_descriptors[3], pipe_identities[3]);
         let mut status = 0;
         assert_eq!(
             unsafe { libc::waitpid(child.process_id(), &mut status, 0) },
@@ -227,8 +237,8 @@ mod tests {
         assert_payload(&stderr_bytes[..stderr_count], b"cargo-val-child-stderr");
         let child_id = child.process_id();
         drop(child);
-        assert_closed(pipe_descriptors[0]);
-        assert_closed(pipe_descriptors[2]);
+        assert_closed(pipe_descriptors[0], pipe_identities[0]);
+        assert_closed(pipe_descriptors[2], pipe_identities[2]);
         std::println!(
             "{{\"children\":1,\"captured_descriptors\":2,\"stdout_payloads\":1,\"stderr_payloads\":1,\"cwd_matches\":1,\"exit_status\":0,\"parent_child_writes_closed\":2,\"captured_reads_closed\":2,\"child_id_nonzero\":{}}}",
             usize::from(child_id > 0)
@@ -248,6 +258,7 @@ mod tests {
             pipes.stderr().parent_read().raw(),
             pipes.stderr().child_write().raw(),
         ];
+        let identities = descriptors.map(descriptor_identity);
         let inherited: [&CStr; 0] = [];
         let overrides: [&CStr; 0] = [];
         let mut argument_bytes = [0; 96];
@@ -267,8 +278,8 @@ mod tests {
             Err(error) => assert_eq!(error, UnixSpawnError { code: libc::ENOENT }),
             Ok(_) => panic!("missing executable unexpectedly launched"),
         }
-        for descriptor in descriptors {
-            assert_closed(descriptor);
+        for (descriptor, identity) in descriptors.into_iter().zip(identities) {
+            assert_closed(descriptor, identity);
         }
         std::println!("{{\"launch_errors\":1,\"owned_descriptors\":0}}");
     }
@@ -378,9 +389,23 @@ mod tests {
         );
     }
 
-    fn assert_closed(descriptor: i32) {
-        assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
-        assert_eq!(last_error_code(), libc::EBADF);
+    fn descriptor_identity(descriptor: i32) -> DescriptorIdentity {
+        let mut metadata = MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) }, 0);
+        let metadata = unsafe { metadata.assume_init() };
+        DescriptorIdentity {
+            device: metadata.st_dev as u64,
+            inode: metadata.st_ino as u64,
+            mode: metadata.st_mode as u32,
+        }
+    }
+
+    fn assert_closed(descriptor: i32, identity: DescriptorIdentity) {
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
+            assert_eq!(last_error_code(), libc::EBADF);
+        } else {
+            assert_ne!(descriptor_identity(descriptor), identity);
+        }
     }
 
     fn last_error_code() -> i32 {
