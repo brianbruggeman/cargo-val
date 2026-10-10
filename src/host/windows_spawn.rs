@@ -292,7 +292,7 @@ mod tests {
         ];
         let mut command_line = [0_u16; 2048];
         let mut environment_block = [0_u16; 256];
-        let mut environment_order = [usize::MAX; 2];
+        let mut environment_order = [usize::MAX; 3];
         let mut arguments = lower_windows_arguments(
             &intent,
             &inherited_environment,
@@ -338,7 +338,7 @@ mod tests {
         let overrides = ["CARGO_VAL_C44C_EXPECT_PRESENT=0"];
         let mut command_line = [0_u16; 2048];
         let mut environment_block = [0_u16; 128];
-        let mut environment_order = [usize::MAX; 1];
+        let mut environment_order = [usize::MAX; 2];
         let mut arguments = lower_windows_arguments(
             &intent,
             &inherited_environment,
