@@ -138,10 +138,10 @@ impl<T, const CAPACITY: usize> SessionSlots<T, CAPACITY> {
         self.length == 0
     }
 
-    /// Whether every session slot is occupied.
+    /// Whether no session slot is available for insertion.
     #[must_use]
     pub const fn is_full(&self) -> bool {
-        self.length == CAPACITY
+        self.free_head.is_none()
     }
 }
 

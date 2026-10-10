@@ -1,0 +1,38 @@
+command: cargo test -p cargo-val --no-default-features --release --test session_slots -- --test-threads=1 --nocapture
+exit: 0
+stdout_bytes: 384
+stdout:
+
+running 3 tests
+test fixed_slots_hold_and_reuse_child_session_values ... ok
+test slot_operations_allocate_nothing_and_probe_counts_allocations ... {"event":"slot_allocation_probe","slot_allocations":0,"positive_control_allocations":1}
+ok
+test zero_capacity_never_admits_a_session ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+stderr_bytes: 162
+stderr:
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running tests/session_slots.rs (/tmp/cargo_target/release/deps/session_slots-903d443ea6425bf6)
+
+command: cargo test -p cargo-val --lib --no-default-features --features proxima-codec,proxima-primitives --release dispatch_stream::tests -- --test-threads=3 --nocapture
+exit: 0
+stdout_bytes: 713
+stdout:
+
+running 3 tests
+{"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
+{"active_child":"alpha child","consumed_bytes":0,"event":"pull_while_full","listing_record":"beta: test\n","result":"Full"}
+{"borrowed_name":"beta","consumed_bytes":11,"event":"pull_after_retire","listing_record":"beta: test\n","result":"Test"}
+test dispatch_stream::tests::dispatch_pipe_does_not_allocate_and_probe_detects_allocation ... ok
+test dispatch_stream::tests::stops_consuming_listing_when_live_child_slots_are_full ... ok
+test dispatch_stream::tests::resumes_listing_after_child_slot_is_retired ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+stderr_bytes: 156
+stderr:
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_target/release/deps/cargo_val-20f62d62c8d6383a)
+
