@@ -99,7 +99,7 @@ impl<'call, 'buffer, 'slots, T, const CAPACITY: usize> Pipe
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use core::alloc::{GlobalAlloc, Layout};
     use core::cell::Cell;
     use core::future::Future;
@@ -146,6 +146,15 @@ mod tests {
             }
             unsafe { System.realloc(pointer, layout, size) }
         }
+    }
+
+    pub(crate) fn measure_allocations<T>(action: impl FnOnce() -> T) -> (T, usize) {
+        ALLOCATION_COUNT.with(|count| count.set(0));
+        COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+        let output = action();
+        COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+        let allocations = ALLOCATION_COUNT.with(Cell::get);
+        (output, allocations)
     }
 
     fn run<'call, 'buffer, 'slots, T, const CAPACITY: usize>(
