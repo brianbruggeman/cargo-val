@@ -1,0 +1,22 @@
+command: cargo test --no-default-features --features proxima-codec,proxima-primitives --lib host::unix_spawn::tests::c38b_ -- --nocapture --test-threads=1
+
+running 2 tests
+test host::unix_spawn::tests::c38b_failed_launch_closes_all_capture_descriptors ... {"launch_errors":1,"owned_descriptors":0}
+ok
+test host::unix_spawn::tests::c38b_launches_exact_child_in_requested_directory_and_owns_reads ... {"child_status":0,"stdout":"\\nrunning 1 test\\ncargo-val-child-stdouttest host::unix_spawn::tests::fixture_alpha ... ok\\n\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s\\n\\n","stderr":"cargo-val-child-stderr"}
+{"children":1,"captured_descriptors":2,"stdout_payloads":1,"stderr_payloads":1,"cwd_matches":1,"exit_status":0,"parent_child_writes_closed":2,"captured_reads_closed":2,"child_id_nonzero":1}
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.01s
+
+command: cargo test --no-default-features --features proxima-codec,proxima-primitives --lib
+
+result from c0 independent run: 19 passed; 0 failed; 0 ignored; 0 filtered; process exit 0.
+
+command: cargo check --no-default-features --lib
+
+result after C38b module gates: finished; process exit 0.
+
+command: cargo fmt --all --check
+
+result after C38b source changes: process exit 0.

@@ -18,7 +18,7 @@ pub(crate) struct OwnedPipe {
 
 /// A descriptor closed exactly once when its owner is dropped.
 #[derive(Debug)]
-pub(crate) struct OwnedDescriptor(c_int);
+pub struct OwnedDescriptor(c_int);
 
 /// Errors while creating a nonblocking pipe with close-on-exec set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +52,13 @@ impl UnixPipePair {
     pub(crate) fn stderr(&self) -> &OwnedPipe {
         &self.stderr
     }
+
+    pub(crate) fn into_parent_reads(self) -> (OwnedDescriptor, OwnedDescriptor) {
+        (
+            self.stdout.into_parent_read(),
+            self.stderr.into_parent_read(),
+        )
+    }
 }
 
 impl OwnedPipe {
@@ -66,12 +73,16 @@ impl OwnedPipe {
     pub(crate) fn child_write(&self) -> &OwnedDescriptor {
         &self.child_write
     }
+
+    fn into_parent_read(self) -> OwnedDescriptor {
+        self.parent_read
+    }
 }
 
 impl OwnedDescriptor {
     /// Returns the raw descriptor for poll, read, or spawn file actions.
     #[must_use]
-    pub(crate) fn raw(&self) -> c_int {
+    pub fn raw(&self) -> c_int {
         self.0
     }
 }
@@ -117,10 +128,26 @@ fn create_pipe() -> Result<OwnedPipe, UnixPipeError> {
     {
         return Err(error);
     }
+    let read_end = move_above_stdio(read_end)?;
+    let write_end = move_above_stdio(write_end)?;
     Ok(OwnedPipe {
         parent_read: read_end,
         child_write: write_end,
     })
+}
+
+fn move_above_stdio(descriptor: OwnedDescriptor) -> Result<OwnedDescriptor, UnixPipeError> {
+    if descriptor.0 > libc::STDERR_FILENO {
+        return Ok(descriptor);
+    }
+    let duplicated =
+        unsafe { libc::fcntl(descriptor.0, libc::F_DUPFD_CLOEXEC, libc::STDERR_FILENO + 1) };
+    if duplicated < 0 {
+        return Err(last_error());
+    }
+    let moved = OwnedDescriptor(duplicated);
+    drop(descriptor);
+    Ok(moved)
 }
 
 #[cfg(not(target_os = "linux"))]
