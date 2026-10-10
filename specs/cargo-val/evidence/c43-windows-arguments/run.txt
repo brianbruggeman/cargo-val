@@ -1,0 +1,15 @@
+focused host command:
+CARGO_TARGET_DIR=/tmp/cargo_val_c43_target cargo test --no-default-features --features proxima-codec,proxima-primitives --lib windows_arguments::tests::c43_ -- --nocapture --test-threads=1
+observed: 3 passed; one quoted executable path, two trailing backslashes before the closing quote, one Unicode environment override with three UTF-16 value units, one preserved drive-current-directory variable, 0 measured allocations in both lowering paths, and one one-unit-short rejection with no partial writes. Payload is focused-tests.txt.
+
+full native macOS library command:
+CARGO_TARGET_DIR=/tmp/cargo_val_c43_target cargo test --no-default-features --features proxima-codec,proxima-primitives --lib -- --test-threads=1
+observed: 24 passed, 0 failed, 0 ignored/filtered; output is native-macos-tests.txt.
+
+Windows target checks:
+CARGO_TARGET_DIR=/tmp/cargo_val_c43_target cargo check --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --lib
+CARGO_TARGET_DIR=/tmp/cargo_val_c43_target cargo check --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --tests
+observed: both exit 0; outputs are windows-no-std-check.txt and windows-test-check.txt. These compile checks are not a Windows runtime result. The native-tests GitHub Actions matrix provides runtime execution on Windows, macOS, and Linux.
+
+source inspection:
+src/windows_arguments.rs writes the mutable CreateProcessW command line and sorted UTF-16 environment block directly into caller storage. The command-line quoting routine emits no intermediate string or vector. Windows environment-block sorting is case-insensitive Unicode order, per https://learn.microsoft.com/en-us/windows/win32/procth/changing-environment-variables.

@@ -37,6 +37,9 @@ pub mod test_intent;
 #[cfg(all(unix, feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod unix_arguments;
 
+#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod windows_arguments;
+
 /// One Cargo artifact outcome returned by the record state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactRecord<'input, 'scratch> {
