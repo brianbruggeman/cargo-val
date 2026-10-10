@@ -1,3 +1,4 @@
+$ cargo test --no-default-features --features proxima-codec,proxima-primitives --lib
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
      Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/cargo_val-bb9c09bb76fef032)
 
@@ -28,3 +29,4 @@ test windows_arguments::tests::c43_rejects_short_utf16_storage_without_partial_w
 test host::unix_spawn::tests::c38b_launches_exact_child_in_requested_directory_and_owns_reads ... ok
 
 test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit status: 0

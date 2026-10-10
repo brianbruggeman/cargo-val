@@ -2,7 +2,7 @@ case: cargo-val macOS library tests with default parallel scheduling
 
 initial observation: 23 tests passed and 1 failed. The pipe ownership test
 dropped its descriptors, then `fcntl(old_descriptor, F_GETFD)` returned 0 at
-`initial-failure.txt:34-37`; the assertion treated any live descriptor number
+`initial-failure.txt:35-38`; the assertion treated any live descriptor number
 as the original pipe still being open.
 
 mechanism: another test thread can open a descriptor after the pipe owner closes
@@ -15,7 +15,7 @@ mode before dropping ownership. After drop they accept `EBADF`, or a live slot
 whose identity differs from the captured pipe. This checks the original kernel
 object without serializing tests.
 
-rerun: `passing-rerun.txt:30` records 24 passed, 0 failed under the same default
+rerun: `passing-rerun.txt:31` records 24 passed, 0 failed under the same default
 parallel test invocation.
 
 next experiment: repeat the default parallel library command on native Linux
