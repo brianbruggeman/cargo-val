@@ -1,0 +1,13 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running unittests src/lib.rs (/tmp/cargo_val_c43_target/debug/deps/cargo_val-bb9c09bb76fef032)
+
+running 3 tests
+test windows_arguments::tests::c43_encodes_sorted_unicode_environment_override_in_caller_storage ... {"inherited_entries":2,"child_overrides":1,"unicode_value_units":3,"drive_directory_preserved":1,"allocations":0}
+ok
+test windows_arguments::tests::c43_quotes_executable_and_escapes_trailing_backslashes ... {"quoted_path":1,"trailing_backslash_escape":1,"allocations":0}
+ok
+test windows_arguments::tests::c43_rejects_short_utf16_storage_without_partial_writes ... {"short_storage_rejected":1,"partial_writes":0}
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s

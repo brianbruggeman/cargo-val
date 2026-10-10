@@ -1,0 +1,9 @@
+C43 fixture corrections
+
+The first compile failed because `b'"' as u16` is an expression rather than a match pattern. The quote test now matches UTF-16 code unit `0x22` directly.
+
+The next compile failed because `from_utf16` is not a `str` constructor. Test-only assertions now use `String::from_utf16`; the allocator measurement encloses only the production lowering call.
+
+The first runtime assertion exposed an environment-block length error: the empty block wrote one NUL while the expected block had two, and nonempty blocks were allocated one extra UTF-16 unit. Required length is now one final block terminator plus each entry's terminator, with an explicit two-unit empty block. The output now preserves the Windows drive-current-directory entry `=C:=C:\\work` before regular variables.
+
+The initial short-storage control used a buffer far below the requirement. It now uses 41 UTF-16 units against the measured required length of 42 and asserts command and environment buffers remain byte-for-byte unchanged.
