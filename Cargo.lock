@@ -24,6 +24,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-waker"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -46,6 +52,7 @@ name = "cargo-val"
 version = "0.1.0"
 dependencies = [
  "conflaguration",
+ "prime",
  "proxima-codec",
  "proxima-primitives",
  "serde_json",
@@ -399,6 +406,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
+name = "prime"
+version = "0.1.0"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
+dependencies = [
+ "atomic-waker",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "proxima-build",
+ "proxima-clock",
+ "proxima-core",
+ "proxima-primitives",
+ "proxima-runtime",
+ "proxima-telemetry",
+ "toml",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -416,6 +440,14 @@ dependencies = [
  "serde",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "proxima-clock"
+version = "0.1.0"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
+dependencies = [
+ "proxima-primitives",
 ]
 
 [[package]]
@@ -457,11 +489,38 @@ dependencies = [
  "portable-atomic",
  "proxima-build",
  "proxima-core",
+ "proxima-runtime",
  "rustc-hash",
  "serde",
  "serde_json",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "proxima-runtime"
+version = "0.1.0"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
+dependencies = [
+ "proxima-core",
+ "thiserror",
+]
+
+[[package]]
+name = "proxima-telemetry"
+version = "0.1.0"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "pin-project-lite",
+ "portable-atomic",
+ "proxima-build",
+ "proxima-core",
+ "proxima-primitives",
+ "serde",
+ "smallvec",
+ "thiserror",
 ]
 
 [[package]]
