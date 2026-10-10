@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (/tmp/cargo_val_target/debug/deps/cargo_val-381d20b72ad1e4f2)
+
+running 2 tests
+test host_drive::tests::parks_pending_task_until_readiness_waker_then_resumes_it ... {"initial_pending":1,"repolls_before_event":0,"readiness_wakes":1,"ready_polls":1}
+ok
+test host_drive::tests::withheld_readiness_control_does_not_poll_pending_task_again ... {"withheld_event":1,"completion_polls":0}
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

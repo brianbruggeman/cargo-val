@@ -1,0 +1,2 @@
+{"case":"c36a_fixture","input":{"polls":["pending","event_wake","ready"],"expected":{"initial_pending":1,"repolls_before_event":0,"readiness_wakes":1,"ready_polls":1}},"status":"observed"}
+{"case":"c36a_negative_control","control":{"mutation":"withhold readiness event","expected":{"completion_polls":0}},"status":"observed"}

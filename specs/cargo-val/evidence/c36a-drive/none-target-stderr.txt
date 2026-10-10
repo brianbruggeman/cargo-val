@@ -1,0 +1,12 @@
+    Checking event-listener v5.4.2
+    Checking atomic-waker v1.1.2
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+   Compiling proxima-core v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling proxima-primitives v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling proxima-telemetry v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling prime v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+    Checking event-listener-strategy v0.5.4
+    Checking async-lock v3.4.2
+    Checking proxima-runtime v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+    Checking proxima-clock v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.89s
