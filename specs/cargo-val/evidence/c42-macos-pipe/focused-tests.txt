@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (/tmp/cargo_val_c42_target/debug/deps/cargo_val-90174107ff274261)
+
+running 1 test
+test host::macos_pipe::tests::c42_reads_both_child_streams_from_the_shared_kqueue ... {"premature_events":0,"ready_batches":4,"stdout_wakes":1,"stderr_wakes":1,"task_wake_notifications":2,"child_exits":1,"stdout_payload":"out","stdout_first_read":2,"stderr_payload":"err","stdout_eof":true,"stderr_eof":true,"post_eof_events":0}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s

@@ -97,6 +97,29 @@ impl MacosExitPort {
         })
     }
 
+    /// Registers a nonblocking pipe descriptor in the shared process reactor.
+    pub fn watch_descriptor(&mut self, descriptor: c_int) -> Result<u64, c_int> {
+        if descriptor < 0 {
+            return Err(libc::EBADF);
+        }
+        let token = self.allocate_token()?;
+        let mut change = event(descriptor as usize, libc::EVFILT_READ, libc::EV_ADD, 0);
+        change.udata = token as usize as *mut _;
+        if unsafe { libc::kevent(self.descriptor, &mut change, 1, null_mut(), 0, null()) } < 0 {
+            return Err(last_error());
+        }
+        Ok(token)
+    }
+
+    /// Removes a read source at EOF so kqueue cannot repeatedly report hangup.
+    pub fn unwatch_descriptor(&self, descriptor: c_int) -> Result<(), c_int> {
+        let mut change = event(descriptor as usize, libc::EVFILT_READ, libc::EV_DELETE, 0);
+        if unsafe { libc::kevent(self.descriptor, &mut change, 1, null_mut(), 0, null()) } < 0 {
+            return Err(last_error());
+        }
+        Ok(())
+    }
+
     fn allocate_token(&mut self) -> Result<u64, c_int> {
         let token = self.next_token;
         self.next_token = token.checked_add(1).ok_or(libc::EOVERFLOW)?;
