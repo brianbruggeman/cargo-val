@@ -1,0 +1,2 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+  Executable unittests src/lib.rs (/tmp/cargo_val_c40_target/aarch64-unknown-linux-musl/debug/deps/cargo_val-7bdf3c9383469c56)

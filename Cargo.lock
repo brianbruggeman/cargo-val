@@ -61,6 +61,7 @@ dependencies = [
  "libc",
  "prime",
  "proxima-codec",
+ "proxima-core",
  "proxima-primitives",
  "serde_json",
  "tempfile",
