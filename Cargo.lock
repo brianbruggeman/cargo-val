@@ -65,6 +65,7 @@ dependencies = [
  "proxima-primitives",
  "serde_json",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

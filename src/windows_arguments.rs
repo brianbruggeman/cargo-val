@@ -41,6 +41,11 @@ impl WindowsArguments<'_> {
     pub fn environment_block(&self) -> &[u16] {
         self.environment_block
     }
+
+    /// Borrows disjoint launch buffers together for one `CreateProcessW` call.
+    pub fn create_process_buffers(&mut self) -> (&mut [u16], &[u16]) {
+        (self.command_line, self.environment_block)
+    }
 }
 
 /// Lowers one exact-test intent and environment overlay into caller-owned UTF-16 buffers.

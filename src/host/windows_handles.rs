@@ -1,0 +1,401 @@
+//! Caller-storage `STARTUPINFOEXW` handle lists for isolated child inheritance.
+
+use core::ffi::c_void;
+use core::mem::{MaybeUninit, size_of};
+
+use windows_sys::Win32::Foundation::{
+    GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::System::Threading::{
+    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    UpdateProcThreadAttribute,
+};
+
+/// Failures while constructing the bounded child stdio handle list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsHandleListError {
+    /// A standard stream handle is null or invalid.
+    InvalidHandle { index: usize },
+    /// A standard stream handle is not inheritable, as required by Win32.
+    HandleNotInheritable { index: usize },
+    /// The caller's storage cannot hold the Win32 attribute list.
+    AttributeStorageTooSmall {
+        required_bytes: usize,
+        available_bytes: usize,
+    },
+    /// The operating system rejected attribute-list initialization.
+    InitializeFailed { code: u32 },
+    /// The operating system rejected the three-handle list.
+    UpdateFailed { code: u32 },
+    /// A storage-size calculation overflowed.
+    SizeOverflow,
+}
+
+/// One initialized Win32 attribute list borrowing its handles and backing storage.
+pub struct WindowsHandleList<'storage> {
+    storage: &'storage mut [MaybeUninit<usize>],
+    handles: &'storage [HANDLE; 3],
+    startup_info: STARTUPINFOEXW,
+    initialized: bool,
+}
+
+impl<'storage> WindowsHandleList<'storage> {
+    /// Builds a one-attribute handle whitelist without allocating storage.
+    pub fn new(
+        handles: &'storage [HANDLE; 3],
+        storage: &'storage mut [MaybeUninit<usize>],
+    ) -> Result<Self, WindowsHandleListError> {
+        for (index, handle) in handles.iter().enumerate() {
+            if handle.is_null() || *handle == INVALID_HANDLE_VALUE {
+                return Err(WindowsHandleListError::InvalidHandle { index });
+            }
+            let mut flags = 0;
+            if unsafe { GetHandleInformation(*handle, &mut flags) } == 0 {
+                return Err(WindowsHandleListError::InvalidHandle { index });
+            }
+            if flags & HANDLE_FLAG_INHERIT == 0 {
+                return Err(WindowsHandleListError::HandleNotInheritable { index });
+            }
+        }
+
+        let mut required_bytes = 0;
+        unsafe {
+            InitializeProcThreadAttributeList(core::ptr::null_mut(), 1, 0, &mut required_bytes);
+        }
+        let available_bytes = storage
+            .len()
+            .checked_mul(size_of::<usize>())
+            .ok_or(WindowsHandleListError::SizeOverflow)?;
+        if required_bytes == 0 || available_bytes < required_bytes {
+            return Err(WindowsHandleListError::AttributeStorageTooSmall {
+                required_bytes,
+                available_bytes,
+            });
+        }
+
+        let attribute_list = storage.as_mut_ptr().cast::<c_void>();
+        if unsafe { InitializeProcThreadAttributeList(attribute_list, 1, 0, &mut required_bytes) }
+            == 0
+        {
+            return Err(WindowsHandleListError::InitializeFailed {
+                code: unsafe { GetLastError() },
+            });
+        }
+        if unsafe {
+            UpdateProcThreadAttribute(
+                attribute_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr().cast(),
+                size_of::<[HANDLE; 3]>(),
+                core::ptr::null_mut(),
+                core::ptr::null(),
+            )
+        } == 0
+        {
+            let code = unsafe { GetLastError() };
+            unsafe { DeleteProcThreadAttributeList(attribute_list) };
+            return Err(WindowsHandleListError::UpdateFailed { code });
+        }
+
+        let mut startup_info = STARTUPINFOEXW::default();
+        startup_info.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup_info.StartupInfo.hStdInput = handles[0];
+        startup_info.StartupInfo.hStdOutput = handles[1];
+        startup_info.StartupInfo.hStdError = handles[2];
+        startup_info.lpAttributeList = attribute_list;
+        Ok(Self {
+            storage,
+            handles,
+            startup_info,
+            initialized: true,
+        })
+    }
+
+    /// Returns the startup structure to pass with `EXTENDED_STARTUPINFO_PRESENT`.
+    #[must_use]
+    pub const fn startup_info(&self) -> &STARTUPINFOEXW {
+        &self.startup_info
+    }
+
+    /// Returns the exact three handles admitted for child inheritance.
+    #[must_use]
+    pub const fn handles(&self) -> &[HANDLE; 3] {
+        self.handles
+    }
+}
+
+impl Drop for WindowsHandleList<'_> {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe { DeleteProcThreadAttributeList(self.startup_info.lpAttributeList) };
+            self.initialized = false;
+        }
+        let _ = self.storage;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ffi::c_void;
+    use core::mem::{MaybeUninit, size_of};
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetHandleInformation, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
+        GetCurrentProcess, GetExitCodeProcess, GetProcessHandleCount, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, STARTUPINFOW, WaitForSingleObject,
+    };
+
+    use proxima_primitives::pipe::Pipe;
+
+    use super::{WindowsHandleList, WindowsHandleListError};
+    use crate::ExecutablePath;
+    use crate::test_intent::{ExactTestIntentInput, ExactTestIntentPipe};
+    use crate::windows_arguments::lower_windows_arguments;
+
+    const CHILD_PROBE_NAME: &str = "host::windows_handles::tests::child_handle_probe";
+
+    struct TestHandle(HANDLE);
+
+    impl Drop for TestHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
+
+    fn create_pipe() -> (TestHandle, TestHandle) {
+        let mut security = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: core::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let mut read_handle = core::ptr::null_mut();
+        let mut write_handle = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { CreatePipe(&mut read_handle, &mut write_handle, &mut security, 0,) },
+            1,
+            "fixture pipe handles are created"
+        );
+        (TestHandle(read_handle), TestHandle(write_handle))
+    }
+
+    fn exact_test_intent<'executable, 'name>(
+        executable: &'executable str,
+        test_name: &'name str,
+    ) -> crate::test_intent::ExactTestIntent<'executable, 'static, 'name> {
+        let pipe = ExactTestIntentPipe::new();
+        let future = pipe.call(ExactTestIntentInput {
+            executable: ExecutablePath::Borrowed(executable),
+            test_name,
+        });
+        let mut future = core::pin::pin!(future);
+        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+        match core::future::Future::poll(future.as_mut(), &mut context) {
+            core::task::Poll::Ready(Ok(intent)) => intent,
+            core::task::Poll::Ready(Err(error)) => match error {},
+            core::task::Poll::Pending => panic!("intent Pipe unexpectedly yielded"),
+        }
+    }
+
+    fn launch_probe(
+        command_line: &mut [u16],
+        environment_block: &[u16],
+        startup_info: &STARTUPINFOEXW,
+        extended: bool,
+    ) -> u32 {
+        let executable = std::env::current_exe().expect("test executable path exists");
+        let executable = executable
+            .to_str()
+            .expect("Windows test executable path is representable as UTF-8");
+        let executable_wide = executable
+            .encode_utf16()
+            .chain([0])
+            .collect::<std::vec::Vec<_>>();
+        let mut process_information = unsafe { core::mem::zeroed() };
+        let startup_info = startup_info as *const STARTUPINFOEXW;
+        let startup_info = startup_info.cast();
+        let creation_flags = CREATE_UNICODE_ENVIRONMENT
+            | if extended {
+                EXTENDED_STARTUPINFO_PRESENT
+            } else {
+                0
+            };
+        assert_eq!(
+            unsafe {
+                CreateProcessW(
+                    executable_wide.as_ptr(),
+                    command_line.as_mut_ptr(),
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    1,
+                    creation_flags,
+                    environment_block.as_ptr().cast::<c_void>(),
+                    core::ptr::null(),
+                    startup_info,
+                    &mut process_information,
+                )
+            },
+            1,
+            "child process is created with the requested inheritance mode"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(process_information.hProcess, u32::MAX) },
+            WAIT_OBJECT_0,
+            "child test process exits"
+        );
+        let mut exit_code = u32::MAX;
+        assert_eq!(
+            unsafe { GetExitCodeProcess(process_information.hProcess, &mut exit_code) },
+            1,
+            "child process exit code is readable"
+        );
+        unsafe {
+            CloseHandle(process_information.hThread);
+            CloseHandle(process_information.hProcess);
+        }
+        exit_code
+    }
+
+    #[test]
+    fn c44a_restricts_child_inheritance_to_three_stdio_handles() {
+        let (stdin_read, stdin_write) = create_pipe();
+        let (stdout_read, stdout_write) = create_pipe();
+        let (stderr_read, stderr_write) = create_pipe();
+        let (sentinel_read, sentinel_write) = create_pipe();
+        let stdio_handles = [stdin_read.0, stdout_write.0, stderr_write.0];
+        let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
+        let handle_list = WindowsHandleList::new(&stdio_handles, &mut attribute_storage)
+            .expect("caller storage builds the stdio handle whitelist");
+        assert_eq!(handle_list.handles(), &stdio_handles);
+        assert_eq!(
+            handle_list.startup_info().StartupInfo.dwFlags,
+            STARTF_USESTDHANDLES
+        );
+        let sentinel_id = sentinel_read.0 as usize;
+        let sentinel_environment = std::format!("CARGO_VAL_SENTINEL_HANDLE={sentinel_id}");
+        let expected_environment = "CARGO_VAL_EXPECT_SENTINEL=0";
+        let overrides = [sentinel_environment.as_str(), expected_environment];
+        let executable_path = std::env::current_exe().expect("test executable path exists");
+        let executable_path = executable_path
+            .to_str()
+            .expect("Windows test executable path is representable as UTF-8");
+        let intent = exact_test_intent(executable_path, CHILD_PROBE_NAME);
+        let mut command_line = [0_u16; 2048];
+        let mut environment_block = [0_u16; 256];
+        let mut environment_order = [usize::MAX; 2];
+        let mut lowered = lower_windows_arguments(
+            &intent,
+            &[],
+            &overrides,
+            &mut command_line,
+            &mut environment_block,
+            &mut environment_order,
+        )
+        .expect("caller buffers fit the exact child probe invocation");
+        let (command_line, environment_block) = lowered.create_process_buffers();
+        let restricted_exit = launch_probe(
+            command_line,
+            environment_block,
+            handle_list.startup_info(),
+            true,
+        );
+        assert_eq!(
+            restricted_exit, 0,
+            "restricted child does not inherit sentinel"
+        );
+
+        let unrestricted_environment = "CARGO_VAL_EXPECT_SENTINEL=1";
+        let overrides = [sentinel_environment.as_str(), unrestricted_environment];
+        let intent = exact_test_intent(executable_path, CHILD_PROBE_NAME);
+        let mut unrestricted_command_line = [0_u16; 2048];
+        let mut unrestricted_environment_block = [0_u16; 256];
+        let mut unrestricted_order = [usize::MAX; 2];
+        let mut unrestricted = lower_windows_arguments(
+            &intent,
+            &[],
+            &overrides,
+            &mut unrestricted_command_line,
+            &mut unrestricted_environment_block,
+            &mut unrestricted_order,
+        )
+        .expect("caller buffers fit the inheritance control");
+        let (command_line, environment_block) = unrestricted.create_process_buffers();
+        let mut basic_startup = STARTUPINFOEXW::default();
+        basic_startup.StartupInfo.cb = size_of::<STARTUPINFOW>() as u32;
+        basic_startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        basic_startup.StartupInfo.hStdInput = stdin_read.0;
+        basic_startup.StartupInfo.hStdOutput = stdout_write.0;
+        basic_startup.StartupInfo.hStdError = stderr_write.0;
+        basic_startup.lpAttributeList = core::ptr::null_mut();
+        let control_exit = launch_probe(command_line, environment_block, &basic_startup, false);
+        assert_eq!(
+            control_exit, 0,
+            "unrestricted control observes inherited sentinel"
+        );
+        std::println!(
+            "{{\"stdio_handles\":{},\"restricted_sentinel_inherited\":0,\"unrestricted_control_sentinel_inherited\":1,\"restricted_exit\":{restricted_exit},\"control_exit\":{control_exit}}}",
+            handle_list.handles().len()
+        );
+        drop((stdin_write, stdout_read, stderr_read, sentinel_write));
+    }
+
+    #[test]
+    fn c44a_rejects_builder_storage_shortage_without_handle_leaks() {
+        let (stdin_read, _stdin_write) = create_pipe();
+        let (stdout_read, _stdout_write) = create_pipe();
+        let (stderr_read, _stderr_write) = create_pipe();
+        let stdio_handles = [stdin_read.0, stdout_read.0, stderr_read.0];
+        let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 1];
+        let mut handle_count_before = 0;
+        assert_eq!(
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut handle_count_before) },
+            1
+        );
+        let result = WindowsHandleList::new(&stdio_handles, &mut attribute_storage);
+        assert!(matches!(
+            result,
+            Err(WindowsHandleListError::AttributeStorageTooSmall { .. })
+        ));
+        let mut handle_count_after = 0;
+        assert_eq!(
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut handle_count_after) },
+            1
+        );
+        assert_eq!(handle_count_after, handle_count_before);
+        std::println!("{{\"attribute_storage_too_small\":1,\"handle_count_delta\":0}}");
+    }
+
+    #[test]
+    fn child_handle_probe() {
+        let Ok(sentinel_value) = std::env::var("CARGO_VAL_SENTINEL_HANDLE") else {
+            return;
+        };
+        let sentinel = sentinel_value
+            .parse::<usize>()
+            .expect("sentinel handle value is decimal");
+        let sentinel = sentinel as HANDLE;
+        let mut flags = 0;
+        let sentinel_inherited = unsafe { GetHandleInformation(sentinel, &mut flags) } != 0;
+        let expected = std::env::var("CARGO_VAL_EXPECT_SENTINEL")
+            .expect("expected sentinel state is supplied by parent");
+        assert_eq!(sentinel_inherited, expected == "1");
+        for standard_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = unsafe { GetStdHandle(standard_handle) };
+            assert!(!handle.is_null());
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            assert_eq!(unsafe { GetHandleInformation(handle, &mut flags) }, 1);
+        }
+    }
+}
