@@ -1,0 +1,6 @@
+command: CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test libtest_listing parse_one_listing_line -- --exact --nocapture --test-threads=1
+observation: initial run failed with E0432, unresolved import cargo_val::libtest_listing at tests/libtest_listing.rs:12
+toggle: CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo clean -p cargo-val
+clean output: Removed 4538 files, 110.0MiB total
+same command after clean: 1 test passed; C4_ALLOCATION_TRACE os=macos parser_calls=9 parser_allocations=0 positive_control_allocations=1
+scope: the package-clean toggle changed the result; the exact stale artifact responsible was not isolated
