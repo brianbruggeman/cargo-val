@@ -648,6 +648,7 @@ mod tests {
     }
 
     fn report_stage(stage: &str) {
+        std::println!("::notice title=c45b stage::{stage}");
         std::eprintln!("{{\"case\":\"c45b\",\"stage\":\"{stage}\"}}");
     }
 
