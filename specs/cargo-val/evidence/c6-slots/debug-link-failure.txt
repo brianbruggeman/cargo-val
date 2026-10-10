@@ -1,0 +1,10 @@
+command: cargo test -p cargo-val --no-default-features --test session_slots -- --test-threads=1 --nocapture
+exit: 101
+stderr:
+error: unwinding panics are not supported without std
+  = help: using nightly cargo, use -Zbuild-std with panic="abort" to avoid unwinding
+  = note: since the core library is usually precompiled with panic="unwind", rebuilding your crate with panic="abort" may not be enough to fix the problem
+  = note: the error came from the no_std cargo-val binary target in the integration-test build
+
+mechanism: `.cargo/config.toml` sets `panic = "abort"` only for the release profile; `src/main.rs` is `no_std` and has no std unwind runtime. The debug integration-test build therefore cannot link that binary target.
+next experiment: run the card acceptance command under `--release`, where the configured panic strategy is abort.

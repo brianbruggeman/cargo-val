@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running tests/session_slots.rs (/tmp/cargo_target/release/deps/session_slots-54807afcaec7a745)
+
+running 3 tests
+test fixed_slots_hold_and_reuse_child_session_values ... ok
+test slot_operations_allocate_nothing_and_probe_counts_allocations ... {"event":"slot_allocation_probe","slot_allocations":0,"positive_control_allocations":1}
+ok
+test zero_capacity_never_admits_a_session ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

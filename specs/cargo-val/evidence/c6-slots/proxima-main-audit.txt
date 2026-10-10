@@ -1,0 +1,15 @@
+Pinned source revision: 6cffdc693bbd34483f1349f99b0ebd282c92fca4
+Current upstream main read-only audit revision: 151d2dc0ee330838c4b95c3d84d4062a9028af01
+Remote query: `git ls-remote https://github.com/brianbruggeman/proxima.git refs/heads/main` returned 151d2dc0ee330838c4b95c3d84d4062a9028af01.
+Compared process/reactor/Pipe/IO/per-core files between both revisions: `git diff --quiet ... -- proxima-process prime/src/os prime/src/lib.rs proxima-primitives/src/pipe proxima-core/src/io.rs proxima-core/src/per_core.rs` exited 0.
+
+Read source evidence at the audited main revision:
+- `proxima-process/src/lib.rs:40-55,64-65`: process spawn and `Command` exports are behind `feature = "std"`.
+- `proxima-process/Cargo.toml:20,23-32`: std enables alloc; normal process dependencies include `proxima-primitives` with std and futures executor.
+- `proxima-process/src/spawn.rs:94-116,125-149`: Unix `wait` calls `waitpid(..., 0)`; `try_wait` uses `WNOHANG` and is a polling API.
+- `proxima-process/src/fd_pipe.rs:160-163,195-212`: Unix stdio adapter uses per-child threads, blocking `File` I/O, `block_on`, and blocking wait.
+- `proxima-process/src/spawn_windows.rs:38-50`: Windows `wait` delegates to `std::process::Child::wait`; `try_wait` delegates to `try_wait`.
+- `prime/src/os/reactor_windows.rs:1,70-72`: Windows reactor registration accepts `AsSocket` and clones an owned socket.
+- `proxima-core/src/per_core.rs:83-110`: `StaticPerCore<T, N>` stores `[T; N]`, but only exposes immutable `&T` slots; it cannot mutate, retire, or generation-check owned child sessions.
+
+This evidence does not establish a no_std poll-driven child-session implementation on current Proxima main. No Proxima source was changed. cargo-val's session-slot table is coordinator-owned state; process launch/readiness/stdio/reap remains unimplemented.

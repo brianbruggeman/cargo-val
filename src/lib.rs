@@ -9,6 +9,7 @@ pub mod cli;
 pub mod discovery_stream;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod libtest_listing;
+pub mod session_slots;
 
 /// One Cargo artifact outcome returned by the record state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

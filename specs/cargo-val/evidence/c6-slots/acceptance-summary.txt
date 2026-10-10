@@ -1,0 +1,12 @@
+Slice: C6/AC68 fixed child-session slots
+Host: macOS aarch64-apple-darwin
+
+Observed checks:
+- `cargo test -p cargo-val --no-default-features --release --test session_slots -- --test-threads=1 --nocapture`: 3 passed, 0 failed. Assertions cover two simultaneously occupied slots, full rejection preserving the input value, O(1) slot reuse with a new generation, rejection of a stale completion handle, zero-capacity rejection, and an allocation probe reporting 0 slot-operation allocations with a positive control reporting 1. Raw output: `test-output.txt`.
+- The debug-profile form without `--release` exits 101 because the `no_std` binary target cannot link with unwind panic mode; the release profile sets `panic = "abort"`. Raw failure and mechanism: `debug-link-failure.txt`.
+- `cargo check -p cargo-val --lib --no-default-features --features proxima-primitives --message-format=json`: 1 cargo-val library artifact, 0 compiler errors, artifact features `proxima-primitives`. Raw compiler JSON: `no-std-check.jsonl`; stderr: `no-std-check.stderr`.
+- `cargo tree -p cargo-val --target aarch64-unknown-linux-gnu --no-default-features -e normal,features --prefix depth`: 0 `atomic-permits` feature edges and 0 `std` feature edges. Raw tree: `normal-tree.txt`.
+- `cargo fmt --all -- --check`: exit 0 after formatting.
+- `rg -n -i "Semaphore|AtomicPermitPool|AtomicPermit|AdmissionPipe|async_admission" src tests Cargo.toml`: no matches (exit 1).
+
+Scope: these records validate the fixed session-slot container only. They do not validate process launch, child readiness, streaming stdio, timeout, cancellation, or native Windows/Linux behavior.
