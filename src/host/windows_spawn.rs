@@ -17,6 +17,8 @@ pub enum WindowsSpawnError {
     CreateFailed { code: u32 },
     /// `CreateProcessW` returned an invalid process or thread handle.
     InvalidProcessInformation,
+    /// The child working directory is not a valid NUL-terminated UTF-16 path.
+    InvalidWorkingDirectory,
 }
 
 struct OwnedHandle(HANDLE);
@@ -40,6 +42,11 @@ enum ChildEnvironment<'environment> {
     Block(&'environment [u16]),
 }
 
+enum ChildWorkingDirectory<'directory> {
+    Inherit,
+    Borrowed(&'directory [u16]),
+}
+
 impl WindowsChild {
     /// Returns the process identifier assigned by Windows.
     #[must_use]
@@ -60,7 +67,12 @@ pub fn spawn_windows_child(
     handle_list: &WindowsHandleList<'_>,
 ) -> Result<WindowsChild, WindowsSpawnError> {
     let command_line = arguments.command_line();
-    spawn_windows_child_inner(command_line, handle_list, ChildEnvironment::Inherit)
+    spawn_windows_child_inner(
+        command_line,
+        handle_list,
+        ChildEnvironment::Inherit,
+        ChildWorkingDirectory::Inherit,
+    )
 }
 
 /// Starts one child with the caller's complete UTF-16 environment block.
@@ -73,6 +85,22 @@ pub fn spawn_windows_child_with_environment(
         command_line,
         handle_list,
         ChildEnvironment::Block(environment_block),
+        ChildWorkingDirectory::Inherit,
+    )
+}
+
+/// Starts one child with caller-owned UTF-16 environment and working-directory data.
+pub fn spawn_windows_child_with_environment_and_directory(
+    arguments: &mut WindowsArguments<'_>,
+    handle_list: &WindowsHandleList<'_>,
+    working_directory: &[u16],
+) -> Result<WindowsChild, WindowsSpawnError> {
+    let (command_line, environment_block) = arguments.create_process_buffers();
+    spawn_windows_child_inner(
+        command_line,
+        handle_list,
+        ChildEnvironment::Block(environment_block),
+        ChildWorkingDirectory::Borrowed(working_directory),
     )
 }
 
@@ -80,6 +108,7 @@ fn spawn_windows_child_inner(
     command_line: &mut [u16],
     handle_list: &WindowsHandleList<'_>,
     environment: ChildEnvironment<'_>,
+    working_directory: ChildWorkingDirectory<'_>,
 ) -> Result<WindowsChild, WindowsSpawnError> {
     let startup_info = handle_list.startup_info() as *const _ as *const _;
     let mut process_information = PROCESS_INFORMATION::default();
@@ -90,6 +119,15 @@ fn spawn_windows_child_inner(
             EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
         ),
     };
+    let working_directory_pointer = match working_directory {
+        ChildWorkingDirectory::Inherit => core::ptr::null(),
+        ChildWorkingDirectory::Borrowed(path) => {
+            if path.len() < 2 || path.last() != Some(&0) || path[..path.len() - 1].contains(&0) {
+                return Err(WindowsSpawnError::InvalidWorkingDirectory);
+            }
+            path.as_ptr()
+        }
+    };
     let created = unsafe {
         CreateProcessW(
             core::ptr::null(),
@@ -99,7 +137,7 @@ fn spawn_windows_child_inner(
             1,
             creation_flags,
             environment_pointer,
-            core::ptr::null(),
+            working_directory_pointer,
             startup_info,
             &mut process_information,
         )
@@ -138,6 +176,9 @@ mod tests {
     use core::mem::MaybeUninit;
     use std::env::{self, VarError};
     use std::format;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use std::vec::Vec;
 
     use windows_sys::Win32::Foundation::{
         GetHandleInformation, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
@@ -151,6 +192,7 @@ mod tests {
 
     use super::{
         WindowsChild, WindowsSpawnError, spawn_windows_child, spawn_windows_child_with_environment,
+        spawn_windows_child_with_environment_and_directory,
     };
     use crate::host::windows_handles::WindowsHandleList;
     use crate::host::windows_handles::tests::{create_pipe, exact_test_intent};
@@ -161,6 +203,9 @@ mod tests {
         "host::windows_spawn::tests::child_environment_probe";
     const CHILD_VALUE_KEY: &str = "CARGO_VAL_C44C_CHILD_VALUE";
     const EXPECT_PRESENT_KEY: &str = "CARGO_VAL_C44C_EXPECT_PRESENT";
+    const EXPECT_DIRECTORY_KEY: &str = "CARGO_VAL_C44D_EXPECT_DIRECTORY";
+    const CHILD_DIRECTORY_PROBE_NAME: &str =
+        "host::windows_spawn::tests::child_working_directory_probe";
 
     fn current_process_handle_count() -> u32 {
         let mut count = 0;
@@ -263,6 +308,9 @@ mod tests {
             Err(WindowsSpawnError::InvalidProcessInformation) => {
                 panic!("CreateProcessW failure must retain its operating-system error")
             }
+            Err(WindowsSpawnError::InvalidWorkingDirectory) => {
+                panic!("inherited working directory must not be rejected")
+            }
             Ok(_) => panic!("missing executable unexpectedly launched"),
         }
         assert_eq!(current_process_handle_count(), handles_before);
@@ -363,6 +411,112 @@ mod tests {
     }
 
     #[test]
+    fn c44d_child_uses_requested_working_directory_without_parent_mutation() {
+        let (stdin_read, _stdin_write) = create_pipe();
+        let (_stdout_read, stdout_write) = create_pipe();
+        let (_stderr_read, stderr_write) = create_pipe();
+        let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
+        let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
+        let handle_list = WindowsHandleList::new(&handles, &mut attribute_storage)
+            .expect("caller storage builds the stdio handle whitelist");
+        let executable = env::current_exe().expect("test executable path exists");
+        let executable = executable
+            .to_str()
+            .expect("Windows test executable path is valid UTF-8");
+        let intent = exact_test_intent(executable, CHILD_DIRECTORY_PROBE_NAME);
+        let child_directory = tempfile::tempdir().expect("child working directory exists");
+        let child_directory_text = child_directory
+            .path()
+            .to_str()
+            .expect("temporary directory path is valid UTF-8");
+        let child_directory_entry = format!("{EXPECT_DIRECTORY_KEY}={child_directory_text}");
+        let system_root = env::var("SystemRoot").expect("Windows provides SystemRoot");
+        let system_root_entry = format!("SystemRoot={system_root}");
+        let inherited_environment = [system_root_entry.as_str(), child_directory_entry.as_str()];
+        let mut command_line = [0_u16; 2048];
+        let mut environment_block = [0_u16; 1024];
+        let mut environment_order = [usize::MAX; 2];
+        let mut arguments = lower_windows_arguments(
+            &intent,
+            &inherited_environment,
+            &[],
+            &mut command_line,
+            &mut environment_block,
+            &mut environment_order,
+        )
+        .expect("caller buffers fit the child environment block");
+        let child_directory_wide = wide_path(child_directory.path());
+        let parent_directory = env::current_dir().expect("parent working directory exists");
+
+        let child = spawn_windows_child_with_environment_and_directory(
+            &mut arguments,
+            &handle_list,
+            &child_directory_wide,
+        )
+        .expect("CreateProcessW accepts the requested child directory");
+        assert_eq!(wait_for_child_exit(&child), 0);
+        drop(child);
+        assert_eq!(
+            env::current_dir().expect("parent directory remains readable"),
+            parent_directory
+        );
+        std::println!("{{\"child_directory_matches\":1,\"parent_directory_changes\":0}}");
+    }
+
+    #[test]
+    fn c44d_wrong_directory_control_is_rejected_by_child_probe() {
+        let (stdin_read, _stdin_write) = create_pipe();
+        let (_stdout_read, stdout_write) = create_pipe();
+        let (_stderr_read, stderr_write) = create_pipe();
+        let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
+        let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
+        let handle_list = WindowsHandleList::new(&handles, &mut attribute_storage)
+            .expect("caller storage builds the stdio handle whitelist");
+        let executable = env::current_exe().expect("test executable path exists");
+        let executable = executable
+            .to_str()
+            .expect("Windows test executable path is valid UTF-8");
+        let intent = exact_test_intent(executable, CHILD_DIRECTORY_PROBE_NAME);
+        let child_directory = tempfile::tempdir().expect("expected child directory exists");
+        let child_directory_text = child_directory
+            .path()
+            .to_str()
+            .expect("temporary directory path is valid UTF-8");
+        let child_directory_entry = format!("{EXPECT_DIRECTORY_KEY}={child_directory_text}");
+        let system_root = env::var("SystemRoot").expect("Windows provides SystemRoot");
+        let system_root_entry = format!("SystemRoot={system_root}");
+        let inherited_environment = [system_root_entry.as_str(), child_directory_entry.as_str()];
+        let mut command_line = [0_u16; 2048];
+        let mut environment_block = [0_u16; 1024];
+        let mut environment_order = [usize::MAX; 2];
+        let mut arguments = lower_windows_arguments(
+            &intent,
+            &inherited_environment,
+            &[],
+            &mut command_line,
+            &mut environment_block,
+            &mut environment_order,
+        )
+        .expect("caller buffers fit the child environment block");
+        let parent_directory = env::current_dir().expect("parent working directory exists");
+        let parent_directory_wide = wide_path(&parent_directory);
+
+        let child = spawn_windows_child_with_environment_and_directory(
+            &mut arguments,
+            &handle_list,
+            &parent_directory_wide,
+        )
+        .expect("CreateProcessW accepts the parent directory for the control");
+        assert_ne!(wait_for_child_exit(&child), 0);
+        drop(child);
+        assert_eq!(
+            env::current_dir().expect("parent directory remains readable"),
+            parent_directory
+        );
+        std::println!("{{\"wrong_child_directory_rejected\":1,\"parent_directory_changes\":0}}");
+    }
+
+    #[test]
     fn child_process_probe() {
         if !env::args().any(|argument| argument == "--exact") {
             return;
@@ -390,5 +544,20 @@ mod tests {
             )),
             _ => panic!("child expectation is missing or invalid"),
         }
+    }
+
+    #[test]
+    fn child_working_directory_probe() {
+        if !env::args().any(|argument| argument == "--exact") {
+            return;
+        }
+        let expected_directory = env::var_os(EXPECT_DIRECTORY_KEY)
+            .expect("child receives expected directory from its explicit environment");
+        let actual_directory = env::current_dir().expect("child current directory is readable");
+        assert_eq!(actual_directory, PathBuf::from(expected_directory));
+    }
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
     }
 }
