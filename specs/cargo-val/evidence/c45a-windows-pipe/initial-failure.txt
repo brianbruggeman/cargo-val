@@ -1,0 +1,18 @@
+exit status 101
+failures:
+
+---- host::windows_pipe_pair::tests::c45a_creates_one_overlapped_parent_reader_and_inheritable_writer stdout ----
+
+thread 'host::windows_pipe_pair::tests::c45a_creates_one_overlapped_parent_reader_and_inheritable_writer' (3480) panicked at src\host\windows_pipe_pair.rs:220:9:
+assertion `left == right` failed
+  left: 85
+ right: 84
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    host::windows_pipe_pair::tests::c45a_creates_one_overlapped_parent_reader_and_inheritable_writer
+
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+[1m[91merror[0m: test failed, to rerun pass `--lib`
