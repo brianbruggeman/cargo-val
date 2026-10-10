@@ -2,10 +2,12 @@
 """Replay graph records and check cargo-val's normal build graph by target."""
 
 import argparse
+import gzip
 import json
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +53,10 @@ def is_cargo_val_package(package_id: object) -> bool:
 def require_installed_target(target: str, installed_targets: list[str]) -> None:
     if target not in installed_targets:
         raise RuntimeError(f"target {target} is not installed")
+
+
+def exact_error_marker_count(output: str, marker: str) -> int:
+    return output.count(marker)
 
 
 def product_error_count(records: list[dict[str, object]]) -> int:
@@ -244,18 +250,146 @@ def check_target(target: str, oracle_path: Path) -> None:
     print(json.dumps({"rejected_missing_target_preflight_controls": int(control_rejected)}))
 
 
+def check_std_control(target: str, oracle_path: Path) -> None:
+    oracle_records = read_records(oracle_path)
+    fixtures = [record for record in oracle_records if record.get("case") == "c30b_fixture"]
+    controls = [record for record in oracle_records if record.get("case") == "c30b_negative_control"]
+    if len(oracle_records) != 2 or len(fixtures) != 1 or len(controls) != 1:
+        raise RuntimeError("C30b oracle must contain exactly one fixture and one control")
+    fixture = fixtures[0].get("input")
+    control = controls[0].get("control")
+    if not isinstance(fixture, dict) or not isinstance(control, dict):
+        raise RuntimeError("C30b oracle fixture and control must be objects")
+    dependency = fixture.get("normal_dependency")
+    expected = fixture.get("expected")
+    if fixture.get("target") != target or not isinstance(dependency, dict) or not isinstance(expected, dict):
+        raise RuntimeError("target or fixture fields differ from the C30b oracle")
+    if dependency != {"name": "serde", "features": ["std"]}:
+        raise RuntimeError("normal dependency differs from the C30b oracle")
+    expected_marker = expected.get("exact_error_marker")
+    if expected != {
+        "control_exit": 101,
+        "exact_error_marker": "error[E0463]: can't find crate for `std`",
+        "exact_error_marker_count": 2,
+        "compiler_error_records": 5829,
+        "control_diagnostics_in_product_count": 0,
+    }:
+        raise RuntimeError("expected control result differs from the C30b oracle")
+    if control != {
+        "mutation": "replace E0463 marker with unrelated compiler error while retaining exit 101",
+        "expected_rejected": True,
+    }:
+        raise RuntimeError("negative control differs from the C30b oracle")
+
+    add = None
+    try:
+        add = subprocess.run(
+            ["cargo", "add", "serde", "--no-default-features", "--features", "std"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if add.returncode != 0:
+            raise RuntimeError(f"cargo add serde std control failed:\n{add.stderr}")
+        result = subprocess.run(
+            [
+                "cargo",
+                "check",
+                "-p",
+                "cargo-val",
+                "--lib",
+                "--no-default-features",
+                "--features",
+                "proxima-codec,proxima-primitives",
+                "--target",
+                target,
+                "--message-format=json",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        if add is not None:
+            remove = subprocess.run(
+                ["cargo", "remove", "serde"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
+            normal_dependencies = manifest.get("dependencies", {})
+            if "serde" in normal_dependencies:
+                raise RuntimeError(f"cargo remove serde std control failed:\n{remove.stderr}")
+    evidence_directory = ROOT / "specs" / "cargo-val" / "evidence" / "c30-graph"
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    with gzip.open(evidence_directory / f"{target}.std-control.cargo.jsonl.gz", "wt") as evidence_file:
+        evidence_file.write(result.stdout)
+    (evidence_directory / f"{target}.std-control.stderr.txt").write_text(result.stderr)
+    if result.returncode != expected["control_exit"]:
+        raise RuntimeError(f"std control exit differs from oracle: {result.returncode}")
+    combined_output = result.stdout + result.stderr
+    marker_count = exact_error_marker_count(combined_output, expected_marker)
+    if marker_count != expected["exact_error_marker_count"]:
+        raise RuntimeError(f"exact std error markers differ from oracle: {marker_count}")
+
+    mutated_output = combined_output.replace(
+        expected_marker,
+        "error[E0000]: unrelated compiler error",
+        marker_count,
+    )
+    mutation_rejected = (
+        exact_error_marker_count(mutated_output, expected_marker)
+        != expected["exact_error_marker_count"]
+    )
+    if control.get("expected_rejected") is not mutation_rejected:
+        raise RuntimeError("unrelated-error mutation control was not rejected")
+    control_records: list[dict[str, object]] = []
+    for line_number, line in enumerate(result.stdout.splitlines(), start=1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"std control Cargo output line {line_number} is not JSON: {error}") from error
+        if isinstance(record, dict):
+            control_records.append(record)
+    product_errors = product_error_count(control_records)
+    if product_errors != expected["control_diagnostics_in_product_count"]:
+        raise RuntimeError(f"control diagnostics were counted as product errors: {product_errors}")
+    compiler_errors = sum(
+        record.get("reason") == "compiler-message"
+        and isinstance(record.get("message"), dict)
+        and record["message"].get("level") == "error"
+        for record in control_records
+    )
+    if compiler_errors != expected["compiler_error_records"]:
+        raise RuntimeError(f"compiler error records differ from oracle: {compiler_errors}")
+    if marker_count != expected["exact_error_marker_count"]:
+        raise RuntimeError(f"exact std error markers differ from oracle: {marker_count}")
+    print(json.dumps({"std_control_exit": result.returncode, "exact_E0463_markers": marker_count}))
+    print(json.dumps({"compiler_error_records": compiler_errors}))
+    print(json.dumps({"control_diagnostics_in_product_count": product_errors}))
+    print(json.dumps({"rejected_unrelated_error_mutation_controls": int(mutation_rejected)}))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--replay", type=Path)
     parser.add_argument("--target")
     parser.add_argument("--oracle", type=Path)
     parser.add_argument("--product-only", action="store_true")
+    parser.add_argument("--std-control", action="store_true")
     arguments = parser.parse_args()
     if arguments.replay is not None and arguments.target is None and not arguments.product_only:
         replay(arguments.replay)
         return 0
     if arguments.target is not None and arguments.product_only and arguments.replay is None and arguments.oracle is not None:
         check_target(arguments.target, arguments.oracle)
+        return 0
+    if arguments.target is not None and arguments.std_control and arguments.replay is None and arguments.oracle is not None:
+        check_std_control(arguments.target, arguments.oracle)
         return 0
     parser.error("select --replay PATH or --target TARGET --product-only")
     return 2
