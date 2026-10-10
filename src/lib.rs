@@ -21,6 +21,8 @@ pub mod libtest_listing;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod selection;
 pub mod session_slots;
+#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod test_intent;
 
 /// One Cargo artifact outcome returned by the record state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

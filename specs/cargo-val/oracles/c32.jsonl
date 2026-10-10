@@ -1,0 +1,2 @@
+{"case":"c32_fixture","input":{"executable":"target/debug/deps/fixture","test_name":"alpha","expected_argv":["--exact","alpha"],"borrowed_fields":2,"allocations":0},"status":"observed"}
+{"case":"c32_negative_control","control":{"mutation":"transpose exact flag and test name","expected_rejected":true},"status":"observed"}
