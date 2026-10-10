@@ -1,0 +1,9 @@
+command: CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test cargo_artifact_framing two_artifacts_emit_before_source_eof -- --exact --nocapture --test-threads=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/cargo_artifact_framing.rs (/tmp/cargo_val_c3_target/debug/deps/cargo_artifact_framing-7b8fdb98e38d888c)
+
+running 1 test
+test two_artifacts_emit_before_source_eof ... C3_ALLOCATION_TRACE os=macos records=2 path_allocations=0 positive_control_allocations=1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s

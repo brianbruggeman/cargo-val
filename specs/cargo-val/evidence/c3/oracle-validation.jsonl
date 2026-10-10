@@ -1,0 +1,2 @@
+command: python3 specs/cargo-val/validate_c3_oracle.py
+{"held_open_first_emission_checkpoints": 1, "literal_ordered_executables": 2, "missing_newline_rejections": 1, "retained_cargo_test_artifact_controls": 2, "reversed_order_rejections": 1}

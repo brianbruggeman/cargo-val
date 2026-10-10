@@ -5,3 +5,11 @@ edition = "2024"
 
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[features]
+proxima-codec = ["dep:proxima-codec"]
+proxima-primitives = ["dep:proxima-primitives"]
+
+[dependencies]
+proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b", version = "0.1.0", default-features = false, optional = true }
+proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "5207d66e9995ffcb4d3b2d2258c02e6fabc4cc6b", version = "0.1.0", default-features = false, optional = true }
