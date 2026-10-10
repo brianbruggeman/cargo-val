@@ -303,3 +303,8 @@ C2/AC64 landed as unsigned commit `a1d4929` after the configured 1Password signe
 C3/AC65 adds a caller-owned bounded framing adapter and emits two records before producer EOF; commit `ad86d6f`. The focused serial test measured zero allocator calls with one positive-control allocation; the serial full target observed 7 passing tests. The default-parallel target observed 6 passes and one allocation-counter failure at 5 calls. The process-global counter trace does not identify sibling allocation sites; see `evidence/c3/README.md` and `parallel-allocation-control.txt`.
 
 C4/AC66 implements the borrowed libtest listing parser; commit `251f523`. Its focused run observed 1 passing test, 9 parser calls, 0 counted allocator calls, and 1 positive-control allocation. The five oracle counts and cache-clean reproduction trace are retained in `evidence/c4/`. C5 composes that parser with C3's fixed-capacity newline framer to produce one borrowed name per call. Its focused target printed 9 passing tests; cargo-nextest ran the gated four-name dispatch fixture with 1 passed and 8 filtered, and the literal oracle recorded first dispatch before producer release plus 3 later names. Parse progress, poisoning, EOF validation, short-copy replay, and the producer gate are covered in `evidence/c5/`.
+
+C28/AC114 parses `--manifest-path`, the first positional filter, `--exact`, and
+the `--` test-argument boundary from borrowed argv bytes. Its focused release
+run observed 4 passed tests and 0 parser allocations with a 1-allocation
+positive control; literal oracle and output are in `oracles/c28.jsonl` and
