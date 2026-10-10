@@ -1,0 +1,19 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.38s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/cargo_val-745660ea718db708)
+
+running 4 tests
+test unix_arguments::tests::c37_lowers_exact_argv_and_child_environment_into_caller_storage ... {"inherited_entries":1,"child_overrides":1,"argv_pairs":1,"allocations":0}
+ok
+test unix_arguments::tests::c37_rejects_an_interior_nul_in_the_test_name ... {"interior_nul_control_rejected":1,"storage_unchanged":1}
+ok
+test unix_arguments::tests::c37_rejects_one_byte_short_argv_pointer_storage_before_writing ... {"short_argv_pointer_control_rejected":1,"storage_unchanged":1}
+ok
+test unix_arguments::tests::c37_rejects_one_byte_short_argv_storage_before_writing ... {"truncated_argv_control_rejected":1,"storage_unchanged":1}
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+cargo fmt --all --check
+output: no differences
+command_exit=0

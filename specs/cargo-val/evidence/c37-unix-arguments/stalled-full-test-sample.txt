@@ -1,0 +1,31 @@
+Analysis of sampling cargo_val-745660ea718db708 (pid 37830) every 1 millisecond
+Process:         cargo_val-745660ea718db708 [37830]
+Path:            /private/tmp/*/cargo_val-745660ea718db708
+Load Address:    0x104bd8000
+Identifier:      cargo_val-745660ea718db708
+Version:         ???
+Code Type:       ARM64
+Parent Process:  cargo [37353]
+Target Type:     live task
+
+Date/Time:       2026-10-10 13:46:56.125 -0500
+Launch Time:     2026-10-10 13:46:35.747 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    1543 Thread_88187960: Main Thread   DispatchQueue_<multiple>
+      1543 _dyld_start  (in dyld) + 0  [0x104fa07c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        1543
+
+Binary images description not available

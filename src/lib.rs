@@ -33,6 +33,8 @@ pub mod selection;
 pub mod session_slots;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod test_intent;
+#[cfg(all(unix, feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod unix_arguments;
 
 /// One Cargo artifact outcome returned by the record state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
