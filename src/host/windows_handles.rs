@@ -4,13 +4,35 @@ use core::ffi::c_void;
 use core::mem::{MaybeUninit, size_of};
 
 use windows_sys::Win32::Foundation::{
-    GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    CloseHandle, GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     UpdateProcThreadAttribute,
 };
+
+/// Owns one Win32 handle shared by child launch and host I/O adapters.
+pub(super) struct WindowsOwnedHandle(HANDLE);
+
+impl WindowsOwnedHandle {
+    pub(super) const fn new(handle: HANDLE) -> Self {
+        Self(handle)
+    }
+
+    pub(super) const fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for WindowsOwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
 
 /// Failures while constructing the bounded child stdio handle list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

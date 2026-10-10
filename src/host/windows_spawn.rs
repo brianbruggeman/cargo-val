@@ -8,6 +8,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::host::windows_handles::WindowsHandleList;
+use crate::host::windows_handles::WindowsOwnedHandle;
 use crate::windows_arguments::WindowsArguments;
 
 /// Failures while creating a Windows child process.
@@ -21,19 +22,9 @@ pub enum WindowsSpawnError {
     InvalidWorkingDirectory,
 }
 
-struct OwnedHandle(HANDLE);
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-}
-
 /// A launched child whose process handle remains owned until drop.
 pub struct WindowsChild {
-    process: OwnedHandle,
+    process: WindowsOwnedHandle,
     process_id: u32,
 }
 
@@ -57,7 +48,7 @@ impl WindowsChild {
     /// Returns the borrowed handle used by the Windows readiness adapter.
     #[must_use]
     pub const fn raw_process_handle(&self) -> HANDLE {
-        self.process.0
+        self.process.raw()
     }
 }
 
@@ -153,8 +144,8 @@ fn spawn_windows_child_inner(
         return Err(WindowsSpawnError::InvalidProcessInformation);
     }
 
-    let process = OwnedHandle(process_information.hProcess);
-    drop(OwnedHandle(process_information.hThread));
+    let process = WindowsOwnedHandle::new(process_information.hProcess);
+    drop(WindowsOwnedHandle::new(process_information.hThread));
     Ok(WindowsChild {
         process,
         process_id: process_information.dwProcessId,
