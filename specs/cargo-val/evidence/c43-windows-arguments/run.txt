@@ -9,7 +9,7 @@ observed: 24 passed, 0 failed, 0 ignored/filtered; output is native-macos-tests.
 Windows target checks:
 CARGO_TARGET_DIR=/tmp/cargo_val_c43_target cargo check --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --lib
 CARGO_TARGET_DIR=/tmp/cargo_val_c43_target cargo check --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --tests
-observed: both exit 0; outputs are windows-no-std-check.txt and windows-test-check.txt. These compile checks are not a Windows runtime result. The native-tests GitHub Actions matrix provides runtime execution on Windows, macOS, and Linux.
+observed: both exit 0; outputs are windows-no-std-check.txt and windows-test-check.txt. The native-tests GitHub Actions run 38082795657 then executed the full library test suite on Windows, macOS, and Linux; selected raw test-result lines are in native-matrix.txt.
 
 source inspection:
 src/windows_arguments.rs writes the mutable CreateProcessW command line and sorted UTF-16 environment block directly into caller storage. The command-line quoting routine emits no intermediate string or vector. Windows environment-block sorting is case-insensitive Unicode order, per https://learn.microsoft.com/en-us/windows/win32/procth/changing-environment-variables.
