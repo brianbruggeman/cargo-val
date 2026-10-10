@@ -1,0 +1,21 @@
+GitHub Actions run: 38082795657
+commit under test: b3404520ed14be128808e9e1a246a79e6d34b3ef
+workflow: https://github.com/brianbruggeman/cargo-val/actions/runs/38082795657
+
+test (windows-latest): success; 13 passed, 0 failed, 0 ignored; the three c43 tests each reported `ok`.
+2026-10-10T20:13:36.5649540Z test windows_arguments::tests::c43_encodes_sorted_unicode_environment_override_in_caller_storage ... ok
+2026-10-10T20:13:36.5652274Z test windows_arguments::tests::c43_quotes_executable_and_escapes_trailing_backslashes ... ok
+2026-10-10T20:13:36.5667592Z test windows_arguments::tests::c43_rejects_short_utf16_storage_without_partial_writes ... ok
+2026-10-10T20:13:36.5669895Z test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+test (ubuntu-latest): success; 24 passed, 0 failed, 0 ignored; the three c43 tests each reported `ok`.
+2026-10-10T20:12:36.8171270Z test windows_arguments::tests::c43_encodes_sorted_unicode_environment_override_in_caller_storage ... ok
+2026-10-10T20:12:36.8172031Z test windows_arguments::tests::c43_quotes_executable_and_escapes_trailing_backslashes ... ok
+2026-10-10T20:12:36.8173785Z test windows_arguments::tests::c43_rejects_short_utf16_storage_without_partial_writes ... ok
+2026-10-10T20:12:36.8174478Z test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+test (macos-latest): success; 25 passed, 0 failed, 0 ignored; the three c43 tests each reported `ok`.
+2026-10-10T20:13:15.5679490Z test windows_arguments::tests::c43_encodes_sorted_unicode_environment_override_in_caller_storage ... ok
+2026-10-10T20:13:15.5681390Z test windows_arguments::tests::c43_quotes_executable_and_escapes_trailing_backslashes ... ok
+2026-10-10T20:13:15.5682910Z test windows_arguments::tests::c43_rejects_short_utf16_storage_without_partial_writes ... ok
+2026-10-10T20:13:15.5684530Z test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
