@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (/tmp/cargo_val_target/debug/deps/cargo_val-381d20b72ad1e4f2)
+
+running 2 tests
+test host_drive::tests::c36b_missing_control_token_is_a_lost_wake_control ... {"remote_wakes":1,"control_tokens_before_park":0,"resumed_tasks":0,"comparator_rejected":1}
+ok
+test host_drive::tests::c36b_remote_wake_publishes_control_token_before_coordinator_park ... {"tasks_polled_after_wake":1,"remote_wakes":1,"control_tokens_before_park":1,"resumed_tasks":1,"comparator_accepted":1}
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
