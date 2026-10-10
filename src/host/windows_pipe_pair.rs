@@ -214,6 +214,7 @@ mod tests {
             WAIT_OBJECT_0,
             "test cleanup observes completion of the canceled read"
         );
+        drop(event);
         pipe_pair.close_child_write_handle();
         assert!(pipe_pair.child_write_handle().is_none());
         drop(pipe_pair);
