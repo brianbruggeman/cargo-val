@@ -1,0 +1,29 @@
+use conflaguration::codegen;
+use conflaguration::{ConfigCodegen, Error, Settings, Validate, ValidationMessage};
+
+#[derive(Settings, ConfigCodegen)]
+#[settings(prefix = "CARGO_VAL_BUILD")]
+struct BuildDefaults {
+    #[setting(default = 2)]
+    jobs: usize,
+    #[setting(default = true)]
+    color: bool,
+}
+
+impl Validate for BuildDefaults {
+    fn validate(&self) -> conflaguration::Result<()> {
+        if self.jobs == 0 {
+            return Err(Error::Validation {
+                errors: vec![ValidationMessage::new("jobs", "must be greater than zero")],
+            });
+        }
+        Ok(())
+    }
+}
+
+fn main() -> conflaguration::Result<()> {
+    let settings = conflaguration::init::<BuildDefaults>()?;
+    codegen::write_consts(&settings, "cargo_val_build.rs")?;
+    codegen::rerun_for::<BuildDefaults>();
+    Ok(())
+}

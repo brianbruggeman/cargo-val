@@ -1,0 +1,10 @@
+The registry resolution attempt
+`cargo add conflaguration --build --features derive,codegen`
+reported conflaguration v1.2.0 and failed because the crate registry version does not define the `codegen` feature.
+
+The applied dependency command
+`cargo add conflaguration --build --git https://github.com/brianbruggeman/conflaguration.git --rev 3eb325d84fc291df35528e6781b5b814884e2d28 --features derive,codegen`
+added conflaguration v2.0.0 with `derive` and `codegen` as a build dependency.
+
+`cargo tree -p cargo-val -e normal` contains no conflaguration node.
+`cargo tree -p cargo-val -e build` contains the pinned conflaguration v2.0.0 node.

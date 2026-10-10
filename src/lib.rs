@@ -5,6 +5,10 @@ extern crate std;
 
 use core::str;
 
+pub mod build_defaults {
+    include!(concat!(env!("OUT_DIR"), "/cargo_val_build.rs"));
+}
+
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod artifact_stream;
 pub mod cli;
