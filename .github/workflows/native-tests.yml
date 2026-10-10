@@ -29,3 +29,12 @@ jobs:
             printf '::error title=native cargo test failure::exit status %s%%0A%s\n' "$test_status" "$failure_excerpt"
           fi
           exit "$test_status"
+
+  windows-pipe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run focused Windows IOCP tests
+        shell: bash
+        run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib host::windows_pipe::tests::c45b_ -- --nocapture --test-threads=1
