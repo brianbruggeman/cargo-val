@@ -204,7 +204,16 @@ fn last_error() -> UnixPipeError {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::MaybeUninit;
+
     use super::{OwnedPipe, UnixPipeError, UnixPipePair};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct DescriptorIdentity {
+        device: u64,
+        inode: u64,
+        mode: u32,
+    }
 
     #[test]
     fn c38a_creates_two_owned_nonblocking_pipe_pairs() {
@@ -215,6 +224,7 @@ mod tests {
             pair.stderr().parent_read().raw(),
             pair.stderr().child_write().raw(),
         ];
+        let identities = descriptors.map(descriptor_identity);
         for first in 0..descriptors.len() {
             for second in first + 1..descriptors.len() {
                 assert_ne!(descriptors[first], descriptors[second]);
@@ -230,8 +240,8 @@ mod tests {
         assert_status_flag(descriptors[2], libc::O_NONBLOCK, true);
         assert_status_flag(descriptors[3], libc::O_NONBLOCK, false);
         drop(pair);
-        for descriptor in descriptors {
-            assert_closed(descriptor);
+        for (descriptor, identity) in descriptors.into_iter().zip(identities) {
+            assert_closed(descriptor, identity);
         }
         std::println!(
             "{{\"parent_reads\":2,\"child_writes\":2,\"ownership_checks\":4,\"closed_after_drop\":4}}"
@@ -244,6 +254,7 @@ mod tests {
 
         let mut calls = 0;
         let mut first_descriptors = [-1; 2];
+        let mut first_identities = [None; 2];
         let result = UnixPipePair::with_factory(|| {
             calls += 1;
             if calls == 2 {
@@ -253,6 +264,10 @@ mod tests {
             let second = unsafe { libc::dup(0) };
             assert!(duplicated >= 0 && second >= 0);
             first_descriptors = [duplicated, second];
+            first_identities = [
+                Some(descriptor_identity(duplicated)),
+                Some(descriptor_identity(second)),
+            ];
             Ok(OwnedPipe {
                 parent_read: OwnedDescriptor(duplicated),
                 child_write: OwnedDescriptor(second),
@@ -260,8 +275,11 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(first_descriptors.len(), 2);
-        for descriptor in first_descriptors {
-            assert_closed(descriptor);
+        for (descriptor, identity) in first_descriptors.into_iter().zip(first_identities) {
+            assert_closed(
+                descriptor,
+                identity.expect("factory records each owned descriptor identity"),
+            );
         }
         std::println!("{{\"second_pair_failure\":1,\"first_pair_descriptors_closed\":2}}");
     }
@@ -272,9 +290,23 @@ mod tests {
         assert_eq!(status & flag != 0, expected);
     }
 
-    fn assert_closed(descriptor: i32) {
+    fn descriptor_identity(descriptor: i32) -> DescriptorIdentity {
+        let mut metadata = MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) }, 0);
+        let metadata = unsafe { metadata.assume_init() };
+        DescriptorIdentity {
+            device: metadata.st_dev as u64,
+            inode: metadata.st_ino as u64,
+            mode: metadata.st_mode as u32,
+        }
+    }
+
+    fn assert_closed(descriptor: i32, identity: DescriptorIdentity) {
         assert!(descriptor >= 0, "fixture must own a valid descriptor");
-        assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
-        assert_eq!(super::last_error().code, libc::EBADF);
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
+            assert_eq!(super::last_error().code, libc::EBADF);
+        } else {
+            assert_ne!(descriptor_identity(descriptor), identity);
+        }
     }
 }
