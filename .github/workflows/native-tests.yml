@@ -35,6 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows test executable
+        shell: bash
+        run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib --no-run
       - name: Run C45b stdout completion test
         shell: bash
         run: bash .github/scripts/run-c45b-case.sh host::windows_pipe::tests::c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix
