@@ -66,9 +66,11 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
     ///
     /// # Safety
     ///
-    /// `parent_reader` must remain open and this pinned slot and its borrowed
-    /// storage must remain alive and unmoved until `complete` accepts the
-    /// matching completion packet, including after `cancel` succeeds.
+    /// `parent_reader` must be opened for overlapped reads, associated with an
+    /// IOCP, and configured to queue completion packets for successful reads.
+    /// It must remain open and this pinned slot and its borrowed storage must
+    /// remain alive and unmoved until `complete` accepts the matching packet,
+    /// including after `cancel` succeeds.
     pub unsafe fn start(
         self: Pin<&mut Self>,
         parent_reader: HANDLE,
