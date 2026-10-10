@@ -1,0 +1,15 @@
+command: CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo nextest run -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test discovery_stream --no-capture dispatches_first_name_before_listing_eof
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+────────────
+ Nextest run ID 069e18f4-6f9d-493d-8f8b-61972bd9fdb7 with nextest profile: default
+    Starting 1 test across 1 binary (8 tests skipped)
+       START [         ] (1/1) cargo-val::discovery_stream dispatches_first_name_before_listing_eof
+
+running 1 test
+test dispatches_first_name_before_listing_eof ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+        PASS [   0.007s] (1/1) cargo-val::discovery_stream dispatches_first_name_before_listing_eof
+────────────
+     Summary [   0.007s] 1 test run: 1 passed, 8 skipped

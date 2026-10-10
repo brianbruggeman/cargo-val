@@ -1,0 +1,16 @@
+command: CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --test discovery_stream -- --test-threads=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/discovery_stream.rs (/tmp/cargo_val_c3_target/debug/deps/discovery_stream-eaa85c184ba6632f)
+
+running 9 tests
+test dispatches_first_name_before_listing_eof ... ok
+test drains_buffered_line_before_accepting_new_chunk ... ok
+test empty_poll_after_eof_returns_no_line ... ok
+test ignores_summary_without_stalling_later_name ... ok
+test nonempty_input_after_eof_is_rejected_even_with_buffered_line ... ok
+test parser_failure_reports_progress_and_poisons_stream ... ok
+test replays_short_copy_tail_before_reading_another_chunk ... ok
+test reports_framing_failure_without_emitting_name ... ok
+test withholds_split_line_until_newline_arrives ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

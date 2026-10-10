@@ -1,3 +1,4 @@
+use core::cell::Cell;
 use core::future::Future;
 use core::marker::PhantomData;
 
@@ -109,11 +110,11 @@ impl<'call, 'buffer> Pipe for ArtifactPipe<'call, 'buffer> {
 pub struct ArtifactFramer<'buffer> {
     buffer: &'buffer mut [u8],
     buffered: usize,
-    consumed: usize,
+    consumed: Cell<usize>,
     max_record_bytes: usize,
     codec: DelimiterCodec,
-    source_state: SourceState,
-    scan_state: ScanState,
+    source_state: Cell<SourceState>,
+    scan_state: Cell<ScanState>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -148,21 +149,20 @@ impl<'buffer> ArtifactFramer<'buffer> {
         Ok(Self {
             buffer,
             buffered: 0,
-            consumed: 0,
+            consumed: Cell::new(0),
             max_record_bytes,
             codec: DelimiterCodec::new(b"\n", FrameLimits::new(max_record_bytes, false)),
-            source_state: SourceState::Open,
-            scan_state: ScanState::Scanning { scanned: 0 },
+            source_state: Cell::new(SourceState::Open),
+            scan_state: Cell::new(ScanState::Scanning { scanned: 0 }),
         })
     }
 
     /// Copies as much of a transport chunk as fits and returns bytes consumed.
     /// A short count leaves the tail with the caller until a frame is drained.
     pub fn push(&mut self, chunk: &[u8]) -> Result<usize, ArtifactStreamError> {
-        match self.source_state {
-            SourceState::Open => {}
-            SourceState::Eof => return Err(ArtifactStreamError::InputAfterEof),
-            SourceState::Failed => return Err(ArtifactStreamError::Poisoned),
+        self.validate_input(chunk)?;
+        if self.source_state.get() == SourceState::Eof {
+            return Ok(0);
         }
         self.compact();
         let available = self.buffer.len() - self.buffered;
@@ -172,12 +172,62 @@ impl<'buffer> ArtifactFramer<'buffer> {
         Ok(copied)
     }
 
+    /// Checks whether a source chunk is valid for the current stream state.
+    pub fn validate_input(&self, chunk: &[u8]) -> Result<(), ArtifactStreamError> {
+        match self.source_state.get() {
+            SourceState::Open => Ok(()),
+            SourceState::Eof if chunk.is_empty() => Ok(()),
+            SourceState::Eof => Err(ArtifactStreamError::InputAfterEof),
+            SourceState::Failed => Err(ArtifactStreamError::Poisoned),
+        }
+    }
+
+    /// Makes the stream terminal after a downstream parser rejects a consumed frame.
+    pub fn poison(&self) {
+        self.source_state.set(SourceState::Failed);
+    }
+
     /// Returns the next complete record, or `None` while its newline is absent.
-    pub fn next_frame(&mut self) -> Result<Option<&[u8]>, ArtifactStreamError> {
+    pub fn next_frame(&self) -> Result<Option<&[u8]>, ArtifactStreamError> {
         let Some((frame_start, frame_end)) = self.next_frame_bounds()? else {
             return Ok(None);
         };
+        self.consume_frame()?;
         Ok(Some(&self.buffer[frame_start..frame_end]))
+    }
+
+    /// Checks whether a complete frame is buffered without consuming it.
+    pub fn frame_ready(&self) -> Result<bool, ArtifactStreamError> {
+        self.has_complete_frame()
+    }
+
+    /// Returns the next complete frame without advancing the stream cursor.
+    pub fn peek_frame(&self) -> Result<Option<&[u8]>, ArtifactStreamError> {
+        let Some((frame_start, frame_end)) = self.next_frame_bounds()? else {
+            return Ok(None);
+        };
+        self.scan_state.set(ScanState::FrameReady {
+            frame_length: frame_end - frame_start,
+        });
+        Ok(Some(&self.buffer[frame_start..frame_end]))
+    }
+
+    /// Advances past the current complete frame after its borrowed result is handled.
+    pub fn consume_frame(&self) -> Result<(), ArtifactStreamError> {
+        let Some((frame_start, frame_end)) = self.next_frame_bounds()? else {
+            return Ok(());
+        };
+        let pending = &self.buffer[self.consumed.get()..self.buffered];
+        let (_, consumed) = self.codec.parse_frame(pending)?;
+        let next_consumed = self.consumed.get() + consumed;
+        if frame_start + consumed != frame_end + 1 {
+            return Err(ArtifactStreamError::Framing(FrameError::Incomplete));
+        }
+        self.consumed.set(next_consumed);
+        self.scan_state.set(ScanState::Scanning {
+            scanned: next_consumed,
+        });
+        Ok(())
     }
 
     fn next_artifact<'path>(
@@ -186,20 +236,23 @@ impl<'buffer> ArtifactFramer<'buffer> {
         scratch: &'path mut [u8],
         max_json_depth: usize,
     ) -> Result<ArtifactOutput<'path>, ArtifactStreamError> {
-        if self.source_state == SourceState::Failed {
+        if self.source_state.get() == SourceState::Failed {
             return Err(ArtifactStreamError::Poisoned);
         }
-        if self.source_state == SourceState::Eof && !chunk.is_empty() {
+        if self.source_state.get() == SourceState::Eof && !chunk.is_empty() {
             return Err(ArtifactStreamError::InputAfterEof);
         }
-        let consumed_bytes = if self.has_complete_frame()? || self.source_state == SourceState::Eof
-        {
-            0
-        } else {
-            self.push(chunk)?
-        };
+        let consumed_bytes =
+            if self.has_complete_frame()? || self.source_state.get() == SourceState::Eof {
+                0
+            } else {
+                self.push(chunk)?
+            };
         let frame_bounds = self.next_frame_bounds()?;
         let record_consumed = frame_bounds.is_some();
+        if frame_bounds.is_some() {
+            self.consume_frame()?;
+        }
         let selection = match frame_bounds {
             Some((frame_start, frame_end)) => {
                 let parse_result = parse_artifact(
@@ -211,7 +264,7 @@ impl<'buffer> ArtifactFramer<'buffer> {
                 let parsed = match parse_result {
                     Ok(parsed) => parsed,
                     Err(error) => {
-                        self.source_state = SourceState::Failed;
+                        self.source_state.set(SourceState::Failed);
                         return Err(ArtifactStreamError::Parsing(error));
                     }
                 };
@@ -240,72 +293,72 @@ impl<'buffer> ArtifactFramer<'buffer> {
         })
     }
 
-    fn next_frame_bounds(&mut self) -> Result<Option<(usize, usize)>, ArtifactStreamError> {
-        if self.source_state == SourceState::Failed {
+    fn next_frame_bounds(&self) -> Result<Option<(usize, usize)>, ArtifactStreamError> {
+        if self.source_state.get() == SourceState::Failed {
             return Err(ArtifactStreamError::Poisoned);
         }
-        if self.source_state == SourceState::Eof && self.consumed == self.buffered {
+        if self.source_state.get() == SourceState::Eof && self.consumed.get() == self.buffered {
             return Ok(None);
         }
         if !self.has_complete_frame()? {
             return Ok(None);
         }
-        let ScanState::FrameReady { frame_length } = self.scan_state else {
+        let ScanState::FrameReady { frame_length } = self.scan_state.get() else {
             return Err(ArtifactStreamError::Framing(FrameError::Incomplete));
         };
-        let pending = &self.buffer[self.consumed..self.buffered];
+        let pending = &self.buffer[self.consumed.get()..self.buffered];
         let (_, consumed) = self.codec.parse_frame(pending)?;
-        let frame_start = self.consumed;
-        self.consumed += consumed;
-        self.scan_state = ScanState::Scanning {
-            scanned: self.consumed,
-        };
+        let frame_start = self.consumed.get();
+        if consumed != frame_length + 1 {
+            return Err(ArtifactStreamError::Framing(FrameError::Incomplete));
+        }
         Ok(Some((frame_start, frame_start + frame_length)))
     }
 
-    fn has_complete_frame(&mut self) -> Result<bool, ArtifactStreamError> {
-        if matches!(self.scan_state, ScanState::FrameReady { .. }) {
+    fn has_complete_frame(&self) -> Result<bool, ArtifactStreamError> {
+        if matches!(self.scan_state.get(), ScanState::FrameReady { .. }) {
             return Ok(true);
         }
-        let ScanState::Scanning { scanned } = self.scan_state else {
+        let ScanState::Scanning { scanned } = self.scan_state.get() else {
             return Ok(true);
         };
-        let scan_start = scanned.max(self.consumed);
+        let consumed = self.consumed.get();
+        let scan_start = scanned.max(consumed);
         let newline_offset = self.buffer[scan_start..self.buffered]
             .iter()
             .position(|byte| *byte == b'\n')
             .map(|relative_offset| scan_start + relative_offset);
         if let Some(newline_offset) = newline_offset {
-            let frame_length = newline_offset - self.consumed;
+            let frame_length = newline_offset - consumed;
             if frame_length > self.max_record_bytes {
                 Err(ArtifactStreamError::Framing(FrameError::FrameTooLarge {
                     len: frame_length,
                 }))
             } else {
-                self.scan_state = ScanState::FrameReady { frame_length };
+                self.scan_state.set(ScanState::FrameReady { frame_length });
                 Ok(true)
             }
         } else {
-            let pending_length = self.buffered - self.consumed;
+            let pending_length = self.buffered - consumed;
             if pending_length > self.max_record_bytes {
                 return Err(ArtifactStreamError::Framing(FrameError::FrameTooLarge {
                     len: pending_length,
                 }));
             }
-            self.scan_state = ScanState::Scanning {
+            self.scan_state.set(ScanState::Scanning {
                 scanned: self.buffered,
-            };
+            });
             Ok(false)
         }
     }
 
     /// Marks the byte source complete and rejects leftover partial or undrained records.
     pub fn finish(&mut self) -> Result<(), ArtifactStreamError> {
-        if self.source_state == SourceState::Failed {
+        if self.source_state.get() == SourceState::Failed {
             return Err(ArtifactStreamError::Poisoned);
         }
-        self.source_state = SourceState::Eof;
-        let pending_length = self.buffered - self.consumed;
+        self.source_state.set(SourceState::Eof);
+        let pending_length = self.buffered - self.consumed.get();
         if pending_length > 0 {
             if self.has_complete_frame()? {
                 return Err(ArtifactStreamError::UndrainedFrame {
@@ -320,19 +373,20 @@ impl<'buffer> ArtifactFramer<'buffer> {
     }
 
     fn compact(&mut self) {
-        if self.consumed == 0 {
+        let consumed = self.consumed.get();
+        if consumed == 0 {
             return;
         }
-        let remaining = self.buffered - self.consumed;
-        self.buffer.copy_within(self.consumed..self.buffered, 0);
-        let adjusted_scan_state = match self.scan_state {
+        let remaining = self.buffered - consumed;
+        self.buffer.copy_within(consumed..self.buffered, 0);
+        let adjusted_scan_state = match self.scan_state.get() {
             ScanState::Scanning { scanned } => ScanState::Scanning {
-                scanned: scanned.saturating_sub(self.consumed),
+                scanned: scanned.saturating_sub(consumed),
             },
             ScanState::FrameReady { frame_length } => ScanState::FrameReady { frame_length },
         };
         self.buffered = remaining;
-        self.consumed = 0;
-        self.scan_state = adjusted_scan_state;
+        self.consumed.set(0);
+        self.scan_state.set(adjusted_scan_state);
     }
 }
