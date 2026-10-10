@@ -13,6 +13,8 @@ pub mod build_defaults {
 pub mod artifact_stream;
 pub mod cli;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod coordinator;
+#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod discovery_stream;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod dispatch_stream;
