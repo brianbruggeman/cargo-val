@@ -37,10 +37,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run C45b stdout completion test
         shell: bash
-        run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib host::windows_pipe::tests::c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix -- --exact --nocapture --test-threads=1
+        run: bash .github/scripts/run-c45b-case.sh host::windows_pipe::tests::c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix
       - name: Run C45b cancellation completion test
         shell: bash
-        run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib host::windows_pipe::tests::c45b_retains_storage_until_cancel_completion -- --exact --nocapture --test-threads=1
+        run: bash .github/scripts/run-c45b-case.sh host::windows_pipe::tests::c45b_retains_storage_until_cancel_completion
       - name: Run C45b synchronous EOF test
         shell: bash
-        run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib host::windows_pipe::tests::c45b_reports_synchronous_eof_without_an_iocp_packet -- --exact --nocapture --test-threads=1
+        run: bash .github/scripts/run-c45b-case.sh host::windows_pipe::tests::c45b_reports_synchronous_eof_without_an_iocp_packet
