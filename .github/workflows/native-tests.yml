@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib -- --test-threads=1 --show-output > cargo-test-output.txt 2>&1
+          cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib -- --test-threads=1 > cargo-test-output.txt 2>&1
           test_status=$?
           cat cargo-test-output.txt
           if [ "$test_status" -ne 0 ]; then
