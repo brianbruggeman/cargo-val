@@ -27,9 +27,9 @@ pub enum WindowsPipePairError {
 
 /// Owns an overlapped parent reader and inheritable child writer.
 ///
-/// The parent endpoint is read by a Windows adapter that implements
-/// [Proxima's no_std `AsyncRead`](https://github.com/brianbruggeman/proxima/blob/6cffdc693bbd34483f1349f99b0ebd282c92fca4/proxima-core/src/io.rs#L57-L75)
-/// into caller-owned buffers. Pass `child_write_handle` into
+/// The parent endpoint is read by an overlapped completion adapter using
+/// stable caller-owned session storage. Its completed byte slice enters the
+/// existing Proxima `HostEventPipe` flow. Pass `child_write_handle` into
 /// [`super::windows_handles::WindowsHandleList`] for child stdio, then call
 /// [`Self::close_child_write_handle`] after process creation so child exit can
 /// produce EOF on the parent reader.
