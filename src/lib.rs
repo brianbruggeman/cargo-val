@@ -4,6 +4,7 @@ use core::str;
 
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod artifact_stream;
+pub mod cli;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod discovery_stream;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
