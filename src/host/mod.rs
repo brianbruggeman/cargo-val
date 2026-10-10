@@ -6,3 +6,10 @@ pub mod unix_pipe_pair;
     feature = "proxima-primitives"
 ))]
 pub mod unix_spawn;
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod linux_exit;
