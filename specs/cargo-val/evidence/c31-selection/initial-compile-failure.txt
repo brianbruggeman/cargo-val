@@ -1,0 +1,4 @@
+First attempt:
+`cargo test -p cargo-val --no-default-features --features proxima-codec,proxima-primitives --lib selection -- --nocapture --test-threads=1`
+
+Observed compiler error: `src/selection.rs` used `String` in the test module but did not import it; the three test fixture declarations failed with E0433. The correction was `use std::string::String` inside the `#[cfg(test)]` module. The production module remains no_std and does not import `String`.
