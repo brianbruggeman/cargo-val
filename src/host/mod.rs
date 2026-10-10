@@ -21,3 +21,10 @@ pub mod linux_exit;
     feature = "proxima-primitives"
 ))]
 pub mod linux_pipe;
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod macos_exit;
