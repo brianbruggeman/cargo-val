@@ -39,3 +39,6 @@ pub mod macos_pipe;
 
 #[cfg(target_os = "windows")]
 pub mod windows_handles;
+
+#[cfg(target_os = "windows")]
+pub mod windows_spawn;
