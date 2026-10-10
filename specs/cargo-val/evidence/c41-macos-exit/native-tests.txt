@@ -1,0 +1,28 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (/tmp/cargo_val_c41_target/debug/deps/cargo_val-bb9c09bb76fef032)
+
+running 21 tests
+test coordinator::tests::launches_before_eof_and_only_pulls_again_after_slot_retirement ... ok
+test coordinator::tests::rejects_delaying_first_launch_until_listing_eof ... ok
+test dispatch_stream::tests::dispatch_pipe_does_not_allocate_and_probe_detects_allocation ... ok
+test dispatch_stream::tests::resumes_listing_after_child_slot_is_retired ... ok
+test dispatch_stream::tests::stops_consuming_listing_when_live_child_slots_are_full ... ok
+test host::macos_exit::tests::c41_registration_race_control_observes_already_exited_child ... ok
+test host::macos_exit::tests::c41_wakes_for_child_exit_and_control_without_worker_threads ... ok
+test host::unix_pipe_pair::tests::c38a_creates_two_owned_nonblocking_pipe_pairs ... ok
+test host::unix_pipe_pair::tests::c38a_second_pipe_failure_drops_first_pair ... ok
+test host::unix_spawn::tests::c38b_failed_launch_closes_all_capture_descriptors ... ok
+test host::unix_spawn::tests::c38b_launches_exact_child_in_requested_directory_and_owns_reads ... ok
+test host::unix_spawn::tests::fixture_alpha ... ok
+test host_event::tests::events_borrow_output_and_reject_exit_for_retired_generation ... ok
+test outcomes::tests::accounts_every_discovered_test_and_rejects_duplicate_terminal_event ... ok
+test reporter::tests::writes_colored_and_plain_records_and_rejects_short_buffer_atomically ... ok
+test selection::tests::selection_modes_preserve_borrowed_names_and_reject_exact_nonmatch ... ok
+test test_intent::tests::intent_borrows_path_and_name_and_rejects_transposed_arguments ... ok
+test unix_arguments::tests::c37_lowers_exact_argv_and_child_environment_into_caller_storage ... ok
+test unix_arguments::tests::c37_rejects_an_interior_nul_in_the_test_name ... ok
+test unix_arguments::tests::c37_rejects_one_byte_short_argv_pointer_storage_before_writing ... ok
+test unix_arguments::tests::c37_rejects_one_byte_short_argv_storage_before_writing ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
