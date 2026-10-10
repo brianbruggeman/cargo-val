@@ -144,7 +144,7 @@ harness may use `std`; normal executable dependencies may not.
 | C0c / AC61 `feat: enter cargo-val on macos without std` | native macOS `native_entry macos_help` -> same 2 counts | C0b contract; E9 |
 | C0d / AC62 `feat: enter cargo-val on windows without std` | native Windows `native_entry windows_help` -> same 2 counts | C0b contract; E9 |
 | C1 / AC63 `build: pin no_std dependencies` | `dependency_source pinned_revisions` -> 4 identities match pins; `cargo tree -p cargo-val --target all --no-default-features -e normal,features --prefix depth | python3 specs/cargo-val/assert_no_std_graph.py` -> 0 normal `std` edges across 3 target families | P21,F9,C0d; scan the real graph, not a fixture |
-| C2 / AC64 `feat: decode one cargo artifact record` | `artifact_stream one_artifact` -> 1 executable emitted, 1 non-test artifact ignored | C1; E6 |
+| C2 / AC64 `feat: decode one cargo artifact record` | oracle gate: `python3 specs/cargo-val/validate_c2_oracle.py` -> 2 literal executables, 1 ignored literal non-test, 2 retained/live Cargo test artifacts, 1 retained/live non-test, 2 naive selectors rejected, 1 escaped-field spelling control, and 1 each escaped-path/borrowed/over-byte/over-depth/short-scratch oracle control; implementation: `cargo test -p cargo-val --no-default-features --test artifact_stream` -> 1 integration test, 4 executable outcomes, 2 ignored records (production and null executable), 3 input-borrowed outcomes, 1 scratch-decoded path, 0 allocations across 10 measured parser calls (4 executable, 2 ignored, 4 limit cases), 1 deliberate allocation detected, 1 nested unknown field skipped, 1 truncation rejection, 4 root/nested trailing-comma rejections, 1 duplicate-field rejection, 1 invalid-UTF8 rejection, and 1 rejection each for byte overflow, depth overflow, invalid depth limit, and short scratch | C1; `oracles/c2*.jsonl`, `evidence/c2/cargo-all-targets.jsonl`; parser depth cap 16; fixture caller limits 629 bytes / depth 4; runtime settings remain conflaguration-owned; Proxima JSON codec is std-gated; C3 will bound line storage with a caller-owned fixed buffer |
 | C3 / AC65 `feat: emit cargo artifact before eof` | `artifact_stream two_before_eof` -> 2 ordered executables, first before EOF, 0 suite vectors | C2; E6 |
 | C4 / AC66 `feat: parse one libtest listing line` | `discovery_stream one_line` -> 1 name emitted, 1 non-test line ignored | C3; E6 |
 | C5 / AC67 `feat: dispatch first test before listing eof` | `discovery_stream dispatch_before_eof` -> 1 dispatch before EOF, 3 names later, 0 suite vectors | C4; E6 |
@@ -298,11 +298,6 @@ not enter the shipped runtime graph.
 
 ## resume
 
-F0 and P0 are recorded in commits `949262a` and the commit containing this
-update. Their source gaps show the current conflaguration and Proxima contracts
-cannot satisfy the no_std child session requirement. Next run Q1-Q6 as native
-platform probes, then implement only the OS seams each probe establishes.
-F1, PR1, P2, and downstream cargo-val work remain gated by those results.
-Before each platform card, bind its fixture to literal expected events; retain
-raw events and account for both success and failure. Never mark a prospective
-count as observed.
+C2/AC64 has a bounded no_std Cargo artifact parser and retained literal, retained Cargo, and live Cargo controls. `evidence/c2/README.md` records the parser limits, allocation trace, and remaining binary/std boundary. The package integration command observed one parser test passed; the oracle counts are in `evidence/c2/oracle-validation-latest.jsonl`.
+
+C3/AC65 is next. It will add the caller-owned stream buffer and emit records before EOF.
