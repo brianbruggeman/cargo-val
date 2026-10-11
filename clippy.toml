@@ -1,0 +1,2 @@
+# fixed caller-owned storage lives on the main thread stack by design: no heap
+array-size-threshold = 1048576

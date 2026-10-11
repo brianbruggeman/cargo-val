@@ -7,10 +7,19 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
     INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::System::JobObjects::{
+    CreateJobObjectW, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
+};
 use windows_sys::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    UpdateProcThreadAttribute,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, UpdateProcThreadAttribute,
+};
+
+use crate::windows_arguments::{
+    WINDOWS_BELOW_NORMAL_PRIORITY, windows_attribute_count, windows_attribute_storage_words,
+    windows_job_limit_flags,
 };
 
 /// Owns one Win32 handle shared by child launch and host I/O adapters.
@@ -34,6 +43,67 @@ impl Drop for WindowsOwnedHandle {
     }
 }
 
+/// Failures while creating the run-scoped job object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsJobError {
+    /// `CreateJobObjectW` rejected the request.
+    CreateFailed { code: u32 },
+    /// `SetInformationJobObject` rejected the limit flags.
+    LimitFailed { code: u32 },
+    /// The limit structure size does not fit its `u32` length field.
+    SizeOverflow,
+}
+
+/// One job object per run; closing it kills every child created in it.
+///
+/// Children join at creation through `PROC_THREAD_ATTRIBUTE_JOB_LIST` in
+/// [`WindowsHandleList::new_in_job`], so there is no suspend, assign, resume.
+pub struct WindowsJob {
+    handle: WindowsOwnedHandle,
+}
+
+impl WindowsJob {
+    /// Creates the job with kill-on-close, die-on-unhandled-exception, and below-normal priority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsJobError`] when Windows rejects job creation or its limits.
+    pub fn new() -> Result<Self, WindowsJobError> {
+        let raw = unsafe { CreateJobObjectW(core::ptr::null(), core::ptr::null()) };
+        if raw.is_null() {
+            return Err(WindowsJobError::CreateFailed {
+                code: unsafe { GetLastError() },
+            });
+        }
+        let handle = WindowsOwnedHandle::new(raw);
+        let limits_bytes = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+            .map_err(|_| WindowsJobError::SizeOverflow)?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = windows_job_limit_flags();
+        limits.BasicLimitInformation.PriorityClass = WINDOWS_BELOW_NORMAL_PRIORITY;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle.raw(),
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                limits_bytes,
+            )
+        };
+        if configured == 0 {
+            return Err(WindowsJobError::LimitFailed {
+                code: unsafe { GetLastError() },
+            });
+        }
+        Ok(Self { handle })
+    }
+
+    /// Returns the borrowed job handle for membership queries.
+    #[must_use]
+    pub const fn raw(&self) -> HANDLE {
+        self.handle.raw()
+    }
+}
+
 /// Failures while constructing the bounded child stdio handle list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsHandleListError {
@@ -50,6 +120,8 @@ pub enum WindowsHandleListError {
     InitializeFailed { code: u32 },
     /// The operating system rejected the three-handle list.
     UpdateFailed { code: u32 },
+    /// The operating system rejected the job list.
+    JobUpdateFailed { code: u32 },
     /// A storage-size calculation overflowed.
     SizeOverflow,
 }
@@ -58,14 +130,40 @@ pub enum WindowsHandleListError {
 pub struct WindowsHandleList<'storage> {
     storage: &'storage mut [MaybeUninit<usize>],
     handles: &'storage [HANDLE; 3],
+    job: Option<&'storage WindowsJob>,
     startup_info: STARTUPINFOEXW,
     initialized: bool,
 }
 
 impl<'storage> WindowsHandleList<'storage> {
-    /// Builds a one-attribute handle whitelist without allocating storage.
+    /// Builds a one-attribute handle whitelist without allocating storage; children are in no job.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsHandleListError`] when a handle is invalid or not inheritable, attribute storage is too small, or Windows rejects the attribute list.
     pub fn new(
         handles: &'storage [HANDLE; 3],
+        storage: &'storage mut [MaybeUninit<usize>],
+    ) -> Result<Self, WindowsHandleListError> {
+        Self::build(handles, None, storage)
+    }
+
+    /// Builds the handle whitelist plus a job list so the child is created inside `job`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsHandleListError`] when a handle is invalid or not inheritable, attribute storage is too small, or Windows rejects either attribute.
+    pub fn new_in_job(
+        handles: &'storage [HANDLE; 3],
+        job: &'storage WindowsJob,
+        storage: &'storage mut [MaybeUninit<usize>],
+    ) -> Result<Self, WindowsHandleListError> {
+        Self::build(handles, Some(job), storage)
+    }
+
+    fn build(
+        handles: &'storage [HANDLE; 3],
+        job: Option<&'storage WindowsJob>,
         storage: &'storage mut [MaybeUninit<usize>],
     ) -> Result<Self, WindowsHandleListError> {
         for (index, handle) in handles.iter().enumerate() {
@@ -73,7 +171,7 @@ impl<'storage> WindowsHandleList<'storage> {
                 return Err(WindowsHandleListError::InvalidHandle { index });
             }
             let mut flags = 0;
-            if unsafe { GetHandleInformation(*handle, &mut flags) } == 0 {
+            if unsafe { GetHandleInformation(*handle, &raw mut flags) } == 0 {
                 return Err(WindowsHandleListError::InvalidHandle { index });
             }
             if flags & HANDLE_FLAG_INHERIT == 0 {
@@ -81,15 +179,21 @@ impl<'storage> WindowsHandleList<'storage> {
             }
         }
 
+        let attribute_count = windows_attribute_count(job.is_some());
         let mut required_bytes = 0;
         unsafe {
-            InitializeProcThreadAttributeList(core::ptr::null_mut(), 1, 0, &mut required_bytes);
+            InitializeProcThreadAttributeList(
+                core::ptr::null_mut(),
+                attribute_count,
+                0,
+                &raw mut required_bytes,
+            );
         }
         let available_bytes = storage
             .len()
             .checked_mul(size_of::<usize>())
             .ok_or(WindowsHandleListError::SizeOverflow)?;
-        if required_bytes == 0 || available_bytes < required_bytes {
+        if required_bytes == 0 || storage.len() < windows_attribute_storage_words(required_bytes) {
             return Err(WindowsHandleListError::AttributeStorageTooSmall {
                 required_bytes,
                 available_bytes,
@@ -97,8 +201,14 @@ impl<'storage> WindowsHandleList<'storage> {
         }
 
         let attribute_list = storage.as_mut_ptr().cast::<c_void>();
-        if unsafe { InitializeProcThreadAttributeList(attribute_list, 1, 0, &mut required_bytes) }
-            == 0
+        if unsafe {
+            InitializeProcThreadAttributeList(
+                attribute_list,
+                attribute_count,
+                0,
+                &raw mut required_bytes,
+            )
+        } == 0
         {
             return Err(WindowsHandleListError::InitializeFailed {
                 code: unsafe { GetLastError() },
@@ -120,9 +230,27 @@ impl<'storage> WindowsHandleList<'storage> {
             unsafe { DeleteProcThreadAttributeList(attribute_list) };
             return Err(WindowsHandleListError::UpdateFailed { code });
         }
+        if let Some(job) = job
+            && unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                    (&raw const job.handle.0).cast(),
+                    size_of::<HANDLE>(),
+                    core::ptr::null_mut(),
+                    core::ptr::null(),
+                )
+            } == 0
+        {
+            let code = unsafe { GetLastError() };
+            unsafe { DeleteProcThreadAttributeList(attribute_list) };
+            return Err(WindowsHandleListError::JobUpdateFailed { code });
+        }
 
         let mut startup_info = STARTUPINFOEXW::default();
-        startup_info.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup_info.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>())
+            .map_err(|_| WindowsHandleListError::SizeOverflow)?;
         startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         startup_info.StartupInfo.hStdInput = handles[0];
         startup_info.StartupInfo.hStdOutput = handles[1];
@@ -131,6 +259,7 @@ impl<'storage> WindowsHandleList<'storage> {
         Ok(Self {
             storage,
             handles,
+            job,
             startup_info,
             initialized: true,
         })
@@ -140,6 +269,12 @@ impl<'storage> WindowsHandleList<'storage> {
     #[must_use]
     pub const fn startup_info(&self) -> &STARTUPINFOEXW {
         &self.startup_info
+    }
+
+    /// Returns the job every child created from this list joins, if any.
+    #[must_use]
+    pub const fn job(&self) -> Option<&WindowsJob> {
+        self.job
     }
 
     /// Returns the exact three handles admitted for child inheritance.
@@ -178,11 +313,8 @@ pub(crate) mod tests {
         STARTUPINFOEXW, STARTUPINFOW, WaitForSingleObject,
     };
 
-    use proxima_primitives::pipe::Pipe;
-
     use super::{WindowsHandleList, WindowsHandleListError};
     use crate::ExecutablePath;
-    use crate::test_intent::{ExactTestIntentInput, ExactTestIntentPipe};
     use crate::windows_arguments::lower_windows_arguments;
 
     pub(crate) const CHILD_PROBE_NAME: &str = "host::windows_handles::tests::child_handle_probe";
@@ -223,17 +355,9 @@ pub(crate) mod tests {
         executable: &'executable str,
         test_name: &'name str,
     ) -> crate::test_intent::ExactTestIntent<'executable, 'static, 'name> {
-        let pipe = ExactTestIntentPipe::new();
-        let future = pipe.call(ExactTestIntentInput {
+        crate::test_intent::ExactTestIntent {
             executable: ExecutablePath::Borrowed(executable),
             test_name,
-        });
-        let mut future = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        match core::future::Future::poll(future.as_mut(), &mut context) {
-            core::task::Poll::Ready(Ok(intent)) => intent,
-            core::task::Poll::Ready(Err(error)) => match error {},
-            core::task::Poll::Pending => panic!("intent Pipe unexpectedly yielded"),
         }
     }
 

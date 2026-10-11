@@ -38,6 +38,25 @@ impl<'port> MacosPipeReader<'port> {
         self.token
     }
 
+    /// Suspends source readiness while the caller consumes the current artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
+    pub fn pause(&self) -> Result<(), c_int> {
+        self.port.unwatch_descriptor(self.descriptor.raw())
+    }
+
+    /// Registers the same descriptor after the caller has consumed that artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
+    pub fn resume(&mut self) -> Result<(), c_int> {
+        self.token = self.port.watch_descriptor(self.descriptor.raw())?;
+        Ok(())
+    }
+
     /// Wakes this pending reader after its token appears in a reactor batch.
     pub fn wake_read_ready(&mut self) -> bool {
         if let Some(waker) = self.waker.take() {
@@ -69,9 +88,11 @@ impl AsyncRead for MacosPipeReader<'_> {
                     buffer.len(),
                 )
             };
-            if read > 0 {
+            if let Ok(count) = usize::try_from(read)
+                && count > 0
+            {
                 reader.waker = None;
-                return Poll::Ready(Ok(read as usize));
+                return Poll::Ready(Ok(count));
             }
             if read == 0 {
                 if let Err(code) = reader.port.unwatch_descriptor(reader.descriptor.raw()) {
@@ -129,6 +150,94 @@ mod tests {
         }
     }
 
+    fn run_pipe_child(pipes: &UnixPipePair, release_barrier: [libc::c_int; 2]) -> ! {
+        unsafe {
+            libc::close(release_barrier[1]);
+            libc::close(pipes.stdout().parent_read().raw());
+            libc::close(pipes.stderr().parent_read().raw());
+            let mut release = 0_u8;
+            let count = libc::read(
+                release_barrier[0],
+                (&raw mut release).cast(),
+                size_of_val(&release),
+            );
+            libc::close(release_barrier[0]);
+            if count != 1 {
+                libc::_exit(1);
+            }
+        }
+        let standard_output = b"out";
+        let standard_error = b"err";
+        let stdout_count = unsafe {
+            libc::write(
+                pipes.stdout().child_write().raw(),
+                standard_output.as_ptr().cast(),
+                standard_output.len(),
+            )
+        };
+        let stderr_count = unsafe {
+            libc::write(
+                pipes.stderr().child_write().raw(),
+                standard_error.as_ptr().cast(),
+                standard_error.len(),
+            )
+        };
+        unsafe {
+            libc::_exit(i32::from(
+                stdout_count != standard_output.len().cast_signed()
+                    || stderr_count != standard_error.len().cast_signed(),
+            ));
+        }
+    }
+
+    fn release_child(barrier_write: libc::c_int) {
+        let release_byte = *b"x";
+        let release_count = unsafe {
+            libc::write(
+                barrier_write,
+                release_byte.as_ptr().cast(),
+                release_byte.len(),
+            )
+        };
+        unsafe { libc::close(barrier_write) };
+        assert_eq!(release_count, 1);
+    }
+
+    fn assert_pending(reader: &mut MacosPipeReader<'_>, context: &mut Context<'_>) {
+        let mut pending_probe = [0_u8; 1];
+        assert!(matches!(
+            Pin::new(reader).poll_read(context, &mut pending_probe),
+            Poll::Pending
+        ));
+    }
+
+    fn read_step(
+        reader: &mut MacosPipeReader<'_>,
+        context: &mut Context<'_>,
+        payload: &mut [u8; 3],
+        length: &mut usize,
+        chunk_limit: usize,
+    ) -> (bool, Option<usize>) {
+        let mut eof_probe = [0_u8; 1];
+        let destination = if *length < payload.len() {
+            let output_limit = (*length + chunk_limit).min(payload.len());
+            &mut payload[*length..output_limit]
+        } else {
+            &mut eof_probe[..]
+        };
+        match Pin::new(reader).poll_read(context, destination) {
+            Poll::Ready(Ok(0)) => (true, None),
+            Poll::Ready(Ok(count)) if *length < payload.len() => {
+                let first_read = (*length == 0).then_some(count);
+                *length += count;
+                (false, first_read)
+            }
+            Poll::Ready(Ok(count)) => panic!("unexpected stream bytes: {count}"),
+            Poll::Ready(Err(code)) => panic!("stream read failed: {code}"),
+            Poll::Pending => (false, None),
+        }
+    }
+
     #[test]
     fn c42_reads_both_child_streams_from_the_shared_kqueue() {
         let pipes = UnixPipePair::new().expect("stdout and stderr pipes are created");
@@ -137,48 +246,12 @@ mod tests {
         let process_id = unsafe { libc::fork() };
         assert!(process_id >= 0, "pipe fixture child forks");
         if process_id == 0 {
-            unsafe {
-                libc::close(release_barrier[1]);
-                libc::close(pipes.stdout().parent_read().raw());
-                libc::close(pipes.stderr().parent_read().raw());
-                let mut release = 0_u8;
-                let count = libc::read(
-                    release_barrier[0],
-                    (&mut release as *mut u8).cast(),
-                    size_of_val(&release),
-                );
-                libc::close(release_barrier[0]);
-                if count != 1 {
-                    libc::_exit(1);
-                }
-            }
-            let standard_output = b"out";
-            let standard_error = b"err";
-            let stdout_count = unsafe {
-                libc::write(
-                    pipes.stdout().child_write().raw(),
-                    standard_output.as_ptr().cast(),
-                    standard_output.len(),
-                )
-            };
-            let stderr_count = unsafe {
-                libc::write(
-                    pipes.stderr().child_write().raw(),
-                    standard_error.as_ptr().cast(),
-                    standard_error.len(),
-                )
-            };
-            unsafe {
-                libc::_exit(i32::from(
-                    stdout_count != standard_output.len() as isize
-                        || stderr_count != standard_error.len() as isize,
-                ));
-            }
+            run_pipe_child(&pipes, release_barrier);
         }
 
         unsafe { libc::close(release_barrier[0]) };
         let (stdout_descriptor, stderr_descriptor) = pipes.into_parent_reads();
-        let mut port = MacosExitPort::new().expect("shared kqueue port is created");
+        let port = MacosExitPort::new().expect("shared kqueue port is created");
         let stdout_token = port
             .watch_descriptor(stdout_descriptor.raw())
             .expect("stdout reader registers with shared kqueue");
@@ -193,41 +266,27 @@ mod tests {
         let wake_count = Arc::new(WakeCount(AtomicUsize::new(0)));
         let reader_waker = Waker::from(Arc::clone(&wake_count));
         let mut context = Context::from_waker(&reader_waker);
-        let mut pending_probe = [0_u8; 1];
-        assert!(matches!(
-            Pin::new(&mut stdout).poll_read(&mut context, &mut pending_probe),
-            Poll::Pending
-        ));
-        assert!(matches!(
-            Pin::new(&mut stderr).poll_read(&mut context, &mut pending_probe),
-            Poll::Pending
-        ));
-        let mut events = [MacosExitEvent { token: u64::MAX }; 4];
+        assert_pending(&mut stdout, &mut context);
+        assert_pending(&mut stderr, &mut context);
+        let mut events = [MacosExitEvent {
+            token: u64::MAX,
+            ..MacosExitEvent::default()
+        }; 4];
         let premature_events = port
             .poll(&mut events)
             .expect("held sources have no readiness");
         assert_eq!(premature_events, 0);
-        let release_byte = [b'x'];
-        let release_count = unsafe {
-            libc::write(
-                release_barrier[1],
-                release_byte.as_ptr().cast(),
-                release_byte.len(),
-            )
-        };
-        unsafe { libc::close(release_barrier[1]) };
-        assert_eq!(release_count, 1);
+        release_child(release_barrier[1]);
 
         let mut stdout_payload = [0_u8; 3];
         let mut stderr_payload = [0_u8; 3];
-        let mut eof_probe = [0_u8; 1];
+        let stderr_chunk_limit = stderr_payload.len();
         let mut stdout_length = 0;
         let mut stdout_first_read = 0;
         let mut stderr_length = 0;
         let mut stdout_eof = false;
         let mut stderr_eof = false;
-        let mut stdout_wakes = 0;
-        let mut stderr_wakes = 0;
+        let (mut stdout_wakes, mut stderr_wakes) = (0, 0);
         let mut child_exits = 0;
         let mut batches = 0;
         let mut child_status = None;
@@ -237,42 +296,28 @@ mod tests {
             for event in events.iter().take(event_count) {
                 if event.token == stdout.token() {
                     stdout_wakes += usize::from(stdout.wake_read_ready());
-                    let destination = if stdout_length < stdout_payload.len() {
-                        let output_limit = (stdout_length + 2).min(stdout_payload.len());
-                        &mut stdout_payload[stdout_length..output_limit]
-                    } else {
-                        &mut eof_probe[..]
-                    };
-                    match Pin::new(&mut stdout).poll_read(&mut context, destination) {
-                        Poll::Ready(Ok(0)) => stdout_eof = true,
-                        Poll::Ready(Ok(count)) if stdout_length < stdout_payload.len() => {
-                            if stdout_length == 0 {
-                                stdout_first_read = count;
-                            }
-                            stdout_length += count;
-                        }
-                        Poll::Ready(Ok(count)) => panic!("unexpected stdout bytes: {count}"),
-                        Poll::Ready(Err(code)) => panic!("stdout read failed: {code}"),
-                        Poll::Pending => {}
-                    }
+                    let (eof, first_read) = read_step(
+                        &mut stdout,
+                        &mut context,
+                        &mut stdout_payload,
+                        &mut stdout_length,
+                        2,
+                    );
+                    stdout_eof |= eof;
+                    stdout_first_read = first_read.unwrap_or(stdout_first_read);
                 } else if event.token == stderr.token() {
                     stderr_wakes += usize::from(stderr.wake_read_ready());
-                    let destination = if stderr_length < stderr_payload.len() {
-                        &mut stderr_payload[stderr_length..]
-                    } else {
-                        &mut eof_probe[..]
-                    };
-                    match Pin::new(&mut stderr).poll_read(&mut context, destination) {
-                        Poll::Ready(Ok(0)) => stderr_eof = true,
-                        Poll::Ready(Ok(count)) if stderr_length < stderr_payload.len() => {
-                            stderr_length += count;
-                        }
-                        Poll::Ready(Ok(count)) => panic!("unexpected stderr bytes: {count}"),
-                        Poll::Ready(Err(code)) => panic!("stderr read failed: {code}"),
-                        Poll::Pending => {}
-                    }
+                    let (eof, _) = read_step(
+                        &mut stderr,
+                        &mut context,
+                        &mut stderr_payload,
+                        &mut stderr_length,
+                        stderr_chunk_limit,
+                    );
+                    stderr_eof |= eof;
                 } else if event.token == child_watch.token() {
                     child_exits += 1;
+                    child_watch.observe(event);
                     child_status = child_watch
                         .reap()
                         .expect("ready child reaps through nonblocking pid lifecycle");

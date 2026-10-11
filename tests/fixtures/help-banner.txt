@@ -6,3 +6,77 @@ Usage: cargo val [OPTIONS] [FILTER] [-- <TEST-ARGS>...]
 Options:
   -h, --help       Print help
   -V, --version    Print version
+      --exact      Match FILTER against the full test name
+      --fail-fast  Stop launching tests after the first failure (default)
+      --no-fail-fast
+                   Run every selected test; also forwarded to Cargo
+      --max-fail <N>
+                   Stop launching tests after N failures (N >= 1); --fail-fast is N = 1
+      --no-tests <fail|warn|pass>
+                   What a run that selects zero tests does (default: fail)
+  -E, --filterset <EXPR>
+                   Select tests with a nextest filterset subset (see below)
+
+Cargo options such as -p, --package, --test, --lib, -F, --features, -m,
+--manifest-path, --target, --profile, and -j/--jobs are forwarded to Cargo.
+-j/--jobs keeps Cargo's meaning (build jobs).
+
+Test arguments after `--`:
+  --ignored                  Run only ignored tests
+  --include-ignored          Run ignored and regular tests (not with --ignored)
+  --test-threads <N>         Live test processes at once; also --test-threads=<N>
+
+Test concurrency, highest precedence first (valid range 1..=64):
+  1. --test-threads <N> after `--`
+  2. RUST_TEST_THREADS
+  3. CARGO_VAL_JOBS
+  4. the build-time default (CARGO_VAL_BUILD_JOBS)
+
+Stop policy, highest precedence first (default: fail fast, --max-fail 1):
+  1. --fail-fast, --no-fail-fast, or --max-fail <N> (the last one given wins)
+  2. CARGO_VAL_MAX_FAIL=<N>
+  3. CARGO_VAL_FAIL_FAST=<true|false>
+On a trip, no further tests launch, children already running finish normally,
+and the report counts listed tests that were not run.
+
+No-tests policy, highest precedence first (default: fail):
+  1. --no-tests <fail|warn|pass>
+  2. CARGO_VAL_NO_TESTS
+fail and warn print "no tests to run" with the selection to stderr; fail exits 4,
+warn and pass exit 0.
+
+Ignored tests: `#[ignore]`d tests are listed per test binary with `--list --ignored`, are
+not launched by default, and are reported IGNORED and counted separately. CARGO_VAL_IGNORED
+=<skip|only|include> sets the mode; --ignored / --include-ignored win. Each launched test
+is classified by its libtest `test result:` line: 0 passed is never PASS, and an exact
+launch that ran no test body is an error naming the test.
+
+Filterset (-E, --filterset, or CARGO_VAL_FILTERSET; the flag wins): predicates test(),
+binary(), package(), all(), none(); operators and/&, or/|/+, not/!, - (difference) and
+parentheses (not binds tighter than and/-, which bind tighter than or). Matchers: bare
+text (contains for test(), glob for binary() and package(), as in nextest), ~contains,
+=exact, #glob (* ? [..] [!..]). /regex/ and glob {a,b} are not supported and fail with a
+caret before anything is built. Excluded tests are never launched and count as filtered.
+
+Test executables and bins: a test or bench executable is not listed or launched until
+every bin target of its package has been built, so env!("CARGO_BIN_EXE_<name>") exists.
+The bin set comes from one `cargo metadata --no-deps`; without it the executable waits
+for build-finished. CARGO_VAL_BIN_GATE=off disables the wait.
+
+Summary: after the results, one line per test binary, then a total line with wall time:
+  <binary>: discovered N, passed P, failed F, ignored I, filtered X
+  total: discovered N, passed P, failed F, ignored I, filtered X, wall S.mmms
+The binary id is the package name for a library and package::target otherwise. A binary
+whose counts do not add up is an error naming it. A run that executed no test (passed +
+failed = 0) follows --no-tests.
+
+Exit status: 0 all selected tests passed, 1 a test failed, 2 invalid arguments or
+settings or a driver failure, 4 no tests to run under the fail policy.
+
+Doc tests: the default selection also runs `cargo test --doc` as one child at nice 10,
+concurrently with the other tests; its doctests are reported and counted like any test.
+--doc runs only doc tests. Any target flag (--lib, --bins, --bin, --examples, --example,
+--tests, --test, --benches, --bench, --all-targets) without --doc excludes them, as in
+Cargo. A package with no library target skips them with a notice; a run of 0 doc tests
+prints "doc tests: running 0 tests". On a stop-policy trip the doc child is interrupted
+only if it has not printed "running N tests"; otherwise it finishes normally.

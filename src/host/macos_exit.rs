@@ -1,14 +1,17 @@
 //! macOS child-exit readiness through one coordinator-owned kqueue.
 
+use core::cell::Cell;
 use core::ffi::c_int;
 use core::mem::MaybeUninit;
 use core::ptr::{null, null_mut};
 
 /// One process-exit or coordinator-wake record written into caller storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MacosExitEvent {
     /// Monotonic process token, or zero for the coordinator wake source.
     pub token: u64,
+    /// Raw wait status carried by a delivered `NOTE_EXIT`, such as `0x700` for exit code 7.
+    pub exit_status: Option<i32>,
 }
 
 /// A nonblocking terminal status for one child process.
@@ -20,12 +23,21 @@ pub struct MacosExitStatus {
     pub signal: Option<i32>,
 }
 
+/// Whether kqueue has delivered this child's exit, which makes a blocking reap bounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchState {
+    Live,
+    Exited { raw_status: i32 },
+    Reaped,
+}
+
 /// One child identity registered with a [`MacosExitPort`].
 #[derive(Debug)]
 pub struct MacosProcessWatch {
     process_id: libc::pid_t,
     token: u64,
-    reaped: bool,
+    registered: bool,
+    state: WatchState,
     pending_status: Option<MacosExitStatus>,
 }
 
@@ -33,11 +45,15 @@ pub struct MacosProcessWatch {
 #[derive(Debug)]
 pub struct MacosExitPort {
     descriptor: c_int,
-    next_token: u64,
+    next_token: Cell<u64>,
 }
 
 impl MacosExitPort {
     /// Creates a kqueue and registers one user event for remote coordinator wakes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
     pub fn new() -> Result<Self, c_int> {
         let descriptor = unsafe { libc::kqueue() };
         if descriptor < 0 {
@@ -45,99 +61,159 @@ impl MacosExitPort {
         }
         let port = Self {
             descriptor,
-            next_token: 1,
+            next_token: Cell::new(1),
         };
-        let mut change = event(0, libc::EVFILT_USER, libc::EV_ADD | libc::EV_CLEAR, 0);
-        if unsafe { libc::kevent(port.descriptor, &mut change, 1, null_mut(), 0, null()) } < 0 {
+        let change = event(0, libc::EVFILT_USER, libc::EV_ADD | libc::EV_CLEAR, 0);
+        if unsafe { libc::kevent(port.descriptor, &raw const change, 1, null_mut(), 0, null()) } < 0
+        {
             return Err(last_error());
         }
         Ok(port)
     }
 
     /// Registers a child exit without owning or blocking on the process handle.
-    pub fn watch(&mut self, process_id: libc::pid_t) -> Result<MacosProcessWatch, c_int> {
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
+    pub fn watch(&self, process_id: libc::pid_t) -> Result<MacosProcessWatch, c_int> {
         if process_id <= 0 {
             return Err(libc::EINVAL);
         }
         let token = self.allocate_token()?;
         let mut change = event(
-            process_id as usize,
+            identity(process_id)?,
             libc::EVFILT_PROC,
             libc::EV_ADD | libc::EV_ONESHOT,
-            libc::NOTE_EXIT,
+            libc::NOTE_EXIT | libc::NOTE_EXITSTATUS,
         );
-        change.udata = token as usize as *mut _;
-        if unsafe { libc::kevent(self.descriptor, &mut change, 1, null_mut(), 0, null()) } < 0 {
+        change.udata = token_pointer(token)?;
+        if unsafe { libc::kevent(self.descriptor, &raw const change, 1, null_mut(), 0, null()) } < 0
+        {
             let code = last_error();
             if code != libc::ESRCH {
                 return Err(code);
             }
-            let Some(status) = try_reap(process_id)? else {
-                return Err(code);
-            };
+            // an exiting child can be invisible to kqueue before waitpid can reap it.
+            let pending_status = try_reap(process_id)?;
             return Ok(MacosProcessWatch {
                 process_id,
                 token,
-                reaped: false,
-                pending_status: Some(status),
+                registered: false,
+                state: WatchState::Live,
+                pending_status,
             });
         }
         let pending_status = try_reap(process_id)?;
         if pending_status.is_some() {
-            let mut remove = event(process_id as usize, libc::EVFILT_PROC, libc::EV_DELETE, 0);
+            let remove = event(identity(process_id)?, libc::EVFILT_PROC, libc::EV_DELETE, 0);
             unsafe {
-                libc::kevent(self.descriptor, &mut remove, 1, null_mut(), 0, null());
+                libc::kevent(self.descriptor, &raw const remove, 1, null_mut(), 0, null());
             }
         }
         Ok(MacosProcessWatch {
             process_id,
             token,
-            reaped: false,
+            registered: pending_status.is_none(),
+            state: WatchState::Live,
             pending_status,
         })
     }
 
     /// Registers a nonblocking pipe descriptor in the shared process reactor.
-    pub fn watch_descriptor(&mut self, descriptor: c_int) -> Result<u64, c_int> {
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
+    pub fn watch_descriptor(&self, descriptor: c_int) -> Result<u64, c_int> {
         if descriptor < 0 {
             return Err(libc::EBADF);
         }
         let token = self.allocate_token()?;
-        let mut change = event(descriptor as usize, libc::EVFILT_READ, libc::EV_ADD, 0);
-        change.udata = token as usize as *mut _;
-        if unsafe { libc::kevent(self.descriptor, &mut change, 1, null_mut(), 0, null()) } < 0 {
+        let mut change = event(identity(descriptor)?, libc::EVFILT_READ, libc::EV_ADD, 0);
+        change.udata = token_pointer(token)?;
+        if unsafe { libc::kevent(self.descriptor, &raw const change, 1, null_mut(), 0, null()) } < 0
+        {
             return Err(last_error());
         }
         Ok(token)
     }
 
     /// Removes a read source at EOF so kqueue cannot repeatedly report hangup.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
     pub fn unwatch_descriptor(&self, descriptor: c_int) -> Result<(), c_int> {
-        let mut change = event(descriptor as usize, libc::EVFILT_READ, libc::EV_DELETE, 0);
-        if unsafe { libc::kevent(self.descriptor, &mut change, 1, null_mut(), 0, null()) } < 0 {
+        let change = event(identity(descriptor)?, libc::EVFILT_READ, libc::EV_DELETE, 0);
+        if unsafe { libc::kevent(self.descriptor, &raw const change, 1, null_mut(), 0, null()) } < 0
+        {
             return Err(last_error());
         }
         Ok(())
     }
 
-    fn allocate_token(&mut self) -> Result<u64, c_int> {
-        let token = self.next_token;
-        self.next_token = token.checked_add(1).ok_or(libc::EOVERFLOW)?;
+    /// Removes a child exit source after its status was collected elsewhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
+    pub fn unwatch_process(&self, process_id: libc::pid_t) -> Result<(), c_int> {
+        let change = event(identity(process_id)?, libc::EVFILT_PROC, libc::EV_DELETE, 0);
+        if unsafe { libc::kevent(self.descriptor, &raw const change, 1, null_mut(), 0, null()) } < 0
+        {
+            let code = last_error();
+            if code != libc::ENOENT && code != libc::ESRCH {
+                return Err(code);
+            }
+        }
+        Ok(())
+    }
+
+    fn allocate_token(&self) -> Result<u64, c_int> {
+        let token = self.next_token.get();
+        self.next_token
+            .set(token.checked_add(1).ok_or(libc::EOVERFLOW)?);
         Ok(token)
     }
 
     /// Parks the coordinator for a process exit or remote wake event.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
     pub fn wait(&self, events: &mut [MacosExitEvent]) -> Result<usize, c_int> {
         self.collect(events, null())
     }
 
+    /// Waits for readiness with a bounded child-exit observation interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
+    pub fn wait_for(
+        &self,
+        events: &mut [MacosExitEvent],
+        milliseconds: u32,
+    ) -> Result<usize, c_int> {
+        let timeout = libc::timespec {
+            tv_sec: (milliseconds / 1000).into(),
+            tv_nsec: ((milliseconds % 1000) * 1_000_000).into(),
+        };
+        self.collect(events, &raw const timeout)
+    }
+
     /// Drains currently ready kqueue records without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
     pub fn poll(&self, events: &mut [MacosExitEvent]) -> Result<usize, c_int> {
         let timeout = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        self.collect(events, &timeout)
+        self.collect(events, &raw const timeout)
     }
 
     fn collect(
@@ -150,7 +226,8 @@ impl MacosExitPort {
         }
         let mut kernel_events: [MaybeUninit<libc::kevent>; 64] =
             [const { MaybeUninit::uninit() }; 64];
-        let limit = events.len().min(kernel_events.len()) as c_int;
+        let limit =
+            c_int::try_from(events.len().min(kernel_events.len())).map_err(|_| libc::EINVAL)?;
         let ready = unsafe {
             libc::kevent(
                 self.descriptor,
@@ -161,26 +238,26 @@ impl MacosExitPort {
                 timeout,
             )
         };
-        if ready < 0 {
-            return Err(last_error());
-        }
-        for (destination, source) in events
-            .iter_mut()
-            .zip(kernel_events.iter())
-            .take(ready as usize)
-        {
+        let ready = usize::try_from(ready).map_err(|_| last_error())?;
+        for (destination, source) in events.iter_mut().zip(kernel_events.iter()).take(ready) {
             let source = unsafe { source.assume_init_ref() };
             *destination = MacosExitEvent {
                 token: source.udata as usize as u64,
+                exit_status: exit_status(source),
             };
         }
-        Ok(ready as usize)
+        Ok(ready)
     }
 
     /// Publishes a coalescing user event to release the coordinator park.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
     pub fn wake(&self) -> Result<(), c_int> {
-        let mut change = event(0, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER);
-        if unsafe { libc::kevent(self.descriptor, &mut change, 1, null_mut(), 0, null()) } < 0 {
+        let change = event(0, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER);
+        if unsafe { libc::kevent(self.descriptor, &raw const change, 1, null_mut(), 0, null()) } < 0
+        {
             return Err(last_error());
         }
         Ok(())
@@ -196,24 +273,53 @@ impl Drop for MacosExitPort {
 }
 
 impl MacosProcessWatch {
+    /// Whether kqueue still owns a process-exit notification for this child.
+    #[must_use]
+    pub const fn registered(&self) -> bool {
+        self.registered
+    }
+
     /// Caller-owned event identity registered for this child.
     #[must_use]
     pub const fn token(&self) -> u64 {
         self.token
     }
 
-    /// Returns a terminal process record only after exit, without blocking.
+    /// Records a delivered `NOTE_EXIT` for this child so the next reap may block on `waitpid`.
+    ///
+    /// Events for other tokens and events without an exit status are ignored.
+    pub fn observe(&mut self, event: &MacosExitEvent) {
+        let (WatchState::Live, Some(raw_status)) = (self.state, event.exit_status) else {
+            return;
+        };
+        if event.token == self.token {
+            self.registered = false;
+            self.state = WatchState::Exited { raw_status };
+        }
+    }
+
+    /// Returns a terminal process record once the child has exited.
+    ///
+    /// Without an observed exit event this never blocks; after one, `waitpid` is bounded
+    /// because the process has already exited.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing kqueue or wait system call.
     pub fn reap(&mut self) -> Result<Option<MacosExitStatus>, c_int> {
-        if self.reaped {
-            return Ok(None);
-        }
-        if let Some(status) = self.pending_status.take() {
-            self.reaped = true;
-            return Ok(Some(status));
-        }
-        let status = try_reap(self.process_id)?;
+        let status = match self.state {
+            WatchState::Reaped => return Ok(None),
+            WatchState::Exited { raw_status } => {
+                release_zombie(self.process_id)?;
+                Some(decode_status(raw_status)?)
+            }
+            WatchState::Live => match self.pending_status.take() {
+                Some(status) => Some(status),
+                None => try_reap(self.process_id)?,
+            },
+        };
         if status.is_some() {
-            self.reaped = true;
+            self.state = WatchState::Reaped;
         }
         Ok(status)
     }
@@ -221,38 +327,71 @@ impl MacosProcessWatch {
 
 fn try_reap(process_id: libc::pid_t) -> Result<Option<MacosExitStatus>, c_int> {
     let mut raw_status = 0;
-    let result = unsafe { libc::waitpid(process_id, &mut raw_status, libc::WNOHANG) };
+    let result = unsafe { libc::waitpid(process_id, &raw mut raw_status, libc::WNOHANG) };
     if result == 0 {
         return Ok(None);
     }
     if result < 0 {
-        let code = last_error();
-        return Err(code);
+        return Err(last_error());
     }
+    decode_status(raw_status).map(Some)
+}
+
+fn release_zombie(process_id: libc::pid_t) -> Result<(), c_int> {
+    loop {
+        let result = unsafe { libc::waitpid(process_id, core::ptr::null_mut(), 0) };
+        if result >= 0 {
+            return Ok(());
+        }
+        let code = last_error();
+        if code != libc::EINTR {
+            return Err(code);
+        }
+    }
+}
+
+fn decode_status(raw_status: i32) -> Result<MacosExitStatus, c_int> {
     if libc::WIFEXITED(raw_status) {
-        return Ok(Some(MacosExitStatus {
+        return Ok(MacosExitStatus {
             code: Some(libc::WEXITSTATUS(raw_status)),
             signal: None,
-        }));
+        });
     }
     if libc::WIFSIGNALED(raw_status) {
-        return Ok(Some(MacosExitStatus {
+        return Ok(MacosExitStatus {
             code: None,
             signal: Some(libc::WTERMSIG(raw_status)),
-        }));
+        });
     }
     Err(libc::EIO)
 }
 
-fn event(ident: usize, filter: i16, flags: u16, fflags: u32) -> libc::kevent {
+fn exit_status(record: &libc::kevent) -> Option<i32> {
+    let delivered = record.filter == libc::EVFILT_PROC && record.fflags & libc::NOTE_EXIT != 0;
+    if !delivered {
+        return None;
+    }
+    i32::try_from(record.data).ok()
+}
+
+fn event(ident: usize, filter: i16, actions: u16, notes: u32) -> libc::kevent {
     libc::kevent {
         ident,
         filter,
-        flags,
-        fflags,
+        flags: actions,
+        fflags: notes,
         data: 0,
         udata: null_mut(),
     }
+}
+
+fn identity(value: c_int) -> Result<usize, c_int> {
+    usize::try_from(value).map_err(|_| libc::EINVAL)
+}
+
+fn token_pointer(token: u64) -> Result<*mut core::ffi::c_void, c_int> {
+    let address = usize::try_from(token).map_err(|_| libc::EOVERFLOW)?;
+    Ok(core::ptr::without_provenance_mut(address))
 }
 
 fn last_error() -> c_int {
@@ -263,7 +402,7 @@ fn last_error() -> c_int {
 mod tests {
     use core::mem::size_of_val;
 
-    use super::{MacosExitEvent, MacosExitPort};
+    use super::{MacosExitEvent, MacosExitPort, MacosProcessWatch, WatchState};
 
     struct HeldChild {
         process_id: libc::pid_t,
@@ -296,11 +435,8 @@ mod tests {
                 unsafe {
                     libc::close(release[1]);
                     let mut value = 0_u8;
-                    let count = libc::read(
-                        release[0],
-                        (&mut value as *mut u8).cast(),
-                        size_of_val(&value),
-                    );
+                    let count =
+                        libc::read(release[0], (&raw mut value).cast(), size_of_val(&value));
                     libc::close(release[0]);
                     libc::_exit(i32::from(count != 1));
                 }
@@ -314,7 +450,7 @@ mod tests {
         }
 
         fn release(&mut self) {
-            let value = [b'x'];
+            let value = *b"x";
             let count = unsafe { libc::write(self.release[1], value.as_ptr().cast(), value.len()) };
             unsafe { libc::close(self.release[1]) };
             self.release[1] = -1;
@@ -339,17 +475,23 @@ mod tests {
     #[test]
     fn c41_wakes_for_child_exit_and_control_without_worker_threads() {
         let mut child = HeldChild::new();
-        let mut port = MacosExitPort::new().expect("kqueue port is created");
+        let port = MacosExitPort::new().expect("kqueue port is created");
         let mut watch = port
             .watch(child.process_id)
             .expect("child exit is registered");
-        let mut events = [MacosExitEvent { token: u64::MAX }; 4];
+        let mut events = [MacosExitEvent {
+            token: u64::MAX,
+            ..MacosExitEvent::default()
+        }; 4];
         let before_release = port
             .poll(&mut events)
             .expect("held child has no exit event");
         let premature_reap = watch.reap().expect("held child remains live");
         child.release();
         let exit_count = port.wait(&mut events).expect("kqueue waits for child exit");
+        for event in events.iter().take(exit_count) {
+            watch.observe(event);
+        }
         assert!(
             events
                 .iter()
@@ -389,15 +531,15 @@ mod tests {
             unsafe {
                 libc::waitid(
                     libc::P_PID,
-                    process_id as libc::id_t,
-                    &mut exit_record,
+                    process_id.cast_unsigned(),
+                    &raw mut exit_record,
                     libc::WEXITED | libc::WNOWAIT,
                 )
             },
             0,
             "waitid observes exit without reaping before registration"
         );
-        let mut port = MacosExitPort::new().expect("race control kqueue is created");
+        let port = MacosExitPort::new().expect("race control kqueue is created");
         let mut watch = port
             .watch(process_id)
             .expect("already-exited pid is registered");
@@ -409,6 +551,72 @@ mod tests {
         assert_eq!(watch.reap().expect("race control record is unique"), None);
         std::println!(
             "{{\"exited_before_registration\":1,\"exit_records\":1,\"reaps\":1,\"duplicate_reaps\":0}}"
+        );
+    }
+
+    #[test]
+    fn c59_exit_event_carries_signal_status_and_blocking_reap_releases_zombie() {
+        let mut child = HeldChild::new();
+        let port = MacosExitPort::new().expect("kqueue port is created");
+        let mut watch = port
+            .watch(child.process_id)
+            .expect("child exit is registered");
+        let mut events = [MacosExitEvent::default(); 4];
+        unsafe { libc::kill(child.process_id, libc::SIGKILL) };
+        let ready = port.wait(&mut events).expect("kqueue waits for child exit");
+        let delivered = events
+            .iter()
+            .take(ready)
+            .find(|event| event.token == watch.token())
+            .expect("exit event for the watched child");
+        assert_eq!(
+            delivered.exit_status.map(|raw| libc::WTERMSIG(raw)),
+            Some(libc::SIGKILL)
+        );
+        watch.observe(delivered);
+        let status = watch.reap().expect("observed exit reaps").expect("status");
+        child.reaped = true;
+        assert_eq!(status.signal, Some(libc::SIGKILL));
+        assert_eq!(
+            unsafe { libc::waitpid(child.process_id, core::ptr::null_mut(), libc::WNOHANG) },
+            -1,
+            "zombie is released"
+        );
+    }
+
+    #[test]
+    fn c54_unregistered_exit_uses_bounded_wait_then_reap() {
+        let mut child = HeldChild::new();
+        let port = MacosExitPort::new().expect("kqueue port is created");
+        let mut watch = MacosProcessWatch {
+            process_id: child.process_id,
+            token: u64::MAX,
+            registered: false,
+            state: WatchState::Live,
+            pending_status: None,
+        };
+        let mut events = [MacosExitEvent {
+            token: 0,
+            ..MacosExitEvent::default()
+        }; 4];
+        assert_eq!(
+            port.poll(&mut events)
+                .expect("no exit filter is registered"),
+            0
+        );
+        child.release();
+        let ready = port
+            .wait_for(&mut events, 100)
+            .expect("bounded wait returns without an exit filter");
+        let status = watch
+            .reap()
+            .expect("unregistered child is reaped without blocking");
+        assert_eq!(ready, 0);
+        assert_eq!(status.and_then(|status| status.code), Some(0));
+        assert_eq!(watch.reap().expect("reap remains unique"), None);
+        child.reaped = true;
+        std::println!(
+            "{{\"unregistered_watches\":1,\"bounded_waits\":1,\"ready_events\":{ready},\"reaps\":1,\"duplicate_reaps\":0}}"
         );
     }
 }

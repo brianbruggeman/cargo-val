@@ -24,12 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-waker"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,14 +51,14 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 name = "cargo-val"
 version = "0.1.0"
 dependencies = [
- "conflaguration",
+ "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e)",
  "libc",
- "prime",
+ "memchr",
  "proxima-codec",
  "proxima-core",
  "proxima-primitives",
  "serde_json",
- "tempfile",
+ "temp-env",
  "windows-sys",
 ]
 
@@ -89,7 +83,7 @@ name = "conflaguration"
 version = "2.0.0"
 source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d84fc291df35528e6781b5b814884e2d28"
 dependencies = [
- "conflaguration-derive",
+ "conflaguration-derive 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
  "environs",
  "memchr",
  "serde",
@@ -99,9 +93,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "conflaguration"
+version = "2.0.0"
+source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cddbc91d356d50f49264a1510dffffc2b7e"
+dependencies = [
+ "conflaguration-core",
+ "conflaguration-derive 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e)",
+ "environs",
+ "thiserror",
+]
+
+[[package]]
+name = "conflaguration-core"
+version = "0.1.0"
+source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cddbc91d356d50f49264a1510dffffc2b7e"
+
+[[package]]
 name = "conflaguration-derive"
 version = "2.0.0"
 source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d84fc291df35528e6781b5b814884e2d28"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "conflaguration-derive"
+version = "2.0.0"
+source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cddbc91d356d50f49264a1510dffffc2b7e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -139,16 +159,6 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
-
-[[package]]
-name = "errno"
-version = "0.3.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
-dependencies = [
- "libc",
- "windows-sys",
-]
 
 [[package]]
 name = "event-listener"
@@ -278,17 +288,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "getrandom"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
-dependencies = [
- "cfg-if",
- "libc",
- "r-efi",
-]
-
-[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,10 +341,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
-name = "linux-raw-sys"
-version = "0.12.1"
+name = "lock_api"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+dependencies = [
+ "scopeguard",
+]
 
 [[package]]
 name = "log"
@@ -425,6 +427,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "redox_syscall",
+ "smallvec",
+ "windows-link",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -443,23 +468,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
-name = "prime"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
-dependencies = [
- "atomic-waker",
- "crossbeam-queue",
- "crossbeam-utils",
- "proxima-build",
- "proxima-clock",
- "proxima-core",
- "proxima-primitives",
- "proxima-runtime",
- "proxima-telemetry",
- "toml",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -473,18 +481,10 @@ name = "proxima-build"
 version = "0.1.0"
 source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
 dependencies = [
- "conflaguration",
+ "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
  "serde",
  "thiserror",
  "toml",
-]
-
-[[package]]
-name = "proxima-clock"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
-dependencies = [
- "proxima-primitives",
 ]
 
 [[package]]
@@ -526,38 +526,11 @@ dependencies = [
  "portable-atomic",
  "proxima-build",
  "proxima-core",
- "proxima-runtime",
  "rustc-hash",
  "serde",
  "serde_json",
  "thiserror",
  "toml",
-]
-
-[[package]]
-name = "proxima-runtime"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
-dependencies = [
- "proxima-core",
- "thiserror",
-]
-
-[[package]]
-name = "proxima-telemetry"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc693bbd34483f1349f99b0ebd282c92fca4"
-dependencies = [
- "bytes",
- "fastrand",
- "pin-project-lite",
- "portable-atomic",
- "proxima-build",
- "proxima-core",
- "proxima-primitives",
- "serde",
- "smallvec",
- "thiserror",
 ]
 
 [[package]]
@@ -570,10 +543,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "r-efi"
-version = "6.0.0"
+name = "redox_syscall"
+version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "regex-automata"
@@ -599,19 +575,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
-name = "rustix"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
-dependencies = [
- "bitflags",
- "errno",
- "libc",
- "linux-raw-sys",
- "windows-sys",
-]
-
-[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -622,6 +585,12 @@ name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
+
+[[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "serde"
@@ -741,16 +710,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempfile"
-version = "3.27.0"
+name = "temp-env"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+checksum = "96374855068f47402c3121c6eed88d29cb1de8f3ab27090e273e420bdabcf050"
 dependencies = [
- "fastrand",
- "getrandom",
- "once_cell",
- "rustix",
- "windows-sys",
+ "parking_lot",
 ]
 
 [[package]]

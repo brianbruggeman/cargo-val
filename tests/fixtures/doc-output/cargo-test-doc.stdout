@@ -1,0 +1,27 @@
+
+running 3 tests
+test src/lib.rs - needs_device (line 21) ... ignored
+test src/lib.rs - add (line 3) ... ok
+test src/lib.rs - subtract (line 12) ... FAILED
+
+failures:
+
+---- src/lib.rs - subtract (line 12) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (99554417) panicked at /var/folders/r9/kv1j05355r34570x2f5wpxpr0000gn/T/rustdoctestmJhVVH/doctest_bundle_2024.rs:16:1:
+assertion `left == right` failed
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+failures:
+    src/lib.rs - subtract (line 12)
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+all doctests ran in 2.17s; merged doctests compilation took 0.67s

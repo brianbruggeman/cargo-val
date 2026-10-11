@@ -1,0 +1,72 @@
+#![cfg(unix)]
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const LOADER_VARIABLES: [&str; 3] = [
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+];
+
+fn fixture_manifest() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dylib_env/Cargo.toml")
+}
+
+fn scrubbed(mut command: Command) -> Command {
+    let target_directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dylib_env_target");
+    command
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("CARGO_TARGET_DIR", target_directory)
+        .env("NO_COLOR", "1")
+        .env_remove("CARGO_MANIFEST_DIR");
+    for variable in LOADER_VARIABLES {
+        command.env_remove(variable);
+    }
+    command
+}
+
+fn run(mut command: Command) -> Output {
+    let output = command.output().expect("command starts");
+    assert!(
+        output.status.success(),
+        "{command:?} failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    output
+}
+
+fn cargo_test_names(output: &Output) -> BTreeSet<String> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("test ")?.strip_suffix(" ... ok"))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn cargo_val_names(output: &Output) -> BTreeSet<String> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_suffix(" PASS"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn proc_macro_test_binary_runs_under_cargo_val_with_the_environment_cargo_test_gives_it() {
+    let mut cargo_test = scrubbed(Command::new("cargo"));
+    cargo_test.args(["test", "--lib", "--manifest-path"]);
+    cargo_test.arg(fixture_manifest());
+    let mut cargo_val = scrubbed(Command::new(env!("CARGO_BIN_EXE_cargo-val")));
+    cargo_val.arg("--lib").arg("--manifest-path");
+    cargo_val.arg(fixture_manifest());
+
+    let expected = cargo_test_names(&run(cargo_test));
+    let observed = cargo_val_names(&run(cargo_val));
+
+    assert_eq!(expected.len(), 4, "cargo test names: {expected:?}");
+    assert_eq!(observed.len(), 4, "cargo val names: {observed:?}");
+    assert_eq!(observed, expected);
+}

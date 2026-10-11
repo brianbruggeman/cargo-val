@@ -1,41 +1,24 @@
 #![cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 
-use core::future::Future;
-use core::pin::pin;
 use core::slice;
-use core::task::{Context, Poll, Waker};
+use core::task::Poll;
 
-use cargo_val::artifact_stream::{ArtifactFramer, ArtifactStreamError};
-use cargo_val::discovery_stream::{
-    ListingDiscoveryError, ListingDiscoveryErrorKind, ListingDiscoveryInput,
-    ListingDiscoveryOutput, ListingDiscoveryPipe,
-};
-use cargo_val::libtest_listing::ListingLine;
-use proxima_primitives::pipe::Pipe;
+use cargo_val::artifact_stream::{ArtifactFramer, ArtifactStreamError, RecordFault, RecordStep};
+use cargo_val::discover_listing::{ListingError, ListingLine, parse_listing_line};
 
-fn discover<'call, 'buffer>(
-    framer: &'call mut ArtifactFramer<'buffer>,
-    chunk: &'call [u8],
-) -> Result<ListingDiscoveryOutput<'call>, ListingDiscoveryError> {
-    discover_with_limit(framer, chunk, 32)
+type Discovery<'call> = Result<RecordStep<ListingLine<'call>>, RecordFault<ListingError>>;
+
+fn discover<'call>(framer: &'call mut ArtifactFramer<'_>, chunk: &'call [u8]) -> Discovery<'call> {
+    framer.next_record(chunk, parse_listing_line)
 }
 
-fn discover_with_limit<'call, 'buffer>(
-    framer: &'call mut ArtifactFramer<'buffer>,
-    chunk: &'call [u8],
-    max_line_bytes: usize,
-) -> Result<ListingDiscoveryOutput<'call>, ListingDiscoveryError> {
-    let pipe = ListingDiscoveryPipe::new();
-    let future = pipe.call(ListingDiscoveryInput {
-        framer,
-        chunk,
-        max_line_bytes,
-    });
-    let mut future = pin!(future);
-    let mut context = Context::from_waker(Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(result) => result,
-        Poll::Pending => panic!("discovery pipe unexpectedly yielded"),
+fn parsed(step: Discovery<'_>) -> (ListingLine<'_>, usize) {
+    match step {
+        Ok(RecordStep::Parsed {
+            parsed,
+            consumed_bytes,
+        }) => (parsed, consumed_bytes),
+        other => panic!("listing line was not parsed: {other:?}"),
     }
 }
 
@@ -74,8 +57,8 @@ struct CountingDispatcher {
 }
 
 impl CountingDispatcher {
-    fn dispatch(&mut self, line: Option<ListingLine<'_>>) {
-        assert!(matches!(line, Some(ListingLine::Test(_))));
+    fn dispatch(&mut self, line: ListingLine<'_>) {
+        assert!(matches!(line, ListingLine::Test(_)));
         self.dispatched_names += 1;
     }
 }
@@ -88,16 +71,12 @@ fn dispatches_first_name_before_listing_eof() {
     let mut dispatcher = CountingDispatcher::default();
     let mut observed_names = 0;
 
-    let first_chunk = match source.poll_next_chunk(dispatcher.dispatched_names) {
-        Poll::Ready(Some(chunk)) => chunk,
-        _ => panic!("first listing chunk was not ready"),
+    let Poll::Ready(Some(first_chunk)) = source.poll_next_chunk(dispatcher.dispatched_names) else {
+        panic!("first listing chunk was not ready")
     };
-    let first_line = {
-        let first = discover(&mut framer, first_chunk).expect("first discovery");
-        assert!(first.line_consumed);
-        assert_eq!(first.line, Some(ListingLine::Test("alpha")));
-        first.line
-    };
+    let (first_line, first_consumed) = parsed(discover(&mut framer, first_chunk));
+    assert_eq!(first_consumed, first_chunk.len());
+    assert_eq!(first_line, ListingLine::Test("alpha"));
     observed_names += 1;
     assert!(matches!(
         source.poll_next_chunk(dispatcher.dispatched_names),
@@ -106,15 +85,12 @@ fn dispatches_first_name_before_listing_eof() {
     dispatcher.dispatch(first_line);
 
     for expected_name in ["beta", "gamma", "delta"] {
-        let next_chunk = match source.poll_next_chunk(dispatcher.dispatched_names) {
-            Poll::Ready(Some(chunk)) => chunk,
-            _ => panic!("gated listing chunk was not released after dispatch"),
+        let Poll::Ready(Some(next_chunk)) = source.poll_next_chunk(dispatcher.dispatched_names)
+        else {
+            panic!("gated listing chunk was not released after dispatch")
         };
-        let next_line = {
-            let next = discover(&mut framer, next_chunk).expect("next discovery");
-            assert_eq!(next.line, Some(ListingLine::Test(expected_name)));
-            next.line
-        };
+        let (next_line, _) = parsed(discover(&mut framer, next_chunk));
+        assert_eq!(next_line, ListingLine::Test(expected_name));
         dispatcher.dispatch(next_line);
         observed_names += 1;
     }
@@ -132,13 +108,14 @@ fn dispatches_first_name_before_listing_eof() {
 fn ignores_summary_without_stalling_later_name() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
-    let first = discover(&mut framer, b"1 test, 0 benchmarks\n").expect("summary line");
-    assert_eq!(first.line, Some(ListingLine::Ignored));
-    assert!(first.line_consumed);
+    let summary = b"1 test, 0 benchmarks\n";
+    let (first, first_consumed) = parsed(discover(&mut framer, summary));
+    assert_eq!(first, ListingLine::Ignored);
+    assert_eq!(first_consumed, summary.len());
 
-    let second = discover(&mut framer, b"alpha: test\n").expect("test line");
-    assert_eq!(second.line, Some(ListingLine::Test("alpha")));
-    assert!(second.line_consumed);
+    let (second, second_consumed) = parsed(discover(&mut framer, b"alpha: test\n"));
+    assert_eq!(second, ListingLine::Test("alpha"));
+    assert_eq!(second_consumed, 12);
 }
 
 #[test]
@@ -148,11 +125,9 @@ fn reports_framing_failure_without_emitting_name() {
     let result = discover(&mut framer, b"longer: test\n");
     assert!(matches!(
         result,
-        Err(ListingDiscoveryError {
-            kind: ListingDiscoveryErrorKind::Framing(ArtifactStreamError::Framing(
-                proxima_codec::FrameError::FrameTooLarge { .. }
-            )),
-            consumed_bytes: 4,
+        Err(RecordFault::Framing {
+            error: ArtifactStreamError::Framing(proxima_codec::FrameError::FrameTooLarge { .. }),
+            consumed_bytes: 0,
         })
     ));
 }
@@ -163,11 +138,17 @@ fn withholds_split_line_until_newline_arrives() {
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     let line = b"alpha: test\n";
     for (index, byte) in line.iter().enumerate() {
-        let output = discover(&mut framer, slice::from_ref(byte)).expect("split input");
+        let step = discover(&mut framer, slice::from_ref(byte)).expect("split input");
         if index + 1 == line.len() {
-            assert_eq!(output.line, Some(ListingLine::Test("alpha")));
+            assert_eq!(
+                step,
+                RecordStep::Parsed {
+                    parsed: ListingLine::Test("alpha"),
+                    consumed_bytes: 1
+                }
+            );
         } else {
-            assert_eq!(output.line, None);
+            assert_eq!(step, RecordStep::NeedMore { consumed_bytes: 1 });
         }
     }
 }
@@ -176,19 +157,40 @@ fn withholds_split_line_until_newline_arrives() {
 fn drains_buffered_line_before_accepting_new_chunk() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
-    let first_chunk = b"alpha: test\nbeta: test\n";
-    let first = discover(&mut framer, first_chunk).expect("first buffered line");
-    assert_eq!(first.line, Some(ListingLine::Test("alpha")));
-    assert_eq!(first.consumed_bytes, first_chunk.len());
+    let fragment = b"al";
+    assert_eq!(
+        discover(&mut framer, fragment),
+        Ok(RecordStep::NeedMore { consumed_bytes: 2 })
+    );
+    let rest = b"pha: test\nbeta: test\n";
+    let (first, first_consumed) = parsed(discover(&mut framer, rest));
+    assert_eq!(first, ListingLine::Test("alpha"));
+    assert_eq!(first_consumed, rest.len());
 
     let replay_chunk = b"gamma: test\n";
-    let second = discover(&mut framer, replay_chunk).expect("second buffered line");
-    assert_eq!(second.line, Some(ListingLine::Test("beta")));
-    assert_eq!(second.consumed_bytes, 0);
+    let (second, second_consumed) = parsed(discover(&mut framer, replay_chunk));
+    assert_eq!(second, ListingLine::Test("beta"));
+    assert_eq!(second_consumed, 0);
 
-    let third = discover(&mut framer, replay_chunk).expect("replayed tail");
-    assert_eq!(third.line, Some(ListingLine::Test("gamma")));
-    assert_eq!(third.consumed_bytes, replay_chunk.len());
+    let (third, third_consumed) = parsed(discover(&mut framer, replay_chunk));
+    assert_eq!(third, ListingLine::Test("gamma"));
+    assert_eq!(third_consumed, replay_chunk.len());
+    assert_eq!(framer.finish(), Ok(()));
+}
+
+#[test]
+fn lent_chunk_consumes_one_line_and_leaves_the_tail_with_the_caller() {
+    let mut buffer = [0; 33];
+    let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
+    let chunk = b"alpha: test\nbeta: test\n";
+    let (first, first_consumed) = parsed(discover(&mut framer, chunk));
+    assert_eq!(first, ListingLine::Test("alpha"));
+    assert_eq!(first_consumed, 12);
+
+    let tail = &chunk[first_consumed..];
+    let (second, second_consumed) = parsed(discover(&mut framer, tail));
+    assert_eq!(second, ListingLine::Test("beta"));
+    assert_eq!(second_consumed, tail.len());
     assert_eq!(framer.finish(), Ok(()));
 }
 
@@ -197,15 +199,15 @@ fn replays_short_copy_tail_before_reading_another_chunk() {
     let mut buffer = [0; 12];
     let mut framer = ArtifactFramer::new(&mut buffer, 11).expect("fixed line capacity");
     let chunk = b"alpha: test\nbeta: test\n";
-    let first = discover_with_limit(&mut framer, chunk, 11).expect("first short-copy frame");
-    assert_eq!(first.line, Some(ListingLine::Test("alpha")));
-    assert_eq!(first.consumed_bytes, 12);
-    assert!(first.consumed_bytes < chunk.len());
+    let (first, first_consumed) = parsed(discover(&mut framer, chunk));
+    assert_eq!(first, ListingLine::Test("alpha"));
+    assert_eq!(first_consumed, 12);
+    assert!(first_consumed < chunk.len());
 
-    let tail = &chunk[first.consumed_bytes..];
-    let second = discover_with_limit(&mut framer, tail, 11).expect("replayed short-copy tail");
-    assert_eq!(second.line, Some(ListingLine::Test("beta")));
-    assert_eq!(second.consumed_bytes, tail.len());
+    let tail = &chunk[first_consumed..];
+    let (second, second_consumed) = parsed(discover(&mut framer, tail));
+    assert_eq!(second, ListingLine::Test("beta"));
+    assert_eq!(second_consumed, tail.len());
     assert_eq!(framer.finish(), Ok(()));
 }
 
@@ -217,18 +219,16 @@ fn parser_failure_reports_progress_and_poisons_stream() {
     let result = discover(&mut framer, malformed_chunk);
     assert!(matches!(
         result,
-        Err(ListingDiscoveryError {
+        Err(RecordFault::Parse {
             consumed_bytes,
-            kind: ListingDiscoveryErrorKind::Listing(
-                cargo_val::libtest_listing::ListingError::InvalidUtf8
-            ),
-        }) if consumed_bytes == malformed_chunk.len()
+            error: ListingError::InvalidUtf8,
+        }) if consumed_bytes == b"\xff: test\n".len()
     ));
     assert!(matches!(
         discover(&mut framer, b""),
-        Err(ListingDiscoveryError {
+        Err(RecordFault::Framing {
             consumed_bytes: 0,
-            kind: ListingDiscoveryErrorKind::Framing(ArtifactStreamError::Poisoned),
+            error: ArtifactStreamError::Poisoned,
         })
     ));
 }
@@ -238,24 +238,30 @@ fn empty_poll_after_eof_returns_no_line() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     assert_eq!(framer.finish(), Ok(()));
-    let output = discover(&mut framer, b"").expect("empty eof poll");
-    assert_eq!(output.line, None);
-    assert_eq!(output.consumed_bytes, 0);
+    assert_eq!(
+        discover(&mut framer, b""),
+        Ok(RecordStep::NeedMore { consumed_bytes: 0 })
+    );
 }
 
 #[test]
 fn nonempty_input_after_eof_is_rejected_even_with_buffered_line() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
-    framer.push(b"alpha: test\n").expect("buffer first line");
+    assert_eq!(
+        discover(&mut framer, b"al"),
+        Ok(RecordStep::NeedMore { consumed_bytes: 2 })
+    );
+    let (first, _) = parsed(discover(&mut framer, b"pha: test\nbeta: test\n"));
+    assert_eq!(first, ListingLine::Test("alpha"));
     assert!(matches!(
         framer.finish(),
         Err(ArtifactStreamError::UndrainedFrame { .. })
     ));
     assert!(matches!(
-        discover(&mut framer, b"beta: test\n"),
-        Err(ListingDiscoveryError {
-            kind: ListingDiscoveryErrorKind::Framing(ArtifactStreamError::InputAfterEof),
+        discover(&mut framer, b"gamma: test\n"),
+        Err(RecordFault::Framing {
+            error: ArtifactStreamError::InputAfterEof,
             consumed_bytes: 0,
         })
     ));

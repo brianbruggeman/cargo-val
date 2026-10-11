@@ -38,9 +38,19 @@ impl UnixChild {
     pub fn stderr(&self) -> &OwnedDescriptor {
         &self.stderr
     }
+
+    /// Transfers the two capture descriptors to poll-driven host readers.
+    #[must_use]
+    pub fn into_parts(self) -> (libc::pid_t, OwnedDescriptor, OwnedDescriptor) {
+        (self.process_id, self.stdout, self.stderr)
+    }
 }
 
 /// Spawns one exact-test intent in `current_directory` and captures both streams.
+///
+/// # Errors
+///
+/// Returns the pipe, file-action, or `posix_spawn` error code.
 pub fn spawn_unix(
     arguments: &UnixArguments<'_>,
     current_directory: &CStr,
@@ -55,7 +65,83 @@ fn spawn_with_pipes(
     current_directory: &CStr,
     pipes: UnixPipePair,
 ) -> Result<UnixChild, UnixSpawnError> {
+    spawn_raw_with_pipes(
+        unsafe { CStr::from_ptr(arguments.argv()[0]) },
+        arguments.argv(),
+        arguments.envp(),
+        Some(current_directory),
+        false,
+        pipes,
+        false,
+    )
+}
+
+/// Spawns a borrowed argv through the same owned capture-pipe path.
+///
+/// # Errors
+///
+/// Returns the pipe, file-action, or `posix_spawn` error code.
+pub fn spawn_raw_unix(
+    executable: &CStr,
+    argv: &[*const c_char],
+    envp: &[*const c_char],
+    current_directory: Option<&CStr>,
+    search_path: bool,
+) -> Result<UnixChild, UnixSpawnError> {
+    let pipes =
+        UnixPipePair::new().map_err(|error: UnixPipeError| UnixSpawnError { code: error.code })?;
+    spawn_raw_with_pipes(
+        executable,
+        argv,
+        envp,
+        current_directory,
+        search_path,
+        pipes,
+        false,
+    )
+}
+
+/// Spawns like [`spawn_raw_unix`] but as the leader of a new process group, so one `killpg`
+/// reaches the child and everything it spawns.
+///
+/// # Errors
+///
+/// Returns the pipe, file-action, or `posix_spawn` error code.
+pub fn spawn_raw_unix_in_new_group(
+    executable: &CStr,
+    argv: &[*const c_char],
+    envp: &[*const c_char],
+    current_directory: Option<&CStr>,
+    search_path: bool,
+) -> Result<UnixChild, UnixSpawnError> {
+    let pipes =
+        UnixPipePair::new().map_err(|error: UnixPipeError| UnixSpawnError { code: error.code })?;
+    spawn_raw_with_pipes(
+        executable,
+        argv,
+        envp,
+        current_directory,
+        search_path,
+        pipes,
+        true,
+    )
+}
+
+fn spawn_raw_with_pipes(
+    executable: &CStr,
+    argv: &[*const c_char],
+    envp: &[*const c_char],
+    current_directory: Option<&CStr>,
+    search_path: bool,
+    pipes: UnixPipePair,
+    new_group: bool,
+) -> Result<UnixChild, UnixSpawnError> {
     let mut actions = FileActions::new()?;
+    let mut attributes = SpawnAttributes::new(new_group)?;
+    #[cfg(target_os = "macos")]
+    add_action(unsafe {
+        posix_spawn_file_actions_addinherit_np(actions.raw(), libc::STDIN_FILENO)
+    })?;
     add_action(unsafe {
         libc::posix_spawn_file_actions_adddup2(
             actions.raw(),
@@ -78,20 +164,26 @@ fn spawn_with_pipes(
     ] {
         add_action(unsafe { libc::posix_spawn_file_actions_addclose(actions.raw(), descriptor) })?;
     }
-    add_action(unsafe {
-        libc::posix_spawn_file_actions_addchdir_np(actions.raw(), current_directory.as_ptr())
-    })?;
+    if let Some(current_directory) = current_directory {
+        add_action(unsafe {
+            libc::posix_spawn_file_actions_addchdir_np(actions.raw(), current_directory.as_ptr())
+        })?;
+    }
 
     let mut process_id = 0;
-    let argv = arguments.argv().as_ptr().cast::<*mut c_char>();
-    let envp = arguments.envp().as_ptr().cast::<*mut c_char>();
-    let executable = arguments.argv()[0].cast_mut();
+    let argv = argv.as_ptr().cast::<*mut c_char>();
+    let envp = envp.as_ptr().cast::<*mut c_char>();
+    let spawn = if search_path {
+        libc::posix_spawnp
+    } else {
+        libc::posix_spawn
+    };
     let result = unsafe {
-        libc::posix_spawn(
-            &mut process_id,
-            executable,
+        spawn(
+            &raw mut process_id,
+            executable.as_ptr(),
             actions.raw(),
-            core::ptr::null::<libc::posix_spawnattr_t>(),
+            attributes.raw(),
             argv,
             envp,
         )
@@ -115,6 +207,14 @@ fn add_action(result: c_int) -> Result<(), UnixSpawnError> {
     }
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn posix_spawn_file_actions_addinherit_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        descriptor: c_int,
+    ) -> c_int;
+}
+
 struct FileActions(libc::posix_spawn_file_actions_t);
 
 impl FileActions {
@@ -125,14 +225,51 @@ impl FileActions {
     }
 
     fn raw(&mut self) -> *mut libc::posix_spawn_file_actions_t {
-        &mut self.0
+        &raw mut self.0
     }
 }
 
 impl Drop for FileActions {
     fn drop(&mut self) {
         unsafe {
-            libc::posix_spawn_file_actions_destroy(&mut self.0);
+            libc::posix_spawn_file_actions_destroy(&raw mut self.0);
+        }
+    }
+}
+
+struct SpawnAttributes(libc::posix_spawnattr_t);
+
+impl SpawnAttributes {
+    fn new(new_group: bool) -> Result<Self, UnixSpawnError> {
+        let mut attributes = core::mem::MaybeUninit::<libc::posix_spawnattr_t>::uninit();
+        add_action(unsafe { libc::posix_spawnattr_init(attributes.as_mut_ptr()) })?;
+        let mut owner = Self(unsafe { attributes.assume_init() });
+        let mut flags = 0;
+        #[cfg(target_os = "macos")]
+        {
+            flags |= libc::c_int::from(libc::POSIX_SPAWN_CLOEXEC_DEFAULT);
+        }
+        if new_group {
+            flags |= libc::c_int::from(libc::POSIX_SPAWN_SETPGROUP);
+            add_action(unsafe { libc::posix_spawnattr_setpgroup(&raw mut owner.0, 0) })?;
+        }
+        if flags != 0 {
+            let flags = libc::c_short::try_from(flags)
+                .map_err(|_| UnixSpawnError { code: libc::EINVAL })?;
+            add_action(unsafe { libc::posix_spawnattr_setflags(&raw mut owner.0, flags) })?;
+        }
+        Ok(owner)
+    }
+
+    fn raw(&mut self) -> *const libc::posix_spawnattr_t {
+        &raw const self.0
+    }
+}
+
+impl Drop for SpawnAttributes {
+    fn drop(&mut self) {
+        unsafe {
+            libc::posix_spawnattr_destroy(&raw mut self.0);
         }
     }
 }
@@ -146,19 +283,17 @@ mod tests {
     use std::format;
     use std::vec::Vec;
 
-    use proxima_primitives::pipe::Pipe;
-
     use super::{UnixSpawnError, spawn_with_pipes};
     use crate::ExecutablePath;
     use crate::host::unix_pipe_pair::UnixPipePair;
-    use crate::test_intent::{ExactTestIntentInput, ExactTestIntentPipe};
+    use crate::test_intent::ExactTestIntent;
     use crate::unix_arguments::{UnixArguments, lower_unix_arguments};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct DescriptorIdentity {
-        device: u64,
-        inode: u64,
-        mode: u32,
+        device: libc::dev_t,
+        inode: libc::ino_t,
+        mode: libc::mode_t,
     }
 
     #[test]
@@ -167,7 +302,8 @@ mod tests {
         let executable_text = executable
             .to_str()
             .expect("test executable path is valid UTF-8");
-        let working_directory = tempfile::tempdir().expect("child working directory is created");
+        let working_directory =
+            crate::test_dir::tempdir().expect("child working directory is created");
         let working_directory_path = working_directory
             .path()
             .canonicalize()
@@ -220,7 +356,7 @@ mod tests {
         assert_closed(pipe_descriptors[3], pipe_identities[3]);
         let mut status = 0;
         assert_eq!(
-            unsafe { libc::waitpid(child.process_id(), &mut status, 0) },
+            unsafe { libc::waitpid(child.process_id(), &raw mut status, 0) },
             child.process_id()
         );
         let mut stdout_bytes = [0; 8192];
@@ -301,12 +437,12 @@ mod tests {
         let stderr = b"cargo-val-child-stderr";
         assert_eq!(
             unsafe { libc::write(libc::STDOUT_FILENO, stdout.as_ptr().cast(), stdout.len()) }
-                as usize,
+                .cast_unsigned(),
             stdout.len()
         );
         assert_eq!(
             unsafe { libc::write(libc::STDERR_FILENO, stderr.as_ptr().cast(), stderr.len()) }
-                as usize,
+                .cast_unsigned(),
             stderr.len()
         );
     }
@@ -315,22 +451,10 @@ mod tests {
         executable: &'name str,
         test_name: &'name str,
     ) -> crate::test_intent::ExactTestIntent<'name, 'static, 'name> {
-        let pipe = ExactTestIntentPipe::new();
-        let future = pipe.call(ExactTestIntentInput {
-            executable: ExecutablePath::Borrowed(executable),
-            test_name,
-        });
-        let mut future = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        match core::future::Future::poll(future.as_mut(), &mut context) {
-            core::task::Poll::Ready(Ok(intent)) => intent,
-            core::task::Poll::Ready(Err(error)) => match error {},
-            core::task::Poll::Pending => panic!("intent Pipe unexpectedly yielded"),
-        }
+        ExactTestIntent::new(ExecutablePath::Borrowed(executable), test_name)
     }
-
-    fn lower_arguments<'storage, 'intent>(
-        intent: &crate::test_intent::ExactTestIntent<'_, '_, 'intent>,
+    fn lower_arguments<'storage>(
+        intent: &crate::test_intent::ExactTestIntent<'_, '_, '_>,
         inherited: &[&'storage CStr],
         overrides: &[&'storage CStr],
         argument_bytes: &'storage mut [u8],
@@ -341,6 +465,7 @@ mod tests {
             intent,
             inherited,
             overrides,
+            &[],
             argument_bytes,
             argument_pointers,
             environment_pointers,
@@ -371,7 +496,7 @@ mod tests {
             if count == 0 {
                 break;
             }
-            offset += count as usize;
+            offset += count.cast_unsigned();
             assert!(
                 offset < bytes.len(),
                 "child test output fits caller storage"
@@ -394,9 +519,9 @@ mod tests {
         assert_eq!(unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) }, 0);
         let metadata = unsafe { metadata.assume_init() };
         DescriptorIdentity {
-            device: metadata.st_dev as u64,
-            inode: metadata.st_ino as u64,
-            mode: metadata.st_mode as u32,
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+            mode: metadata.st_mode,
         }
     }
 

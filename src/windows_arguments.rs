@@ -20,6 +20,8 @@ pub enum WindowsArgumentsError {
     EnvironmentOrderStorageTooSmall { required: usize, available: usize },
     /// Two child overrides name the same variable using Windows case folding.
     DuplicateEnvironmentOverride,
+    /// The executable path is neither drive-absolute nor UNC, so `CreateProcessW` would search `PATH`.
+    ExecutableNotAbsolute,
 }
 
 /// Mutable, caller-owned buffers ready for `CreateProcessW`.
@@ -53,8 +55,12 @@ impl WindowsArguments<'_> {
 /// The environment ordering slice holds indexes into `inherited_environment`
 /// followed by `child_overrides`. All capacity errors are checked before either
 /// output buffer is changed.
-pub fn lower_windows_arguments<'storage, 'intent>(
-    intent: &ExactTestIntent<'_, '_, 'intent>,
+///
+/// # Errors
+///
+/// Returns [`WindowsArgumentsError`] for interior NUL units, malformed or duplicate environment entries, or caller storage that is too small.
+pub fn lower_windows_arguments<'storage>(
+    intent: &ExactTestIntent<'_, '_, '_>,
     inherited_environment: &[&str],
     child_overrides: &[&str],
     command_line: &'storage mut [u16],
@@ -151,17 +157,136 @@ pub fn lower_windows_arguments<'storage, 'intent>(
         child_overrides,
     )?;
 
+    let command_offset = write_command_line(&arguments, command_line);
+    write_environment_block(
+        &environment_order[..order_count],
+        inherited_environment,
+        child_overrides,
+        environment_block,
+    );
+
+    Ok(WindowsArguments {
+        command_line: &mut command_line[..=command_offset],
+        environment_block: &mut environment_block[..required_environment_units],
+    })
+}
+
+/// Encodes one test binary's working directory as the NUL-terminated UTF-16 `CreateProcessW` expects.
+///
+/// The directory is encoded once per binary and borrowed by every test launched from it.
+///
+/// # Errors
+///
+/// Returns [`WindowsArgumentsError`] for an interior NUL or storage that is too small.
+pub fn write_working_directory<'storage>(
+    directory: &str,
+    storage: &'storage mut [u16],
+) -> Result<&'storage [u16], WindowsArgumentsError> {
+    if directory.contains('\0') {
+        return Err(WindowsArgumentsError::InteriorNul);
+    }
+    let required = directory.encode_utf16().count() + 1;
+    if storage.len() < required {
+        return Err(WindowsArgumentsError::EnvironmentStorageTooSmall {
+            required,
+            available: storage.len(),
+        });
+    }
+    for (cell, unit) in storage.iter_mut().zip(directory.encode_utf16()) {
+        *cell = unit;
+    }
+    storage[required - 1] = 0;
+    Ok(&storage[..required])
+}
+
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: closing the run job kills every child in it.
+pub const WINDOWS_JOB_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+/// `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`: no WerFault.exe process or crash dialog per child.
+pub const WINDOWS_JOB_DIE_ON_UNHANDLED_EXCEPTION: u32 = 0x0000_0400;
+/// `JOB_OBJECT_LIMIT_PRIORITY_CLASS`: the job's priority class applies to its processes.
+pub const WINDOWS_JOB_PRIORITY_CLASS: u32 = 0x0000_0020;
+/// `BELOW_NORMAL_PRIORITY_CLASS`: children yield cores to rustc.
+pub const WINDOWS_BELOW_NORMAL_PRIORITY: u32 = 0x0000_4000;
+
+const WINDOWS_EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const WINDOWS_CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+
+/// Limit flags of the one job every child of a run is created in.
+#[must_use]
+pub const fn windows_job_limit_flags() -> u32 {
+    WINDOWS_JOB_KILL_ON_JOB_CLOSE
+        | WINDOWS_JOB_DIE_ON_UNHANDLED_EXCEPTION
+        | WINDOWS_JOB_PRIORITY_CLASS
+}
+
+/// `CreateProcessW` creation flags shared by every child launch.
+#[must_use]
+pub const fn windows_creation_flags() -> u32 {
+    WINDOWS_EXTENDED_STARTUPINFO_PRESENT
+        | WINDOWS_CREATE_NO_WINDOW
+        | WINDOWS_CREATE_UNICODE_ENVIRONMENT
+}
+
+/// Attributes in the child's list: the stdio handle list, plus the job list when a job owns the run.
+#[must_use]
+pub const fn windows_attribute_count(has_job: bool) -> u32 {
+    1 + has_job as u32
+}
+
+/// Whole `usize` words of caller storage that hold `required_bytes` of attribute list.
+#[must_use]
+pub const fn windows_attribute_storage_words(required_bytes: usize) -> usize {
+    required_bytes.div_ceil(core::mem::size_of::<usize>())
+}
+
+/// Encodes one absolute executable path as the NUL-terminated UTF-16 `lpApplicationName` expects.
+///
+/// Passing the path as the application name stops `CreateProcessW` from searching `PATH`.
+///
+/// # Errors
+///
+/// Returns [`WindowsArgumentsError`] for an interior NUL, a path that is not drive-absolute or UNC, or storage that is too small.
+pub fn write_executable_path<'storage>(
+    executable: &str,
+    storage: &'storage mut [u16],
+) -> Result<&'storage [u16], WindowsArgumentsError> {
+    if !is_absolute_windows_path(executable) {
+        return Err(WindowsArgumentsError::ExecutableNotAbsolute);
+    }
+    write_working_directory(executable, storage)
+}
+
+fn is_absolute_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let drive_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    drive_absolute || path.starts_with("\\\\")
+}
+
+fn write_command_line(arguments: &[&str], command_line: &mut [u16]) -> usize {
     let mut command_offset = 0;
     for (index, argument) in arguments.iter().enumerate() {
         if index > 0 {
-            command_line[command_offset] = b' ' as u16;
+            command_line[command_offset] = u16::from(b' ');
             command_offset += 1;
         }
         command_offset += write_quoted_argument(argument, &mut command_line[command_offset..]);
     }
     command_line[command_offset] = 0;
+    command_offset
+}
+
+fn write_environment_block(
+    order: &[usize],
+    inherited_environment: &[&str],
+    child_overrides: &[&str],
+    environment_block: &mut [u16],
+) {
     let mut environment_offset = 0;
-    for index in environment_order.iter().take(order_count) {
+    for index in order {
         let entry = environment_entry(*index, inherited_environment, child_overrides);
         for unit in entry.encode_utf16() {
             environment_block[environment_offset] = unit;
@@ -171,14 +296,9 @@ pub fn lower_windows_arguments<'storage, 'intent>(
         environment_offset += 1;
     }
     environment_block[environment_offset] = 0;
-    if order_count == 0 {
+    if order.is_empty() {
         environment_block[environment_offset + 1] = 0;
     }
-
-    Ok(WindowsArguments {
-        command_line: &mut command_line[..command_offset + 1],
-        environment_block: &mut environment_block[..required_environment_units],
-    })
 }
 
 fn quoted_argument_len(argument: &str) -> usize {
@@ -189,11 +309,11 @@ fn quoted_argument_len(argument: &str) -> usize {
     let mut length = usize::from(quote) * 2;
     let mut backslashes = 0;
     for unit in argument.encode_utf16() {
-        if unit == b'\\' as u16 {
+        if unit == u16::from(b'\\') {
             backslashes += 1;
         } else {
             length += backslashes;
-            if unit == b'"' as u16 {
+            if unit == u16::from(b'"') {
                 length += backslashes + 1;
             } else {
                 length += 1;
@@ -216,25 +336,25 @@ fn write_quoted_argument(argument: &str, output: &mut [u16]) -> usize {
             .any(|unit| matches!(unit, 0x20 | 0x09 | 0x22));
     let mut offset = 0;
     if quote {
-        output[offset] = b'"' as u16;
+        output[offset] = u16::from(b'"');
         offset += 1;
     }
     let mut backslashes = 0;
     for unit in argument.encode_utf16() {
-        if unit == b'\\' as u16 {
+        if unit == u16::from(b'\\') {
             backslashes += 1;
             continue;
         }
-        if unit == b'"' as u16 {
-            for _ in 0..(backslashes * 2 + 1) {
-                output[offset] = b'\\' as u16;
+        if unit == u16::from(b'"') {
+            for _ in 0..=backslashes * 2 {
+                output[offset] = u16::from(b'\\');
                 offset += 1;
             }
             output[offset] = unit;
             offset += 1;
         } else {
             for _ in 0..backslashes {
-                output[offset] = b'\\' as u16;
+                output[offset] = u16::from(b'\\');
                 offset += 1;
             }
             output[offset] = unit;
@@ -244,11 +364,11 @@ fn write_quoted_argument(argument: &str, output: &mut [u16]) -> usize {
     }
     let trailing_backslashes = if quote { backslashes * 2 } else { backslashes };
     for _ in 0..trailing_backslashes {
-        output[offset] = b'\\' as u16;
+        output[offset] = u16::from(b'\\');
         offset += 1;
     }
     if quote {
-        output[offset] = b'"' as u16;
+        output[offset] = u16::from(b'"');
         offset += 1;
     }
     offset
@@ -344,27 +464,21 @@ fn environment_entry<'environment>(
 
 #[cfg(test)]
 mod tests {
-    use proxima_primitives::pipe::Pipe;
 
-    use super::{WindowsArgumentsError, lower_windows_arguments};
+    use super::{WindowsArgumentsError, lower_windows_arguments, write_working_directory};
     use crate::ExecutablePath;
-    use crate::test_intent::{ExactTestIntentInput, ExactTestIntentPipe};
+    use crate::cargo_message::TestArtifact;
+    use crate::test_environment::{
+        DYLIB_PATH_KEY, MAX_ENTRIES, TestEnvironmentInput, TestEnvironmentLayout,
+    };
 
     fn exact_intent<'name>(
         executable: &'static str,
         test_name: &'name str,
     ) -> crate::test_intent::ExactTestIntent<'static, 'static, 'name> {
-        let pipe = ExactTestIntentPipe::new();
-        let future = pipe.call(ExactTestIntentInput {
+        crate::test_intent::ExactTestIntent {
             executable: ExecutablePath::Borrowed(executable),
             test_name,
-        });
-        let mut future = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        match core::future::Future::poll(future.as_mut(), &mut context) {
-            core::task::Poll::Ready(Ok(intent)) => intent,
-            core::task::Poll::Ready(Err(error)) => match error {},
-            core::task::Poll::Pending => panic!("intent Pipe unexpectedly yielded"),
         }
     }
 
@@ -374,7 +488,7 @@ mod tests {
         let mut command_line = [0xA5; 128];
         let mut environment_block = [0xA5; 2];
         let mut environment_order = [];
-        let (result, allocations) = crate::dispatch_stream::tests::measure_allocations(|| {
+        let (result, allocations) = crate::test_alloc::measure_allocations(|| {
             lower_windows_arguments(
                 &intent,
                 &[],
@@ -391,7 +505,7 @@ mod tests {
         let command_units = lowered.command_line();
         assert_eq!(
             &command_units[command_units.len() - 4..],
-            &[b'\\' as u16, b'\\' as u16, b'"' as u16, 0]
+            &[u16::from(b'\\'), u16::from(b'\\'), u16::from(b'"'), 0]
         );
         assert_eq!(lowered.environment_block(), &[0, 0]);
         assert_eq!(allocations, 0);
@@ -408,7 +522,7 @@ mod tests {
         let mut command_line = [0_u16; 64];
         let mut environment_block = [0_u16; 64];
         let mut environment_order = [usize::MAX; 3];
-        let (result, allocations) = crate::dispatch_stream::tests::measure_allocations(|| {
+        let (result, allocations) = crate::test_alloc::measure_allocations(|| {
             lower_windows_arguments(
                 &intent,
                 &inherited,
@@ -458,5 +572,180 @@ mod tests {
         assert_eq!(command_line, original_command_line);
         assert_eq!(environment_block, original_environment_block);
         std::println!("{{\"short_storage_rejected\":1,\"partial_writes\":0}}");
+    }
+
+    #[test]
+    fn per_binary_environment_and_directory_lower_for_every_test_without_allocating() {
+        let artifact = TestArtifact {
+            executable: "/work/target/debug/deps/dylib_env-3f2a1c9d8e7b6a50",
+            package_id: "path+file:///work/dylib_env#0.1.0",
+            manifest_path: "/work/dylib_env/Cargo.toml",
+            target_name: "",
+            target_kind: "",
+        };
+        let library_directories = ["/work/sysroot/lib"];
+        let mut storage = [0_u8; 1024];
+        let layout = TestEnvironmentLayout::build(
+            &TestEnvironmentInput {
+                artifact,
+                linked_directories: "/work/target/debug/build/a/out",
+                library_directories: &library_directories,
+                inherited_dylib_path: Some("/usr/lib"),
+                home: None,
+                build_script: None,
+            },
+            &mut storage,
+        )
+        .expect("environment fits");
+        let mut entries = [""; MAX_ENTRIES];
+        for (index, entry) in entries.iter_mut().enumerate().take(layout.len()) {
+            *entry = layout.entry(&storage, index).expect("index is below len");
+        }
+        let overrides = &entries[..layout.len()];
+        let inherited = ["PARENT=kept", "HOME=/Users/dev"];
+        let intent = exact_intent("fixture.exe", "alpha");
+        let mut directory_units = [0_u16; 64];
+        let mut command_line = [0_u16; 64];
+        let mut environment_block = [0_u16; 1024];
+        let mut environment_order = [usize::MAX; 16];
+
+        let (checked, allocations) = crate::test_alloc::measure_allocations(|| {
+            let directory =
+                write_working_directory(layout.current_directory(&storage), &mut directory_units)
+                    .map(<[u16]>::len);
+            let mut lowered_blocks = 0;
+            for _ in 0..100 {
+                let lowered = lower_windows_arguments(
+                    &intent,
+                    &inherited,
+                    overrides,
+                    &mut command_line,
+                    &mut environment_block,
+                    &mut environment_order,
+                );
+                lowered_blocks += usize::from(lowered.is_ok());
+            }
+            (directory, lowered_blocks)
+        });
+
+        assert_eq!(checked, (Ok("/work/dylib_env".len() + 1), 100));
+        assert_eq!(allocations, 0);
+        let lowered = lower_windows_arguments(
+            &intent,
+            &inherited,
+            overrides,
+            &mut command_line,
+            &mut environment_block,
+            &mut environment_order,
+        )
+        .expect("caller buffers fit the environment");
+        let block = std::string::String::from_utf16(lowered.environment_block())
+            .expect("environment block is utf-16");
+        assert!(
+            block.contains("CARGO_MANIFEST_DIR=/work/dylib_env\0"),
+            "{block:?}"
+        );
+        assert!(block.contains(&std::format!(
+            "{DYLIB_PATH_KEY}=/work/target/debug/build/a/out"
+        )));
+        assert!(block.contains("PARENT=kept\0"));
+    }
+
+    #[test]
+    fn c67_job_limit_flags_kill_on_close_die_on_exception_and_priority() {
+        let flags = super::windows_job_limit_flags();
+
+        assert_eq!(flags, 0x2000 | 0x400 | 0x20);
+        assert_eq!(flags & super::WINDOWS_JOB_KILL_ON_JOB_CLOSE, 0x2000);
+        assert_eq!(flags & super::WINDOWS_JOB_DIE_ON_UNHANDLED_EXCEPTION, 0x400);
+        assert_eq!(flags & super::WINDOWS_JOB_PRIORITY_CLASS, 0x20);
+        assert_eq!(super::WINDOWS_BELOW_NORMAL_PRIORITY, 0x4000);
+    }
+
+    #[test]
+    fn c67_creation_flags_hide_window_and_declare_unicode_environment() {
+        let flags = super::windows_creation_flags();
+
+        assert_eq!(flags, 0x0008_0000 | 0x0800_0000 | 0x0000_0400);
+    }
+
+    #[test]
+    fn c67_attribute_count_grows_by_one_for_the_job_list() {
+        assert_eq!(super::windows_attribute_count(false), 1);
+        assert_eq!(super::windows_attribute_count(true), 2);
+    }
+
+    #[test]
+    fn c67_attribute_storage_words_round_up_to_whole_words() {
+        let word = core::mem::size_of::<usize>();
+
+        assert_eq!(super::windows_attribute_storage_words(0), 0);
+        assert_eq!(super::windows_attribute_storage_words(1), 1);
+        assert_eq!(super::windows_attribute_storage_words(word), 1);
+        assert_eq!(super::windows_attribute_storage_words(word + 1), 2);
+        assert_eq!(
+            super::windows_attribute_storage_words(72),
+            72_usize.div_ceil(word)
+        );
+    }
+
+    #[test]
+    fn c67_executable_path_encodes_absolute_paths_nul_terminated() {
+        let mut storage = [0xA5_u16; 128];
+        let path = "C:\\Users\\runner\\work\\target\\debug\\deps\\cargo_val-0a1b2c3d4e5f.exe";
+
+        let encoded = super::write_executable_path(path, &mut storage)
+            .expect("drive-absolute path fits the caller storage");
+
+        assert_eq!(encoded.last(), Some(&0));
+        assert_eq!(encoded.len(), path.encode_utf16().count() + 1);
+        assert!(
+            encoded
+                .iter()
+                .copied()
+                .take(path.len())
+                .eq(path.encode_utf16())
+        );
+    }
+
+    #[test]
+    fn c67_executable_path_accepts_unc_and_verbatim_prefixes() {
+        let mut storage = [0_u16; 64];
+
+        assert!(super::write_executable_path("\\\\?\\C:\\a\\b.exe", &mut storage).is_ok());
+        assert!(super::write_executable_path("\\\\build-host\\share\\b.exe", &mut storage).is_ok());
+    }
+
+    #[test]
+    fn c67_executable_path_rejects_relative_names_that_would_search_path() {
+        let mut storage = [0_u16; 64];
+
+        for relative in [
+            "cargo.exe",
+            ".\\deps\\a.exe",
+            "\\rooted\\a.exe",
+            "C:a.exe",
+            "",
+        ] {
+            assert_eq!(
+                super::write_executable_path(relative, &mut storage),
+                Err(WindowsArgumentsError::ExecutableNotAbsolute),
+                "{relative:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c67_executable_path_rejects_interior_nul_and_short_storage() {
+        let mut storage = [0_u16; 4];
+
+        assert_eq!(
+            super::write_executable_path("C:\\a\0b.exe", &mut [0_u16; 32]),
+            Err(WindowsArgumentsError::InteriorNul)
+        );
+        assert!(matches!(
+            super::write_executable_path("C:\\a\\b.exe", &mut storage),
+            Err(WindowsArgumentsError::EnvironmentStorageTooSmall { available: 4, .. })
+        ));
     }
 }

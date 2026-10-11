@@ -1,0 +1,10 @@
+[package]
+name = "ghost_harness"
+version = "0.1.0"
+edition = "2024"
+
+[[test]]
+name = "ghost"
+harness = false
+
+[dependencies]

@@ -52,10 +52,15 @@ impl UnixArguments<'_> {
 ///
 /// The returned pointers remain valid while `argument_bytes`, `argument_pointers`,
 /// `environment_pointers`, and all input `CStr`s remain alive. No heap storage is used.
-pub fn lower_unix_arguments<'storage, 'intent>(
-    intent: &ExactTestIntent<'_, '_, 'intent>,
+///
+/// # Errors
+///
+/// Returns [`UnixArgumentsError`] for interior NUL bytes, malformed environment entries, or caller storage that is too small.
+pub fn lower_unix_arguments<'storage>(
+    intent: &ExactTestIntent<'_, '_, '_>,
     inherited_environment: &[&'storage CStr],
     child_overrides: &[&'storage CStr],
+    harness_arguments: &[&[u8]],
     argument_bytes: &'storage mut [u8],
     argument_pointers: &'storage mut [*const c_char],
     environment_pointers: &'storage mut [*const c_char],
@@ -71,6 +76,12 @@ pub fn lower_unix_arguments<'storage, 'intent>(
         }
         required_argument_bytes += argument.len() + 1;
     }
+    for argument in harness_arguments {
+        if argument.contains(&0) {
+            return Err(UnixArgumentsError::InteriorNul);
+        }
+        required_argument_bytes += argument.len() + 1;
+    }
     if executable.contains(&0) {
         return Err(UnixArgumentsError::InteriorNul);
     }
@@ -80,13 +91,71 @@ pub fn lower_unix_arguments<'storage, 'intent>(
             available: argument_bytes.len(),
         });
     }
-    if argument_pointers.len() < 4 {
+    let required_argument_pointers = arguments.len() + harness_arguments.len() + 2;
+    if argument_pointers.len() < required_argument_pointers {
         return Err(UnixArgumentsError::ArgumentPointersTooSmall {
-            required: 4,
+            required: required_argument_pointers,
             available: argument_pointers.len(),
         });
     }
 
+    let required_environment_pointers = required_environment_pointers(
+        inherited_environment,
+        child_overrides,
+        environment_pointers,
+    )?;
+
+    let mut byte_offset = 0;
+    let mut pointer_offset = 0;
+    for argument in [executable, arguments[0], arguments[1]]
+        .into_iter()
+        .chain(harness_arguments.iter().copied())
+    {
+        argument_pointers[pointer_offset] = argument_bytes[byte_offset..].as_ptr().cast();
+        argument_bytes[byte_offset..byte_offset + argument.len()].copy_from_slice(argument);
+        byte_offset += argument.len();
+        argument_bytes[byte_offset] = 0;
+        byte_offset += 1;
+        pointer_offset += 1;
+    }
+    argument_pointers[pointer_offset] = core::ptr::null();
+
+    write_environment_pointers(inherited_environment, child_overrides, environment_pointers)?;
+
+    Ok(UnixArguments {
+        argument_bytes: &argument_bytes[..byte_offset],
+        argv: &argument_pointers[..required_argument_pointers],
+        envp: &environment_pointers[..required_environment_pointers],
+    })
+}
+
+/// Merges inherited entries with child-only overrides into caller pointer storage.
+///
+/// An override replaces any inherited entry with the same key. The returned
+/// count includes the trailing null sentinel.
+///
+/// # Errors
+///
+/// Returns [`UnixArgumentsError`] for malformed entries or pointer storage that is too small.
+pub fn merge_environment(
+    inherited_environment: &[&CStr],
+    child_overrides: &[&CStr],
+    environment_pointers: &mut [*const c_char],
+) -> Result<usize, UnixArgumentsError> {
+    let required = required_environment_pointers(
+        inherited_environment,
+        child_overrides,
+        environment_pointers,
+    )?;
+    write_environment_pointers(inherited_environment, child_overrides, environment_pointers)?;
+    Ok(required)
+}
+
+fn required_environment_pointers(
+    inherited_environment: &[&CStr],
+    child_overrides: &[&CStr],
+    environment_pointers: &[*const c_char],
+) -> Result<usize, UnixArgumentsError> {
     for entry in inherited_environment.iter().chain(child_overrides) {
         environment_key(entry)?;
     }
@@ -99,26 +168,21 @@ pub fn lower_unix_arguments<'storage, 'intent>(
         }
     }
     environment_count += child_overrides.len();
-    let required_environment_pointers = environment_count + 1;
-    if environment_pointers.len() < required_environment_pointers {
+    let required = environment_count + 1;
+    if environment_pointers.len() < required {
         return Err(UnixArgumentsError::EnvironmentPointersTooSmall {
-            required: required_environment_pointers,
+            required,
             available: environment_pointers.len(),
         });
     }
+    Ok(required)
+}
 
-    let mut byte_offset = 0;
-    let mut pointer_offset = 0;
-    for argument in [executable, arguments[0], arguments[1]] {
-        argument_pointers[pointer_offset] = argument_bytes[byte_offset..].as_ptr().cast();
-        argument_bytes[byte_offset..byte_offset + argument.len()].copy_from_slice(argument);
-        byte_offset += argument.len();
-        argument_bytes[byte_offset] = 0;
-        byte_offset += 1;
-        pointer_offset += 1;
-    }
-    argument_pointers[pointer_offset] = core::ptr::null();
-
+fn write_environment_pointers(
+    inherited_environment: &[&CStr],
+    child_overrides: &[&CStr],
+    environment_pointers: &mut [*const c_char],
+) -> Result<(), UnixArgumentsError> {
     let mut environment_offset = 0;
     for inherited in inherited_environment {
         let inherited_key = environment_key(inherited)?;
@@ -135,17 +199,10 @@ pub fn lower_unix_arguments<'storage, 'intent>(
         environment_offset += 1;
     }
     environment_pointers[environment_offset] = core::ptr::null();
-
-    Ok(UnixArguments {
-        argument_bytes: &argument_bytes[..byte_offset],
-        argv: &argument_pointers[..4],
-        envp: &environment_pointers[..required_environment_pointers],
-    })
+    Ok(())
 }
 
-fn environment_key<'environment>(
-    entry: &'environment CStr,
-) -> Result<&'environment [u8], UnixArgumentsError> {
+fn environment_key(entry: &CStr) -> Result<&[u8], UnixArgumentsError> {
     let bytes = entry.to_bytes();
     let Some(separator) = bytes.iter().position(|byte| *byte == b'=') else {
         return Err(UnixArgumentsError::InvalidEnvironmentEntry);
@@ -160,30 +217,17 @@ fn environment_key<'environment>(
 mod tests {
     use std::ffi::CStr;
 
-    use proxima_primitives::pipe::Pipe;
-
     use super::{UnixArgumentsError, lower_unix_arguments};
     use crate::ExecutablePath;
-    use crate::test_intent::{ExactTestIntentInput, ExactTestIntentPipe};
 
     fn c_string(bytes: &'static [u8]) -> &'static CStr {
         CStr::from_bytes_with_nul(bytes).expect("fixture is a nul-terminated C string")
     }
 
-    fn exact_intent<'name>(
-        test_name: &'name str,
-    ) -> crate::test_intent::ExactTestIntent<'static, 'static, 'name> {
-        let pipe = ExactTestIntentPipe::new();
-        let future = pipe.call(ExactTestIntentInput {
+    fn exact_intent(test_name: &str) -> crate::test_intent::ExactTestIntent<'static, 'static, '_> {
+        crate::test_intent::ExactTestIntent {
             executable: ExecutablePath::Borrowed("target/debug/deps/fixture"),
             test_name,
-        });
-        let mut future = std::pin::pin!(future);
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        match std::future::Future::poll(future.as_mut(), &mut context) {
-            std::task::Poll::Ready(Ok(intent)) => intent,
-            std::task::Poll::Ready(Err(error)) => match error {},
-            std::task::Poll::Pending => panic!("intent Pipe unexpectedly yielded"),
         }
     }
 
@@ -196,17 +240,17 @@ mod tests {
         let mut argument_pointers = [std::ptr::null(); 4];
         let mut environment_pointers = [std::ptr::null(); 3];
 
-        let (lowered_result, observed_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| {
-                lower_unix_arguments(
-                    &intent,
-                    &inherited_environment,
-                    &child_overrides,
-                    &mut argument_bytes,
-                    &mut argument_pointers,
-                    &mut environment_pointers,
-                )
-            });
+        let (lowered_result, observed_allocations) = crate::test_alloc::measure_allocations(|| {
+            lower_unix_arguments(
+                &intent,
+                &inherited_environment,
+                &child_overrides,
+                &[],
+                &mut argument_bytes,
+                &mut argument_pointers,
+                &mut environment_pointers,
+            )
+        });
         let lowered = lowered_result.expect("caller storage fits the launch data");
 
         assert_eq!(lowered.argv().len(), 4);
@@ -229,6 +273,49 @@ mod tests {
     }
 
     #[test]
+    fn c52_forwards_ignored_flag_after_the_exact_test_name_without_allocating() {
+        let inherited_environment: [&CStr; 0] = [];
+        let child_overrides: [&CStr; 0] = [];
+        let harness_arguments = [b"--ignored".as_slice()];
+        let intent = exact_intent("fixture::ignored");
+        let mut argument_bytes = [0; 128];
+        let mut argument_pointers = [std::ptr::null(); 5];
+        let mut environment_pointers = [std::ptr::null(); 1];
+
+        let (result, allocations) = crate::test_alloc::measure_allocations(|| {
+            lower_unix_arguments(
+                &intent,
+                &inherited_environment,
+                &child_overrides,
+                &harness_arguments,
+                &mut argument_bytes,
+                &mut argument_pointers,
+                &mut environment_pointers,
+            )
+        });
+        let lowered = result.expect("fixed storage fits the ignored flag");
+        let harness_offset = b"target/debug/deps/fixture\0".len()
+            + b"--exact\0".len()
+            + intent.test_name().len()
+            + 1;
+
+        assert_eq!(lowered.argv().len(), 5);
+        assert_eq!(
+            lowered.argv()[3],
+            lowered.argument_bytes()[harness_offset..].as_ptr().cast()
+        );
+        assert_eq!(
+            &lowered.argument_bytes()[harness_offset..harness_offset + b"--ignored\0".len()],
+            b"--ignored\0"
+        );
+        assert!(lowered.argv()[4].is_null());
+        assert_eq!(allocations, 0);
+        std::println!(
+            "{{\"exact_name_before_harness_flag\":1,\"ignored_flag_bytes\":9,\"allocations\":{allocations}}}"
+        );
+    }
+
+    #[test]
     fn c37_rejects_one_byte_short_argv_storage_before_writing() {
         let intent = exact_intent("alpha");
         let mut argument_bytes = [0xA5; 39];
@@ -240,6 +327,7 @@ mod tests {
 
         let result = lower_unix_arguments(
             &intent,
+            &[],
             &[],
             &[],
             &mut argument_bytes,
@@ -274,6 +362,7 @@ mod tests {
             &intent,
             &[],
             &[],
+            &[],
             &mut argument_bytes,
             &mut argument_pointers,
             &mut environment_pointers,
@@ -298,6 +387,7 @@ mod tests {
 
         let result = lower_unix_arguments(
             &intent,
+            &[],
             &[],
             &[],
             &mut argument_bytes,

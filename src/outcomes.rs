@@ -1,4 +1,4 @@
-use crate::session_slots::{SessionSlotId, SessionSlots};
+use crate::schedule::{SessionSlotId, SessionSlots};
 
 /// Terminal result reported by one completed test process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7,9 +7,11 @@ pub enum TerminalOutcome {
     Passed,
     /// The test process reported a failure.
     Failed,
+    /// The exact libtest child reported that this selected test was ignored.
+    Ignored,
 }
 
-/// Bounded accounting for discovered tests and directly owned live sessions.
+/// Bounded counts for discovered tests; live ownership stays in `SessionSlots`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutcomeCounts {
     /// Number of discovered test names.
@@ -33,19 +35,37 @@ pub enum OutcomeError {
     UnknownSession,
     /// The live-session table has no free slot.
     CapacityExhausted,
+    /// A fresh ledger cannot take ownership while sessions are already live.
+    ActiveSessions,
 }
 
-/// Fixed-capacity outcome FSM; its owner supplies concurrency through slots.
-pub struct OutcomeLedger<const CAPACITY: usize> {
+/// Failed insertion that returns ownership of the child to its caller.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StartError<T> {
+    /// Reason the child was not entered into the live-session table.
+    pub error: OutcomeError,
+    /// Child value remains available for caller cleanup or retry.
+    pub child: T,
+}
+
+/// Outcome counters that operate on the coordinator's single live-session table.
+pub struct OutcomeLedger<'sessions, T, const CAPACITY: usize> {
+    live: &'sessions mut SessionSlots<T, CAPACITY>,
     counts: OutcomeCounts,
-    live: SessionSlots<(), CAPACITY>,
 }
 
-impl<const CAPACITY: usize> OutcomeLedger<CAPACITY> {
-    /// Creates empty counts and inline storage for live child sessions.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
+impl<'sessions, T, const CAPACITY: usize> OutcomeLedger<'sessions, T, CAPACITY> {
+    /// Starts a new accounting period over an empty live-session table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutcomeError::ActiveSessions`] when the live table is not empty.
+    pub fn new(live: &'sessions mut SessionSlots<T, CAPACITY>) -> Result<Self, OutcomeError> {
+        if !live.is_empty() {
+            return Err(OutcomeError::ActiveSessions);
+        }
+        Ok(Self {
+            live,
             counts: OutcomeCounts {
                 discovered: 0,
                 filtered: 0,
@@ -53,51 +73,111 @@ impl<const CAPACITY: usize> OutcomeLedger<CAPACITY> {
                 passed: 0,
                 failed: 0,
             },
-            live: SessionSlots::new(),
-        }
+        })
     }
 
     /// Records a discovered name rejected by the selection filter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutcomeError::CountOverflow`] when a counter would overflow.
     pub fn record_filtered(&mut self) -> Result<(), OutcomeError> {
         increment(&mut self.counts.discovered)?;
         increment(&mut self.counts.filtered)
     }
 
     /// Records a discovered name skipped by libtest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutcomeError::CountOverflow`] when a counter would overflow.
     pub fn record_ignored(&mut self) -> Result<(), OutcomeError> {
         increment(&mut self.counts.discovered)?;
         increment(&mut self.counts.ignored)
     }
 
-    /// Records a selected test and gives its child direct ownership of a slot.
-    pub fn start(&mut self) -> Result<SessionSlotId, OutcomeError> {
-        let slot = self
-            .live
-            .insert(())
-            .map_err(|_| OutcomeError::CapacityExhausted)?;
-        if let Err(error) = increment(&mut self.counts.discovered) {
-            let _ = self.live.remove(slot);
-            return Err(error);
-        }
+    /// Inserts a selected child into the coordinator-owned live-session table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartError`] carrying the child back when a counter overflows or the live table is full.
+    pub fn start(&mut self, child: T) -> Result<SessionSlotId, StartError<T>> {
+        let Some(next_discovered) = self.counts.discovered.checked_add(1) else {
+            return Err(StartError {
+                error: OutcomeError::CountOverflow,
+                child,
+            });
+        };
+        let slot = match self.live.insert(child) {
+            Ok(slot) => slot,
+            Err(child) => {
+                return Err(StartError {
+                    error: OutcomeError::CapacityExhausted,
+                    child,
+                });
+            }
+        };
+        self.counts.discovered = next_discovered;
         Ok(slot)
     }
 
-    /// Accepts exactly one terminal event for a live child session.
+    /// Lends the live table read-only for Proxima [`HostEventPipe`] validation.
+    ///
+    /// Use [`crate::host_event::HostEventPipe`] to validate readiness events while this ledger
+    /// owns lifecycle mutation. `SessionSlots` remains the one generation
+    /// checked store; this view cannot insert or retire children.
+    #[must_use]
+    pub const fn sessions(&self) -> &SessionSlots<T, CAPACITY> {
+        self.live
+    }
+
+    /// Mutates one live child's lifecycle state without changing table ownership.
+    pub fn session_mut(&mut self, slot: SessionSlotId) -> Option<&mut T> {
+        self.live.get_mut(slot)
+    }
+
+    /// Checks whether one terminal category can be committed for a live child.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutcomeError::UnknownSession`] for a stale slot, or [`OutcomeError::CountOverflow`] when the category counter would overflow.
+    pub fn can_finish(
+        &self,
+        slot: SessionSlotId,
+        outcome: TerminalOutcome,
+    ) -> Result<(), OutcomeError> {
+        if self.live.get(slot).is_none() {
+            return Err(OutcomeError::UnknownSession);
+        }
+        let count = match outcome {
+            TerminalOutcome::Passed => self.counts.passed,
+            TerminalOutcome::Failed => self.counts.failed,
+            TerminalOutcome::Ignored => self.counts.ignored,
+        };
+        count.checked_add(1).ok_or(OutcomeError::CountOverflow)?;
+        Ok(())
+    }
+
+    /// Counts one terminal result and retires that child from the shared table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutcomeError::UnknownSession`] for a stale slot, or [`OutcomeError::CountOverflow`] when the category counter would overflow.
     pub fn finish(
         &mut self,
         slot: SessionSlotId,
         outcome: TerminalOutcome,
-    ) -> Result<(), OutcomeError> {
+    ) -> Result<T, OutcomeError> {
+        self.can_finish(slot, outcome)?;
         let count = match outcome {
             TerminalOutcome::Passed => &mut self.counts.passed,
             TerminalOutcome::Failed => &mut self.counts.failed,
+            TerminalOutcome::Ignored => &mut self.counts.ignored,
         };
         let next = count.checked_add(1).ok_or(OutcomeError::CountOverflow)?;
-        if self.live.remove(slot).is_none() {
-            return Err(OutcomeError::UnknownSession);
-        }
+        let child = self.live.remove(slot).ok_or(OutcomeError::UnknownSession)?;
         *count = next;
-        Ok(())
+        Ok(child)
     }
 
     /// Returns the current category counts and remaining unaccounted names.
@@ -117,12 +197,6 @@ impl<const CAPACITY: usize> OutcomeLedger<CAPACITY> {
     }
 }
 
-impl<const CAPACITY: usize> Default for OutcomeLedger<CAPACITY> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn increment(count: &mut usize) -> Result<(), OutcomeError> {
     *count = count.checked_add(1).ok_or(OutcomeError::CountOverflow)?;
     Ok(())
@@ -130,30 +204,46 @@ fn increment(count: &mut usize) -> Result<(), OutcomeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OutcomeError, OutcomeLedger, TerminalOutcome};
+    use super::{OutcomeError, OutcomeLedger, StartError, TerminalOutcome};
+    use crate::schedule::SessionSlots;
 
     #[test]
-    fn accounts_every_discovered_test_and_rejects_duplicate_terminal_event() {
-        let (result, allocations) = crate::dispatch_stream::tests::measure_allocations(|| {
-            let mut ledger = OutcomeLedger::<3>::new();
+    fn c48h_accounts_outcomes_in_the_coordinator_owned_session_table() {
+        let (result, allocations) = crate::test_alloc::measure_allocations(|| {
+            let mut live = SessionSlots::<u8, 3>::new();
+            let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
             ledger.record_filtered().expect("filtered count increments");
             ledger.record_ignored().expect("ignored count increments");
-            let passed_one = ledger.start().expect("first live slot is available");
-            let passed_two = ledger.start().expect("second live slot is available");
-            let failed = ledger.start().expect("third live slot is available");
-            ledger
-                .finish(passed_one, TerminalOutcome::Passed)
-                .expect("first pass is accounted");
-            ledger
-                .finish(passed_two, TerminalOutcome::Passed)
-                .expect("second pass is accounted");
-            ledger
-                .finish(failed, TerminalOutcome::Failed)
-                .expect("failure is accounted");
+            let passed_one = ledger.start(10).expect("first slot is available");
+            let passed_two = ledger.start(11).expect("second slot is available");
+            let failed = ledger.start(12).expect("third slot is available");
+            assert_eq!(
+                ledger
+                    .finish(passed_one, TerminalOutcome::Passed)
+                    .expect("first pass is accounted and retired"),
+                10
+            );
+            assert_eq!(
+                ledger
+                    .finish(passed_two, TerminalOutcome::Passed)
+                    .expect("second pass is accounted and retired"),
+                11
+            );
+            assert_eq!(
+                ledger
+                    .finish(failed, TerminalOutcome::Failed)
+                    .expect("failure is accounted and retired"),
+                12
+            );
             let duplicate = ledger.finish(failed, TerminalOutcome::Failed);
-            (ledger.snapshot(), ledger.unaccounted(), duplicate)
+            (
+                ledger.snapshot(),
+                ledger.unaccounted(),
+                duplicate,
+                ledger.live.len(),
+            )
         });
-        let (counts, unaccounted, duplicate) = result;
+        let (counts, unaccounted, duplicate, live_sessions) = result;
 
         assert_eq!(counts.discovered, 5);
         assert_eq!(counts.filtered, 1);
@@ -162,9 +252,107 @@ mod tests {
         assert_eq!(counts.failed, 1);
         assert_eq!(unaccounted, 0);
         assert_eq!(duplicate, Err(OutcomeError::UnknownSession));
+        assert_eq!(live_sessions, 0);
         assert_eq!(allocations, 0);
         std::println!(
-            "{{\"discovered\":5,\"filtered\":1,\"ignored\":1,\"passed\":2,\"failed\":1,\"unaccounted\":0,\"duplicate_rejected\":1,\"allocations\":0}}"
+            "{{\"discovered\":5,\"filtered\":1,\"ignored\":1,\"passed\":2,\"failed\":1,\"unaccounted\":0,\"duplicate_rejected\":1,\"live_session_tables\":1,\"live_sessions\":0,\"allocations\":0}}"
+        );
+    }
+
+    #[test]
+    fn c48h_rejects_a_stale_generation_without_changing_counts() {
+        let (result, allocations) = crate::test_alloc::measure_allocations(|| {
+            let mut live = SessionSlots::<u8, 1>::new();
+            let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
+            let stale = ledger.start(7).expect("slot is available");
+            ledger
+                .live
+                .remove(stale)
+                .expect("fixture retires generation zero");
+            let active = ledger.start(8).expect("slot is reused");
+            let before = ledger.snapshot();
+            let stale_finish = ledger.finish(stale, TerminalOutcome::Failed);
+            (
+                stale_finish,
+                before,
+                ledger.snapshot(),
+                ledger.live.get(active).copied(),
+            )
+        });
+        let (stale_finish, before, after, active_value) = result;
+
+        assert_eq!(stale_finish, Err(OutcomeError::UnknownSession));
+        assert_eq!(before, after);
+        assert_eq!(active_value, Some(8));
+        assert_eq!(allocations, 0);
+        std::println!(
+            "{{\"stale_generation_finishes_counted\":0,\"active_generation_retained\":1,\"allocations\":{allocations}}}"
+        );
+    }
+
+    #[test]
+    fn c48h_rejects_replacing_ledger_while_a_child_is_live() {
+        let mut live = SessionSlots::<u8, 1>::new();
+        let slot = {
+            let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
+            ledger.start(9).expect("slot is available")
+        };
+
+        assert!(matches!(
+            OutcomeLedger::new(&mut live),
+            Err(OutcomeError::ActiveSessions)
+        ));
+        assert_eq!(live.get(slot), Some(&9));
+    }
+
+    #[test]
+    fn c48h_returns_child_when_the_live_table_is_full() {
+        let mut live = SessionSlots::<u8, 1>::new();
+        let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
+        ledger.start(4).expect("first child owns the only slot");
+
+        let failure = ledger
+            .start(5)
+            .expect_err("second child cannot enter a full table");
+        assert_eq!(
+            failure,
+            StartError {
+                error: OutcomeError::CapacityExhausted,
+                child: 5
+            }
+        );
+        assert_eq!(ledger.snapshot().discovered, 1);
+        assert_eq!(ledger.live.len(), 1);
+        std::println!(
+            "{{\"capacity_rejection\":1,\"returned_child\":{},\"discovered_count\":{},\"live_sessions\":{}}}",
+            failure.child,
+            ledger.snapshot().discovered,
+            ledger.live.len()
+        );
+    }
+
+    #[test]
+    fn c48h_returns_child_when_discovered_count_overflows() {
+        let mut live = SessionSlots::<u8, 1>::new();
+        let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
+        ledger.counts.discovered = usize::MAX;
+
+        let failure = ledger
+            .start(6)
+            .expect_err("discovered count cannot advance past usize::MAX");
+        assert_eq!(
+            failure,
+            StartError {
+                error: OutcomeError::CountOverflow,
+                child: 6
+            }
+        );
+        assert_eq!(ledger.snapshot().discovered, usize::MAX);
+        assert!(ledger.live.is_empty());
+        std::println!(
+            "{{\"count_overflow_rejection\":1,\"returned_child\":{},\"discovered_count_unchanged\":\"usize::MAX\",\"live_sessions\":{}}}",
+            failure.child,
+            ledger.live.len()
         );
     }
 }
