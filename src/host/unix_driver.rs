@@ -1220,6 +1220,38 @@ enum Flow {
     Eof,
 }
 
+// a full job set stops reading the listing, and a level-triggered readable fd left
+// registered would return from every kevent and starve the zero-ready backstop.
+#[derive(Clone, Copy)]
+enum StdoutRegistration {
+    Registered,
+    Paused,
+}
+
+impl StdoutRegistration {
+    fn sync(&mut self, stdout: &mut NativeReader<'_>, wanted: bool) -> Result<(), RunError> {
+        match (*self, wanted) {
+            (Self::Registered, false) => {
+                stdout.pause().map_err(|_| RunError::Reactor)?;
+                *self = Self::Paused;
+            }
+            (Self::Paused, true) => {
+                stdout.resume().map_err(|_| RunError::Reactor)?;
+                *self = Self::Registered;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn listing_wanted(
+    run: &ListingRun<'_>,
+    ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+) -> bool {
+    run.tripped(ledger) || ledger.sessions().len() < run.settings.jobs
+}
+
 struct ListingScan<'scan, 'run> {
     run: &'scan ListingRun<'run>,
     target: usize,
@@ -1337,9 +1369,6 @@ fn collect_ignored(
             break;
         }
         let ready = wait_for_events(run.port, run.signals, &mut events)?;
-        if ready == 0 {
-            reap_unreported_children(run.port, ledger, watches, run.reporting())?;
-        }
         for event in events.iter().copied().take(ready) {
             run.observe_doc_event(event);
             if event.token == stdout.token() {
@@ -1353,6 +1382,7 @@ fn collect_ignored(
                 test_event(run.port, event, ledger, watches, run.reporting())?;
             }
         }
+        reap_unreported_children(run.port, ledger, watches, run.reporting())?;
     }
     if exit_status.is_some_and(|status| status.code != Some(0)) && !run.interrupted() {
         return Err(RunError::ListingFailed);
@@ -1402,9 +1432,11 @@ fn run_listing(
     reap_into(&mut process, listing_id, &mut exit_status)?;
     let mut events = [NativeEvent::default(); 64];
     let mut context = Context::from_waker(Waker::noop());
+    let mut stdout_registration = StdoutRegistration::Registered;
     while !stdout_eof || !stderr_eof || exit_status.is_none() {
         run.pump_doc_tests()?;
-        if !stdout_eof && (run.tripped(ledger) || ledger.sessions().len() < run.settings.jobs) {
+        if !stdout_eof && listing_wanted(run, ledger) {
+            stdout_registration.sync(&mut stdout, true)?;
             loop {
                 let stopped = run.tripped(ledger);
                 let step = source.poll_next(
@@ -1432,10 +1464,10 @@ fn run_listing(
         if stdout_eof && stderr_eof && exit_status.is_some() {
             break;
         }
-        let ready = wait_for_events(run.port, run.signals, &mut events)?;
-        if ready == 0 {
-            reap_unreported_children(run.port, ledger, watches, run.reporting())?;
+        if !stdout_eof {
+            stdout_registration.sync(&mut stdout, listing_wanted(run, ledger))?;
         }
+        let ready = wait_for_events(run.port, run.signals, &mut events)?;
         for event in events.iter().copied().take(ready) {
             run.observe_doc_event(event);
             if event.token == stdout.token() {
@@ -1449,6 +1481,7 @@ fn run_listing(
                 test_event(run.port, event, ledger, watches, run.reporting())?;
             }
         }
+        reap_unreported_children(run.port, ledger, watches, run.reporting())?;
     }
     if exit_status.is_some_and(|status| status.code != Some(0)) && !run.interrupted() {
         return Err(RunError::ListingFailed);
@@ -1858,13 +1891,11 @@ impl CargoDriver<'_, '_> {
                 break;
             }
             let ready = wait_for_events(run.port, run.signals, &mut events)?;
-            if ready == 0 {
-                reap_unreported_children(run.port, ledger, watches, run.reporting())?;
-            }
             for event in events.iter().copied().take(ready) {
                 run.observe_doc_event(event);
                 self.dispatch_event(event, run, ledger, watches)?;
             }
+            reap_unreported_children(run.port, ledger, watches, run.reporting())?;
         }
         Ok(())
     }

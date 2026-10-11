@@ -94,14 +94,15 @@ impl MacosExitPort {
             if code != libc::ESRCH {
                 return Err(code);
             }
-            // an exiting child can be invisible to kqueue before waitpid can reap it.
-            let pending_status = try_reap(process_id)?;
+            // esrch for our own child means it is past kqueue's reach and mid-exit, so no
+            // NOTE_EXIT will ever arrive; the reap is bounded and the only way to see it.
+            let pending_status = decode_status(wait_blocking(process_id)?)?;
             return Ok(MacosProcessWatch {
                 process_id,
                 token,
                 registered: false,
                 state: WatchState::Live,
-                pending_status,
+                pending_status: Some(pending_status),
             });
         }
         let pending_status = try_reap(process_id)?;
@@ -338,10 +339,15 @@ fn try_reap(process_id: libc::pid_t) -> Result<Option<MacosExitStatus>, c_int> {
 }
 
 fn release_zombie(process_id: libc::pid_t) -> Result<(), c_int> {
+    wait_blocking(process_id).map(drop)
+}
+
+fn wait_blocking(process_id: libc::pid_t) -> Result<i32, c_int> {
     loop {
-        let result = unsafe { libc::waitpid(process_id, core::ptr::null_mut(), 0) };
+        let mut raw_status = 0;
+        let result = unsafe { libc::waitpid(process_id, &raw mut raw_status, 0) };
         if result >= 0 {
-            return Ok(());
+            return Ok(raw_status);
         }
         let code = last_error();
         if code != libc::EINTR {
@@ -552,6 +558,50 @@ mod tests {
         std::println!(
             "{{\"exited_before_registration\":1,\"exit_records\":1,\"reaps\":1,\"duplicate_reaps\":0}}"
         );
+    }
+
+    #[test]
+    fn c97_watch_never_returns_an_unregistered_unreaped_child() {
+        let mut child = HeldChild::new();
+        let port = MacosExitPort::new().expect("kqueue port is created");
+        let watch = port
+            .watch(child.process_id)
+            .expect("live child is registered");
+        assert!(watch.registered(), "a live child owns a kqueue exit filter");
+        unsafe { libc::kill(child.process_id, libc::SIGKILL) };
+        let mut exit_record = unsafe { core::mem::zeroed::<libc::siginfo_t>() };
+        let observed = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.process_id.cast_unsigned(),
+                &raw mut exit_record,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(observed, 0, "waitid observes the kill without reaping");
+        let mut late = port
+            .watch(child.process_id)
+            .expect("an exited child still resolves to a watch");
+        let first = late.reap().expect("late watch reaps");
+        child.reaped = true;
+        assert_eq!(first.and_then(|status| status.signal), Some(libc::SIGKILL));
+        assert!(!late.registered());
+    }
+
+    #[test]
+    fn c97_watch_of_a_pid_that_is_not_our_child_errors_instead_of_parking() {
+        let process_id = unsafe { libc::fork() };
+        assert!(process_id >= 0, "gone-pid child forks");
+        if process_id == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        assert_eq!(
+            unsafe { libc::waitpid(process_id, core::ptr::null_mut(), 0) },
+            process_id
+        );
+        let port = MacosExitPort::new().expect("kqueue port is created");
+        let refused = port.watch(process_id).expect_err("a reaped pid is not watchable");
+        assert_eq!(refused, libc::ECHILD, "esrch resolves through waitpid, never an unreaped watch");
     }
 
     #[test]

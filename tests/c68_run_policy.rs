@@ -772,3 +772,34 @@ fn c68_a_trip_before_doc_tests_execute_interrupts_the_doc_child_and_says_so() {
     );
     assert_eq!(run.count("FAIL"), 1);
 }
+
+#[test]
+fn c97_one_live_child_drains_every_listed_test_and_ends_the_listing() {
+    let run = run_stopping(&["--no-fail-fast", "--", "--test-threads=1"], &[]);
+
+    assert_eq!(run.status, Some(0), "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.count("PASS"), TEST_COUNT, "{}", run.stdout);
+    assert!(
+        run.stdout.contains(&format!(
+            "total: discovered {TEST_COUNT}, passed {TEST_COUNT}, failed 0, ignored 0"
+        )),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn c97_one_live_child_still_drains_the_listing_and_the_doc_group_together() {
+    let run = run_fixture(
+        DOC_FIXTURE,
+        &["--no-fail-fast", "--", "--test-threads=1"],
+        &[],
+        None,
+    );
+
+    assert_eq!(run.count("PASS"), 3, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.count("FAIL"), 1);
+    assert_eq!(run.count("IGNORED"), 1);
+    assert_eq!(doc_lines(&run, "PASS"), 1);
+    assert_eq!(run.status, Some(1));
+}
