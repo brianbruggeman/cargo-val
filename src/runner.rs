@@ -766,17 +766,10 @@ mod tests {
         let mut buffer = [0_u8; 4096];
         let mut length = 0;
         loop {
-            let count = unsafe {
-                libc::read(
-                    descriptor,
-                    buffer[length..].as_mut_ptr().cast(),
-                    buffer.len() - length,
-                )
-            };
+            let count = read_stream(descriptor, &mut buffer[length..]);
             if count == 0 {
                 break;
             }
-            assert!(count > 0, "child stream must be readable after exit");
             length += count.cast_unsigned();
             assert!(length < buffer.len(), "child stdout fits fixed capture");
         }
