@@ -1,0 +1,10 @@
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+     Running tests/std_compat.rs (/tmp/conflaguration_f8a_target/debug/deps/std_compat-c2b00a63f9e340d4)
+
+running 1 test
+test file_unchanged ... {"file_base_workers":2,"file_overlay_workers":7,"file_source_paths":1,"resolved_workers":7,"pinned_workers":7,"precedence_differences":0,"reversed_workers":2,"mutation_differences":1,"mutation_rejected":1}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

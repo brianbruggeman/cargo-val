@@ -1,0 +1,1 @@
+["val", "--manifest-path", "tests/fixtures/workspace/Cargo.toml", "--package", "cargo_val_fixture", "fixture::passes", "--", "--nocapture", "--test-threads=1"]

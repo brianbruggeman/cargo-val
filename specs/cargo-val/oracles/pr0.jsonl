@@ -1,0 +1,5 @@
+{"case":"held_permit","expected_ready_acquires":0,"expected_wakes":0}
+{"case":"release_one_permit","expected_ready_acquires":1,"expected_wakes":1}
+{"case":"close_pending_acquire","expected_errors":1,"expected_ready_acquires":0}
+{"case":"release_after_close","expected_errors":1,"expected_wakes":0}
+{"case":"summary","lost_wakes":0,"pending_acquires":1,"release_wakes":1,"scope":"controlled pending-to-release and pending-to-close transitions"}

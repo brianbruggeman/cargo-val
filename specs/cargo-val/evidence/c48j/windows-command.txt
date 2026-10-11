@@ -1,0 +1,2 @@
+cargo check -p cargo-val --lib --no-default-features --features proxima-codec,proxima-primitives --target x86_64-pc-windows-msvc
+exit_status=0

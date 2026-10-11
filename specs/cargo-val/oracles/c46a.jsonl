@@ -1,0 +1,2 @@
+{"case":"c46a_fixture","input":{"release_barrier":"held then opened","expected":{"process_callbacks":1,"iocp_exit_packets":1,"pre_release_packets":0}},"status":"prospective"}
+{"case":"c46a_negative_control","control":{"mutation":"keep barrier held","expected":{"exit_packets":0}},"status":"prospective"}

@@ -1,0 +1,8 @@
+{"admitted": 1, "name": "suite::alpha", "record": "identity"}
+{"admitted": 1, "name": "suite::beta", "record": "identity"}
+{"admitted": 1, "name": "suite::gamma", "record": "identity"}
+{"admitted": 1, "name": "suite::delta", "record": "identity"}
+{"admitted": 1, "name": "suite::epsilon", "record": "identity"}
+{"admitted": 1, "name": "suite::zeta", "record": "identity"}
+{"admitted": 1, "name": "suite::eta", "record": "identity"}
+{"admitted": 7, "capacity": 2, "completed": 7, "discovered": 7, "lost": 0, "peak_sessions": 2, "record": "summary"}

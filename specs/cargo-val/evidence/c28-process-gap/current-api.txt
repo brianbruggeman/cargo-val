@@ -1,0 +1,343 @@
+     1	//! libc-based process spawn primitive.
+     2	//!
+     3	//! Consumes a tier-1 [`CommandDescriptor`] descriptor and produces a
+     4	//! [`Child`] containing the child's pid plus parent-side
+     5	//! file descriptors for every [`Stdio::Piped`] slot.
+     6	//!
+     7	//! # What it honors
+     8	//!
+     9	//! Every field of [`CommandDescriptor`]:
+    10	//! - `program` + `args` → `execvp` argv
+    11	//! - `cwd` → `chdir(2)` in the child before exec
+    12	//! - `env` → built into a `*const *const c_char` envp **in the
+    13	//!   parent** (allocation-safe context), then handed to the child
+    14	//!   via a single `environ` pointer swap. The child performs **no**
+    15	//!   `setenv` / `unsetenv` / `clearenv` calls — pure data pass-
+    16	//!   through. `execvp` uses the swapped `environ` for both the
+    17	//!   child's env AND its `PATH` search.
+    18	//! - `umask` → `umask(2)` in the child before exec
+    19	//! - `controlling_tty` → `setsid()` + `ioctl(TIOCSCTTY, 0)` on fd 0
+    20	//! - per-slot [`Stdio`] wiring:
+    21	//!   - [`Stdio::Inherit`] — child inherits parent's fd at that index
+    22	//!   - [`Stdio::Null`] — open `/dev/null` in the child, dup2 onto the slot
+    23	//!   - [`Stdio::Fd`]`(n)` — child dup2s `n` onto the slot (caller retains
+    24	//!     ownership of `n`)
+    25	//!   - [`Stdio::Piped`] — `pipe(2)` allocated in the parent before fork;
+    26	//!     child dup2s its end, parent keeps the other in [`Child`]
+    27	//!
+    28	//! # Hazard
+    29	//!
+    30	//! `fork(2)` from a multi-threaded parent is unsafe (held mutexes
+    31	//! survive into the child with no thread to release them). Direct
+    32	//! callers of `spawn` should route through
+    33	//! [`ForkServer`](super::fork_server::ForkServer) when the parent
+    34	//! is multi-threaded. The fork-server is single-threaded by
+    35	//! construction so its `spawn` is safe; multi-threaded direct
+    36	//! callers risk deadlocks.
+    37
+    38	use std::ffi::CString;
+    39	use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+    40	use std::ptr;
+    41
+    42	use proxima_primitives::pipe::ProximaError;
+    43
+    44	use super::descriptor::{CommandDescriptor, EnvVar, Stdio};
+    45	use super::fd_pipe::make_pipe;
+    46
+    47	/// Result of a successful spawn: child pid + parent-side fds for
+    48	/// every [`Stdio::Piped`] slot.
+    49	#[derive(Debug)]
+    50	pub struct Child {
+    51	    /// Child process id. Private — once reaped, the OS is free to
+    52	    /// recycle this number for an unrelated process, so it must
+    53	    /// only ever reach a syscall through [`Child`]'s own methods,
+    54	    /// which know whether it has been reaped.
+    55	    pid: libc::pid_t,
+   260	    /// PTY-wrapper code sets this; vanilla `CommandPipe` leaves
+   261	    /// it `false`.
+   262	    pub controlling_tty: bool,
+   263	    /// File-creation umask to apply in the child before exec.
+   264	    /// `None` inherits the parent's umask. Maximum 0o777.
+   265	    pub umask: Option<u32>,
+   266	}
+   267
+   268	/// Spawn `command` as a child process honouring `options`
+   269	/// (dispatch-fd wiring, controlling-tty setup, umask). `CommandDescriptor`
+   270	/// itself stays pure data; anything that varies per spawn site
+   271	/// rides in [`SpawnOptions`].
+   272	pub fn spawn(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
+   273	    let mut piped_pairs: Vec<PipedPair> = Vec::new();
+   274	    for slot in [Slot::Input, Slot::Output, Slot::Error] {
+   275	        if matches!(slot_io(command, slot), Stdio::Piped) {
+   276	            piped_pairs.push(allocate_piped_pair(slot)?);
+   277	        }
+   278	    }
+   279
+   280	    let mut argv_storage: Vec<&std::ffi::CStr> = Vec::with_capacity(command.args.len() + 1);
+   281	    argv_storage.push(&command.program);
+   282	    for argument in &command.args {
+   283	        argv_storage.push(argument);
+   284	    }
+   285	    let argv_pointers: Vec<*const libc::c_char> = argv_storage
+   286	        .iter()
+   287	        .map(|cstr| cstr.as_ptr())
+   288	        .chain(std::iter::once(ptr::null()))
+   289	        .collect();
+   290
+   291	    let envp = build_envp(&command.env);
+   292	    let program_pointer = command.program.as_ptr();
+   293
+   294	    let pid = unsafe { libc::fork() };
+   295	    if pid < 0 {
+   296	        return Err(ProximaError::Body(format!(
+   297	            "libc::fork failed: {}",
+   298	            std::io::Error::last_os_error()
+   299	        )));
+   300	    }
+   301
+   302	    if pid == 0 {
+   303	        run_child(
+   304	            command,
+   305	            &piped_pairs,
+   306	            &envp,
+   155	/// Drain `request_body` into `write_end` on a worker thread.
+   156	/// Closing `write_end` (dropped on closure exit) signals EOF to
+   157	/// whatever reads the other end.
+   158	fn spawn_request_pump(write_end: OwnedFd, request: Request<Bytes>) {
+   159	    let raw_fd = write_end.into_raw_fd();
+   160	    thread::spawn(move || {
+   161	        let mut writer = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+   162	        let mut stream = request.into_chunk_stream();
+   163	        block_on(async {
+   164	            while let Some(result) = stream.next().await {
+   165	                let Ok(bytes) = result else { break };
+   166	                if writer.write_all(&bytes).is_err() {
+   167	                    break;
+   168	                }
+   169	            }
+   170	        });
+   171	    });
+   172	}
+   173
+   174	/// Wrap a read-end fd as a [`RequestStream`] (no child pid to reap).
+   175	/// Used inside the fork-server's grandchild where its input fd needs
+   176	/// to become the inner Pipe's request body. Exposed at `pub(super)`
+   177	/// so the grandchild runner can compose the same primitive.
+   178	pub(super) fn body_from_read_fd(read_end: OwnedFd) -> RequestStream {
+   179	    RequestStream::from_chunk_stream(byte_stream_from_read_fd(read_end, 0))
+   180	}
+   181
+   182	/// Wrap `read_end` as a [`ResponseStream`] backed by an unbounded
+   183	/// channel that a worker thread feeds in 4 KiB chunks.
+   184	fn build_response_body(read_end: OwnedFd, child_pid: libc::pid_t) -> ResponseStream {
+   185	    ResponseStream::from_chunk_stream(byte_stream_from_read_fd(read_end, child_pid))
+   186	}
+   187
+   188	/// Build a [`ChunkStream`] from `read_end`, fed by a worker thread in
+   189	/// 4 KiB chunks. After read EOF the worker reaps `child_pid` if
+   190	/// non-zero, then drops the sender so the stream ends.
+   191	fn byte_stream_from_read_fd(read_end: OwnedFd, child_pid: libc::pid_t) -> ChunkStream {
+   192	    let raw_fd = read_end.into_raw_fd();
+   193	    let (sender, receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+   194
+   195	    thread::spawn(move || {
+   196	        let mut reader = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+   197	        let mut buffer = [0u8; 4096];
+   198	        loop {
+   199	            match reader.read(&mut buffer) {
+   200	                Ok(0) => break,
+   201	                Ok(bytes_read) => {
+   202	                    if sender.send(buffer[..bytes_read].to_vec()).is_err() {
+   203	                        break;
+   204	                    }
+   205	                }
+   206	                Err(_) => break,
+   207	            }
+   208	        }
+   209	        if child_pid > 0 {
+   210	            let mut status: libc::c_int = 0;
+   211	            unsafe {
+   212	                libc::waitpid(child_pid, &mut status, 0);
+   213	            }
+   214	        }
+   215	    });
+   216
+   217	    Box::pin(stream::unfold(receiver, |mut rx| async move {
+   218	        rx.recv()
+   219	            .await
+   220	            .map(|chunk| (Ok::<Bytes, ProximaError>(Bytes::from(chunk)), rx))
+     1	//! `impl Pipe` that spawns a [`CommandDescriptor`] as a subprocess with a
+     2	//! typed dispatch chain attached.
+     3	//!
+     4	//! # Composition
+     5	//!
+     6	//! `CommandPipe::call` composes:
+     7	//!
+     8	//! 1. [`spawn_and_dispatch`] — fork+exec the child with the
+     9	//!    dispatch chain wired to `extra_fd[7]` + `PROXIMA_DISPATCH_FD`
+    10	//!    in the child env. A sibling thread drives the chain over the
+    11	//!    parent end of a socketpair.
+    12	//! 2. [`FdPairPipe`] — wrap the (parent_write_fd, parent_read_fd)
+    13	//!    pair as a Pipe; its `call(request)` does the byte shuttle.
+    14	//! 3. Background reap — when the response body fully drains, a
+    15	//!    detached thread runs [`DispatchedChild::wait`] which joins
+    16	//!    the dispatch thread and `waitpid`s the child.
+   165	    fn call(
+   166	        &self,
+   167	        request: Request<Bytes>,
+   168	    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+   169	        let mut command = self.command.clone();
+   170	        command.stdin(Stdio::Piped).stdout(Stdio::Piped);
+   171	        let shim_result = if self.libc_shim {
+   172	            attach_libc_shim_env(&mut command)
+   173	        } else {
+   174	            Ok(())
+   175	        };
+   176	        let chain = self.chain.clone();
+   177
+   178	        async move {
+   179	            shim_result?;
+   180	            let mut dispatched = spawn_and_dispatch(&command, chain)?;
+   181
+   182	            let input_fd = dispatched
+   183	                .child
+   184	                .stdin
+   185	                .take()
+   186	                .ok_or_else(|| ProximaError::Body("spawn returned no Piped input fd".into()))?;
+   187	            let output_fd =
+   188	                dispatched.child.stdout.take().ok_or_else(|| {
+   189	                    ProximaError::Body("spawn returned no Piped output fd".into())
+   190	                })?;
+   228	        |(mut stream, mut handle)| async move {
+   229	            match stream.next().await {
+   230	                Some(item) => Some((item, (stream, handle))),
+   231	                None => {
+   232	                    if let Some(dispatched) = handle.take() {
+   233	                        thread::spawn(move || {
+   234	                            let _ = dispatched.wait();
+   235	                        });
+   236	                    }
+   237	                    None
+   238	                }
+   239	            }
+     1	#![cfg_attr(not(feature = "std"), no_std)]
+     2
+     3	#[cfg(feature = "alloc")]
+     4	extern crate alloc;
+     5
+     6	pub mod capabilities;
+     7	pub mod descriptor;
+     8	pub mod env;
+     9	pub mod framing;
+    10	pub mod grounds;
+    11	pub mod markers;
+    12	pub mod operators;
+    13	pub mod path;
+    14	pub mod protocol;
+    15	pub mod taint;
+    16
+    17	#[cfg(feature = "std")]
+    18	pub mod command_config;
+    19	#[cfg(feature = "std")]
+    20	pub mod command_pipe;
+    21	#[cfg(feature = "std")]
+    22	pub mod dispatched;
+    23	#[cfg(feature = "std")]
+    24	pub mod fd_pipe;
+    25	#[cfg(feature = "std")]
+    26	pub mod fork_server;
+    27	#[cfg(feature = "std")]
+    28	pub mod host_grounds;
+    29	#[cfg(feature = "std")]
+    30	pub mod ipc;
+    31	#[cfg(feature = "std")]
+    32	pub mod libc_shim;
+    33	#[cfg(feature = "std")]
+    34	pub mod pty;
+    35	#[cfg(feature = "std")]
+    36	pub mod pty_config;
+    37	#[cfg(feature = "std")]
+    38	pub mod pty_pipe;
+    39	#[cfg(feature = "std")]
+    40	pub mod spawn;
+    41
+    42	#[cfg(all(test, feature = "std"))]
+    12	[features]
+    13	default = ["std"]
+    14	# alloc is always required (the crate uses Vec/String/etc.); declared
+    15	# as a no-op feature so callers can mirror proxima-primitives::pipe's shape.
+    16	alloc = []
+    17	# std enables tier-2 modules (host_grounds, ipc, dispatched, command_pipe,
+    18	# pty_pipe, fork_server, fd_pipe, command_settings, spawn, pty) that
+    19	# require std::io / std::path / std::os::unix / std::thread.
+    20	std = ["alloc"]
+    21
+    22	[dependencies]
+    23	bon.workspace = true
+    24	bytes.workspace = true
+    25	conflaguration = { workspace = true, features = ["derive", "toml"] }
+    26	futures = { workspace = true, features = ["executor"] }
+    27	libc.workspace = true
+    28	nix = { version = "0.31.3", features = ["poll", "ioctl", "socket", "net", "term", "process", "signal", "fs", "uio"] }
+    29	postcard = { workspace = true, features = ["alloc"] }
+    30	proxima-primitives = { workspace = true, features = ["std"] }
+    31	proxima-protocols = { workspace = true, features = ["process"] }
+    32	serde = { workspace = true, features = ["derive"] }
+   493	    /// Mirrors [`std::process::Command::spawn`] in shape. Lowers
+   494	    /// to the descriptor, applies [`SpawnOptions`], fork+execs.
+   495	    /// Returns a [`Child`] with the parent-side fds for any
+   496	    /// `Stdio::Piped` slots — no chain/dispatch wiring here
+   497	    /// (use [`Pipe::call`](proxima_primitives::pipe::Pipe::call) for that — it handles the dispatch
+   498	    /// thread lifecycle alongside the byte shuttle).
+   499	    pub fn spawn(&mut self) -> Result<Child, ProximaError> {
+   500	        let descriptor = self.to_descriptor()?;
+   501	        spawn(&descriptor, self.spawn_options(None))
+   502	    }
+   503
+   504	    /// Mirrors [`std::process::Command::output`] in shape. Spawns
+   505	    /// the child with `stdout` + `stderr` forced to
+   506	    /// [`Stdio::Piped`], collects both, waits for exit, returns
+   507	    /// status + buffered output. `stdin` stays whatever the
+   508	    /// caller configured (default `Inherit`).
+   509	    ///
+   510	    /// Drop-in alignment with std uses `io::Result<Output>`; we
+   511	    /// return `Result<Output, ProximaError>` because the rest of
+   512	    /// the crate uses `ProximaError` — same shape, different
+   513	    /// error type.
+   514	    pub fn output(&mut self) -> Result<Output, ProximaError> {
+   515	        let original_stdout = self.stdout;
+   516	        let original_stderr = self.stderr;
+   517	        self.stdout = Stdio::Piped;
+   518	        self.stderr = Stdio::Piped;
+   519	        let result = self.spawn_and_collect();
+   520	        self.stdout = original_stdout;
+   521	        self.stderr = original_stderr;
+   522	        result
+   523	    }
+   524
+   525	    /// Mirrors [`std::process::Command::status`] in shape. Spawns
+   526	    /// the child with stdio as configured (no forced piping),
+   527	    /// waits for exit, returns the raw `wait(2)` status code.
+   528	    pub fn status(&mut self) -> Result<i32, ProximaError> {
+   529	        let mut child = self.spawn()?;
+   530	        wait_child(&mut child)
+   531	    }
+   532
+   533	    fn spawn_and_collect(&mut self) -> Result<Output, ProximaError> {
+   534	        let mut child = self.spawn()?;
+   535	        let stdout_fd = child
+   536	            .stdout
+   537	            .take()
+   538	            .ok_or_else(|| ProximaError::Body("output requires piped stdout".into()))?;
+   539	        let stderr_fd = child
+   540	            .stderr
+   541	            .take()
+   542	            .ok_or_else(|| ProximaError::Body("output requires piped stderr".into()))?;
+   543	        let stdout_bytes = drain_fd(stdout_fd);
+   544	        let stderr_bytes = drain_fd(stderr_fd);
+   545	        let status = wait_child(&mut child)?;
+   546	        Ok(Output {
+   547	            status,
+   548	            stdout: stdout_bytes,
+   549	            stderr: stderr_bytes,
+   550	        })

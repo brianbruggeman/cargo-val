@@ -1,0 +1,10 @@
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running tests/std_compat.rs (/tmp/conflaguration_f7_target/debug/deps/std_compat-39911d52c4d3b879)
+
+running 1 test
+test display_unchanged ... {"rendered":"port=8080","pinned":"port=8080","byte_differences":0,"mutation_byte_differences":1,"mutation_rejected":1}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

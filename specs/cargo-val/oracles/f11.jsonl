@@ -1,0 +1,2 @@
+{"case":"f11_fixture","input":{"defaults":{"jobs":2,"color":true},"environment":{"CARGO_VAL_JOBS":"3","CARGO_VAL_COLOR":"false"},"cli":{"jobs":4,"color":true},"expected":{"jobs":4,"color":true,"validation_calls":1}},"status":"prospective"}
+{"case":"f11_negative_control","control":{"mutation":"set CLI jobs to 0","expected":{"validation_errors":1,"field":"jobs"}},"status":"prospective"}

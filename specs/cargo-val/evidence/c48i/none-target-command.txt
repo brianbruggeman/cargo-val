@@ -1,0 +1,1 @@
+command: CARGO_TARGET_DIR=/tmp/cargo_val_lib_fresh_20261010 cargo check -p cargo-val --lib --no-default-features --target x86_64-unknown-none

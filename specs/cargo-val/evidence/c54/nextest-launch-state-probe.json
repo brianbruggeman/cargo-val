@@ -1,0 +1,39 @@
+{
+  "case": "cargo_nextest_multi_fixture_discovery_on_macos",
+  "status": "observed",
+  "host": "macos-15.8-arm64",
+  "command": [
+    "cargo",
+    "nextest",
+    "run",
+    "--manifest-path",
+    "tests/fixtures/workspace/Cargo.toml",
+    "--no-fail-fast"
+  ],
+  "target_directory": "/tmp/cargo_val_c54_multi_fixture_target",
+  "first_attempt": {
+    "timeout_seconds": 12,
+    "cargo_build_status": "Finished test profile in 0.00s",
+    "nextest_stdout": null,
+    "nextest_stderr": "Finished test profile (unoptimized + debuginfo) target(s) in 0.00s"
+  },
+  "second_attempt_process_snapshot": {
+    "elapsed_seconds": "02",
+    "nextest_pid": 86046,
+    "test_listing_children": 10,
+    "listing_invocations": [
+      "--list --format terse",
+      "--list --format terse --ignored"
+    ],
+    "targets": [
+      "arithmetic_fixture",
+      "branch_fixture",
+      "bytes_fixture",
+      "integration_fixture",
+      "order_fixture"
+    ],
+    "all_listing_processes_state": "S",
+    "parent_and_all_ten_children_were_killed_after_snapshot": true
+  },
+  "interpretation": "Nextest did not reach running selected tests during this attempt; its test discovery subprocesses stayed alive. This is a shared host launch failure observation, not a nextest performance result."
+}

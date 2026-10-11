@@ -30,10 +30,27 @@ def source_line(path: Path, pattern: str) -> int:
     raise ValueError(f"missing source anchor {pattern!r} in {path}")
 
 
+def anchor_rejected(source: str, pattern: str) -> bool:
+    try:
+        source_line_from_text(source, pattern)
+    except ValueError:
+        return True
+    return False
+
+
+def source_line_from_text(source: str, pattern: str) -> int:
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        if re.search(pattern, line):
+            return line_number
+    raise ValueError(f"missing source anchor {pattern!r} in fixture")
+
+
 def main() -> int:
     library = LIB.read_text()
     manifest = MANIFEST.read_text()
     derive = DERIVE.read_text()
+    if not anchor_rejected("pub fn from_env() {}", r"from_pairs"):
+        raise ValueError("negative control accepted a fixture without the borrowed-pair entry point")
 
     gaps = [
         {
@@ -81,14 +98,31 @@ def main() -> int:
         "serde_yaml",
         "serde-value",
     }
-    unbound_dependencies = sorted(set(dependencies) - tracked_dependencies)
-    observed = gaps + [{"api_signature": SIGNATURE}]
+    unclassified_dependencies = sorted(set(dependencies) - tracked_dependencies)
+    reviewed = sorted(dependencies)
+    observed = gaps + [
+        {"api_signature": SIGNATURE},
+        {
+            "direct_dependency_inventory": {
+                "names": reviewed,
+                "unclassified_names": unclassified_dependencies,
+            }
+        },
+        {
+            "counts": {
+                "source_backed_gaps": len(gaps),
+                "borrowed_pair_signatures": 1,
+                "unclassified_direct_dependency_names": len(unclassified_dependencies),
+            }
+        },
+        {"negative_controls": {"missing_borrowed_pair_anchor_rejected": 1}},
+    ]
     expected = [json.loads(line) for line in ORACLE.read_text().splitlines() if line.strip()]
-    if observed != expected or len(gaps) != 5 or unbound_dependencies:
+    if observed != expected or len(gaps) != 5 or unclassified_dependencies:
         raise ValueError(
             f"expected 5 gaps, 1 API signature, 0 unbound dependencies; "
             f"observed {len(gaps)}, {sum('api_signature' in row for row in observed)}, "
-            f"{len(unbound_dependencies)}"
+            f"{len(unclassified_dependencies)}"
         )
 
     for gap in gaps:
@@ -100,14 +134,17 @@ def main() -> int:
                 "counts": {
                     "source_backed_gaps": len(gaps),
                     "borrowed_pair_signatures": 1,
-                    "unbound_runtime_dependencies": len(unbound_dependencies),
+                    "unclassified_direct_dependency_names": len(unclassified_dependencies),
                 },
-                "dependencies_reviewed": sorted(dependencies),
-                "unbound_dependencies": unbound_dependencies,
+                "direct_dependency_inventory": {
+                    "names": reviewed,
+                    "unclassified_names": unclassified_dependencies,
+                },
             },
             sort_keys=True,
         )
     )
+    print(json.dumps(observed[-1], sort_keys=True))
     return 0
 
 

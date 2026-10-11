@@ -1,0 +1,2 @@
+{"case":"f12_fixture","input":{"builder":{"jobs":4,"color":false},"expected_serialized":{"jobs":4,"color":false},"expected":{"roundtrips":1,"typed_fields":2}},"status":"prospective"}
+{"case":"f12_negative_control","control":{"mutation":"omit jobs during deserialize","expected":{"schema_errors":1}},"status":"prospective"}

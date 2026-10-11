@@ -1,0 +1,2 @@
+{"case":"c52c_fixture","input":{"host":"windows","env":{"CARGO_VAL_JOBS":"2","CARGO_VAL_COLOR":"true","NO_COLOR":""},"expected":{"recognized_keys":3,"empty_no_color_present":1,"truncated_utf16_values":0}},"status":"prospective"}
+{"case":"c52c_negative_control","control":{"mutation":"map ERROR_ENVVAR_NOT_FOUND to present-empty","expected_rejected":true},"status":"prospective"}

@@ -1,0 +1,2 @@
+{"case":"c46c_fixture","input":{"child_exit_status":0,"expected":{"classified_exits":1,"process_handle_closures":1,"duplicate_exit_records":0}},"status":"prospective"}
+{"case":"c46c_negative_control","control":{"mutation":"deliver duplicate callback","expected":{"duplicate_classifications":0,"double_closes":0}},"status":"prospective"}

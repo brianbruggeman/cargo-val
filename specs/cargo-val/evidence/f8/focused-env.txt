@@ -1,0 +1,10 @@
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running tests/std_compat.rs (/tmp/conflaguration_f8_target/debug/deps/std_compat-1ed8f255ba8c3bd2)
+
+running 1 test
+test env_unchanged ... {"environment":"WORKERS=2","env_source_paths":1,"pinned":2,"resolved":2,"value_differences":0,"mutation":3,"mutation_differences":1,"mutation_rejected":1}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

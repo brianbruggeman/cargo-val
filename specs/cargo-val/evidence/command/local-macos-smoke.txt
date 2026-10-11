@@ -1,0 +1,27 @@
+Host: macOS Darwin 24.6.0, aarch64-apple-darwin
+Install command: RUSTC_WRAPPER= cargo install --path . --root /tmp/cargo-val-local-install --force
+Install output: cargo-val v0.1.0 compiled in release profile; executable installed at /tmp/cargo-val-local-install/bin/cargo-val
+
+Command: PATH=/tmp/cargo-val-local-install/bin:$PATH cargo val --help
+Exit: 0
+Stdout:
+cargo-val
+Run Rust tests as isolated processes with streaming discovery.
+
+Usage: cargo val [OPTIONS] [FILTER] [-- <TEST-ARGS>...]
+
+Options:
+  -h, --help       Print help
+  -V, --version    Print version
+
+Stderr: empty
+
+Command: PATH=/tmp/cargo-val-local-install/bin:$PATH cargo val --manifest-path tests/fixtures/workspace/Cargo.toml --exact fixture::passes
+Exit: 2
+Stdout: empty
+Stderr:
+cargo-val is not implemented yet; use --help for usage
+
+Help fixture comparison:
+Command: PATH=/tmp/cargo-val-local-install/bin:$PATH cargo val --help > /tmp/cargo-val-help.stdout 2> /tmp/cargo-val-help.stderr; cmp -s tests/fixtures/help-banner.txt /tmp/cargo-val-help.stdout
+Observed: status 0; stdout 8 lines; stderr 0 bytes; fixture comparison status 0

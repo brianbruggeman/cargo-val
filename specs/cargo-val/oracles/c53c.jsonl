@@ -1,0 +1,2 @@
+{"case":"c53c_fixture","input":{"host":"windows","producer_eof":"held until first test starts","tests":["pass","fail"],"expected":{"starts_before_eof":1,"passed":1,"failed":1,"orphans":0,"blocking_child_calls":0,"dedicated_child_threads":0}},"status":"prospective"}
+{"case":"c53c_negative_control","control":{"mutation":"wait for producer eof before launch","expected_rejected":true},"status":"prospective"}

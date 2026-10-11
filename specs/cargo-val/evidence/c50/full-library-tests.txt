@@ -1,0 +1,99 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (/tmp/cargo_val_c50_source_target/debug/deps/cargo_val-90174107ff274261)
+
+running 46 tests
+{"direct_buffered_oversize_error_equal":1,"direct_buffered_streams_not_poisoned":1,"error":"frame_too_large:9"}
+{"complete_line_pointer_identity":1,"complete_line_payload_copies":0,"copy_comparator_control_rejected":1,"allocations":0}
+{"artifacts_before_eof":1,"non_test_ignored":1,"whole_output_collections":0,"borrowed_pointer_identity":1,"source_read_calls":1,"source_step_allocations":0}
+{"producer_open":1,"eof_wait_pending":1,"artifact_after_eof_by_control":1,"same_comparator_rejected":1}
+{"missing_trailing_value":1,"missing_before_option":1,"missing_before_separator":1,"duplicate_filters_rejected":1,"invalid_invocations_rejected":4}
+{"fragmented_record_staged":1,"fragmented_path_borrows_framer":1}
+{"retirements_while_read_pending":0,"retirements_after_both_cancellations_and_eofs":1,"normal_read_completions":2,"buffer_releases_before_retirement":2,"empty_read_rearms":2,"read_after_eof_rejected":1,"eof_while_buffer_ready_rejected":1,"withheld_stderr_retirements":0,"allocations":0}
+{"exit_first_retirements":1,"eof_first_retirements":1,"duplicate_retirements":0,"allocations":0}
+{"first_launch_before_eof":1,"listing_bytes_consumed_while_full":0,"launch_after_exit":1,"allocations":0}
+{"cargo_external_prefixes":1,"manifest_pairs":1,"package_pairs":1,"filters":1,"harness_tail_arguments":2,"copied_argument_bytes":0}
+test artifact_stream::tests::c49z_oversized_complete_record_matches_buffered_framing_error ... ok
+test cargo_source::tests::c49_emits_borrowed_artifact_before_reader_eof ... ok
+{"actual_intent_before_eof":1,"delayed_control_before_eof":0,"delayed_control_after_eof":1,"late_launch_control_rejected":1}
+test cargo_source::tests::c49_eof_wait_control_withholds_the_same_artifact ... ok
+{"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
+test artifact_stream::tests::c49z_borrows_complete_record_and_stages_fragmented_record ... ok
+{"borrowed_name":"beta","consumed_bytes":11,"event":"pull_after_retire","listing_record":"beta: test\n","result":"Test"}
+test cli::tests::c48d_rejects_a_missing_cargo_option_value_before_spawn ... ok
+{"native_child_artifacts_before_eof":1,"native_non_test_ignored":1,"pending_while_child_stdout_open":1,"stdout_eof_after_release":1,"child_reaped":1}
+test child_completion::tests::c48i_waits_for_windows_read_cancellation_and_both_streams ... ok
+{"active_child":"alpha child","consumed_bytes":0,"event":"pull_while_full","listing_record":"beta: test\n","result":"Full"}
+test child_completion::tests::c48i_retires_after_exit_and_streams_in_either_order ... ok
+test coordinator::tests::launches_before_eof_and_only_pulls_again_after_slot_retirement ... ok
+{"parent_reads":2,"child_writes":2,"ownership_checks":4,"closed_after_drop":4}
+{"exited_before_registration":1,"exit_records":1,"reaps":1,"duplicate_reaps":0}
+{"before_release":0,"premature_reaps":0,"exit_events":1,"reaps":1,"duplicate_reaps":0,"control_wakes":1}
+test cli::tests::c48d_retains_external_cargo_and_harness_arguments_by_reference ... ok
+test coordinator::tests::rejects_delaying_first_launch_until_listing_eof ... ok
+{"second_pair_failure":1,"first_pair_descriptors_closed":2}
+test dispatch_stream::tests::dispatch_pipe_does_not_allocate_and_probe_detects_allocation ... ok
+test dispatch_stream::tests::resumes_listing_after_child_slot_is_retired ... ok
+{"premature_events":0,"ready_batches":3,"stdout_wakes":1,"stderr_wakes":1,"task_wake_notifications":2,"child_exits":1,"stdout_payload":"out","stdout_first_read":2,"stderr_payload":"err","stdout_eof":true,"stderr_eof":true,"post_eof_events":0}
+test cargo_source::tests::c49_native_child_stdout_yields_before_the_child_closes_it ... ok
+{"launch_errors":1,"owned_descriptors":0}
+test dispatch_stream::tests::stops_consuming_listing_when_live_child_slots_are_full ... ok
+test host::unix_pipe_pair::tests::c38a_creates_two_owned_nonblocking_pipe_pairs ... ok
+{"stdout":1,"stderr":1,"exit":1,"retired_generation_rejected":1,"borrowed_payloads":2,"payload_copies":0,"allocations":0}
+{"exit_accepted":1,"late_stdout_accepted":1,"late_stderr_accepted":1,"borrowed_pointer_equalities":2,"live_sessions":1,"removed_slot_control_rejected":1,"payload_copies":0,"allocations":0}
+test host::macos_exit::tests::c41_registration_race_control_observes_already_exited_child ... ok
+{"host_event_validated_through_ledger":1,"borrowed_pointer_identity":1,"live_before_retirement":1,"retired_after_outcome":1,"allocations":0}
+test host::macos_exit::tests::c41_wakes_for_child_exit_and_control_without_worker_threads ... ok
+{"stdout_eof_accepted":1,"stderr_eof_accepted":1,"live_sessions":1,"payload_copies":0,"allocations":0}
+test host::unix_pipe_pair::tests::c38a_second_pipe_failure_drops_first_pair ... ok
+{"stale_stdout_eof_rejected":1,"stale_stderr_eof_rejected":1,"active_session_retained":1,"payload_copies":0,"allocations":0}
+test host::macos_pipe::tests::c42_reads_both_child_streams_from_the_shared_kqueue ... ok
+{"collector_pending_before_eof":1,"collector_first_intent_after_eof":1,"same_comparator_rejected":1}
+test host::unix_spawn::tests::fixture_alpha ... ok
+{"direct_utf8_error":"Listing(InvalidUtf8)","buffered_utf8_error":"Listing(InvalidUtf8)","direct_poisoned":1,"buffered_poisoned":1,"direct_oversize_error":"Framing(Framing(FrameTooLarge { len: 9 }))","buffered_oversize_error":"Framing(Framing(FrameTooLarge { len: 9 }))","direct_oversize_retry_same":1,"buffered_oversize_retry_same":1,"fragmented_line_staged":1,"partial_eof_rejected":1}
+test host::unix_spawn::tests::c38b_failed_launch_closes_all_capture_descriptors ... ok
+{"direct_borrowed_name_pointers":2,"unread_tail_replayed":1,"complete_direct_lines_pending_bytes":0,"direct_eof_drain":1}
+test host_event::tests::c48g_events_borrow_output_and_reject_exit_for_retired_generation ... ok
+{"mock_launches":2,"first_intent_before_eof":1,"borrowed_name_pointer_identities":2,"full_slot_read_delta":0,"full_slot_consumed_delta":0,"resumed_after_retirement":1,"source_allocations":0}
+test host_event::tests::c48g_exit_keeps_slot_live_for_late_stream_output ... ok
+test host_event::tests::c48h_validates_a_borrowed_event_through_the_ledger_view ... ok
+{"discovered":5,"filtered":1,"ignored":1,"passed":2,"failed":1,"unaccounted":0,"duplicate_rejected":1,"live_session_tables":1,"live_sessions":0,"allocations":0}
+test host_event::tests::c48j_accepts_eof_for_each_live_child_stream ... ok
+{"stale_generation_finishes_counted":0,"active_generation_retained":1,"allocations":0}
+test host_event::tests::c48j_rejects_eof_from_a_retired_slot_generation ... ok
+{"count_overflow_rejection":1,"returned_child":6,"discovered_count_unchanged":"usize::MAX","live_sessions":0}
+test listing_source::tests::c50_collect_all_control_emits_first_intent_only_after_eof ... ok
+{"capacity_rejection":1,"returned_child":5,"discovered_count":1,"live_sessions":1}
+{"ansi_records_true":2,"ansi_records_false":0,"short_buffer_errors":1,"short_buffer_unchanged":1,"allocations":0}
+test listing_source::tests::c50_direct_and_buffered_errors_keep_framing_and_poison_contracts ... ok
+test listing_source::tests::c50_direct_listing_replays_tail_without_copying_complete_lines ... ok
+{"substring_selected":2,"exact_selected":1,"exact_nonmatch":1,"owned_name_copies":0}
+{"borrowed_executable_paths":1,"borrowed_test_names":1,"exact_arguments_in_order":2,"transposed_control_rejected":1,"allocations":0}
+test listing_source::tests::c50_launches_one_borrowed_intent_then_pauses_at_full_capacity ... ok
+test outcomes::tests::c48h_accounts_outcomes_in_the_coordinator_owned_session_table ... ok
+test outcomes::tests::c48h_rejects_replacing_ledger_while_a_child_is_live ... ok
+{"inherited_entries":1,"child_overrides":1,"argv_pairs":1,"allocations":0}
+test outcomes::tests::c48h_rejects_a_stale_generation_without_changing_counts ... ok{"short_argv_pointer_control_rejected":1,"storage_unchanged":1}
+
+{"interior_nul_control_rejected":1,"storage_unchanged":1}
+test outcomes::tests::c48h_returns_child_when_discovered_count_overflows ... ok
+{"truncated_argv_control_rejected":1,"storage_unchanged":1}
+test outcomes::tests::c48h_returns_child_when_the_live_table_is_full ... ok
+test reporter::tests::writes_colored_and_plain_records_and_rejects_short_buffer_atomically ... ok
+{"inherited_entries":2,"child_overrides":1,"unicode_value_units":3,"drive_directory_preserved":1,"allocations":0}
+{"quoted_path":1,"trailing_backslash_escape":1,"allocations":0}
+{"short_storage_rejected":1,"partial_writes":0}
+test selection::tests::selection_modes_preserve_borrowed_names_and_reject_exact_nonmatch ... ok
+test test_intent::tests::intent_borrows_path_and_name_and_rejects_transposed_arguments ... ok
+test unix_arguments::tests::c37_lowers_exact_argv_and_child_environment_into_caller_storage ... ok
+test unix_arguments::tests::c37_rejects_one_byte_short_argv_pointer_storage_before_writing ... ok
+test unix_arguments::tests::c37_rejects_an_interior_nul_in_the_test_name ... ok
+test unix_arguments::tests::c37_rejects_one_byte_short_argv_storage_before_writing ... ok
+test windows_arguments::tests::c43_encodes_sorted_unicode_environment_override_in_caller_storage ... ok
+test windows_arguments::tests::c43_quotes_executable_and_escapes_trailing_backslashes ... ok
+test windows_arguments::tests::c43_rejects_short_utf16_storage_without_partial_writes ... ok
+{"child_status":0,"stdout":"\nrunning 1 test\ncargo-val-child-stdouttest host::unix_spawn::tests::fixture_alpha ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s\n\n","stderr":"cargo-val-child-stderr"}
+{"children":1,"captured_descriptors":2,"stdout_payloads":1,"stderr_payloads":1,"cwd_matches":1,"exit_status":0,"parent_child_writes_closed":2,"captured_reads_closed":2,"child_id_nonzero":1}
+test host::unix_spawn::tests::c38b_launches_exact_child_in_requested_directory_and_owns_reads ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

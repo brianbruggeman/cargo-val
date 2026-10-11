@@ -1,0 +1,2 @@
+{"case":"c48n_fixture","status":"prospective","input":{"host":"macos","inherited_environment":["PATH=/fixture/bin","CARGO_HOME=/fixture/cargo"],"child_overrides":["CARGO_VAL_CASE=alpha"]},"expected":{"tests_passed":2,"tests_failed":0,"inherited_entries":2,"child_only_overrides":1,"parent_changes":0,"copied_value_bytes":0}}
+{"case":"c48n_negative_control","status":"prospective","control":{"mutation":"drop inherited PATH entry before child lowering","same_comparator":"inherited_child_environment","expected_rejected":true,"accepted_child_environments":0}}

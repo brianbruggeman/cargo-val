@@ -1,0 +1,32 @@
+Analysis of sampling integration_fixture-c192ef95dfef63d1 (pid 50651) every 1 millisecond
+Process:         integration_fixture-c192ef95dfef63d1 [50651]
+Path:            /private/tmp/*/integration_fixture-c192ef95dfef63d1
+Load Address:    0x102aec000
+Identifier:      integration_fixture-c192ef95dfef63d1
+Version:         ???
+Code Type:       ARM64
+Parent Process:  cargo [50587]
+Target Type:     live task
+
+Date/Time:       2026-10-10 19:13:00.321 -0500
+Launch Time:     2026-10-10 19:12:29.928 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    892 Thread_89194080: Main Thread   DispatchQueue_<multiple>
+      892 _dyld_start  (in dyld) + 0  [0x102e487c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        892
+
+Binary images description not available
+

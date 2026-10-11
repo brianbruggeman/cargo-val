@@ -1,0 +1,163 @@
+--- /tmp/cargo_val_c54b_control_src/src/host/unix_driver.rs	2026-10-10 21:12:09
++++ src/host/unix_driver.rs	2026-10-10 21:08:02
+@@ -47,6 +47,12 @@
+ const CAPTURE_CAPACITY: usize = 4096;
+ const RESULT_LINE_CAPACITY: usize = NAME_CAPACITY + 64;
+ 
++struct PendingListing {
++    child: UnixChild,
++    path: [u8; PATH_CAPACITY],
++    path_length: usize,
++}
++
+ /// Run-mode failure category that the no_std binary can report without allocation.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum RunError {
+@@ -570,31 +576,48 @@
+ #[cfg(target_os = "linux")]
+ fn last_error() -> c_int {
+     unsafe { *libc::__errno_location() }
++}
++
++fn spawn_listing(
++    executable: &str,
++    envp: &[*const c_char],
++    cwd: &CStr,
++) -> Result<PendingListing, RunError> {
++    if executable.len() + 1 > PATH_CAPACITY || executable.as_bytes().contains(&0) {
++        return Err(RunError::Arguments);
++    }
++    let mut path = [0; PATH_CAPACITY];
++    path[..executable.len()].copy_from_slice(executable.as_bytes());
++    let executable_cstr = CStr::from_bytes_with_nul(&path[..executable.len() + 1])
++        .map_err(|_| RunError::Arguments)?;
++    let argv = [
++        executable_cstr.as_ptr(),
++        c"--list".as_ptr(),
++        core::ptr::null(),
++    ];
++    let child = spawn_raw_unix(executable_cstr, &argv, envp, Some(cwd), false)
++        .map_err(|_| RunError::Spawn)?;
++    Ok(PendingListing {
++        child,
++        path,
++        path_length: executable.len(),
++    })
+ }
+ 
+ fn run_listing<'sessions>(
+     port: &NativePort,
+-    executable: &str,
++    pending: PendingListing,
+     filter: &str,
+     exact: bool,
+     environment: &[&CStr],
+-    envp: &[*const c_char],
+     cwd: &CStr,
+     settings: &Settings,
+     ledger: &mut OutcomeLedger<'sessions, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+     watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+ ) -> Result<(), RunError> {
+-    if executable.len() + 1 > PATH_CAPACITY || executable.as_bytes().contains(&0) {
+-        return Err(RunError::Arguments);
+-    }
+-    let mut executable_bytes = [0; PATH_CAPACITY];
+-    executable_bytes[..executable.len()].copy_from_slice(executable.as_bytes());
+-    let executable_cstr = CStr::from_bytes_with_nul(&executable_bytes[..executable.len() + 1])
++    let executable = core::str::from_utf8(&pending.path[..pending.path_length])
+         .map_err(|_| RunError::Arguments)?;
+-    let argv = [executable_cstr.as_ptr(), c"--list".as_ptr(), core::ptr::null()];
+-    let child = spawn_raw_unix(executable_cstr, &argv, envp, Some(cwd), false)
+-        .map_err(|_| RunError::Spawn)?;
+-    let (mut stdout, mut stderr, mut process) = reader_pair(port, child)?;
++    let (mut stdout, mut stderr, mut process) = reader_pair(port, pending.child)?;
+     let mut stdout_bytes = [0; SOURCE_CAPACITY];
+     let mut frame_bytes = [0; SOURCE_CAPACITY + 1];
+     let mut source = ListingSource::new(&mut stdout_bytes).map_err(|_| RunError::ListingStream)?;
+@@ -758,6 +781,7 @@
+     let mut cargo_stdout_eof = false;
+     let mut cargo_stderr_eof = false;
+     let mut cargo_exit_status = cargo_process.reap().map_err(|_| RunError::Reactor)?;
++    let mut pending_listing: Option<PendingListing> = None;
+     while !cargo_stdout_eof
+         || !cargo_stderr_eof
+         || cargo_exit_status.is_none()
+@@ -775,25 +799,27 @@
+                     Poll::Ready(Ok(CargoSourceStep::Artifact(ArtifactSelection {
+                         path, ..
+                     }))) => {
+-                        cargo_stdout.pause().map_err(|_| RunError::Reactor)?;
+-                        if !cargo_stderr_eof {
+-                            cargo_stderr.pause().map_err(|_| RunError::Reactor)?;
+-                        }
+-                        run_listing(
+-                            &port,
+-                            path,
+-                            filter,
+-                            parser.exact(),
+-                            inherited,
+-                            envp,
+-                            cwd,
+-                            &settings,
+-                            &mut ledger,
+-                            &mut watches,
+-                        )?;
+-                        cargo_stdout.resume().map_err(|_| RunError::Reactor)?;
+-                        if !cargo_stderr_eof {
+-                            cargo_stderr.resume().map_err(|_| RunError::Reactor)?;
++                        let next_listing = spawn_listing(path, envp, cwd)?;
++                        if let Some(previous_listing) = pending_listing.replace(next_listing) {
++                            cargo_stdout.pause().map_err(|_| RunError::Reactor)?;
++                            if !cargo_stderr_eof {
++                                cargo_stderr.pause().map_err(|_| RunError::Reactor)?;
++                            }
++                            run_listing(
++                                &port,
++                                previous_listing,
++                                filter,
++                                parser.exact(),
++                                inherited,
++                                cwd,
++                                &settings,
++                                &mut ledger,
++                                &mut watches,
++                            )?;
++                            cargo_stdout.resume().map_err(|_| RunError::Reactor)?;
++                            if !cargo_stderr_eof {
++                                cargo_stderr.resume().map_err(|_| RunError::Reactor)?;
++                            }
+                         }
+                     }
+                     Poll::Ready(Ok(CargoSourceStep::Progress { .. })) => {}
+@@ -806,6 +832,31 @@
+                 }
+             }
+         }
++        if let Some(listing) = pending_listing.take() {
++            if !cargo_stdout_eof {
++                cargo_stdout.pause().map_err(|_| RunError::Reactor)?;
++            }
++            if !cargo_stderr_eof {
++                cargo_stderr.pause().map_err(|_| RunError::Reactor)?;
++            }
++            run_listing(
++                &port,
++                listing,
++                filter,
++                parser.exact(),
++                inherited,
++                cwd,
++                &settings,
++                &mut ledger,
++                &mut watches,
++            )?;
++            if !cargo_stdout_eof {
++                cargo_stdout.resume().map_err(|_| RunError::Reactor)?;
++            }
++            if !cargo_stderr_eof {
++                cargo_stderr.resume().map_err(|_| RunError::Reactor)?;
++            }
++        }
+         if !cargo_stderr_eof {
+             cargo_stderr_eof = drain_reader(&mut cargo_stderr, 2)?;
+         }

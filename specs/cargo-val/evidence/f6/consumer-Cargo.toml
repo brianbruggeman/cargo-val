@@ -1,0 +1,8 @@
+[package]
+name = "consumer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+conflaguration = { version = "0.1.0", path = "../facade" }
+conflaguration-derive = { version = "2.0.0", path = "../../../../Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-derive" }
