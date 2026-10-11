@@ -1,0 +1,8 @@
+cargo-val
+Run Rust tests as isolated processes with streaming discovery.
+
+Usage: cargo val [OPTIONS] [FILTER] [-- <TEST-ARGS>...]
+
+Options:
+  -h, --help       Print help
+  -V, --version    Print version

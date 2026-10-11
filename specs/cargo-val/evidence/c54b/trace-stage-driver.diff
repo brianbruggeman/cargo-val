@@ -1,0 +1,121 @@
+--- src/host/unix_driver.rs	2026-10-10 21:08:02
++++ /tmp/cargo_val_c54b_trace_src/src/host/unix_driver.rs	2026-10-10 21:19:24
+@@ -250,6 +250,43 @@
+         bytes = &bytes[written as usize..];
+     }
+     Ok(())
++}
++
++
++fn trace_decimal(mut value: u64, output: &mut [u8], position: &mut usize) {
++    let mut digits = [0_u8; 20];
++    let mut count = 0;
++    loop {
++        digits[count] = b'0' + (value % 10) as u8;
++        count += 1;
++        value /= 10;
++        if value == 0 { break; }
++    }
++    while count != 0 {
++        count -= 1;
++        output[*position] = digits[count];
++        *position += 1;
++    }
++}
++
++fn trace_event(label: &[u8], value: u64) -> Result<(), RunError> {
++    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
++    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
++        return Err(RunError::Reactor);
++    }
++    let stamp = now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64;
++    let mut line = [0_u8; 96];
++    let mut offset = 0;
++    for fragment in [b"C54TRACE ".as_slice(), label, b" "] {
++        line[offset..offset + fragment.len()].copy_from_slice(fragment);
++        offset += fragment.len();
++    }
++    trace_decimal(stamp, &mut line, &mut offset);
++    line[offset] = b' ';
++    offset += 1;
++    trace_decimal(value, &mut line, &mut offset);
++    line[offset] = b'\n';
++    write_fd(2, &line[..offset + 1])
+ }
+ 
+ fn reap_unreported_children<'sessions>(
+@@ -597,6 +634,7 @@
+     ];
+     let child = spawn_raw_unix(executable_cstr, &argv, envp, Some(cwd), false)
+         .map_err(|_| RunError::Spawn)?;
++    trace_event(b"listing_spawn", child.process_id() as u64)?;
+     Ok(PendingListing {
+         child,
+         path,
+@@ -615,6 +653,8 @@
+     ledger: &mut OutcomeLedger<'sessions, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+     watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+ ) -> Result<(), RunError> {
++    trace_event(b"listing_begin", pending.child.process_id() as u64)?;
++    let listing_pid = pending.child.process_id();
+     let executable = core::str::from_utf8(&pending.path[..pending.path_length])
+         .map_err(|_| RunError::Arguments)?;
+     let (mut stdout, mut stderr, mut process) = reader_pair(port, pending.child)?;
+@@ -650,6 +690,7 @@
+                         let mut argument_bytes = [0; PATH_CAPACITY + NAME_CAPACITY + 32];
+                         let mut argument_pointers = [core::ptr::null(); 4];
+                         let mut environment_pointers = [core::ptr::null(); ENV_CAPACITY + 1];
++                        trace_event(b"launch_begin", 0)?;
+                         let slot = ready(UnixLaunchPipe::new().call(UnixLaunchInput {
+                             owner: UnixLaunchOwner::Ledger(ledger),
+                             intent,
+@@ -661,7 +702,9 @@
+                             environment_pointers: &mut environment_pointers,
+                         }))?
+                         .map_err(|_| RunError::Launch)?;
++                        trace_event(b"launch_return", ledger.sessions().get(slot).ok_or(RunError::Outcome)?.child().process_id() as u64)?;
+                         register_test(port, ledger, watches, slot, settings.color)?;
++                        trace_event(b"test_spawn", ledger.sessions().get(slot).ok_or(RunError::Outcome)?.child().process_id() as u64)?;
+                         if ledger.sessions().len() >= settings.jobs {
+                             break;
+                         }
+@@ -716,6 +759,7 @@
+     if exit_status.is_some_and(|status| status.code != Some(0)) {
+         return Err(RunError::ListingFailed);
+     }
++    trace_event(b"listing_done", listing_pid as u64)?;
+     Ok(())
+ }
+ 
+@@ -729,6 +773,7 @@
+     {
+         return Err(RunError::Arguments);
+     }
++    trace_event(b"run_start", 0)?;
+     let environment = unsafe { UnixEnvironment::current() };
+     let settings = runtime_settings(&environment)?;
+     let mut inherited = [c""; ENV_CAPACITY];
+@@ -764,6 +809,7 @@
+     }
+     let cargo_child = spawn_raw_unix(c"cargo", &argv[..args.len() + 5], envp, None, true)
+         .map_err(|_| RunError::Spawn)?;
++    trace_event(b"cargo_spawn", cargo_child.process_id() as u64)?;
+     let port = NativePort::new().map_err(|_| RunError::Reactor)?;
+     let (mut cargo_stdout, mut cargo_stderr, mut cargo_process) = reader_pair(&port, cargo_child)?;
+     let mut cargo_source_bytes = [0; SOURCE_CAPACITY];
+@@ -799,6 +845,7 @@
+                     Poll::Ready(Ok(CargoSourceStep::Artifact(ArtifactSelection {
+                         path, ..
+                     }))) => {
++                        trace_event(b"artifact", 0)?;
+                         let next_listing = spawn_listing(path, envp, cwd)?;
+                         if let Some(previous_listing) = pending_listing.replace(next_listing) {
+                             cargo_stdout.pause().map_err(|_| RunError::Reactor)?;
+@@ -903,6 +950,7 @@
+         return Err(RunError::CargoFailed);
+     }
+     let counts = ledger.snapshot();
++    trace_event(b"run_done", counts.passed as u64 + counts.failed as u64)?;
+     Ok(RunSummary {
+         passed: counts.passed,
+         failed: counts.failed,

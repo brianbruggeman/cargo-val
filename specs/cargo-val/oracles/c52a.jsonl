@@ -1,0 +1,2 @@
+{"case":"c52a_fixture","input":{"host":"linux","env":{"CARGO_VAL_JOBS":"2","CARGO_VAL_COLOR":"true","NO_COLOR":""},"expected":{"recognized_keys":3,"empty_no_color_present":1,"value_copies":0}},"status":"prospective"}
+{"case":"c52a_negative_control","control":{"mutation":"represent empty NO_COLOR as null pointer","expected_rejected":true},"status":"prospective"}

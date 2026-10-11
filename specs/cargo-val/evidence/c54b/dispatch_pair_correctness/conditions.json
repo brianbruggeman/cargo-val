@@ -1,0 +1,52 @@
+{
+  "host": "macOS-15.8-arm64-arm-64bit-Mach-O",
+  "fixture": "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+  "target_dir": "/tmp/cargo_target",
+  "jobs": 10,
+  "binary": "/tmp/cargo_target/release/cargo-val",
+  "binary_sha256": "afa199a105233a4b61b7b5edfffc96be8fbbd0a0d842e9096ab27f45ea62874a",
+  "commands": {
+    "cargo_test": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+      "--tests",
+      "--jobs",
+      "10",
+      "--",
+      "--test-threads",
+      "10"
+    ],
+    "cargo_val": [
+      "cargo",
+      "val",
+      "--manifest-path",
+      "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+      "--tests",
+      "--jobs",
+      "10"
+    ],
+    "direct_val": [
+      "/tmp/cargo_target/release/cargo-val",
+      "val",
+      "--manifest-path",
+      "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+      "--tests",
+      "--jobs",
+      "10"
+    ]
+  },
+  "effective_val_argv_after_cargo_dispatch": [
+    "val",
+    "--manifest-path",
+    "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+    "--tests",
+    "--jobs",
+    "10"
+  ],
+  "round_order_seed": 521010,
+  "warmup_rounds": 1,
+  "paired_rounds": 5,
+  "capture": "subprocess pipes; identical /usr/bin/time -l wrapper and target artifacts"
+}

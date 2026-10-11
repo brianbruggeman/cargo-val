@@ -1,0 +1,2 @@
+{"case":"c45f_fixture","status":"prospective","input":{"host":"windows","process_id":4242,"sequence_numbers":[7,8],"destination_capacity_units":64},"expected":{"tests_passed":2,"tests_failed":0,"distinct_nul_terminated_names":2,"heap_allocations":0}}
+{"case":"c45f_negative_control","status":"prospective","control":{"mutation":"shorten UTF-16 destination by one required unit","same_comparator":"utf16_pipe_name","expected_rejected":true,"destination_units_changed":0}}

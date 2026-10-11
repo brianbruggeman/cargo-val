@@ -1,0 +1,31 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+error[E0433]: cannot find `dispatch_stream` in the crate root
+   --> src/child_completion.rs:262:40
+    |
+262 |         let ((), allocations) = crate::dispatch_stream::tests::measure_allocations(|| {
+    |                                        ^^^^^^^^^^^^^^^ could not find `dispatch_stream` in the crate root
+    |
+note: found an item that was configured out
+   --> src/lib.rs:28:9
+    |
+ 27 | #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+    |           ------------------------- the item is gated behind the `proxima-codec` feature
+ 28 | pub mod dispatch_stream;
+    |         ^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `dispatch_stream` in the crate root
+   --> src/child_completion.rs:329:40
+    |
+329 |         let ((), allocations) = crate::dispatch_stream::tests::measure_allocations(|| {
+    |                                        ^^^^^^^^^^^^^^^ could not find `dispatch_stream` in the crate root
+    |
+note: found an item that was configured out
+   --> src/lib.rs:28:9
+    |
+ 27 | #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+    |           ------------------------- the item is gated behind the `proxima-codec` feature
+ 28 | pub mod dispatch_stream;
+    |         ^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `cargo-val` (lib test) due to 2 previous errors

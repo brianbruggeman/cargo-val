@@ -1,0 +1,16 @@
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running tests/builder.rs (/tmp/conflaguration_f8a_target/debug/deps/builder-e2d6c542e0d66e26)
+
+running 8 tests
+test env_then_file_overwrites_env_state ... ok
+test file_error_short_circuits ... ok
+test file_loads_config ... ok
+test file_overlay_preserves_keys_absent_from_file ... ok
+test file_overlays_second_file ... ok
+test file_then_env_overwrites_file_state ... ok
+test file_then_env_then_apply ... ok
+test overlay_file_keeps_existing_overwrites_nothing ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.01s
+

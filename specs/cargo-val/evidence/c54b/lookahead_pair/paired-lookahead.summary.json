@@ -1,0 +1,99 @@
+{
+  "conditions": {
+    "host": "macOS-15.8-arm64-arm-64bit-Mach-O",
+    "fixture": "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+    "target_dir": "/tmp/cargo_target",
+    "jobs": 10,
+    "cargo_val_jobs_environment": null,
+    "commands": {
+      "cargo_test": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "10",
+        "--",
+        "--test-threads",
+        "10"
+      ],
+      "control": [
+        "cargo",
+        "val",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "10"
+      ],
+      "lookahead": [
+        "cargo",
+        "val",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "10"
+      ]
+    },
+    "binary_sha256": {
+      "control": "6ce63c183993ed17437909490ef77ba61fbc0d34030b8d85bcd38d2733ae6720",
+      "lookahead": "a04ddb04afe7fa8955384fc8aa6bacb526155cc7d573eee7f528f389f8f3b1a0"
+    },
+    "control_source": "/tmp/cargo_val_c54b_control_src/src/host/unix_driver.rs",
+    "source_diff": "evidence/c54b/lookahead-control-to-candidate.diff",
+    "warmup_rounds": 1,
+    "paired_rounds": 5,
+    "round_order_seed": 541010,
+    "capture": "normal cargo val via arm-specific PATH; same /usr/bin/time -l wrapper and child target dir"
+  },
+  "arms": {
+    "cargo_test": {
+      "elapsed_ns": [
+        70050000,
+        72008000,
+        76456000,
+        71186000,
+        71883000
+      ],
+      "median_elapsed_ns": 71883000,
+      "coefficient_of_variation": 0.03019060994316573,
+      "selected_per_run": 17,
+      "passed_per_run": 17
+    },
+    "control": {
+      "elapsed_ns": [
+        74923000,
+        72713000,
+        77470000,
+        78153000,
+        77064000
+      ],
+      "median_elapsed_ns": 77064000,
+      "coefficient_of_variation": 0.02620905862792826,
+      "selected_per_run": 17,
+      "passed_per_run": 17
+    },
+    "lookahead": {
+      "elapsed_ns": [
+        72298000,
+        73919000,
+        78236000,
+        76313000,
+        72452000
+      ],
+      "median_elapsed_ns": 73919000,
+      "coefficient_of_variation": 0.030855133715213375,
+      "selected_per_run": 17,
+      "passed_per_run": 17
+    }
+  },
+  "within_round_lookahead_minus_control_ns": [
+    -2625000,
+    1206000,
+    766000,
+    -1840000,
+    -4612000
+  ]
+}

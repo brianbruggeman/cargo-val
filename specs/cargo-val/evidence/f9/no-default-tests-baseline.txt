@@ -1,0 +1,2762 @@
+   Compiling syn v2.0.117
+   Compiling once_cell v1.21.3
+   Compiling tempfile v3.25.0
+   Compiling pest_generator v2.9.1
+   Compiling serde_derive v1.0.228
+   Compiling divan-macros v0.1.21
+   Compiling conflaguration-derive v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-derive)
+   Compiling divan v0.1.21
+   Compiling pest_derive v2.9.1
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+   Compiling serde v1.0.228
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling json5 v0.4.1
+   Compiling ron v0.12.2
+   Compiling trybuild v1.0.116
+   Compiling envy v0.4.2
+   Compiling toml_edit v0.22.27
+   Compiling config v0.15.25
+   Compiling toml v0.8.23
+   Compiling figment v0.10.19
+error[E0432]: unresolved import `conflaguration::ConfigCodegen`
+   --> tests/codegen.rs:3:5
+    |
+  3 | use conflaguration::ConfigCodegen;
+    |     ^^^^^^^^^^^^^^^^-------------
+    |                     |
+    |                     no `ConfigCodegen` in the root
+    |
+note: found an item that was configured out
+   --> src/lib.rs:268:32
+    |
+267 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+268 | pub use conflaguration_derive::ConfigCodegen;
+    |                                ^^^^^^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:532:11
+    |
+531 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+532 | pub trait ConfigCodegen {
+    |           ^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `conflaguration::ConfigDisplay`
+   --> tests/derive.rs:5:5
+    |
+  5 | use conflaguration::ConfigDisplay;
+    |     ^^^^^^^^^^^^^^^^-------------
+    |                     |
+    |                     no `ConfigDisplay` in the root
+    |
+note: found an item that was configured out
+   --> src/lib.rs:141:32
+    |
+140 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+141 | pub use conflaguration_derive::ConfigDisplay;
+    |                                ^^^^^^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:551:11
+    |
+550 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+551 | pub trait ConfigDisplay {
+    |           ^^^^^^^^^^^^^
+
+error: cannot find attribute `settings` in this scope
+ --> tests/codegen.rs:6:3
+  |
+6 | #[settings(prefix = "APP")]
+  |   ^^^^^^^^
+  |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+  |
+7 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+8 | struct BuildConfig {
+  |
+
+error[E0432]: unresolved import `conflaguration::Settings`
+   --> tests/derive.rs:6:5
+    |
+  6 | use conflaguration::Settings;
+    |     ^^^^^^^^^^^^^^^^--------
+    |                     |
+    |                     no `Settings` in the root
+    |
+note: found an item that was configured out
+   --> src/lib.rs:212:32
+    |
+211 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+212 | pub use conflaguration_derive::Settings;
+    |                                ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:426:11
+    |
+425 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+426 | pub trait Settings: Sized {
+    |           ^^^^^^^^
+
+error[E0432]: unresolved import `conflaguration::Validate`
+   --> tests/derive.rs:7:5
+    |
+  7 | use conflaguration::Validate;
+    |     ^^^^^^^^^^^^^^^^--------
+    |                     |
+    |                     no `Validate` in the root
+    |
+note: found an item that was configured out
+   --> src/lib.rs:101:31
+    |
+100 | #[cfg(all(feature = "alloc", not(any(feature = "default", feature = "std"))))]
+    |           ----------------- the item is gated behind the `alloc` feature
+101 | pub use conflaguration_core::{Validate, ValidationError, ValidationMessage};
+    |                               ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:264:32
+    |
+263 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+264 | pub use conflaguration_derive::Validate;
+    |                                ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:457:11
+    |
+456 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+457 | pub trait Validate {
+    |           ^^^^^^^^
+
+error[E0432]: unresolved import `conflaguration::ValidationMessage`
+   --> tests/derive.rs:8:5
+    |
+  8 | use conflaguration::ValidationMessage;
+    |     ^^^^^^^^^^^^^^^^-----------------
+    |                     |
+    |                     no `ValidationMessage` in the root
+    |
+note: found an item that was configured out
+   --> src/lib.rs:101:58
+    |
+100 | #[cfg(all(feature = "alloc", not(any(feature = "default", feature = "std"))))]
+    |           ----------------- the item is gated behind the `alloc` feature
+101 | pub use conflaguration_core::{Validate, ValidationError, ValidationMessage};
+    |                                                          ^^^^^^^^^^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:324:12
+    |
+322 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+323 | #[derive(Debug, Clone)]
+324 | pub struct ValidationMessage {
+    |            ^^^^^^^^^^^^^^^^^
+
+error: cannot find attribute `settings` in this scope
+  --> tests/derive.rs:11:3
+   |
+11 | #[settings(prefix = "CONFLAG_TEST")]
+   |   ^^^^^^^^
+   |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+   |
+12 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+13 | struct BasicConfig {
+   |
+
+error: cannot find attribute `setting` in this scope
+  --> tests/derive.rs:13:7
+   |
+13 |     #[setting(default = 8080)]
+   |       ^^^^^^^
+   |
+   = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+  --> tests/derive.rs:16:7
+   |
+16 |     #[setting(default = "localhost")]
+   |       ^^^^^^^
+   |
+   = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+  --> tests/derive.rs:19:7
+   |
+19 |     #[setting(default = false)]
+   |       ^^^^^^^
+   |
+   = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+  --> tests/derive.rs:47:3
+   |
+47 | #[settings(prefix = "CONFLAG_EXPLICIT")]
+   |   ^^^^^^^^
+   |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+   |
+48 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+49 | struct OverrideEnvConfig {
+   |
+
+error: cannot find attribute `setting` in this scope
+  --> tests/derive.rs:49:7
+   |
+49 |     #[setting(envs = "MY_PORT", r#override, default = 9090)]
+   |       ^^^^^^^
+   |
+   = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+  --> tests/derive.rs:70:3
+   |
+70 | #[settings(prefix = "CONFLAG_RENAME")]
+   |   ^^^^^^^^
+   |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+   |
+71 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+72 | struct RenamedEnvConfig {
+   |
+
+error: cannot find attribute `setting` in this scope
+  --> tests/derive.rs:72:7
+   |
+72 |     #[setting(envs = "TIMEOUT", default = 30)]
+   |       ^^^^^^^
+   |
+   = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+  --> tests/derive.rs:93:3
+   |
+93 | #[settings(prefix = "CONFLAG_ENVS")]
+   |   ^^^^^^^^
+   |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+   |
+94 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+95 | struct MultiOverrideConfig {
+   |
+
+error: cannot find attribute `setting` in this scope
+  --> tests/derive.rs:95:7
+   |
+95 |     #[setting(envs = ["FIRST_PORT", "SECOND_PORT"], r#override, default = 7070)]
+   |       ^^^^^^^
+   |
+   = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:116:3
+    |
+116 | #[settings(prefix = "CONFLAG_MENV")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+117 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+118 | struct MultiEnvsConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:118:7
+    |
+118 |     #[setting(envs = ["PORT", "HTTP_PORT"], default = 7070)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:139:3
+    |
+139 | #[settings(prefix = "CONFLAG_OPT")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+140 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+141 | struct OptionalConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:143:7
+    |
+143 |     #[setting(default = "app")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:165:3
+    |
+165 | #[settings(prefix = "CONFLAG_INNER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+166 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+167 | struct InnerConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:167:7
+    |
+167 |     #[setting(default = "redis://localhost")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:172:3
+    |
+172 | #[settings(prefix = "CONFLAG_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+173 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+174 | struct OuterConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:174:7
+    |
+174 |     #[setting(default = 8080)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:177:7
+    |
+177 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:191:3
+    |
+191 | #[settings(prefix = "CONFLAG_SKIP")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+192 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+193 | struct SkipConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:193:7
+    |
+193 |     #[setting(default = 42)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:196:7
+    |
+196 |     #[setting(skip)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:210:3
+    |
+210 | #[settings(prefix = "CONFLAG_DEFSTR")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+211 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+212 | struct DefaultStrConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:212:7
+    |
+212 |     #[setting(default_str = "8080")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:226:7
+    |
+226 |     #[setting(default = 1234)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:247:3
+    |
+247 | #[settings(prefix = "CONFLAG_FLAGS")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+248 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+249 | struct FeatureFlags {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:249:7
+    |
+249 |     #[setting(default = false)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:252:7
+    |
+252 |     #[setting(default = false)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:282:3
+    |
+282 | #[settings(prefix = "CONFLAG_VALIDATE")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+283 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+284 | struct ValidatedConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:284:7
+    |
+284 |     #[setting(default = 0)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:287:7
+    |
+287 |     #[setting(default = "")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:363:3
+    |
+363 | #[settings(prefix = "ACCUM_INNER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+364 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+365 | struct AccumInner {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:365:7
+    |
+365 |     #[setting(default = "default_val")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:370:3
+    |
+370 | #[settings(prefix = "ACCUM_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+371 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+372 | struct AccumOuter {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:372:7
+    |
+372 |     #[setting(default = 1)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:375:7
+    |
+375 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:412:3
+    |
+412 | #[settings(prefix = "SEG_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+413 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+414 | struct SegmentPrefixOuter {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:414:7
+    |
+414 |     #[setting(nested, prefix = "DB")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:427:3
+    |
+427 | #[settings(prefix = "FLAT_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+428 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+429 | struct FlattenOuter {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:429:7
+    |
+429 |     #[setting(flatten)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:442:3
+    |
+442 | #[settings(prefix = "EXPLICIT_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+443 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+444 | struct ExplicitPrefixOuter {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:444:7
+    |
+444 |     #[setting(nested, override_prefix = "CUSTOM_NS")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:481:3
+    |
+481 | #[settings(prefix = "CONFLAG_NOOP")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+482 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+483 | struct NoopValidateConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:483:7
+    |
+483 |     #[setting(default = false)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:486:7
+    |
+486 |     #[setting(default = "test")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:497:3
+    |
+497 | #[settings(prefix = "CASCVAL_INNER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+498 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+499 | struct CascadeInnerConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:499:7
+    |
+499 |     #[setting(default = 0)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:514:3
+    |
+514 | #[settings(prefix = "CASCVAL_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+515 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+516 | struct CascadeOuterConfig {
+    |
+
+error[E0599]: no method named `to_const_module` found for struct `BuildConfig` in the current scope
+  --> tests/codegen.rs:25:25
+   |
+ 7 | struct BuildConfig {
+   | ------------------ method `to_const_module` not found for this struct
+...
+25 |     let module = config.to_const_module();
+   |                         ^^^^^^^^^^^^^^^ method not found in `BuildConfig`
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:516:7
+    |
+516 |     #[setting(default = false)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:519:7
+    |
+519 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:545:3
+    |
+545 | #[settings(prefix = "CASCVAL_SECOND")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+546 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+547 | struct CascadeSecondInner {
+    |
+
+error[E0599]: no associated function or constant named `env_keys` found for struct `BuildConfig` in the current scope
+  --> tests/codegen.rs:34:29
+   |
+ 7 | struct BuildConfig {
+   | ------------------ associated function or constant `env_keys` not found for this struct
+...
+34 |     let keys = BuildConfig::env_keys();
+   |                             ^^^^^^^^ associated function or constant not found in `BuildConfig`
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:547:7
+    |
+547 |     #[setting(default = "")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:564:3
+    |
+564 | #[settings(prefix = "CASCVAL_MULTI")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+565 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+566 | struct MultiCascadeConfig {
+    |
+
+error[E0599]: no associated function or constant named `env_keys` found for struct `NoPrefix` in the current scope
+  --> tests/codegen.rs:40:26
+   |
+14 | struct NoPrefix {
+   | --------------- associated function or constant `env_keys` not found for this struct
+...
+40 |     assert_eq!(NoPrefix::env_keys(), vec!["WORKERS"]);
+   |                          ^^^^^^^^ associated function or constant not found in `NoPrefix`
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:566:7
+    |
+566 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:569:7
+    |
+569 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:588:3
+    |
+588 | #[settings(prefix = "DEEP_L3")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+589 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+590 | struct DeepLevel3 {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:590:7
+    |
+590 |     #[setting(default = 0)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error[E0599]: no method named `to_const_module` found for struct `BuildConfig` in the current scope
+  --> tests/codegen.rs:50:25
+   |
+ 7 | struct BuildConfig {
+   | ------------------ method `to_const_module` not found for this struct
+...
+50 |     let module = config.to_const_module();
+   |                         ^^^^^^^^^^^^^^^ method not found in `BuildConfig`
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:607:3
+    |
+607 | #[settings(prefix = "DEEP_L2")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+608 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+609 | struct DeepLevel2 {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:609:7
+    |
+609 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:614:3
+    |
+614 | #[settings(prefix = "DEEP_L1")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+615 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+616 | struct DeepLevel1 {
+    |
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:616:7
+    |
+616 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:634:3
+    |
+634 | #[settings(prefix = "DISP_BASIC")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+635 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+636 | struct DisplayBasicConfig {
+    |
+
+error: could not compile `conflaguration` (test "codegen") due to 6 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:636:7
+    |
+636 |     #[setting(default = 8080)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:639:7
+    |
+639 |     #[setting(default = "localhost")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:642:7
+    |
+642 |     #[setting(default = false)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:669:3
+    |
+669 | #[settings(prefix = "DISP_MULTI")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+670 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+671 | struct DisplayMultiKeyConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:671:7
+    |
+671 |     #[setting(envs = "ALT_PORT", r#override, default = 9090)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:685:3
+    |
+685 | #[settings(prefix = "DISP_ENVS")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+686 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+687 | struct DisplayEnvsConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:687:7
+    |
+687 |     #[setting(envs = ["PORT", "HTTP_PORT"], default = 7070)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:701:3
+    |
+701 | #[settings(prefix = "DISP_OENVS")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+702 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+703 | struct DisplayOverrideEnvsConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:703:7
+    |
+703 |     #[setting(envs = ["PRIMARY_PORT", "FALLBACK_PORT"], r#override, default = 7070)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:717:3
+    |
+717 | #[settings(prefix = "DISP_INNER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+718 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+719 | struct DisplayInner {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:719:7
+    |
+719 |     #[setting(default = "redis://localhost")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:724:3
+    |
+724 | #[settings(prefix = "DISP_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+725 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+726 | struct DisplayOuter {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:726:7
+    |
+726 |     #[setting(default = 8080)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:729:7
+    |
+729 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:745:3
+    |
+745 | #[settings(prefix = "DISP_SKIP")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+746 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+747 | struct DisplaySkipConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:747:7
+    |
+747 |     #[setting(default = 42)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:750:7
+    |
+750 |     #[setting(skip)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:765:3
+    |
+765 | #[settings(prefix = "DISP_SENS")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+766 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+767 | struct DisplaySensitiveConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:767:7
+    |
+767 |     #[setting(default = "admin")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:770:7
+    |
+770 |     #[setting(sensitive, default = "s3cret")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:773:7
+    |
+773 |     #[setting(envs = "API_TOKEN", r#override, sensitive)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:804:3
+    |
+804 | #[settings(prefix = "DISP_OPT")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+805 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+806 | struct DisplayOptionalConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:808:7
+    |
+808 |     #[setting(default = "app")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:832:3
+    |
+832 | #[settings(prefix = "OVR_BASIC")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+833 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+834 | struct OverrideBasicConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:834:7
+    |
+834 |     #[setting(default = 8080)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:837:7
+    |
+837 |     #[setting(default = "localhost")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:840:7
+    |
+840 |     #[setting(default = false)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:879:3
+    |
+879 | #[settings(prefix = "OVR_NEST_INNER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+880 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+881 | struct OverrideNestedInner {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:881:7
+    |
+881 |     #[setting(default = "default_url")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:886:3
+    |
+886 | #[settings(prefix = "OVR_NEST_OUTER")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+887 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+888 | struct OverrideNestedOuter {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:888:7
+    |
+888 |     #[setting(default = 8080)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:891:7
+    |
+891 |     #[setting(nested)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:911:3
+    |
+911 | #[settings(prefix = "OVR_OPT")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+912 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+913 | struct OverrideOptionConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:915:7
+    |
+915 |     #[setting(default = "app")]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:950:3
+    |
+950 | #[settings(prefix = "OVR_SKIP")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+951 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+952 | struct OverrideSkipConfig {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:952:7
+    |
+952 |     #[setting(default = 42)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:955:7
+    |
+955 |     #[setting(skip)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+   --> tests/derive.rs:975:3
+    |
+975 | #[settings(prefix = "OVR_OVRD")]
+    |   ^^^^^^^^
+    |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+    |
+976 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+977 | struct OverrideWithOverrideFlag {
+    |
+
+error: cannot find attribute `setting` in this scope
+   --> tests/derive.rs:977:7
+    |
+977 |     #[setting(envs = "MY_SPECIAL_PORT", r#override, default = 9090)]
+    |       ^^^^^^^
+    |
+    = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1032:3
+     |
+1032 | #[settings(prefix = "DPFX_INNER")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1033 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1034 | struct DynPrefixInner {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1034:7
+     |
+1034 |     #[setting(default = "default_url")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1039:3
+     |
+1039 | #[settings(prefix = "DPFX_OUTER")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1040 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1041 | struct DynPrefixOuter {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1041:7
+     |
+1041 |     #[setting(default = 8080)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1044:7
+     |
+1044 |     #[setting(nested, prefix = "SUB")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1060:3
+     |
+1060 | #[settings(prefix = "DISP_EXP_OUTER")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1061 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1062 | struct DisplayExplicitPrefixOuter {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1062:7
+     |
+1062 |     #[setting(default = 8080)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1065:7
+     |
+1065 |     #[setting(nested, override_prefix = "DISP_FIXED_NS")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1089:3
+     |
+1089 | #[settings(prefix = "NONNEST_VAL")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1090 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1091 | struct NonNestedValidateOuter {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1091:7
+     |
+1091 |     #[setting(default = 1)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1094:7
+     |
+1094 |     #[setting(default = 0)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1123:3
+     |
+1123 | #[settings(prefix = "FROM_FN")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1124 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1125 | struct FromFnConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1125:7
+     |
+1125 |     #[setting(resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1128:7
+     |
+1128 |     #[setting(default = 8080)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1150:3
+     |
+1150 | #[settings(prefix = "FROM_FN_DEF")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1151 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1152 | struct FromFnWithDefaultConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1152:7
+     |
+1152 |     #[setting(resolve_with = "parse_comma_list", default_str = "x,y")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1173:3
+     |
+1173 | #[settings(prefix = "FROM_FN_KV")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1174 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1175 | struct FromFnKeyValueConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1175:7
+     |
+1175 |     #[setting(resolve_with = "parse_key_value_pairs")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1188:3
+     |
+1188 | #[settings(prefix = "FROM_FN_DYN")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1189 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1190 | struct FromFnDynamicPrefixConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1190:7
+     |
+1190 |     #[setting(resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1203:3
+     |
+1203 | #[settings(prefix = "FROM_FN_OVR")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1204 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1205 | struct FromFnOverrideConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1205:7
+     |
+1205 |     #[setting(resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1236:3
+     |
+1236 | #[settings(prefix = "RW_FAIL")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1237 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1238 | struct ResolveWithFailConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1238:7
+     |
+1238 |     #[setting(resolve_with = "strict_parse_u16")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1253:3
+     |
+1253 | #[settings(prefix = "RW_DEF_LIT")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1254 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1255 | struct ResolveWithDefaultLitConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1255:7
+     |
+1255 |     #[setting(resolve_with = "strict_parse_u16", default = 3000)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1284:3
+     |
+1284 | #[settings(prefix = "RW_DEFSTR_FAIL")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1285 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1286 | struct ResolveWithDefaultStrFailConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1286:7
+     |
+1286 |     #[setting(resolve_with = "strict_parse_u16", default_str = "banana")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1299:3
+     |
+1299 | #[settings(prefix = "RW_CASCADE")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1300 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1301 | struct ResolveWithCascadeConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1301:7
+     |
+1301 |     #[setting(envs = ["PORT", "HTTP_PORT"], resolve_with = "strict_parse_u16")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1322:3
+     |
+1322 | #[settings(prefix = "RW_OVR_FAIL")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1323 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1324 | struct ResolveWithOverrideFailConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1324:7
+     |
+1324 |     #[setting(resolve_with = "strict_parse_u16")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1338:3
+     |
+1338 | #[settings(prefix = "RW_DYN_FAIL")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1339 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1340 | struct ResolveWithDynamicPrefixFailConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1340:7
+     |
+1340 |     #[setting(resolve_with = "strict_parse_u16")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1353:3
+     |
+1353 | #[settings(prefix = "STRUCT_RW_FAIL", resolve_with = "strict_parse_u16")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1354 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1355 | struct StructLevelResolveWithFailConfig {
+     |
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1367:3
+     |
+1367 | #[settings(prefix = "STRUCT_RW", resolve_with = "parse_comma_list")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1368 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1369 | struct StructLevelResolveWithConfig {
+     |
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1388:3
+     |
+1388 | #[settings(prefix = "STRUCT_RW_MIX", resolve_with = "parse_comma_list")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1389 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1390 | struct StructLevelWithFieldOverride {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1392:7
+     |
+1392 |     #[setting(resolve_with = "parse_upper")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1406:3
+     |
+1406 | #[settings(prefix = "STRUCT_RW_SKIP", resolve_with = "parse_comma_list")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1407 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1408 | struct StructLevelSkipsNestedAndSkip {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1410:7
+     |
+1410 |     #[setting(skip)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1415:3
+     |
+1415 | #[settings(prefix = "STRUCT_RW_TYPED", resolve_with = "parse_comma_list")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1416 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1417 | struct StructLevelWithTypedDefault {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1419:7
+     |
+1419 |     #[setting(default = 8080)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1422:7
+     |
+1422 |     #[setting(default)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1462:3
+     |
+1462 | #[settings(prefix = "RW_ENVS_OVR")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1463 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1464 | struct ResolveWithEnvsOverrideConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1464:7
+     |
+1464 |     #[setting(envs = "CUSTOM_TAGS", r#override, resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1485:3
+     |
+1485 | #[settings(prefix = "RW_DEFSTR_ENV_FAIL")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1486 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1487 | struct ResolveWithDefaultStrEnvFailConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1487:7
+     |
+1487 |     #[setting(resolve_with = "strict_parse_u16", default_str = "8080")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1508:3
+     |
+1508 | #[settings(prefix = "RW_DYN_DEF")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1509 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1510 | struct ResolveWithDynamicPrefixDefaultConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1510:7
+     |
+1510 |     #[setting(resolve_with = "parse_comma_list", default_str = "fallback")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1531:3
+     |
+1531 | #[settings(prefix = "RW_OVR_PFX")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1532 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1533 | struct ResolveWithOverridePrefixConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1533:7
+     |
+1533 |     #[setting(resolve_with = "strict_parse_u16")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1569:3
+     |
+1569 | #[settings(prefix = "STRUCT_RW_NEST_INNER")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1570 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1571 | struct StructRwNestInner {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1571:7
+     |
+1571 |     #[setting(default = "inner_val")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1576:3
+     |
+1576 | #[settings(prefix = "STRUCT_RW_NEST", resolve_with = "parse_comma_list")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1577 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1578 | struct StructLevelResolveWithNestedConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1580:7
+     |
+1580 |     #[setting(nested)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1594:3
+     |
+1594 | #[settings(prefix = "STRUCT_RW_MISS")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1595 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1596 | struct StructLevelResolveWithMissingConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1596:7
+     |
+1596 |     #[setting(resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1609:3
+     |
+1609 | #[settings(prefix = "DISP_RW")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1610 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1611 | struct DisplayResolveWithConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1611:7
+     |
+1611 |     #[setting(resolve_with = "parse_comma_list", default_str = "x")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1614:7
+     |
+1614 |     #[setting(default = 8080)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1638:3
+     |
+1638 | #[settings(prefix = "BUILD_RW")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1639 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1640 | struct BuilderResolveWithConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1640:7
+     |
+1640 |     #[setting(resolve_with = "parse_comma_list", default_str = "default")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1643:7
+     |
+1643 |     #[setting(default = 3000)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1684:3
+     |
+1684 | #[settings(prefix = "DISP_RW_SENS")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1685 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1686 | struct DisplayResolveWithSensitiveConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1686:7
+     |
+1686 |     #[setting(resolve_with = "parse_comma_list", sensitive, default_str = "secret")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1689:7
+     |
+1689 |     #[setting(default = "visible")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1715:3
+     |
+1715 | #[settings(prefix = "RW_EMPTY")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1716 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1717 | struct ResolveWithEmptyEnvConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1717:7
+     |
+1717 |     #[setting(resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1730:3
+     |
+1730 | #[settings(prefix = "RW_EMPTY_DEF")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1731 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1732 | struct ResolveWithEmptyEnvDefaultConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1732:7
+     |
+1732 |     #[setting(resolve_with = "parse_comma_list", default_str = "fallback")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1745:3
+     |
+1745 | #[settings(prefix = "RW_MULTI_OVR")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1746 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1747 | struct ResolveWithMultiEnvsOverrideConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1747:7
+     |
+1747 |     #[setting(envs = ["PRIMARY", "FALLBACK"], r#override, resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1776:3
+     |
+1776 | #[settings(prefix = "RW_COEXIST_INNER")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1777 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1778 | struct ResolveWithCoexistInner {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1778:7
+     |
+1778 |     #[setting(default = "inner_default")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1783:3
+     |
+1783 | #[settings(prefix = "RW_COEXIST")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1784 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1785 | struct ResolveWithCoexistConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1785:7
+     |
+1785 |     #[setting(resolve_with = "parse_comma_list")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1788:7
+     |
+1788 |     #[setting(nested)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1791:7
+     |
+1791 |     #[setting(default = 8080)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1851:3
+     |
+1851 | #[settings(prefix = "COLON")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1852 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1853 | struct ColonConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1853:7
+     |
+1853 |     #[setting(resolve_with = "parse_colon_pair")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1856:7
+     |
+1856 |     #[setting(default = 8080)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1925:3
+     |
+1925 | #[settings(prefix = "BARE_DEF")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1926 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1927 | struct BareDefaultConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1927:7
+     |
+1927 |     #[setting(default)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1930:7
+     |
+1930 |     #[setting(default)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1933:7
+     |
+1933 |     #[setting(default)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1968:3
+     |
+1968 | #[settings(prefix = "BARE_DEF_OVR")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1969 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+1970 | struct BareDefaultOverrideConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1970:7
+     |
+1970 |     #[setting(default)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:1973:7
+     |
+1973 |     #[setting(default)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:1998:3
+     |
+1998 | #[settings(prefix = "BARE_DEF_RW")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+1999 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+2000 | struct BareDefaultResolveWithConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:2000:7
+     |
+2000 |     #[setting(resolve_with = "parse_comma_list", default)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:2021:3
+     |
+2021 | #[settings(prefix = "OPT_PARSE")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+2022 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+2023 | struct OptionParseConfig {
+     |
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:2051:3
+     |
+2051 | #[settings(prefix = "DUP_ENV")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+2052 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+2053 | struct DuplicateEnvAliasConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:2053:7
+     |
+2053 |     #[setting(envs = ["PORT", "PORT"], default = 3000)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:2074:3
+     |
+2074 | #[settings(prefix = "EMPTY_ENV_LIST")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+2075 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+2076 | struct EmptyEnvListConfig {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:2076:7
+     |
+2076 |     #[setting(envs = [], default = 3000)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:2097:3
+     |
+2097 | #[settings(prefix = "NEST_ERR_INNER")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+2098 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+2099 | struct NestedErrorInner {
+     |
+
+error: cannot find attribute `settings` in this scope
+    --> tests/derive.rs:2103:3
+     |
+2103 | #[settings(prefix = "NEST_ERR_OUTER")]
+     |   ^^^^^^^^
+     |
+help: `settings` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+     |
+2104 + #[derive(ConfigCodegen, ConfigDisplay, Settings, Validate)]
+2105 | struct NestedErrorOuter {
+     |
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:2105:7
+     |
+2105 |     #[setting(default = "ok")]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error: cannot find attribute `setting` in this scope
+    --> tests/derive.rs:2108:7
+     |
+2108 |     #[setting(nested)]
+     |       ^^^^^^^
+     |
+     = note: `setting` is an attribute that can be used by the derive macros `ConfigCodegen`, `ConfigDisplay`, `Settings` and `Validate`, you might be missing a `derive` attribute
+
+error[E0405]: cannot find trait `Validate` in crate `conflaguration`
+   --> tests/derive.rs:291:22
+    |
+291 | impl conflaguration::Validate for ValidatedConfig {
+    |                      ^^^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:101:31
+    |
+100 | #[cfg(all(feature = "alloc", not(any(feature = "default", feature = "std"))))]
+    |           ----------------- the item is gated behind the `alloc` feature
+101 | pub use conflaguration_core::{Validate, ValidationError, ValidationMessage};
+    |                               ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:264:32
+    |
+263 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+264 | pub use conflaguration_derive::Validate;
+    |                                ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:457:11
+    |
+456 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+457 | pub trait Validate {
+    |           ^^^^^^^^
+
+error[E0425]: cannot find type `Result` in crate `conflaguration`
+   --> tests/derive.rs:292:43
+    |
+292 |     fn validate(&self) -> conflaguration::Result<()> {
+    |                                           ^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:299:10
+    |
+298 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+299 | pub type Result<T> = std::result::Result<T, Error>;
+    |          ^^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::fmt::Result;
+    |
+  5 + use std::io::Result;
+    |
+  5 + use std::result::Result;
+    |
+  5 + use std::thread::Result;
+    |
+    = and 2 other candidates
+help: if you import `Result`, refer to it directly
+    |
+292 -     fn validate(&self) -> conflaguration::Result<()> {
+292 +     fn validate(&self) -> Result<()> {
+    |
+
+error[E0433]: cannot find `Error` in `conflaguration`
+   --> tests/derive.rs:300:68
+    |
+300 |         if errors.is_empty() { Ok(()) } else { Err(conflaguration::Error::Validation { errors }) }
+    |                                                                    ^^^^^ could not find `Error` in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:367:10
+    |
+364 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+...
+367 | pub enum Error {
+    |          ^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::error::Error;
+    |
+  5 + use std::fmt::Error;
+    |
+  5 + use std::io::Error;
+    |
+  5 + use core::error::Error;
+    |
+    = and 1 other candidate
+help: if you import `Error`, refer to it directly
+    |
+300 -         if errors.is_empty() { Ok(()) } else { Err(conflaguration::Error::Validation { errors }) }
+300 +         if errors.is_empty() { Ok(()) } else { Err(Error::Validation { errors }) }
+    |
+
+error[E0425]: cannot find type `Result` in crate `conflaguration`
+   --> tests/derive.rs:307:37
+    |
+307 |         let result: conflaguration::Result<ValidatedConfig> = conflaguration::init();
+    |                                     ^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:299:10
+    |
+298 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+299 | pub type Result<T> = std::result::Result<T, Error>;
+    |          ^^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::fmt::Result;
+    |
+  5 + use std::io::Result;
+    |
+  5 + use std::result::Result;
+    |
+  5 + use std::thread::Result;
+    |
+    = and 2 other candidates
+help: if you import `Result`, refer to it directly
+    |
+307 -         let result: conflaguration::Result<ValidatedConfig> = conflaguration::init();
+307 +         let result: Result<ValidatedConfig> = conflaguration::init();
+    |
+
+error[E0425]: cannot find function `init` in crate `conflaguration`
+   --> tests/derive.rs:307:79
+    |
+307 |         let result: conflaguration::Result<ValidatedConfig> = conflaguration::init();
+    |                                                                               ^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:465:8
+    |
+464 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+465 | pub fn init<T: Settings + Validate>() -> Result<T> {
+    |        ^^^^
+
+error[E0425]: cannot find function `init` in crate `conflaguration`
+   --> tests/derive.rs:321:55
+    |
+321 |         let config: ValidatedConfig = conflaguration::init().unwrap_or_else(|err| panic!("init failed: {err}"));
+    |                                                       ^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:465:8
+    |
+464 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+465 | pub fn init<T: Settings + Validate>() -> Result<T> {
+    |        ^^^^
+
+error[E0405]: cannot find trait `Validate` in crate `conflaguration`
+   --> tests/derive.rs:503:22
+    |
+503 | impl conflaguration::Validate for CascadeInnerConfig {
+    |                      ^^^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:101:31
+    |
+100 | #[cfg(all(feature = "alloc", not(any(feature = "default", feature = "std"))))]
+    |           ----------------- the item is gated behind the `alloc` feature
+101 | pub use conflaguration_core::{Validate, ValidationError, ValidationMessage};
+    |                               ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:264:32
+    |
+263 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+264 | pub use conflaguration_derive::Validate;
+    |                                ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:457:11
+    |
+456 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+457 | pub trait Validate {
+    |           ^^^^^^^^
+
+error[E0425]: cannot find type `Result` in crate `conflaguration`
+   --> tests/derive.rs:504:43
+    |
+504 |     fn validate(&self) -> conflaguration::Result<()> {
+    |                                           ^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:299:10
+    |
+298 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+299 | pub type Result<T> = std::result::Result<T, Error>;
+    |          ^^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::fmt::Result;
+    |
+  5 + use std::io::Result;
+    |
+  5 + use std::result::Result;
+    |
+  5 + use std::thread::Result;
+    |
+    = and 2 other candidates
+help: if you import `Result`, refer to it directly
+    |
+504 -     fn validate(&self) -> conflaguration::Result<()> {
+504 +     fn validate(&self) -> Result<()> {
+    |
+
+error[E0433]: cannot find `Error` in `conflaguration`
+   --> tests/derive.rs:509:68
+    |
+509 |         if errors.is_empty() { Ok(()) } else { Err(conflaguration::Error::Validation { errors }) }
+    |                                                                    ^^^^^ could not find `Error` in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:367:10
+    |
+364 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+...
+367 | pub enum Error {
+    |          ^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::error::Error;
+    |
+  5 + use std::fmt::Error;
+    |
+  5 + use std::io::Error;
+    |
+  5 + use core::error::Error;
+    |
+    = and 1 other candidate
+help: if you import `Error`, refer to it directly
+    |
+509 -         if errors.is_empty() { Ok(()) } else { Err(conflaguration::Error::Validation { errors }) }
+509 +         if errors.is_empty() { Ok(()) } else { Err(Error::Validation { errors }) }
+    |
+
+error[E0405]: cannot find trait `Validate` in crate `conflaguration`
+   --> tests/derive.rs:551:22
+    |
+551 | impl conflaguration::Validate for CascadeSecondInner {
+    |                      ^^^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:101:31
+    |
+100 | #[cfg(all(feature = "alloc", not(any(feature = "default", feature = "std"))))]
+    |           ----------------- the item is gated behind the `alloc` feature
+101 | pub use conflaguration_core::{Validate, ValidationError, ValidationMessage};
+    |                               ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:264:32
+    |
+263 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+264 | pub use conflaguration_derive::Validate;
+    |                                ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:457:11
+    |
+456 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+457 | pub trait Validate {
+    |           ^^^^^^^^
+
+error[E0425]: cannot find type `Result` in crate `conflaguration`
+   --> tests/derive.rs:552:43
+    |
+552 |     fn validate(&self) -> conflaguration::Result<()> {
+    |                                           ^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:299:10
+    |
+298 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+299 | pub type Result<T> = std::result::Result<T, Error>;
+    |          ^^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::fmt::Result;
+    |
+  5 + use std::io::Result;
+    |
+  5 + use std::result::Result;
+    |
+  5 + use std::thread::Result;
+    |
+    = and 2 other candidates
+help: if you import `Result`, refer to it directly
+    |
+552 -     fn validate(&self) -> conflaguration::Result<()> {
+552 +     fn validate(&self) -> Result<()> {
+    |
+
+error[E0433]: cannot find `Error` in `conflaguration`
+   --> tests/derive.rs:554:33
+    |
+554 |             Err(conflaguration::Error::Validation {
+    |                                 ^^^^^ could not find `Error` in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:367:10
+    |
+364 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+...
+367 | pub enum Error {
+    |          ^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::error::Error;
+    |
+  5 + use std::fmt::Error;
+    |
+  5 + use std::io::Error;
+    |
+  5 + use core::error::Error;
+    |
+    = and 1 other candidate
+help: if you import `Error`, refer to it directly
+    |
+554 -             Err(conflaguration::Error::Validation {
+554 +             Err(Error::Validation {
+    |
+
+error[E0405]: cannot find trait `Validate` in crate `conflaguration`
+   --> tests/derive.rs:594:22
+    |
+594 | impl conflaguration::Validate for DeepLevel3 {
+    |                      ^^^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:101:31
+    |
+100 | #[cfg(all(feature = "alloc", not(any(feature = "default", feature = "std"))))]
+    |           ----------------- the item is gated behind the `alloc` feature
+101 | pub use conflaguration_core::{Validate, ValidationError, ValidationMessage};
+    |                               ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:264:32
+    |
+263 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+    |                                  -------------------------------------- the item is gated here
+264 | pub use conflaguration_derive::Validate;
+    |                                ^^^^^^^^
+note: found an item that was configured out
+   --> src/lib.rs:457:11
+    |
+456 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+457 | pub trait Validate {
+    |           ^^^^^^^^
+
+error[E0425]: cannot find type `Result` in crate `conflaguration`
+   --> tests/derive.rs:595:43
+    |
+595 |     fn validate(&self) -> conflaguration::Result<()> {
+    |                                           ^^^^^^ not found in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:299:10
+    |
+298 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+299 | pub type Result<T> = std::result::Result<T, Error>;
+    |          ^^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::fmt::Result;
+    |
+  5 + use std::io::Result;
+    |
+  5 + use std::result::Result;
+    |
+  5 + use std::thread::Result;
+    |
+    = and 2 other candidates
+help: if you import `Result`, refer to it directly
+    |
+595 -     fn validate(&self) -> conflaguration::Result<()> {
+595 +     fn validate(&self) -> Result<()> {
+    |
+
+error[E0433]: cannot find `Error` in `conflaguration`
+   --> tests/derive.rs:597:33
+    |
+597 |             Err(conflaguration::Error::Validation {
+    |                                 ^^^^^ could not find `Error` in `conflaguration`
+    |
+note: found an item that was configured out
+   --> src/lib.rs:367:10
+    |
+364 | #[cfg(any(feature = "default", feature = "std"))]
+    |          -------------------------------------- the item is gated here
+...
+367 | pub enum Error {
+    |          ^^^^^
+help: consider importing one of these items
+    |
+  5 + use std::error::Error;
+    |
+  5 + use std::fmt::Error;
+    |
+  5 + use std::io::Error;
+    |
+  5 + use core::error::Error;
+    |
+    = and 1 other candidate
+help: if you import `Error`, refer to it directly
+    |
+597 -             Err(conflaguration::Error::Validation {
+597 +             Err(Error::Validation {
+    |
+
+error[E0405]: cannot find trait `Validate` in crate `conflaguration`
+    --> tests/derive.rs:1647:22
+     |
+1647 | impl conflaguration::Validate for BuilderResolveWithConfig {
+     |                      ^^^^^^^^ not found in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:101:31
+     |
+ 100 | #[cfg(all(feature = "alloc", not(any(feature = "default", feature = "std"))))]
+     |           ----------------- the item is gated behind the `alloc` feature
+ 101 | pub use conflaguration_core::{Validate, ValidationError, ValidationMessage};
+     |                               ^^^^^^^^
+note: found an item that was configured out
+    --> src/lib.rs:264:32
+     |
+ 263 | #[cfg(all(feature = "derive", any(feature = "default", feature = "std")))]
+     |                                  -------------------------------------- the item is gated here
+ 264 | pub use conflaguration_derive::Validate;
+     |                                ^^^^^^^^
+note: found an item that was configured out
+    --> src/lib.rs:457:11
+     |
+ 456 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+ 457 | pub trait Validate {
+     |           ^^^^^^^^
+
+error[E0425]: cannot find type `Result` in crate `conflaguration`
+    --> tests/derive.rs:1648:43
+     |
+1648 |     fn validate(&self) -> conflaguration::Result<()> {
+     |                                           ^^^^^^ not found in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:299:10
+     |
+ 298 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+ 299 | pub type Result<T> = std::result::Result<T, Error>;
+     |          ^^^^^^
+help: consider importing one of these items
+     |
+   5 + use std::fmt::Result;
+     |
+   5 + use std::io::Result;
+     |
+   5 + use std::result::Result;
+     |
+   5 + use std::thread::Result;
+     |
+     = and 2 other candidates
+help: if you import `Result`, refer to it directly
+     |
+1648 -     fn validate(&self) -> conflaguration::Result<()> {
+1648 +     fn validate(&self) -> Result<()> {
+     |
+
+error[E0433]: cannot find `Error` in `conflaguration`
+    --> tests/derive.rs:1650:40
+     |
+1650 |             return Err(conflaguration::Error::Validation {
+     |                                        ^^^^^ could not find `Error` in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:367:10
+     |
+ 364 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+...
+ 367 | pub enum Error {
+     |          ^^^^^
+help: consider importing one of these items
+     |
+   5 + use std::error::Error;
+     |
+   5 + use std::fmt::Error;
+     |
+   5 + use std::io::Error;
+     |
+   5 + use core::error::Error;
+     |
+     = and 1 other candidate
+help: if you import `Error`, refer to it directly
+     |
+1650 -             return Err(conflaguration::Error::Validation {
+1650 +             return Err(Error::Validation {
+     |
+
+error[E0425]: cannot find function `builder` in crate `conflaguration`
+    --> tests/derive.rs:1661:64
+     |
+1661 |         let config: BuilderResolveWithConfig = conflaguration::builder()
+     |                                                                ^^^^^^^ not found in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:91:5
+     |
+  90 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+  91 | mod builder;
+     |     ^^^^^^^
+note: found an item that was configured out
+    --> src/lib.rs:473:8
+     |
+ 472 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+ 473 | pub fn builder<T>() -> ConfigBuilder<T> {
+     |        ^^^^^^^
+
+error[E0425]: cannot find function `builder` in crate `conflaguration`
+    --> tests/derive.rs:1673:64
+     |
+1673 |         let config: BuilderResolveWithConfig = conflaguration::builder()
+     |                                                                ^^^^^^^ not found in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:91:5
+     |
+  90 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+  91 | mod builder;
+     |     ^^^^^^^
+note: found an item that was configured out
+    --> src/lib.rs:473:8
+     |
+ 472 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+ 473 | pub fn builder<T>() -> ConfigBuilder<T> {
+     |        ^^^^^^^
+
+error[E0425]: cannot find type `Result` in crate `conflaguration`
+    --> tests/derive.rs:1919:37
+     |
+1919 | ...   let result: conflaguration::Result<BuilderResolveWithConfig> = conflaguration::builder().value(BuilderResolveWithConfig::def...
+     |                                   ^^^^^^ not found in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:299:10
+     |
+ 298 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+ 299 | pub type Result<T> = std::result::Result<T, Error>;
+     |          ^^^^^^
+help: consider importing one of these items
+     |
+   5 + use std::fmt::Result;
+     |
+   5 + use std::io::Result;
+     |
+   5 + use std::result::Result;
+     |
+   5 + use std::thread::Result;
+     |
+     = and 2 other candidates
+help: if you import `Result`, refer to it directly
+     |
+1919 -         let result: conflaguration::Result<BuilderResolveWithConfig> = conflaguration::builder().value(BuilderResolveWithConfig::default()).validate().build();
+1919 +         let result: Result<BuilderResolveWithConfig> = conflaguration::builder().value(BuilderResolveWithConfig::default()).validate().build();
+     |
+
+error[E0425]: cannot find function `builder` in crate `conflaguration`
+    --> tests/derive.rs:1919:88
+     |
+1919 | ...   let result: conflaguration::Result<BuilderResolveWithConfig> = conflaguration::builder().value(BuilderResolveWithConfig::def...
+     |                                                                                      ^^^^^^^ not found in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:91:5
+     |
+  90 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+  91 | mod builder;
+     |     ^^^^^^^
+note: found an item that was configured out
+    --> src/lib.rs:473:8
+     |
+ 472 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+ 473 | pub fn builder<T>() -> ConfigBuilder<T> {
+     |        ^^^^^^^
+
+error[E0433]: cannot find `Error` in `conflaguration`
+    --> tests/derive.rs:1920:54
+     |
+1920 |         assert!(matches!(result, Err(conflaguration::Error::Validation { .. })));
+     |                                                      ^^^^^ could not find `Error` in `conflaguration`
+     |
+note: found an item that was configured out
+    --> src/lib.rs:367:10
+     |
+ 364 | #[cfg(any(feature = "default", feature = "std"))]
+     |          -------------------------------------- the item is gated here
+...
+ 367 | pub enum Error {
+     |          ^^^^^
+help: consider importing one of these items
+     |
+   5 + use std::error::Error;
+     |
+   5 + use std::fmt::Error;
+     |
+   5 + use std::io::Error;
+     |
+   5 + use core::error::Error;
+     |
+     = and 1 other candidate
+help: if you import `Error`, refer to it directly
+     |
+1920 -         assert!(matches!(result, Err(conflaguration::Error::Validation { .. })));
+1920 +         assert!(matches!(result, Err(Error::Validation { .. })));
+     |
+
+Some errors have detailed explanations: E0405, E0425, E0432, E0433.
+For more information about an error, try `rustc --explain E0405`.
+error: could not compile `conflaguration` (test "derive") due to 227 previous errors

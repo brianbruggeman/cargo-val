@@ -1,0 +1,1 @@
+{"child_exit_code":0,"invocation":"cargo val --manifest-path tests/fixtures/workspace/Cargo.toml --exact fixture::passes","passed_records":1,"selected_test":"fixture::passes","unexpected_output_bytes":0}

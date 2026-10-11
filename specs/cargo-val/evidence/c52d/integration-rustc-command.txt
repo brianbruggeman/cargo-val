@@ -1,0 +1,91 @@
+       Fresh unicode-ident v1.0.26
+       Fresh autocfg v1.5.1
+       Fresh falsehoods v1.0.0
+       Fresh proc-macro2 v1.0.107
+       Fresh tracing-core v0.1.36
+       Fresh hashbrown v0.17.1
+       Fresh equivalent v1.0.2
+       Fresh winnow v0.7.15
+       Fresh quote v1.0.47
+       Fresh indexmap v2.14.2
+       Fresh toml_write v0.1.2
+       Fresh syn v3.0.6
+       Fresh syn v2.0.119
+       Fresh num-traits v0.2.19
+       Fresh serde_derive v1.0.229
+       Fresh thiserror-impl v2.0.21
+       Fresh tracing-attributes v0.1.31
+       Fresh ordered-float v2.10.1
+       Fresh conflaguration-derive v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+       Fresh futures-macro v0.3.34
+       Fresh conflaguration-derive v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cdd)
+       Fresh tracing v0.1.44
+       Fresh futures-core v0.3.34
+       Fresh environs v1.2.0
+       Fresh toml_datetime v0.6.11
+       Fresh serde_spanned v0.6.9
+       Fresh serde-value v0.7.0
+       Fresh futures-sink v0.3.34
+       Fresh toml_edit v0.22.27
+       Fresh futures-task v0.3.34
+       Fresh pin-project-lite v0.2.17
+       Fresh slab v0.4.12
+       Fresh futures-channel v0.3.34
+       Fresh toml v0.8.23
+       Fresh futures-util v0.3.34
+       Fresh futures-io v0.3.34
+       Fresh thiserror v2.0.21
+       Fresh serde_core v1.0.229
+       Fresh conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+       Fresh futures v0.3.34
+       Fresh byteorder v1.5.0
+       Fresh smallvec v1.16.2
+       Fresh proxima-build v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+       Fresh memchr v2.8.3
+       Fresh hash32 v0.3.1
+       Fresh crossbeam-utils v0.8.23
+       Fresh zmij v1.0.23
+       Fresh fastrand v2.5.0
+       Fresh bytes v1.12.1
+       Fresh itoa v1.0.18
+       Fresh stable_deref_trait v1.2.1
+       Fresh serde_json v1.0.151
+       Fresh crossbeam-queue v0.3.14
+       Fresh serde v1.0.229
+       Fresh proxima-core v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+       Fresh heapless v0.9.3
+       Fresh errno v0.3.14
+       Fresh portable-atomic v1.15.0
+       Fresh libc v0.2.190
+       Fresh cfg-if v1.0.5
+       Fresh bitflags v2.13.2
+       Fresh conflaguration-core v0.1.0 (https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cdd)
+       Fresh rustc-hash v2.1.3
+       Fresh proxima-codec v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+       Fresh rustix v1.1.5
+       Fresh conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cdd)
+       Fresh getrandom v0.4.3
+       Fresh once_cell v1.21.4
+       Fresh proxima-primitives v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+       Fresh tempfile v3.27.0
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+     Running `CARGO=/Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo CARGO_CRATE_NAME=cargo_val CARGO_MANIFEST_DIR=/Users/brianbruggeman/repos/slot-0/cargo-val CARGO_MANIFEST_PATH=/Users/brianbruggeman/repos/slot-0/cargo-val/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=cargo-val CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' CARGO_PRIMARY_PACKAGE=1 DYLD_FALLBACK_LIBRARY_PATH='/tmp/cargo_val_c52d_probe_target/release/deps:/Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib:/Users/brianbruggeman/lib:/usr/local/lib:/usr/lib' OUT_DIR=/tmp/cargo_val_c52d_probe_target/release/build/cargo-val-5c12836bdc6a68b3/out /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name cargo_val --edition=2024 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no --cfg 'feature="proxima-codec"' --cfg 'feature="proxima-core"' --cfg 'feature="proxima-primitives"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("proxima-codec", "proxima-core", "proxima-primitives"))' -C metadata=19fafe5e33960246 -C extra-filename=-5404604b6aed4111 --out-dir /tmp/cargo_val_c52d_probe_target/release/deps -C strip=debuginfo -L dependency=/tmp/cargo_val_c52d_probe_target/release/deps --extern conflaguration=/tmp/cargo_val_c52d_probe_target/release/deps/libconflaguration-bd29cc25f696bc91.rmeta --extern libc=/tmp/cargo_val_c52d_probe_target/release/deps/liblibc-4dcc784480343756.rmeta --extern proxima_codec=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_codec-6393456be6e47db8.rmeta --extern proxima_core=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_core-1b02376ea47270f3.rmeta --extern proxima_primitives=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_primitives-75a91b72f823a749.rmeta`
+     Running `CARGO=/Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo CARGO_BIN_NAME=cargo-val CARGO_CRATE_NAME=cargo_val CARGO_MANIFEST_DIR=/Users/brianbruggeman/repos/slot-0/cargo-val CARGO_MANIFEST_PATH=/Users/brianbruggeman/repos/slot-0/cargo-val/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=cargo-val CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' CARGO_PRIMARY_PACKAGE=1 DYLD_FALLBACK_LIBRARY_PATH='/tmp/cargo_val_c52d_probe_target/release/deps:/Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib:/Users/brianbruggeman/lib:/usr/local/lib:/usr/lib' OUT_DIR=/tmp/cargo_val_c52d_probe_target/release/build/cargo-val-5c12836bdc6a68b3/out /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name cargo_val --edition=2024 src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C panic=abort -C embed-bitcode=no --cfg 'feature="proxima-codec"' --cfg 'feature="proxima-core"' --cfg 'feature="proxima-primitives"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("proxima-codec", "proxima-core", "proxima-primitives"))' -C metadata=3fbac12c70a07d67 -C extra-filename=-8378f8b18160c085 --out-dir /tmp/cargo_val_c52d_probe_target/release/deps -C strip=debuginfo -L dependency=/tmp/cargo_val_c52d_probe_target/release/deps --extern cargo_val=/tmp/cargo_val_c52d_probe_target/release/deps/libcargo_val-92ad44a80cb975f3.rlib --extern conflaguration=/tmp/cargo_val_c52d_probe_target/release/deps/libconflaguration-1074c0cac697a7ce.rlib --extern libc=/tmp/cargo_val_c52d_probe_target/release/deps/liblibc-ff89511b1df396c1.rlib --extern proxima_codec=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_codec-15d5580dcf35b0e7.rlib --extern proxima_core=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_core-e0ab1f91ba362dc9.rlib --extern proxima_primitives=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_primitives-9d9e0a93c0660969.rlib`
+error[E0152]: found duplicate lang item `panic_impl`
+   --> src/main.rs:167:1
+    |
+167 | / fn panic(_information: &PanicInfo<'_>) -> ! {
+168 | |     terminate(101)
+169 | | }
+    | |_^
+    |
+    = note: the lang item is first defined in crate `std` (which `fastrand` depends on)
+    = note: first definition in `std` loaded from /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib/libstd-614bb9b33bbc23af.dylib, /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib/libstd-614bb9b33bbc23af.rlib, /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib/libstd-614bb9b33bbc23af.rmeta
+    = note: second definition in the local crate (`cargo_val`)
+
+For more information about this error, try `rustc --explain E0152`.
+error: could not compile `cargo-val` (bin "cargo-val") due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `CARGO=/Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo CARGO_BIN_NAME=cargo-val CARGO_CRATE_NAME=cargo_val CARGO_MANIFEST_DIR=/Users/brianbruggeman/repos/slot-0/cargo-val CARGO_MANIFEST_PATH=/Users/brianbruggeman/repos/slot-0/cargo-val/Cargo.toml CARGO_PKG_AUTHORS='' CARGO_PKG_DESCRIPTION='' CARGO_PKG_HOMEPAGE='' CARGO_PKG_LICENSE='' CARGO_PKG_LICENSE_FILE='' CARGO_PKG_NAME=cargo-val CARGO_PKG_README=README.md CARGO_PKG_REPOSITORY='' CARGO_PKG_RUST_VERSION='' CARGO_PKG_VERSION=0.1.0 CARGO_PKG_VERSION_MAJOR=0 CARGO_PKG_VERSION_MINOR=1 CARGO_PKG_VERSION_PATCH=0 CARGO_PKG_VERSION_PRE='' CARGO_PRIMARY_PACKAGE=1 DYLD_FALLBACK_LIBRARY_PATH='/tmp/cargo_val_c52d_probe_target/release/deps:/Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib:/Users/brianbruggeman/lib:/usr/local/lib:/usr/lib' OUT_DIR=/tmp/cargo_val_c52d_probe_target/release/build/cargo-val-5c12836bdc6a68b3/out /Users/brianbruggeman/.cargo/bin/sccache /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name cargo_val --edition=2024 src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C panic=abort -C embed-bitcode=no --cfg 'feature="proxima-codec"' --cfg 'feature="proxima-core"' --cfg 'feature="proxima-primitives"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("proxima-codec", "proxima-core", "proxima-primitives"))' -C metadata=3fbac12c70a07d67 -C extra-filename=-8378f8b18160c085 --out-dir /tmp/cargo_val_c52d_probe_target/release/deps -C strip=debuginfo -L dependency=/tmp/cargo_val_c52d_probe_target/release/deps --extern cargo_val=/tmp/cargo_val_c52d_probe_target/release/deps/libcargo_val-92ad44a80cb975f3.rlib --extern conflaguration=/tmp/cargo_val_c52d_probe_target/release/deps/libconflaguration-1074c0cac697a7ce.rlib --extern libc=/tmp/cargo_val_c52d_probe_target/release/deps/liblibc-ff89511b1df396c1.rlib --extern proxima_codec=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_codec-15d5580dcf35b0e7.rlib --extern proxima_core=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_core-e0ab1f91ba362dc9.rlib --extern proxima_primitives=/tmp/cargo_val_c52d_probe_target/release/deps/libproxima_primitives-9d9e0a93c0660969.rlib` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...

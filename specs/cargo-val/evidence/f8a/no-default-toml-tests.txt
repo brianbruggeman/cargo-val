@@ -1,0 +1,72 @@
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (/tmp/conflaguration_f8a_target/debug/deps/conflaguration-a7a0763e25dd2805)
+
+running 21 tests
+test template::tests::binary_values ... ok
+test template::tests::empty_input ... ok
+test template::tests::env_resolver ... ok
+test template::tests::error_offset ... ok
+test template::tests::first_wins_in_chain ... ok
+test template::tests::lenient_passes_through ... ok
+test template::tests::no_templates_borrows ... ok
+test template::tests::resolvable_bytes ... ok
+test template::tests::resolvable_lenient ... ok
+test template::tests::resolvable_str ... ok
+test template::tests::resolved_returns_owned ... ok
+test template::tests::tuple_composition ... ok
+test template::tests::unclosed_passes_through ... ok
+test template::tests::unresolved_errors ... ok
+test tests::join_key_empty_prefix_returns_bare_segment ... ok
+test tests::join_key_empty_segment_still_underscores ... ok
+test tests::join_key_joins_with_underscore ... ok
+test tests::join_key_sizes_the_buffer_by_bytes_not_chars ... ok
+test tests::validation_displays_paths ... ok
+test tests::validation_message_prepend_empty_path ... ok
+test tests::validation_message_prepend_path ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/builder.rs (/tmp/conflaguration_f8a_target/debug/deps/builder-4a6bedbdedbde41b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/codegen.rs (/tmp/conflaguration_f8a_target/debug/deps/codegen-8950cd7d45bdd1cc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/compile_fail.rs (/tmp/conflaguration_f8a_target/debug/deps/compile_fail-339e06c3c67b586a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/derive.rs (/tmp/conflaguration_f8a_target/debug/deps/derive-ef0e881b966d541b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/file.rs (/tmp/conflaguration_f8a_target/debug/deps/file-388055ae231d19e2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/merge_parity.rs (/tmp/conflaguration_f8a_target/debug/deps/merge_parity-80a207222d1e8b09)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/std_compat.rs (/tmp/conflaguration_f8a_target/debug/deps/std_compat-121f6f80753eb5c9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+cargo_test_exit=0

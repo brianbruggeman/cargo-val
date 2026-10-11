@@ -1,0 +1,7 @@
+  Installing cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Updating crates.io index
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `release` profile [optimized] target(s) in 0.29s
+   Replacing /tmp/cargo-val-no-std-install/bin/cargo-val
+    Replaced package `cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)` with `cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)` (executable `cargo-val`)
+warning: be sure to add `/tmp/cargo-val-no-std-install/bin` to your PATH to be able to run the installed binaries

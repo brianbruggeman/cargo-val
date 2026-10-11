@@ -1,0 +1,16 @@
+
+running 1 test
+test seven_two_slots ... C7_IDENTITY {"name":"suite::alpha","admitted":1}
+C7_IDENTITY {"name":"suite::beta","admitted":1}
+C7_IDENTITY {"name":"suite::gamma","admitted":1}
+C7_IDENTITY {"name":"suite::delta","admitted":1}
+C7_IDENTITY {"name":"suite::epsilon","admitted":1}
+C7_IDENTITY {"name":"suite::zeta","admitted":1}
+C7_IDENTITY {"name":"suite::eta","admitted":1}
+C7_SUMMARY {"discovered":7,"admitted":7,"completed":7,"peak_sessions":2,"lost":0,"capacity":2}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/async_admission.rs (/tmp/cargo_target/debug/deps/async_admission-9edbbc2aecd6917a)

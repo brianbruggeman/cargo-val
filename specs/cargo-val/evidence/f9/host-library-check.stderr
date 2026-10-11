@@ -1,0 +1,8 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.44
+   Compiling unicode-ident v1.0.24
+    Checking conflaguration-core v0.1.0 (/Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-core)
+   Compiling syn v2.0.117
+   Compiling conflaguration-derive v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-derive)
+    Checking conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.96s

@@ -1,0 +1,117 @@
+{
+  "conditions": {
+    "host": "macOS-15.8-arm64-arm-64bit-Mach-O",
+    "fixture": "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+    "target_dir": "/tmp/cargo_target",
+    "jobs": 4,
+    "runner_binary": "/tmp/cargo_target/release/cargo-val",
+    "runner_binary_sha256": "ba19331041774f1f9ec33932806a101fc7b9e2d1b3a8928afb730e32e89a52e2",
+    "commands": {
+      "cargo_test": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "4",
+        "--",
+        "--test-threads",
+        "4"
+      ],
+      "cargo_val": [
+        "cargo",
+        "val",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "4"
+      ],
+      "nextest": [
+        "cargo",
+        "nextest",
+        "run",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "-j",
+        "4"
+      ]
+    },
+    "capture": "subprocess pipes; wall clock wraps /usr/bin/time -l and child exit",
+    "cpu_rss_scope": "/usr/bin/time -l reports command process usage; child-test-process totals are unmeasured",
+    "per_test_latency_scope": "nextest emits per-test durations; cargo test and cargo val do not emit them",
+    "warmup_rounds": 1,
+    "paired_rounds": 5
+  },
+  "runners": {
+    "cargo_test": {
+      "elapsed_ns": [
+        69847334,
+        70235250,
+        71368500,
+        70628750,
+        74207542
+      ],
+      "median_elapsed_ns": 70628750,
+      "coefficient_of_variation": 0.0218708018550122,
+      "throughput_tests_per_second": [
+        243.38795808584476,
+        242.04370312627918,
+        238.20032647456512,
+        240.69518432649593,
+        229.08722674037634
+      ],
+      "status_counts": {
+        "zero": 5,
+        "nonzero": 0
+      }
+    },
+    "cargo_val": {
+      "elapsed_ns": [
+        98591833,
+        102337750,
+        96072625,
+        97229541,
+        97679875
+      ],
+      "median_elapsed_ns": 97679875,
+      "coefficient_of_variation": 0.021727324458681065,
+      "throughput_tests_per_second": [
+        172.42807525446858,
+        166.11660897371692,
+        176.94946921664732,
+        174.84398080208976,
+        174.03789675201776
+      ],
+      "status_counts": {
+        "zero": 5,
+        "nonzero": 0
+      }
+    },
+    "nextest": {
+      "elapsed_ns": [
+        184359792,
+        180466500,
+        189275375,
+        186367708,
+        181115083
+      ],
+      "median_elapsed_ns": 184359792,
+      "coefficient_of_variation": 0.017808557726081017,
+      "throughput_tests_per_second": [
+        92.21099576853504,
+        94.20030864454067,
+        89.8162267542727,
+        91.21751929255899,
+        93.86297219652324
+      ],
+      "status_counts": {
+        "zero": 5,
+        "nonzero": 0
+      }
+    }
+  },
+  "cargo_val_fraction_of_cargo_test": 1.383004442242005,
+  "cargo_val_fraction_of_nextest": 0.5298328553115312
+}

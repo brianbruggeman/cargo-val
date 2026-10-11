@@ -1,5 +1,9 @@
-{"evidence":"the Unix child owner is a std process wrapper with blocking wait","id":"no_std_process_launch","line":94,"source":"proxima-process/src/spawn.rs"}
-{"evidence":"child stdio is serviced by helper threads around blocking I/O","id":"child_stdio_readiness","line":1335,"source":"proxima-process/src/command.rs"}
-{"evidence":"Windows child lifecycle wraps std::process without a reactor exit event","id":"windows_process_wrapper","line":4,"source":"proxima-process/src/spawn_windows.rs"}
-{"evidence":"Windows reactor registration accepts sockets; child pipe/process handles are not exposed","id":"no_std_handle_reactor","line":1,"source":"prime/src/os/reactor_windows.rs"}
+{"evidence":"the only Unix launch module is gated on std","id":"no_std_process_launch","line":272,"related_sources":[{"line":19,"source":"proxima-process/src/lib.rs"}],"source":"proxima-process/src/spawn.rs"}
+{"evidence":"child stdio uses helper threads, Windows reactor registration is socket-only, and off-worker readiness busy-polls","id":"child_stdio_readiness","line":1335,"related_sources":[{"line":1,"source":"prime/src/os/reactor_windows.rs"},{"line":20,"source":"prime/src/os/readiness.rs"}],"source":"proxima-process/src/command.rs"}
+{"evidence":"Unix wait blocks and Windows wait wraps std child lifecycle without a reactor exit event","id":"child_exit_readiness","line":105,"related_sources":[{"line":4,"source":"proxima-process/src/spawn_windows.rs"}],"source":"proxima-process/src/spawn.rs"}
+{"evidence":"the default and normal Proxima primitive dependency features enable std","id":"no_std_process_feature_graph","line":13,"related_sources":[{"line":31,"source":"proxima-process/Cargo.toml"}],"source":"proxima-process/Cargo.toml"}
+{"evidence":"async Semaphore is std-gated and the alloc-tier atomic permit pool has no async waiter","id":"no_std_async_admission","line":64,"related_sources":[{"line":4,"source":"proxima-primitives/src/sync/atomic_permits.rs"}],"source":"proxima-primitives/src/sync/mod.rs"}
+{"evidence":"Prime OS driver is std-gated and the reactor feature enables std","id":"no_std_prime_host_driver","line":20,"related_sources":[{"line":101,"source":"prime/Cargo.toml"}],"source":"prime/src/lib.rs"}
 {"api_signature":"pub struct ChildSession<In, Out, Err> { /* persistent native state */ }"}
+{"counts":{"source_backed_gaps":6,"typed_session_signatures":1}}
+{"negative_controls":{"missing_blocking_wait_anchor_rejected":1}}

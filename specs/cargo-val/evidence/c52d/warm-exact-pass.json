@@ -1,0 +1,16 @@
+{
+  "command": [
+    "cargo",
+    "val",
+    "--manifest-path",
+    "tests/fixtures/workspace/Cargo.toml",
+    "--exact",
+    "fixture::passes"
+  ],
+  "binary_sha256": "dc0f23cb832bc6b625ae52dc36fccdaa741a2deda7f03787920013a5bd9fcb62",
+  "elapsed_ns": 86041213875,
+  "status": 0,
+  "timed_out": false,
+  "stdout": "PASS\n",
+  "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s\n"
+}

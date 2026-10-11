@@ -1,0 +1,45 @@
+{
+  "host": "macOS-15.8-arm64-arm-64bit-Mach-O",
+  "fixture": "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+  "target_dir": "/tmp/cargo_target",
+  "jobs": 4,
+  "runner_binary": "/tmp/cargo_val_c54b_diag_target/release/cargo-val",
+  "runner_binary_sha256": "da0c51be4ced36326551e57c86dfb36b48e64629327e58bdbfea3c8800085396",
+  "commands": {
+    "cargo_test": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+      "--tests",
+      "--jobs",
+      "4",
+      "--",
+      "--test-threads",
+      "4"
+    ],
+    "cargo_val": [
+      "cargo",
+      "val",
+      "--manifest-path",
+      "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+      "--tests",
+      "--jobs",
+      "4"
+    ],
+    "nextest": [
+      "cargo",
+      "nextest",
+      "run",
+      "--manifest-path",
+      "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+      "-j",
+      "4"
+    ]
+  },
+  "capture": "subprocess pipes; wall clock wraps /usr/bin/time -l and child exit",
+  "cpu_rss_scope": "/usr/bin/time -l reports command process usage; child-test-process totals are unmeasured",
+  "per_test_latency_scope": "nextest emits per-test durations; cargo test and cargo val do not emit them",
+  "warmup_rounds": 1,
+  "paired_rounds": 5
+}

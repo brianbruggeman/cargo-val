@@ -1,0 +1,6 @@
+command=cargo check -p cargo-val --lib --no-default-features --target x86_64-unknown-none
+exit_status=0
+stdout:
+stderr:
+    Checking cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s

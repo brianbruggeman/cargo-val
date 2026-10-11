@@ -1,0 +1,5 @@
+command: cargo tree -p cargo-val --no-default-features --features proxima-codec,proxima-primitives,serde/std -e normal -f {p} {f}
+exit: 101
+stdout:
+stderr:
+error: the package 'cargo-val' does not contain this feature: serde/std

@@ -1,0 +1,57 @@
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (/tmp/conflaguration_f8a_target/debug/deps/conflaguration-fbac71b9d41066ee)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/builder.rs (/tmp/conflaguration_f8a_target/debug/deps/builder-31595a1d988e8bf8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/codegen.rs (/tmp/conflaguration_f8a_target/debug/deps/codegen-abe51ad3046f8292)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/compile_fail.rs (/tmp/conflaguration_f8a_target/debug/deps/compile_fail-a0ad74031d01b1ba)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/derive.rs (/tmp/conflaguration_f8a_target/debug/deps/derive-d3b970e0fd184c8e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/file.rs (/tmp/conflaguration_f8a_target/debug/deps/file-d2d89383048bdc37)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/merge_parity.rs (/tmp/conflaguration_f8a_target/debug/deps/merge_parity-fc3fc1c5c97ca6c7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/no_std_graph.rs (/tmp/conflaguration_f8a_target/debug/deps/no_std_graph-f4f83c0cd9317f39)
+
+running 1 test
+test no_std_export ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.71s
+
+     Running tests/std_compat.rs (/tmp/conflaguration_f8a_target/debug/deps/std_compat-d380f3c89f619633)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

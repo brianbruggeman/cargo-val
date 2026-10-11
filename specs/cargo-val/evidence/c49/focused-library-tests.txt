@@ -1,0 +1,14 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running unittests src/lib.rs (/tmp/cargo_val_c49_source_target/debug/deps/cargo_val-90174107ff274261)
+
+running 3 tests
+{"producer_open":1,"eof_wait_pending":1,"artifact_after_eof_by_control":1,"same_comparator_rejected":1}
+{"artifacts_before_eof":1,"non_test_ignored":1,"whole_output_collections":0,"borrowed_pointer_identity":1,"source_read_calls":1,"source_step_allocations":0}
+test cargo_source::tests::c49_emits_borrowed_artifact_before_reader_eof ... ok
+test cargo_source::tests::c49_eof_wait_control_withholds_the_same_artifact ... ok
+{"native_child_artifacts_before_eof":1,"native_non_test_ignored":1,"pending_while_child_stdout_open":1,"stdout_eof_after_release":1,"child_reaped":1}
+test cargo_source::tests::c49_native_child_stdout_yields_before_the_child_closes_it ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+

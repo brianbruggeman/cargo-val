@@ -1,0 +1,62 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--manifest-path",
+    "tests/fixtures/workspace/Cargo.toml",
+    "--test",
+    "integration_fixture",
+    "--",
+    "--nocapture"
+  ],
+  "target_dir": "/tmp/cargo_val_wallclock_probe_target",
+  "host": "macOS arm64",
+  "workload": "one empty integration test",
+  "runs": [
+    {
+      "run": 1,
+      "elapsed_ns": 117880167,
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "stdout": "\nrunning 1 test\ntest fixture::passes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s\n     Running tests/integration_fixture.rs (/tmp/cargo_val_wallclock_probe_target/debug/deps/integration_fixture-c192ef95dfef63d1)\n"
+    },
+    {
+      "run": 2,
+      "elapsed_ns": 106821625,
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "stdout": "\nrunning 1 test\ntest fixture::passes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s\n     Running tests/integration_fixture.rs (/tmp/cargo_val_wallclock_probe_target/debug/deps/integration_fixture-c192ef95dfef63d1)\n"
+    },
+    {
+      "run": 3,
+      "elapsed_ns": 97288166,
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "stdout": "\nrunning 1 test\ntest fixture::passes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s\n     Running tests/integration_fixture.rs (/tmp/cargo_val_wallclock_probe_target/debug/deps/integration_fixture-c192ef95dfef63d1)\n"
+    },
+    {
+      "run": 4,
+      "elapsed_ns": 97137208,
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "stdout": "\nrunning 1 test\ntest fixture::passes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s\n     Running tests/integration_fixture.rs (/tmp/cargo_val_wallclock_probe_target/debug/deps/integration_fixture-c192ef95dfef63d1)\n"
+    },
+    {
+      "run": 5,
+      "elapsed_ns": 97720625,
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "stdout": "\nrunning 1 test\ntest fixture::passes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s\n     Running tests/integration_fixture.rs (/tmp/cargo_val_wallclock_probe_target/debug/deps/integration_fixture-c192ef95dfef63d1)\n"
+    }
+  ]
+}

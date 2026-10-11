@@ -1,0 +1,240 @@
+iteration=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=3
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=4
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=5
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=6
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=7
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=8
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=9
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=10
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=11
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=12
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=13
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=14
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=15
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=16
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=17
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=18
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=19
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+
+iteration=20
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+

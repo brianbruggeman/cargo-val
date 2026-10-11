@@ -1,0 +1,50 @@
+   Compiling conflaguration-core v0.1.0 (https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cdd)
+   Compiling proxima-core v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cdd)
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+   Compiling proxima-primitives v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling proxima-codec v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+warning: variable does not need to be mutable
+   --> src/cargo_source.rs:396:13
+    |
+396 |         let mut port = MacosExitPort::new().expect("shared kqueue is created");
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/host/macos_exit.rs:377:13
+    |
+377 |         let mut port = MacosExitPort::new().expect("kqueue port is created");
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/host/macos_exit.rs:435:13
+    |
+435 |         let mut port = MacosExitPort::new().expect("race control kqueue is created");
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/host/macos_pipe.rs:192:13
+    |
+192 |         let mut port = MacosExitPort::new().expect("shared kqueue port is created");
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: `cargo-val` (lib test) generated 4 warnings (run `cargo fix --lib -p cargo-val --tests` to apply 4 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 05s
+     Running unittests src/lib.rs (/tmp/cargo_target/debug/deps/cargo_val-42db377b47c85c7e)
+
+running 1 test
+{"unregistered_watches":1,"bounded_waits":1,"ready_events":0,"reaps":1,"duplicate_reaps":0}
+test host::macos_exit::tests::c54_unregistered_exit_uses_bounded_wait_then_reap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.10s
+

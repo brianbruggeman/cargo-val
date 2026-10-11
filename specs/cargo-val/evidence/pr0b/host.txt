@@ -1,0 +1,2 @@
+Darwin Thor-43.local 24.6.0 Darwin Kernel Version 24.6.0: Mon Aug 17 20:38:31 PDT 2026; root:xnu-11417.140.69.712.68~1/RELEASE_ARM64_T6000 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)

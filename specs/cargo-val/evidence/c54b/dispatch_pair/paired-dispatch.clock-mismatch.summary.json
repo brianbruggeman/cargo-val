@@ -1,0 +1,138 @@
+{
+  "conditions": {
+    "host": "macOS-15.8-arm64-arm-64bit-Mach-O",
+    "fixture": "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+    "target_dir": "/tmp/cargo_target",
+    "jobs": 10,
+    "binary": "/tmp/cargo_val_c54b_diag_target/release/cargo-val",
+    "binary_sha256": "0c688836457a0fefd9d0db703a9dc5bbc6bfcf724bbd01687e294363085ae3e7",
+    "commands": {
+      "cargo_test": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "10",
+        "--",
+        "--test-threads",
+        "10"
+      ],
+      "cargo_val": [
+        "cargo",
+        "val",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "10"
+      ],
+      "direct_val": [
+        "/tmp/cargo_val_c54b_diag_target/release/cargo-val",
+        "val",
+        "--manifest-path",
+        "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+        "--tests",
+        "--jobs",
+        "10"
+      ]
+    },
+    "effective_val_argv_after_cargo_dispatch": [
+      "val",
+      "--manifest-path",
+      "/Users/brianbruggeman/repos/slot-0/cargo-val/tests/fixtures/workspace/Cargo.toml",
+      "--tests",
+      "--jobs",
+      "10"
+    ],
+    "round_order_seed": 521010,
+    "warmup_rounds": 1,
+    "paired_rounds": 5,
+    "capture": "subprocess pipes; identical /usr/bin/time -l wrapper and target artifacts"
+  },
+  "arms": {
+    "cargo_test": {
+      "elapsed_ns": [
+        69444166,
+        70321166,
+        71483459,
+        69986500,
+        70243083
+      ],
+      "median_elapsed_ns": 70243083,
+      "before_binary_run_ns": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "after_binary_run_ns": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "median_before_binary_run_ns": null
+    },
+    "cargo_val": {
+      "elapsed_ns": [
+        75216500,
+        72941041,
+        73779875,
+        68546458,
+        74598250
+      ],
+      "median_elapsed_ns": 73779875,
+      "before_binary_run_ns": [
+        -5458339708,
+        -5461488625,
+        -5461880750,
+        -5461699583,
+        -5461019625
+      ],
+      "after_binary_run_ns": [
+        5484136208,
+        5484118666,
+        5484116625,
+        5484102041,
+        5484106875
+      ],
+      "median_before_binary_run_ns": -5461488625
+    },
+    "direct_val": {
+      "elapsed_ns": [
+        55386500,
+        54656584,
+        53378291,
+        53876458,
+        55942917
+      ],
+      "median_elapsed_ns": 54656584,
+      "before_binary_run_ns": [
+        -5479073583,
+        -5478987666,
+        -5479481250,
+        -5479576750,
+        -5479219166
+      ],
+      "after_binary_run_ns": [
+        5484075083,
+        5484101250,
+        5484108541,
+        5484114208,
+        5484107083
+      ],
+      "median_before_binary_run_ns": -5479219166
+    }
+  },
+  "within_round_val_difference_ns": [
+    19830000,
+    18284457,
+    20401584,
+    14670000,
+    18655333
+  ]
+}

@@ -1,0 +1,37 @@
+    Blocking waiting for file lock on package cache
+    Checking futures-sink v0.3.34
+    Checking futures-core v0.3.34
+    Checking futures-task v0.3.34
+    Checking slab v0.4.12
+    Checking pin-project-lite v0.2.17
+   Compiling environs v1.2.0
+    Checking futures-io v0.3.34
+    Checking thiserror v2.0.21
+    Checking serde_core v1.0.229
+    Checking smallvec v1.16.2
+    Checking memchr v2.8.3
+    Checking byteorder v1.5.0
+    Checking crossbeam-utils v0.8.23
+    Checking zmij v1.0.23
+    Checking futures-channel v0.3.34
+   Compiling libc v0.2.190
+    Checking futures-util v0.3.34
+    Checking bytes v1.12.1
+    Checking stable_deref_trait v1.2.1
+    Checking hash32 v0.3.1
+   Compiling conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+    Checking itoa v1.0.18
+    Checking crossbeam-queue v0.3.14
+    Checking portable-atomic v1.15.0
+    Checking rustc-hash v2.1.3
+    Checking heapless v0.9.3
+    Checking fastrand v2.5.0
+   Compiling proxima-build v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+   Compiling proxima-core v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling proxima-primitives v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+    Checking serde_json v1.0.151
+    Checking serde v1.0.229
+    Checking futures v0.3.34
+    Checking proxima-codec v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.14s

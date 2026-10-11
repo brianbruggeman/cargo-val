@@ -1,0 +1,40 @@
+diff -ru tests/fixtures/workspace/tests/arithmetic_fixture.rs /tmp/cargo_val_fixture_10m/tests/arithmetic_fixture.rs
+--- tests/fixtures/workspace/tests/arithmetic_fixture.rs	2026-10-10 20:00:41
++++ /tmp/cargo_val_fixture_10m/tests/arithmetic_fixture.rs	2026-10-10 21:23:16
+@@ -1,5 +1,5 @@
+ fn checksum(seed: u64) -> u64 {
+-    (0..1_000_000_u64).fold(seed, |state, value| {
++    (0..10_000_000_u64).fold(seed, |state, value| {
+         std::hint::black_box(state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(value))
+     })
+ }
+diff -ru tests/fixtures/workspace/tests/branch_fixture.rs /tmp/cargo_val_fixture_10m/tests/branch_fixture.rs
+--- tests/fixtures/workspace/tests/branch_fixture.rs	2026-10-10 20:00:41
++++ /tmp/cargo_val_fixture_10m/tests/branch_fixture.rs	2026-10-10 21:23:16
+@@ -1,5 +1,5 @@
+ fn branch_count(seed: u64) -> u64 {
+-    (0..1_000_000_u64).fold(0, |count, value| {
++    (0..10_000_000_u64).fold(0, |count, value| {
+         count + u64::from((value.wrapping_mul(seed) & 31) < 7)
+     })
+ }
+diff -ru tests/fixtures/workspace/tests/bytes_fixture.rs /tmp/cargo_val_fixture_10m/tests/bytes_fixture.rs
+--- tests/fixtures/workspace/tests/bytes_fixture.rs	2026-10-10 20:00:41
++++ /tmp/cargo_val_fixture_10m/tests/bytes_fixture.rs	2026-10-10 21:23:16
+@@ -1,5 +1,5 @@
+ fn byte_mix(seed: u8) -> u64 {
+-    (0..1_000_000_u64).fold(u64::from(seed), |state, value| {
++    (0..10_000_000_u64).fold(u64::from(seed), |state, value| {
+         let byte = (value as u8).wrapping_mul(seed).rotate_left((value & 7) as u32);
+         std::hint::black_box(state.rotate_left(5) ^ u64::from(byte))
+     })
+diff -ru tests/fixtures/workspace/tests/order_fixture.rs /tmp/cargo_val_fixture_10m/tests/order_fixture.rs
+--- tests/fixtures/workspace/tests/order_fixture.rs	2026-10-10 20:00:41
++++ /tmp/cargo_val_fixture_10m/tests/order_fixture.rs	2026-10-10 21:23:16
+@@ -1,5 +1,5 @@
+ fn ordered_fold(seed: u64) -> u64 {
+-    (0..1_000_000_u64).fold(seed, |state, value| {
++    (0..10_000_000_u64).fold(seed, |state, value| {
+         std::hint::black_box(state.wrapping_add(value ^ (value >> 3)).rotate_left(9))
+     })
+ }

@@ -1,0 +1,12 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.44
+   Compiling unicode-ident v1.0.24
+   Compiling thiserror v2.0.18
+    Checking once_cell v1.21.3
+    Checking pin-project-lite v0.2.16
+    Checking falsehoods v1.0.0
+    Checking conflaguration-core v0.1.0 (/Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-core)
+error: could not compile `falsehoods` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `once_cell` (lib) due to 245 previous errors
+cargo_check_exit=101

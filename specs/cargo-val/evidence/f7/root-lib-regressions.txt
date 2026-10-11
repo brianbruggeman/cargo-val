@@ -1,0 +1,63 @@
+   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running unittests src/lib.rs (/tmp/conflaguration_f7_target/debug/deps/conflaguration-fd35774862b7919e)
+
+running 55 tests
+test template::tests::binary_values ... ok
+test template::tests::empty_input ... ok
+test template::tests::env_resolver ... ok
+test template::tests::error_offset ... ok
+test template::tests::first_wins_in_chain ... ok
+test template::tests::lenient_passes_through ... ok
+test template::tests::no_templates_borrows ... ok
+test template::tests::resolvable_bytes ... ok
+test template::tests::resolvable_lenient ... ok
+test template::tests::resolvable_str ... ok
+test template::tests::resolved_returns_owned ... ok
+test template::tests::tuple_composition ... ok
+test template::tests::unclosed_passes_through ... ok
+test template::tests::unresolved_errors ... ok
+test tests::config_prefix_view_uses_default_fmt_config_with_prefix ... ok
+test tests::config_view_display_delegates_to_fmt_config ... ok
+test tests::env_error_propagates_through ... ok
+test tests::from_env_reads_environment ... ok
+test tests::from_env_with_defaults ... ok
+test tests::init_combines_from_env_and_validate ... ok
+test tests::init_propagates_validation_error ... ok
+test tests::join_key_empty_prefix_returns_bare_segment ... ok
+test tests::join_key_empty_segment_still_underscores ... ok
+test tests::join_key_joins_with_underscore ... ok
+test tests::join_key_sizes_the_buffer_by_bytes_not_chars ... ok
+test tests::resolve_with_cascade_errors_on_first_bad_value ... ok
+test tests::resolve_with_cascades_to_second_key ... ok
+test tests::resolve_with_errors_on_missing_key ... ok
+test tests::resolve_with_or_cascades_to_second_key ... ok
+test tests::resolve_with_or_propagates_parse_error_despite_default ... ok
+test tests::resolve_with_or_receives_empty_string_not_default ... ok
+test tests::resolve_with_or_returns_default_when_missing ... ok
+test tests::resolve_with_or_returns_parsed_when_set ... ok
+test tests::resolve_with_or_str_cascade_errors_on_first_bad_value ... ok
+test tests::resolve_with_or_str_cascades_to_second_key ... ok
+test tests::resolve_with_or_str_empty_keys_error_shows_default_key ... ok
+test tests::resolve_with_or_str_empty_keys_uses_default_str ... ok
+test tests::resolve_with_or_str_error_shows_default_key_when_missing ... ok
+test tests::resolve_with_or_str_error_shows_env_key_when_set ... ok
+test tests::resolve_with_or_str_propagates_error_on_default_str ... ok
+test tests::resolve_with_or_str_propagates_error_on_env_value ... ok
+test tests::resolve_with_or_str_receives_empty_string_not_default ... ok
+test tests::resolve_with_or_str_returns_parsed_when_set ... ok
+test tests::resolve_with_or_str_uses_default_str_when_missing ... ok
+test tests::resolve_with_propagates_parse_error ... ok
+test tests::resolve_with_receives_empty_string_when_env_set_empty ... ok
+test tests::resolve_with_returns_parsed_value ... ok
+test tests::trait_default_from_env_with_prefix_delegates_to_from_env ... ok
+test tests::trait_default_override_from_env_is_noop ... ok
+test tests::trait_default_override_from_env_with_prefix_is_noop ... ok
+test tests::validate_collects_all_errors ... ok
+test tests::validate_passes_on_valid_config ... ok
+test tests::validation_displays_paths ... ok
+test tests::validation_message_prepend_empty_path ... ok
+test tests::validation_message_prepend_path ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

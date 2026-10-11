@@ -1,0 +1,32 @@
+Analysis of sampling cli_run-c48f007155b24dd0 (pid 68680) every 1 millisecond
+Process:         cli_run-c48f007155b24dd0 [68680]
+Path:            /private/tmp/*/cli_run-c48f007155b24dd0
+Load Address:    0x100cd0000
+Identifier:      cli_run-c48f007155b24dd0
+Version:         ???
+Code Type:       ARM64
+Parent Process:  cargo-val [68677]
+Target Type:     live task
+
+Date/Time:       2026-10-10 21:22:27.113 -0500
+Launch Time:     2026-10-10 21:22:16.465 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    849 Thread_89735768: Main Thread   DispatchQueue_<multiple>
+      849 _dyld_start  (in dyld) + 0  [0x1011a47c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        849
+
+Binary images description not available
+

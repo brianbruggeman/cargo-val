@@ -1,0 +1,16 @@
+{
+  "snapshot_monotonic_ns": 890971796195333,
+  "competing_proxima_build_rows": [],
+  "top_cpu_process_rows": [
+    "71799 71797  91.2 S    /private/tmp/cargo_target_attn7/release/examples/norm_variant_ab",
+    "17029     1  81.0 R    /Users/brianbruggeman/.local/bin/ragd serve --listen 127.0.0.1:7243",
+    "  476     1  38.9 Us   /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon",
+    "  542     1  23.8 Us   /usr/libexec/syspolicyd",
+    "54533     1  13.1 R    /Applications/iTerm.app/Contents/MacOS/iTerm2",
+    " 1265     1   8.0 Ss   /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService",
+    " 3968 31629   3.7 Rs   /Users/brianbruggeman/.codex/packages/app-server-daemon/releases/0.162.1-aarch64-apple-darwin/bin/codex app-server --listen unix:// --analytics-default-enabled -c features.api_key_model_discovery=true -c features.auth_elicitation=true -c features.code_mode_host=true -c features.mcp_oauth_refresh_coordination=false --managed-daemon",
+    "54647 54569   2.4 S+   claude",
+    "  477     1   1.0 Ss   /System/Library/PrivateFrameworks/TCC.framework/Support/tccd system",
+    " 1010  1005   0.9 S    /Applications/Docker.app/Contents/MacOS/com.docker.backend services --autostart"
+  ]
+}

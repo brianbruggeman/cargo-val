@@ -1,0 +1,2 @@
+cargo-val is not implemented yet; use --help for usage
+exit_code=2

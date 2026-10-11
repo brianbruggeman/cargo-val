@@ -1,0 +1,149 @@
+0proxima-primitives v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-primitives)
+1bytes v1.12.1
+1fastrand v2.5.0
+1heapless v0.9.3
+2stable_deref_trait v1.2.1
+2hash32 feature "default"
+3hash32 v0.3.1
+4byteorder v1.5.0
+1proxima-core v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-core)
+2smallvec v1.15.2
+2thiserror v2.0.19
+3thiserror-impl feature "default"
+4thiserror-impl v2.0.19 (proc-macro)
+5proc-macro2 feature "default"
+6proc-macro2 v1.0.107
+7unicode-ident feature "default"
+8unicode-ident v1.0.24
+6proc-macro2 feature "proc-macro"
+7proc-macro2 v1.0.107 (*)
+5quote feature "default"
+6quote v1.0.47
+7proc-macro2 v1.0.107 (*)
+6quote feature "proc-macro"
+7quote v1.0.47 (*)
+7proc-macro2 feature "proc-macro" (*)
+5syn feature "default"
+6syn v3.0.3
+7proc-macro2 v1.0.107 (*)
+7quote v1.0.47 (*)
+7unicode-ident feature "default" (*)
+6syn feature "clone-impls"
+7syn v3.0.3 (*)
+6syn feature "derive"
+7syn v3.0.3 (*)
+6syn feature "parsing"
+7syn v3.0.3 (*)
+6syn feature "printing"
+7syn v3.0.3 (*)
+6syn feature "proc-macro"
+7syn v3.0.3 (*)
+7proc-macro2 feature "proc-macro" (*)
+7quote feature "proc-macro" (*)
+2futures feature "alloc"
+3futures v0.3.33
+4futures-core v0.3.33
+4futures-io v0.3.33
+4futures-sink v0.3.33
+4futures-task v0.3.33
+4futures-channel feature "sink"
+5futures-channel v0.3.33
+6futures-core v0.3.33
+6futures-sink v0.3.33
+5futures-channel feature "futures-sink"
+6futures-channel v0.3.33 (*)
+4futures-util feature "sink"
+5futures-util v0.3.33
+6futures-core v0.3.33
+6futures-macro v0.3.33 (proc-macro)
+7proc-macro2 feature "default" (*)
+7quote feature "default" (*)
+7syn feature "default"
+8syn v2.0.119
+9proc-macro2 v1.0.107 (*)
+9quote v1.0.47 (*)
+9unicode-ident feature "default" (*)
+8syn feature "clone-impls"
+9syn v2.0.119 (*)
+8syn feature "derive"
+9syn v2.0.119 (*)
+8syn feature "parsing"
+9syn v2.0.119 (*)
+8syn feature "printing"
+9syn v2.0.119 (*)
+8syn feature "proc-macro"
+9syn v2.0.119 (*)
+9proc-macro2 feature "proc-macro" (*)
+9quote feature "proc-macro" (*)
+7syn feature "full"
+8syn v2.0.119 (*)
+6futures-sink v0.3.33
+6futures-task v0.3.33
+6slab v0.4.12
+6pin-project-lite feature "default"
+7pin-project-lite v0.2.17
+5futures-util feature "futures-sink"
+6futures-util v0.3.33 (*)
+3futures-channel feature "alloc"
+4futures-channel v0.3.33 (*)
+4futures-core feature "alloc"
+5futures-core v0.3.33
+3futures-core feature "alloc" (*)
+3futures-sink feature "alloc"
+4futures-sink v0.3.33
+3futures-task feature "alloc"
+4futures-task v0.3.33
+3futures-util feature "alloc"
+4futures-util v0.3.33 (*)
+4futures-core feature "alloc" (*)
+4futures-task feature "alloc" (*)
+4futures-util feature "slab"
+5futures-util v0.3.33 (*)
+2futures feature "async-await"
+3futures v0.3.33 (*)
+3futures-util feature "async-await"
+4futures-util v0.3.33 (*)
+3futures-util feature "async-await-macro"
+4futures-util v0.3.33 (*)
+4futures-util feature "async-await" (*)
+4futures-util feature "futures-macro"
+5futures-util v0.3.33 (*)
+2pin-project-lite feature "default" (*)
+1rustc-hash v2.1.3
+1thiserror v2.0.19 (*)
+1crossbeam-queue feature "alloc"
+2crossbeam-queue v0.3.13
+3crossbeam-utils v0.8.22
+1futures feature "alloc" (*)
+1futures feature "async-await" (*)
+1portable-atomic feature "fallback"
+2portable-atomic v1.14.0
+1serde feature "alloc"
+2serde v1.0.229
+3serde_core feature "result"
+4serde_core v1.0.229
+3serde_derive feature "default"
+4serde_derive v1.0.229 (proc-macro)
+5proc-macro2 feature "proc-macro" (*)
+5quote feature "proc-macro" (*)
+5syn feature "clone-impls" (*)
+5syn feature "derive" (*)
+5syn feature "parsing" (*)
+5syn feature "printing" (*)
+5syn feature "proc-macro" (*)
+2serde_core feature "alloc"
+3serde_core v1.0.229
+1serde feature "derive"
+2serde v1.0.229 (*)
+2serde feature "serde_derive"
+3serde v1.0.229 (*)
+1serde_json feature "alloc"
+2serde_json v1.0.151
+3memchr v2.8.3
+3serde_core v1.0.229
+3itoa feature "default"
+4itoa v1.0.18
+3zmij feature "default"
+4zmij v1.0.23
+2serde_core feature "alloc" (*)
+cargo_tree_exit=0

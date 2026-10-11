@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51a_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+test runner::tests::c51a_duplicate_and_name_capacity_controls_reject_before_spawn ... {"duplicate_rejections":1,"distinct_launches":2,"capacity_rejections":1,"post_rejection_slots":0,"captured_stream_eofs":4}
+ok
+test runner::tests::c51a_launches_exact_child_before_listing_eof_and_stops_at_full_slot ... {"exact_launches":2,"duplicate_names":0,"full_slot_pulls":0,"first_before_eof":true,"captured_stream_eofs":4,"name_capacity_bytes":64,"observed_names":["runner::tests::fixture_alpha","runner::tests::fixture_beta"]}
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.01s
+

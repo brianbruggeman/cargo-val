@@ -1,0 +1,19 @@
+   319	    watches[slot.index()] = Some(TestWatch {
+   320	        slot,
+   321	        stdout_token,
+   322	        stderr_token,
+   323	        process,
+   324	    });
+   325	    #[cfg(target_os = "macos")]
+   326	    if ledger.sessions().get(slot).ok_or(RunError::Outcome)?.name_bytes() == b"branch_seed_eleven" {
+   327	        port.unwatch_process(child.process_id()).map_err(|_| RunError::Reactor)?;
+   328	        write_fd(2, b"PROBE forced-missing-process-event branch_seed_eleven\n")?;
+   329	    }
+   330	    if let Some(status) = immediate_status {
+   331	        let exited = deliver(
+   332	            ledger,
+   333	            HostEvent::Exit {
+   334	                slot,
+   335	                status: status.code.unwrap_or(1),
+   336	            },
+   337	            color,

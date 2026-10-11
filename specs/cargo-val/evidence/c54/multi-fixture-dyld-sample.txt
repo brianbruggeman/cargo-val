@@ -1,0 +1,32 @@
+Analysis of sampling cargo_val_fixture-3b47bb63cfb7774f (pid 77660) every 1 millisecond
+Process:         cargo_val_fixture-3b47bb63cfb7774f [77660]
+Path:            /private/tmp/*/cargo_val_fixture-3b47bb63cfb7774f
+Load Address:    0x102d60000
+Identifier:      cargo_val_fixture-3b47bb63cfb7774f
+Version:         ???
+Code Type:       ARM64
+Parent Process:  cargo [77574]
+Target Type:     live task
+
+Date/Time:       2026-10-10 20:02:20.127 -0500
+Launch Time:     2026-10-10 20:01:19.030 -0500
+OS Version:      macOS 15.8 (24H20)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    1605 Thread_89359881: Main Thread   DispatchQueue_<multiple>
+      1605 _dyld_start  (in dyld) + 0  [0x10319c7c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        1605
+
+Binary images description not available
+

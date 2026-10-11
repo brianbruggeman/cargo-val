@@ -1,0 +1,28 @@
+[
+  {
+    "binary": "/tmp/cargo_val_c54_multi_fixture_target/debug/deps/cargo_val_fixture-3b47bb63cfb7774f",
+    "exit_code": 0,
+    "stdout": "0 tests, 0 benchmarks\n",
+    "stderr": ""
+  },
+  {
+    "binary": "/tmp/cargo_val_wallclock_probe_target/debug/deps/new-integration-fixture-test",
+    "observed": "timeout",
+    "timeout_seconds": 5,
+    "stdout": null,
+    "stderr": null
+  },
+  {
+    "binary": "/tmp/cargo_val_wallclock_probe_target/debug/deps/integration_fixture-c192ef95dfef63d1",
+    "exit_code": 0,
+    "stdout": "fixture::passes: test\n\n1 test, 0 benchmarks\n",
+    "stderr": ""
+  },
+  {
+    "binary": "/tmp/cargo_val_c54_multi_fixture_target/debug/deps/old-integration-fixture-test",
+    "observed": "timeout",
+    "timeout_seconds": 5,
+    "stdout": null,
+    "stderr": null
+  }
+]

@@ -1,0 +1,37 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling once_cell v1.21.4
+   Compiling thiserror v2.0.21
+   Compiling libc v0.2.190
+   Compiling pin-project-lite v0.2.17
+   Compiling falsehoods v1.0.0
+   Compiling memchr v2.8.3
+   Compiling getrandom v0.4.3
+   Compiling rustix v1.1.5
+   Compiling zmij v1.0.23
+   Compiling serde_core v1.0.229
+   Compiling tracing-core v0.1.36
+   Compiling cfg-if v1.0.5
+   Compiling serde_json v1.0.151
+   Compiling bitflags v2.13.2
+   Compiling fastrand v2.5.0
+   Compiling itoa v1.0.18
+   Compiling syn v2.0.119
+   Compiling syn v3.0.6
+   Compiling errno v0.3.14
+   Compiling thiserror-impl v2.0.21
+   Compiling tempfile v3.27.0
+   Compiling tracing-attributes v0.1.31
+   Compiling conflaguration-derive v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+   Compiling tracing v0.1.44
+   Compiling environs v1.2.0
+   Compiling conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+error: unwinding panics are not supported without std
+  |
+  = help: using nightly cargo, use -Zbuild-std with panic="abort" to avoid unwinding
+  = note: since the core library is usually precompiled with panic="unwind", rebuilding your crate with panic="abort" may not be enough to fix the problem
+
+error: could not compile `cargo-val` (bin "cargo-val") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

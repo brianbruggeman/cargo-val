@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/tmp/cargo_val_lib_fresh_20261010/debug/deps/cargo_val-bb9c09bb76fef032)
+
+running 2 tests
+test host_event::tests::c48g_events_borrow_output_and_reject_exit_for_retired_generation ... {"stdout":1,"stderr":1,"exit":1,"retired_generation_rejected":1,"borrowed_payloads":2,"payload_copies":0,"allocations":0}
+ok
+test host_event::tests::c48g_exit_keeps_slot_live_for_late_stream_output ... {"exit_accepted":1,"late_stdout_accepted":1,"late_stderr_accepted":1,"borrowed_pointer_equalities":2,"live_sessions":1,"removed_slot_control_rejected":1,"payload_copies":0,"allocations":0}
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+

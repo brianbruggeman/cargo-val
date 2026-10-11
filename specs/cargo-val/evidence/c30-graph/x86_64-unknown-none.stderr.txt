@@ -1,1 +1,2 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.36s

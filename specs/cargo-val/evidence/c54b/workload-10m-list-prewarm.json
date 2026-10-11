@@ -1,0 +1,44 @@
+[
+  {
+    "path": "/tmp/cargo_val_workload10_target/debug/deps/cargo_val_fixture-3b47bb63cfb7774f",
+    "status": 0,
+    "elapsed_ns": 143751791,
+    "stdout": "0 tests, 0 benchmarks\n",
+    "stderr": ""
+  },
+  {
+    "path": "/tmp/cargo_val_workload10_target/debug/deps/integration_fixture-c192ef95dfef63d1",
+    "status": 0,
+    "elapsed_ns": 136800333,
+    "stdout": "fixture::passes: test\n\n1 test, 0 benchmarks\n",
+    "stderr": ""
+  },
+  {
+    "path": "/tmp/cargo_val_workload10_target/debug/deps/arithmetic_fixture-431efa3eca1096ff",
+    "status": 0,
+    "elapsed_ns": 137165416,
+    "stdout": "arithmetic_seed_four: test\narithmetic_seed_one: test\narithmetic_seed_three: test\narithmetic_seed_two: test\n\n4 tests, 0 benchmarks\n",
+    "stderr": ""
+  },
+  {
+    "path": "/tmp/cargo_val_workload10_target/debug/deps/bytes_fixture-fa5226d147e7dc65",
+    "status": 0,
+    "elapsed_ns": 136379041,
+    "stdout": "bytes_seed_nineteen: test\nbytes_seed_seventeen: test\nbytes_seed_twenty_nine: test\nbytes_seed_twenty_three: test\n\n4 tests, 0 benchmarks\n",
+    "stderr": ""
+  },
+  {
+    "path": "/tmp/cargo_val_workload10_target/debug/deps/order_fixture-b7ae6ec0e90f95c9",
+    "status": 0,
+    "elapsed_ns": 133047250,
+    "stdout": "order_seed_forty_one: test\norder_seed_forty_three: test\norder_seed_thirty_one: test\norder_seed_thirty_seven: test\n\n4 tests, 0 benchmarks\n",
+    "stderr": ""
+  },
+  {
+    "path": "/tmp/cargo_val_workload10_target/debug/deps/branch_fixture-fbfe914d80ceeef3",
+    "status": 0,
+    "elapsed_ns": 135067541,
+    "stdout": "branch_seed_eleven: test\nbranch_seed_five: test\nbranch_seed_seven: test\nbranch_seed_thirteen: test\n\n4 tests, 0 benchmarks\n",
+    "stderr": ""
+  }
+]

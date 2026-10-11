@@ -1,0 +1,8 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+error: unwinding panics are not supported without std
+  |
+  = help: using nightly cargo, use -Zbuild-std with panic="abort" to avoid unwinding
+  = note: since the core library is usually precompiled with panic="unwind", rebuilding your crate with panic="abort" may not be enough to fix the problem
+
+error: could not compile `cargo-val` (bin "cargo-val") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

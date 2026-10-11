@@ -1,0 +1,426 @@
+   150	        bytes = &bytes[written as usize..];
+   151	    }
+   152	    Ok(())
+   153	}
+   154	
+   155	fn phase_decimal(mut value: u64, output: &mut [u8], position: &mut usize) {
+   156	    let mut digits = [0_u8; 20];
+   157	    let mut count = 0;
+   158	    loop {
+   159	        digits[count] = b'0' + (value % 10) as u8;
+   160	        count += 1;
+   161	        value /= 10;
+   162	        if value == 0 {
+   163	            break;
+   164	        }
+   165	    }
+   166	    while count != 0 {
+   167	        count -= 1;
+   168	        output[*position] = digits[count];
+   169	        *position += 1;
+   170	    }
+   171	}
+   172	
+   173	fn phase_event(label: &[u8], process_id: libc::pid_t, count: usize) -> Result<(), RunError> {
+   174	    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+   175	    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+   176	        return Err(RunError::Reactor);
+   177	    }
+   178	    let nanos = now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64;
+   179	    let mut line = [0_u8; 128];
+   180	    let mut offset = 0;
+   181	    for fragment in [b"C54PHASE ".as_slice(), label, b" "] {
+   182	        line[offset..offset + fragment.len()].copy_from_slice(fragment);
+   183	        offset += fragment.len();
+   184	    }
+   185	    phase_decimal(nanos, &mut line, &mut offset);
+   186	    line[offset] = b' ';
+   187	    offset += 1;
+   188	    phase_decimal(process_id as u64, &mut line, &mut offset);
+   189	    line[offset] = b' ';
+   190	    offset += 1;
+   191	    phase_decimal(count as u64, &mut line, &mut offset);
+   192	    line[offset] = b'\n';
+   193	    write_fd(2, &line[..offset + 1])
+   194	}
+   195	
+   196	fn reap_unreported_children<'sessions>(
+   197	    port: &NativePort,
+   198	    ledger: &mut OutcomeLedger<'sessions, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+   199	    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+   200	    color: bool,
+   201	) -> Result<(), RunError> {
+   202	    for index in 0..LIVE_CAPACITY {
+   203	        let Some(watch) = watches[index].as_mut() else {
+   204	            continue;
+   205	        };
+   206	        let Some(status) = watch.process.reap().map_err(|_| RunError::Reactor)? else {
+   207	            continue;
+   208	        };
+   209	        phase_event(
+   210	            b"test_exit",
+   211	            ledger.sessions().get(watch.slot).ok_or(RunError::Outcome)?.child().process_id(),
+   212	            0,
+   213	        )?;
+   214	        #[cfg(target_os = "macos")]
+   215	        port.unwatch_process(ledger.sessions().get(watch.slot).ok_or(RunError::Outcome)?.child().process_id())
+   216	            .map_err(|_| RunError::Reactor)?;
+   217	        #[cfg(target_os = "linux")]
+   218	        let _ = port;
+   219	        let retired = deliver(
+   220	            ledger,
+   221	            HostEvent::Exit { slot: watch.slot, status: status.code.unwrap_or(1) },
+   222	            color,
+   223	        )?;
+   224	        if retired {
+   225	            watches[index] = None;
+   226	        }
+   227	    }
+   228	    Ok(())
+   229	}
+   230	
+   305	    };
+   306	    let step = ready(UnixOutcomePipe::new().call(UnixOutcomeInput {
+   307	        ledger,
+   308	        event,
+   309	        report_output: &mut report[name_length..],
+   310	        color,
+   311	    }))?
+   312	    .map_err(|_| RunError::Outcome)?;
+   313	    match step {
+   314	        UnixOutcomeStep::Reported { report_bytes, .. } => {
+   315	            phase_event(b"test_report", 0, ledger.snapshot().passed + ledger.snapshot().failed)?;
+   316	            write_fd(1, &report[..name_length + report_bytes])?;
+   317	            Ok(true)
+   318	        }
+   319	        UnixOutcomeStep::Pending | UnixOutcomeStep::Stdout(_) | UnixOutcomeStep::Stderr(_) => {
+   320	            Ok(false)
+   321	        }
+   322	    }
+   323	}
+   324	
+   325	fn register_test<'sessions>(
+   326	    port: &NativePort,
+   327	    ledger: &mut OutcomeLedger<'sessions, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+   328	    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+   329	    slot: SessionSlotId,
+   330	    color: bool,
+   331	) -> Result<(), RunError> {
+   332	    let child = ledger
+   333	        .sessions()
+   334	        .get(slot)
+   335	        .ok_or(RunError::Outcome)?
+   336	        .child();
+   337	    let stdout_token = port
+   338	        .watch_descriptor(child.stdout().raw())
+   339	        .map_err(|_| RunError::Reactor)?;
+   340	    let stderr_token = port
+   341	        .watch_descriptor(child.stderr().raw())
+   342	        .map_err(|_| RunError::Reactor)?;
+   343	    let mut process = port
+   344	        .watch(child.process_id())
+   345	        .map_err(|_| RunError::Reactor)?;
+   346	    phase_event(b"test_spawn", child.process_id(), ledger.sessions().len())?;
+   347	    let immediate_status = process.reap().map_err(|_| RunError::Reactor)?;
+   348	    watches[slot.index()] = Some(TestWatch {
+   349	        slot,
+   350	        stdout_token,
+   351	        stderr_token,
+   352	        process,
+   353	    });
+   354	    if let Some(status) = immediate_status {
+   355	        phase_event(b"test_exit", child.process_id(), 0)?;
+   356	        let exited = deliver(
+   357	            ledger,
+   358	            HostEvent::Exit {
+   359	                slot,
+   360	                status: status.code.unwrap_or(1),
+   440	                if code == libc::EINTR {
+   441	                    continue;
+   442	                }
+   443	                if code == libc::EAGAIN || code == libc::EWOULDBLOCK {
+   444	                    return Ok(true);
+   445	                }
+   446	                return Err(RunError::Reactor);
+   447	            }
+   448	        }
+   449	        if token == watch.process.token() {
+   450	            if let Some(status) = watch.process.reap().map_err(|_| RunError::Reactor)? {
+   451	                phase_event(b"test_exit", ledger.sessions().get(slot).ok_or(RunError::Outcome)?.child().process_id(), 0)?;
+   452	                let retired = deliver(
+   453	                    ledger,
+   454	                    HostEvent::Exit {
+   455	                        slot,
+   456	                        status: status.code.unwrap_or(1),
+   457	                    },
+   458	                    color,
+   459	                )?;
+   460	                if retired {
+   495	    executable_bytes[..executable.len()].copy_from_slice(executable.as_bytes());
+   496	    let executable_cstr = CStr::from_bytes_with_nul(&executable_bytes[..executable.len() + 1])
+   497	        .map_err(|_| RunError::Arguments)?;
+   498	    let argv = [
+   499	        executable_cstr.as_ptr(),
+   500	        c"--list".as_ptr(),
+   501	        core::ptr::null(),
+   502	    ];
+   503	    let child = spawn_raw_unix(executable_cstr, &argv, envp, Some(cwd), false)
+   504	        .map_err(|_| RunError::Spawn)?;
+   505	    phase_event(b"listing_spawn", child.process_id(), 0)?;
+   506	    let listing_process_id = child.process_id();
+   507	    let (mut stdout, mut stderr, mut process) = reader_pair(port, child)?;
+   508	    let mut stdout_bytes = [0; SOURCE_CAPACITY];
+   509	    let mut frame_bytes = [0; SOURCE_CAPACITY + 1];
+   510	    let mut source = ListingSource::new(&mut stdout_bytes).map_err(|_| RunError::ListingStream)?;
+   511	    let mut framer = ArtifactFramer::new(&mut frame_bytes, SOURCE_CAPACITY)
+   512	        .map_err(|_| RunError::ListingStream)?;
+   513	    let mut stderr_eof = false;
+   514	    let mut stdout_eof = false;
+   515	    let mut exit_status = process.reap().map_err(|_| RunError::Reactor)?;
+   516	    if exit_status.is_some() {
+   517	        phase_event(b"listing_exit", listing_process_id, 0)?;
+   518	    }
+   519	    let mut events = [NativeEvent { token: 0 }; 64];
+   520	    let mut context = Context::from_waker(Waker::noop());
+   521	    let mut capacity_waiting = false;
+   522	    while !stdout_eof || !stderr_eof || exit_status.is_none() {
+   523	        if capacity_waiting && ledger.sessions().len() < settings.jobs {
+   524	            phase_event(b"list_resume", listing_process_id, ledger.sessions().len())?;
+   525	            capacity_waiting = false;
+   526	        }
+   527	        if !stdout_eof && ledger.sessions().len() < settings.jobs {
+   528	            loop {
+   529	                let step = source.poll_next(
+   530	                    Pin::new(&mut stdout),
+   531	                    &mut framer,
+   532	                    ledger.sessions(),
+   533	                    ExecutablePath::Borrowed(executable),
+   534	                    filter,
+   535	                    if exact {
+   536	                        SelectionMode::Exact
+   537	                    } else {
+   538	                        SelectionMode::Substring
+   539	                    },
+   540	                    SOURCE_CAPACITY,
+   541	                    &mut context,
+   542	                );
+   543	                match step {
+   544	                    Poll::Ready(Ok(ListingSourceStep::Launch(intent))) => {
+   545	                        let mut argument_bytes = [0; PATH_CAPACITY + NAME_CAPACITY + 32];
+   546	                        let mut argument_pointers = [core::ptr::null(); 4];
+   547	                        let mut environment_pointers = [core::ptr::null(); ENV_CAPACITY + 1];
+   548	                        let slot = ready(UnixLaunchPipe::new().call(UnixLaunchInput {
+   549	                            owner: UnixLaunchOwner::Ledger(ledger),
+   550	                            intent,
+   551	                            inherited_environment: environment,
+   552	                            child_overrides: &[],
+   553	                            current_directory: cwd,
+   554	                            argument_bytes: &mut argument_bytes,
+   555	                            argument_pointers: &mut argument_pointers,
+   556	                            environment_pointers: &mut environment_pointers,
+   557	                        }))?
+   558	                        .map_err(|_| RunError::Launch)?;
+   559	                        register_test(port, ledger, watches, slot, settings.color)?;
+   560	                        if ledger.sessions().len() >= settings.jobs {
+   561	                            break;
+   562	                        }
+   563	                    }
+   564	                    Poll::Ready(Ok(ListingSourceStep::Progress {
+   565	                        filtered_line,
+   566	                        ..
+   567	                    })) => {
+   568	                        // summary lines are not ignored tests.
+   569	                        if filtered_line {
+   570	                            ledger.record_filtered().map_err(|_| RunError::Outcome)?;
+   571	                        }
+   572	                    }
+   573	                    Poll::Ready(Ok(ListingSourceStep::Eof)) => {
+   574	                        stdout_eof = true;
+   575	                        break;
+   576	                    }
+   577	                    Poll::Ready(Ok(ListingSourceStep::Full)) | Poll::Pending => break,
+   578	                    Poll::Ready(Err(_)) => return Err(RunError::ListingStream),
+   579	                }
+   580	            }
+   581	        }
+   582	        if !stderr_eof {
+   583	            stderr_eof = drain_reader(&mut stderr, 2)?;
+   584	        }
+   585	        if let Some(status) = process.reap().map_err(|_| RunError::Reactor)? {
+   586	            if exit_status.is_none() {
+   587	                phase_event(b"listing_exit", listing_process_id, 0)?;
+   588	            }
+   589	            exit_status = Some(status);
+   590	        }
+   591	        if stdout_eof && stderr_eof && exit_status.is_some() {
+   592	            break;
+   593	        }
+   594	        if !stdout_eof && ledger.sessions().len() >= settings.jobs && !capacity_waiting {
+   595	            phase_event(b"list_full", listing_process_id, ledger.sessions().len())?;
+   596	            capacity_waiting = true;
+   597	        }
+   598	        #[cfg(target_os = "macos")]
+   599	        let ready = port.wait_for(&mut events, 100).map_err(|_| RunError::Reactor)?;
+   600	        #[cfg(target_os = "linux")]
+   601	        let ready = port.wait(&mut events).map_err(|_| RunError::Reactor)?;
+   602	        if ready == 0 {
+   603	            reap_unreported_children(port, ledger, watches, settings.color)?;
+   604	        }
+   605	        for event in events.iter().take(ready) {
+   606	            if event.token == stdout.token() {
+   607	                stdout.wake_read_ready();
+   608	            } else if event.token == stderr.token() {
+   609	                stderr.wake_read_ready();
+   610	            } else if event.token == process.token() {
+   611	                if let Some(status) = process.reap().map_err(|_| RunError::Reactor)? {
+   612	                    if exit_status.is_none() {
+   613	                        phase_event(b"listing_exit", listing_process_id, 0)?;
+   614	                    }
+   615	                    exit_status = Some(status);
+   616	                }
+   617	            } else {
+   618	                test_event(port, event.token, ledger, watches, settings.color)?;
+   619	            }
+   620	        }
+   621	    }
+   622	    if exit_status.is_some_and(|status| status.code != Some(0)) {
+   623	        return Err(RunError::ListingFailed);
+   624	    }
+   625	    phase_event(b"listing_done", listing_process_id, ledger.snapshot().discovered)?;
+   630	pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
+   631	    phase_event(b"run_start", 0, 0)?;
+   632	    if parser.has_invalid_manifest_path()
+   633	        || parser.has_invalid_cargo_option_value()
+   634	        || parser.has_invalid_positional_argument()
+   635	        || parser.has_argument_storage_overflow()
+   636	    {
+   637	        return Err(RunError::Arguments);
+   638	    }
+   639	    let environment = unsafe { UnixEnvironment::current() };
+   640	    let settings = runtime_settings(&environment)?;
+   641	    let mut inherited = [c""; ENV_CAPACITY];
+   642	    let inherited_count = environment
+   643	        .collect(&mut inherited)
+   644	        .map_err(|_| RunError::Environment)?;
+   645	    let inherited = &inherited[..inherited_count];
+   646	    let mut envp = [core::ptr::null(); ENV_CAPACITY + 1];
+   647	    let envp_count = environment_pointers(inherited, &mut envp)?;
+   648	    let envp = &envp[..envp_count];
+   649	    let mut cwd_bytes = [0; PATH_CAPACITY];
+   650	    let cwd = working_directory(&mut cwd_bytes)?;
+   651	    let filter = parser
+   652	        .filter()
+   653	        .map(core::str::from_utf8)
+   654	        .transpose()
+   655	        .map_err(|_| RunError::Arguments)?
+   656	        .unwrap_or("");
+   657	    let mut argv = [core::ptr::null(); 64];
+   658	    let args = parser.cargo_arguments();
+   659	    if args.len() + 5 > argv.len() {
+   660	        return Err(RunError::Arguments);
+   661	    }
+   662	    argv[0] = c"cargo".as_ptr();
+   663	    argv[1] = c"test".as_ptr();
+   664	    argv[2] = c"--no-run".as_ptr();
+   665	    argv[3] = c"--message-format=json".as_ptr();
+   666	    for (index, argument) in args.iter().enumerate() {
+   667	        if argument.contains(&0) {
+   668	            return Err(RunError::Arguments);
+   669	        }
+   670	        argv[4 + index] = argument.as_ptr().cast();
+   671	    }
+   672	    let cargo_child = spawn_raw_unix(c"cargo", &argv[..args.len() + 5], envp, None, true)
+   673	        .map_err(|_| RunError::Spawn)?;
+   674	    phase_event(b"cargo_spawn", cargo_child.process_id(), 0)?;
+   675	    let cargo_process_id = cargo_child.process_id();
+   676	    let port = NativePort::new().map_err(|_| RunError::Reactor)?;
+   677	    let (mut cargo_stdout, mut cargo_stderr, mut cargo_process) = reader_pair(&port, cargo_child)?;
+   678	    let mut cargo_source_bytes = [0; SOURCE_CAPACITY];
+   679	    let mut cargo_frame_bytes = [0; FRAME_CAPACITY];
+   680	    let mut cargo_scratch = [0; PATH_CAPACITY];
+   681	    let mut source =
+   682	        CargoSource::new(&mut cargo_source_bytes).map_err(|_| RunError::CargoStream)?;
+   683	    let mut framer = ArtifactFramer::new(&mut cargo_frame_bytes, FRAME_CAPACITY - 1)
+   684	        .map_err(|_| RunError::CargoStream)?;
+   685	    let mut sessions = SessionSlots::<RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>::new();
+   686	    let mut ledger = OutcomeLedger::new(&mut sessions).map_err(|_| RunError::Outcome)?;
+   687	    let mut watches: [Option<TestWatch>; LIVE_CAPACITY] = [const { None }; LIVE_CAPACITY];
+   688	    let mut events = [NativeEvent { token: 0 }; 64];
+   689	    let mut context = Context::from_waker(Waker::noop());
+   690	    let mut cargo_stdout_eof = false;
+   691	    let mut cargo_stderr_eof = false;
+   692	    let mut cargo_exit_status = cargo_process.reap().map_err(|_| RunError::Reactor)?;
+   693	    if cargo_exit_status.is_some() {
+   694	        phase_event(b"cargo_exit", cargo_process_id, 0)?;
+   695	    }
+   696	    while !cargo_stdout_eof
+   697	        || !cargo_stderr_eof
+   698	        || cargo_exit_status.is_none()
+   699	        || ledger.unaccounted() != 0
+   700	    {
+   735	                    Poll::Ready(Ok(CargoSourceStep::Eof)) => {
+   736	                        cargo_stdout_eof = true;
+   737	                        break;
+   738	                    }
+   739	                    Poll::Ready(Err(_)) => return Err(RunError::CargoStream),
+   740	                    Poll::Pending => break,
+   741	                }
+   742	            }
+   743	        }
+   744	        if !cargo_stderr_eof {
+   745	            cargo_stderr_eof = drain_reader(&mut cargo_stderr, 2)?;
+   746	        }
+   747	        if let Some(status) = cargo_process.reap().map_err(|_| RunError::Reactor)? {
+   748	            if cargo_exit_status.is_none() {
+   749	                phase_event(b"cargo_exit", cargo_process_id, 0)?;
+   750	            }
+   751	            cargo_exit_status = Some(status);
+   752	        }
+   753	        if cargo_stdout_eof
+   754	            && cargo_stderr_eof
+   755	            && cargo_exit_status.is_some()
+   756	            && ledger.unaccounted() == 0
+   757	        {
+   758	            break;
+   759	        }
+   760	        #[cfg(target_os = "macos")]
+   761	        let ready = port.wait_for(&mut events, 100).map_err(|_| RunError::Reactor)?;
+   762	        #[cfg(target_os = "linux")]
+   763	        let ready = port.wait(&mut events).map_err(|_| RunError::Reactor)?;
+   764	        if ready == 0 {
+   765	            reap_unreported_children(&port, &mut ledger, &mut watches, settings.color)?;
+   766	        }
+   767	        for event in events.iter().take(ready) {
+   768	            if event.token == cargo_stdout.token() {
+   769	                cargo_stdout.wake_read_ready();
+   770	            } else if event.token == cargo_stderr.token() {
+   771	                cargo_stderr.wake_read_ready();
+   772	            } else if event.token == cargo_process.token() {
+   773	                if let Some(status) = cargo_process.reap().map_err(|_| RunError::Reactor)? {
+   774	                    if cargo_exit_status.is_none() {
+   775	                        phase_event(b"cargo_exit", cargo_process_id, 0)?;
+   776	                    }
+   777	                    cargo_exit_status = Some(status);
+   778	                }
+   779	            } else {
+   780	                test_event(
+   781	                    &port,
+   782	                    event.token,
+   783	                    &mut ledger,
+   784	                    &mut watches,
+   785	                    settings.color,
+   786	                )?;
+   787	            }
+   788	        }
+   789	    }
+   790	    if cargo_exit_status.is_some_and(|status| status.code != Some(0)) {
+   791	        return Err(RunError::CargoFailed);
+   792	    }
+   793	    phase_event(b"cargo_done", cargo_process_id, ledger.snapshot().discovered)?;
+   794	    let counts = ledger.snapshot();
+   795	    phase_event(b"run_done", 0, counts.passed + counts.failed)?;
+   796	    Ok(RunSummary {
+   797	        passed: counts.passed,
+   798	        failed: counts.failed,
+   799	    })
+   800	}

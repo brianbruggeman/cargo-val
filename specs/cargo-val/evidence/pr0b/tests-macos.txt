@@ -1,0 +1,38 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running tests/semaphore_alloc.rs (/tmp/cargo-val-pr0-final/target/debug/deps/semaphore_alloc-317244c3070490ab)
+
+running 1 test
+test measure_uncontended_acquire_allocations ... alloc_record {"case":"empty_window_control","cycles":0,"allocation_delta":0}
+alloc_record {"case":"boxed_allocation_positive_control","cycles":1,"allocation_delta":1}
+alloc_record {"case":"uncontended_acquire_once","cycles":1,"allocation_delta":0}
+alloc_record {"case":"uncontended_acquire_repeated","cycles":16,"allocation_delta":0}
+alloc_record {"case":"uncontended_try_acquire_once","cycles":1,"allocation_delta":0}
+alloc_record {"case":"uncontended_try_acquire_repeated","cycles":16,"allocation_delta":0}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (/tmp/cargo-val-pr0-final/target/debug/deps/proxima_primitives-cad7ab73d127cefb)
+
+running 1 test
+test sync::semaphore::tests::close_then_acquire_returns_acquire_error ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests src/lib.rs (/tmp/cargo-val-pr0-final/target/debug/deps/proxima_primitives-cad7ab73d127cefb)
+
+running 1 test
+test sync::semaphore::tests::close_wakes_pending_acquires ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (/tmp/cargo-val-pr0-final/target/debug/deps/proxima_primitives-cad7ab73d127cefb)
+
+running 1 test
+test sync::semaphore::tests::release_wakes_one_pending_acquire ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.00s
+

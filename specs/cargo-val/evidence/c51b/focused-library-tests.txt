@@ -1,0 +1,12 @@
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running unittests src/lib.rs (/tmp/cargo_val_c51b_target/debug/deps/cargo_val-90174107ff274261)
+
+running 2 tests
+{"duplicate_live_exit_rejections":1,"output_after_eof_rejections":1,"short_report_retries":1,"stale_exit_rejections":1,"reported_records":1,"unaccounted":0}
+test runner::tests::c51b_duplicate_exit_is_rejected_while_child_remains_live ... ok
+{"discovered":2,"passed":1,"failed":1,"unaccounted":0,"reported_records":2,"stream_eofs":4,"borrowed_payload_reads":2,"pass_exit_first":1,"fail_streams_first":1,"pass_output_bytes":174,"fail_output_bytes":477}
+test runner::tests::c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+

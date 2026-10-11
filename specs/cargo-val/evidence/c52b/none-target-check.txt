@@ -1,0 +1,22 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling thiserror v2.0.21
+   Compiling once_cell v1.21.4
+   Compiling pin-project-lite v0.2.17
+   Compiling falsehoods v1.0.0
+   Compiling memchr v2.8.3
+   Compiling tracing-core v0.1.36
+   Compiling syn v2.0.119
+   Compiling syn v3.0.6
+   Compiling thiserror-impl v2.0.21
+   Compiling tracing-attributes v0.1.31
+   Compiling conflaguration-derive v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+   Compiling tracing v0.1.44
+   Compiling environs v1.2.0
+   Compiling conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.87s

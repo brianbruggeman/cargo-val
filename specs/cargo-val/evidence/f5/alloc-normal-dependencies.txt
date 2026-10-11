@@ -1,0 +1,3 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+conflaguration-core v0.1.0 (/Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-core)

@@ -1,0 +1,18 @@
+   Compiling proxima-primitives v0.1.0 (https://github.com/brianbruggeman/proxima.git?rev=6cffdc693bbd34483f1349f99b0ebd282c92fca4#6cffdc69)
+   Compiling tempfile v3.27.0
+   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
+error[E0152]: found duplicate lang item `panic_impl`
+   --> src/main.rs:167:1
+    |
+167 | / fn panic(_information: &PanicInfo<'_>) -> ! {
+168 | |     terminate(101)
+169 | | }
+    | |_^
+    |
+    = note: the lang item is first defined in crate `std` (which `fastrand` depends on)
+    = note: first definition in `std` loaded from /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib/libstd-614bb9b33bbc23af.dylib, /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib/libstd-614bb9b33bbc23af.rlib, /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib/libstd-614bb9b33bbc23af.rmeta
+    = note: second definition in the local crate (`cargo_val`)
+
+For more information about this error, try `rustc --explain E0152`.
+error: could not compile `cargo-val` (bin "cargo-val") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

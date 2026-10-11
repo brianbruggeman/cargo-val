@@ -1,0 +1,11 @@
+{
+  "command": [
+    "/tmp/cargo_val_c54_multi_fixture_target/debug/deps/cargo_val_fixture-3b47bb63cfb7774f",
+    "--list"
+  ],
+  "timeout_seconds": 3,
+  "DYLD_PRINT_LIBRARIES": "1",
+  "observed": "timeout",
+  "stdout": null,
+  "stderr": null
+}
