@@ -5,25 +5,32 @@ edition = "2024"
 
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
-tempfile = "3.27.0"
+temp-env = "0.3.6"
 
 [features]
+default = ["proxima-core", "proxima-codec", "proxima-primitives"]
 proxima-codec = ["dep:proxima-codec"]
 proxima-primitives = ["dep:proxima-primitives"]
-prime = ["dep:prime"]
 proxima-core = ["dep:proxima-core"]
 
 [dependencies]
-prime = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, features = ["runtime-prime-executor"], optional = true }
+conflaguration = { git = "https://github.com/brianbruggeman/conflaguration.git", rev = "56e25cddbc91d356d50f49264a1510dffffc2b7e", version = "2.0.0", default-features = false, features = ["derive", "alloc"] }
+memchr = { version = "2.8.3", default-features = false }
 proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
 proxima-core = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, features = ["io-async"], optional = true }
 proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "6cffdc693bbd34483f1349f99b0ebd282c92fca4", version = "0.1.0", default-features = false, optional = true }
 
 [build-dependencies]
-conflaguration = { git = "https://github.com/brianbruggeman/conflaguration.git", rev = "3eb325d84fc291df35528e6781b5b814884e2d28", version = "2.0.0", features = ["derive", "codegen"] }
+conflaguration = { git = "https://github.com/brianbruggeman/conflaguration.git", rev = "56e25cddbc91d356d50f49264a1510dffffc2b7e", version = "2.0.0", features = ["derive", "codegen"] }
 
 [target."cfg(unix)".dependencies]
 libc = { version = "0.2.190", default-features = false }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_Environment", "Win32_System_Console"] }
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_Environment", "Win32_System_Console", "Win32_System_JobObjects"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

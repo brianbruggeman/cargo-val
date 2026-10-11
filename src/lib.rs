@@ -3,35 +3,62 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(test)]
+mod test_dir;
+
+#[cfg(test)]
+pub(crate) mod test_alloc;
+
 use core::str;
 
 pub mod build_defaults {
     include!(concat!(env!("OUT_DIR"), "/cargo_val_build.rs"));
 }
 
+pub mod cargo_message;
+pub mod child_completion;
+pub mod config;
+pub mod filter_glob;
+pub mod filterset;
+pub mod ignored_set;
+pub mod metadata_scan;
+pub mod parked_artifacts;
+pub mod schedule;
+pub mod summary;
+pub mod test_environment;
+
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod artifact_stream;
+#[cfg(all(
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod cargo_source;
+#[cfg(unix)]
+pub mod edge_signal_unix;
 pub mod cli;
-#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod coordinator;
-#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod discovery_stream;
-#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod dispatch_stream;
 pub mod host;
-#[cfg(feature = "prime")]
-pub mod host_drive;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod host_event;
-#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod libtest_listing;
+#[cfg(all(
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod discover_listing;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod outcomes;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod reporter;
+#[cfg(all(
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod runner;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod selection;
-pub mod session_slots;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod test_intent;
 #[cfg(all(unix, feature = "proxima-codec", feature = "proxima-primitives"))]
@@ -62,6 +89,7 @@ pub enum ParseError {
     DepthExceeded,
     InvalidDepthLimit,
     ScratchTooSmall,
+    MissingArtifactField,
     InvalidJson,
     InvalidUtf8,
 }
@@ -79,10 +107,11 @@ struct Json<'input, 'scratch> {
     input: &'input [u8],
     offset: usize,
     scratch: &'scratch mut [u8],
+    scratch_used: usize,
     max_depth: usize,
 }
 
-impl<'input, 'scratch> Json<'input, 'scratch> {
+impl<'input> Json<'input, '_> {
     fn whitespace(&mut self) {
         while matches!(
             self.input.get(self.offset),
@@ -106,6 +135,7 @@ impl<'input, 'scratch> Json<'input, 'scratch> {
         self.byte(b'"')?;
         let start = self.offset;
         let mut segment_start = start;
+        let base = self.scratch_used;
         let mut decoded_length = 0;
         let mut escaped = false;
         loop {
@@ -119,7 +149,7 @@ impl<'input, 'scratch> Json<'input, 'scratch> {
                             str::from_utf8(&self.input[segment_start..end])
                                 .map_err(|_| ParseError::InvalidUtf8)?;
                         }
-                        str::from_utf8(&self.scratch[..decoded_length])
+                        str::from_utf8(&self.scratch[base..base + decoded_length])
                             .map_err(|_| ParseError::InvalidUtf8)?;
                         return if decode {
                             Ok(Text::Decoded(decoded_length))
@@ -151,13 +181,13 @@ impl<'input, 'scratch> Json<'input, 'scratch> {
                     if decode {
                         if !escaped || decoded_length == 0 {
                             let prefix = &self.input[start..self.offset];
-                            copy_to_scratch(prefix, self.scratch, &mut decoded_length)?;
+                            copy_to_scratch(prefix, &mut self.scratch[base..], &mut decoded_length)?;
                         }
                         self.offset += 1;
                         decode_escape(
                             self.input,
                             &mut self.offset,
-                            self.scratch,
+                            &mut self.scratch[base..],
                             &mut decoded_length,
                         )?;
                         segment_start = self.offset;
@@ -183,7 +213,7 @@ impl<'input, 'scratch> Json<'input, 'scratch> {
                 _ => {
                     if decode && escaped {
                         let byte = self.input[self.offset];
-                        push(self.scratch, &mut decoded_length, byte)?;
+                        push(&mut self.scratch[base..], &mut decoded_length, byte)?;
                     }
                     self.offset += 1;
                 }
@@ -357,11 +387,7 @@ fn text_equals(text: Text<'_>, expected: &[u8]) -> bool {
             let mut offset = 0;
             let mut expected_offset = 0;
             while offset < bytes.len() {
-                let scalar = if bytes[offset] != b'\\' {
-                    let scalar = u32::from(bytes[offset]);
-                    offset += 1;
-                    scalar
-                } else {
+                let scalar = if bytes[offset] == b'\\' {
                     offset += 1;
                     let Some(escape) = bytes.get(offset) else {
                         return false;
@@ -398,10 +424,14 @@ fn text_equals(text: Text<'_>, expected: &[u8]) -> bool {
                         }
                         _ => return false,
                     }
+                } else {
+                    let scalar = u32::from(bytes[offset]);
+                    offset += 1;
+                    scalar
                 };
-                if scalar > u32::from(u8::MAX)
-                    || expected.get(expected_offset) != Some(&(scalar as u8))
-                {
+                let matches_expected = u8::try_from(scalar)
+                    .is_ok_and(|byte| expected.get(expected_offset) == Some(&byte));
+                if !matches_expected {
                     return false;
                 }
                 expected_offset += 1;
@@ -453,6 +483,10 @@ fn decode_escape(
 ///
 /// The caller owns the input, scratch storage, byte limit, and effective depth
 /// limit. Depth is capped to keep parser recursion bounded on small stacks.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] when the line exceeds the byte limit, the depth limit is invalid or exceeded, scratch is too small, or the JSON or UTF-8 is malformed.
 pub fn parse_artifact<'input, 'scratch>(
     line: &'input [u8],
     scratch: &'scratch mut [u8],
@@ -472,6 +506,7 @@ pub fn parse_artifact<'input, 'scratch>(
         input: line,
         offset: 0,
         scratch,
+        scratch_used: 0,
         max_depth: max_json_depth,
     };
     json.byte(b'{')?;

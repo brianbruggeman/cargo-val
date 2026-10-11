@@ -14,6 +14,9 @@ use windows_sys::Win32::System::Pipes::{
 
 use crate::host::windows_handles::WindowsOwnedHandle;
 
+// nonpaged pool is billed per pipe byte and reads drain in 64 KiB slots, so one page suffices
+const PIPE_KERNEL_BUFFER_BYTES: u32 = 4096;
+
 /// Failure while creating one overlapped parent-read/child-write pipe pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsPipePairError {
@@ -23,6 +26,8 @@ pub enum WindowsPipePairError {
     CreateServerFailed { code: u32 },
     /// Windows rejected opening the inheritable child endpoint.
     OpenChildWriterFailed { code: u32 },
+    /// A Win32 structure size does not fit its `u32` length field.
+    SizeOverflow,
 }
 
 /// Owns an overlapped parent reader and inheritable child writer.
@@ -43,6 +48,10 @@ impl WindowsPipePair {
     ///
     /// `pipe_name` must be a unique, fully qualified Win32 pipe name ending in
     /// one NUL unit, for example `\\.\pipe\cargo-val-123-4\0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsPipePairError`] for an invalid name, a size that overflows `u32`, or when Windows rejects either endpoint.
     pub fn new(pipe_name: &[u16]) -> Result<Self, WindowsPipePairError> {
         if pipe_name.len() < 2
             || pipe_name.last() != Some(&0)
@@ -58,7 +67,7 @@ impl WindowsPipePair {
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 1,
                 0,
-                0,
+                PIPE_KERNEL_BUFFER_BYTES,
                 0,
                 core::ptr::null(),
             )
@@ -70,8 +79,9 @@ impl WindowsPipePair {
         }
         let parent_reader = WindowsOwnedHandle::new(parent_reader);
 
-        let mut child_security = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        let child_security = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
+                .map_err(|_| WindowsPipePairError::SizeOverflow)?,
             lpSecurityDescriptor: core::ptr::null_mut(),
             bInheritHandle: 1,
         };
@@ -80,7 +90,7 @@ impl WindowsPipePair {
                 pipe_name.as_ptr(),
                 GENERIC_WRITE,
                 0,
-                &mut child_security,
+                &raw const child_security,
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
                 core::ptr::null_mut(),
@@ -282,6 +292,9 @@ mod tests {
             }
             Err(WindowsPipePairError::OpenChildWriterFailed { code }) => {
                 panic!("duplicate server creation should fail before client open: {code}")
+            }
+            Err(WindowsPipePairError::SizeOverflow) => {
+                panic!("Win32 structure sizes fit their u32 length fields")
             }
             Ok(_) => panic!("the first-instance control unexpectedly created another pair"),
         }

@@ -1,6 +1,7 @@
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::Cell;
 use core::hint::black_box;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::System;
 use std::vec::Vec;
 
@@ -8,7 +9,18 @@ use cargo_val::cli::{CliAction, CliParser};
 
 struct CountingAllocator;
 
-static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static TRACKING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn tracking_enabled() -> bool {
+    TRACKING.try_with(Cell::get).unwrap_or(false)
+}
+
+fn set_tracking(enabled: bool) {
+    TRACKING.with(|tracking| tracking.set(enabled));
+}
+
 static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[global_allocator]
@@ -16,7 +28,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+        if tracking_enabled() {
             ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.alloc(layout) }
@@ -27,7 +39,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+        if tracking_enabled() {
             ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.realloc(pointer, layout, size) }
@@ -88,20 +100,20 @@ fn missing_or_empty_manifest_path_is_rejected() {
 #[test]
 fn argv_parsing_allocates_nothing_and_probe_detects_allocation() {
     ALLOCATION_COUNT.store(0, Ordering::Relaxed);
-    COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+    set_tracking(true);
     let mut parser = CliParser::new();
     parser.push(b"--manifest-path");
     parser.push(b"tests/fixtures/workspace/Cargo.toml");
     parser.push(b"fixture::passes");
     parser.push(b"--exact");
     let parsed = parser.manifest_path().is_some() && parser.filter().is_some() && parser.exact();
-    COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
+    set_tracking(false);
     let parser_allocations = ALLOCATION_COUNT.load(Ordering::Relaxed);
 
     ALLOCATION_COUNT.store(0, Ordering::Relaxed);
-    COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+    set_tracking(true);
     let allocation_control = Vec::<u8>::with_capacity(1);
-    COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
+    set_tracking(false);
     let positive_control_allocations = ALLOCATION_COUNT.load(Ordering::Relaxed);
     black_box(allocation_control);
 

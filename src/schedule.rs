@@ -1,6 +1,6 @@
 //! Fixed storage for the live child sessions owned by one async coordinator.
 
-/// O(1) fixed-capacity storage for values representing live child sessions.
+/// Fixed-capacity storage with O(1) insertion, lookup, and retirement.
 ///
 /// The coordinator owns this table and moves child sessions into it as it
 /// pulls intents through [Proxima's `Pipe` primitive](https://github.com/brianbruggeman/proxima/blob/6cffdc693bbd34483f1349f99b0ebd282c92fca4/proxima-primitives/src/pipe/primitives.rs#L91-L113).
@@ -60,6 +60,10 @@ impl<T, const CAPACITY: usize> SessionSlots<T, CAPACITY> {
     }
 
     /// Inserts one live session, returning its stable slot index.
+    ///
+    /// Returns the unchanged value when the table has no free slot.
+    ///
+    /// # Errors
     ///
     /// Returns the unchanged value when the table has no free slot.
     pub fn insert(&mut self, value: T) -> Result<SessionSlotId, T> {
@@ -142,6 +146,15 @@ impl<T, const CAPACITY: usize> SessionSlots<T, CAPACITY> {
     #[must_use]
     pub const fn is_full(&self) -> bool {
         self.free_head.is_none()
+    }
+
+    /// Scans live values within fixed capacity without a second index or move.
+    #[must_use]
+    pub fn any(&self, mut predicate: impl FnMut(&T) -> bool) -> bool {
+        self.entries.iter().any(|entry| match entry {
+            Entry::Occupied { value, .. } => predicate(value),
+            Entry::Vacant { .. } | Entry::Retired => false,
+        })
     }
 }
 

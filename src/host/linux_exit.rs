@@ -1,11 +1,12 @@
 //! Linux child-exit readiness over pidfds and one coordinator-owned epoll port.
 
+use core::cell::Cell;
 use core::ffi::c_int;
 use core::mem::{MaybeUninit, size_of};
 use core::ptr::null_mut;
 
 /// One event returned by the coordinator's Linux event port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LinuxExitEvent {
     /// Caller-owned token supplied when the pidfd was registered; zero is the wake event.
     pub token: u64,
@@ -25,7 +26,7 @@ pub struct LinuxPidWatch {
 pub struct LinuxExitPort {
     epoll: LinuxDescriptor,
     wake: LinuxDescriptor,
-    next_token: u64,
+    next_token: Cell<u64>,
 }
 
 /// A nonblocking child exit record.
@@ -51,6 +52,10 @@ impl Drop for LinuxDescriptor {
 
 impl LinuxExitPort {
     /// Creates one epoll instance and one nonblocking coalescing wake descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
     pub fn new() -> Result<Self, c_int> {
         let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
         if epoll < 0 {
@@ -66,13 +71,13 @@ impl LinuxExitPort {
             events: libc::EPOLLIN as u32,
             u64: 0,
         };
-        if unsafe { libc::epoll_ctl(epoll.0, libc::EPOLL_CTL_ADD, wake.0, &mut event) } < 0 {
+        if unsafe { libc::epoll_ctl(epoll.0, libc::EPOLL_CTL_ADD, wake.0, &raw mut event) } < 0 {
             return Err(last_error());
         }
         Ok(Self {
             epoll,
             wake,
-            next_token: 1,
+            next_token: Cell::new(1),
         })
     }
 
@@ -81,22 +86,33 @@ impl LinuxExitPort {
     /// The returned monotonic token identifies its event for the port's lifetime.
     /// The coordinator stores it in its existing fixed child slot; this port adds
     /// no second child table or admission gate.
-    pub fn watch(&mut self, process_id: libc::pid_t) -> Result<LinuxPidWatch, c_int> {
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
+    pub fn watch(&self, process_id: libc::pid_t) -> Result<LinuxPidWatch, c_int> {
         if process_id <= 0 {
             return Err(libc::EINVAL);
         }
         let token = self.allocate_token()?;
-        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as c_int };
-        if descriptor < 0 {
+        let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) };
+        if opened < 0 {
             return Err(last_error());
         }
+        let descriptor = c_int::try_from(opened).map_err(|_| libc::EOVERFLOW)?;
         let descriptor = LinuxDescriptor(descriptor);
         let mut event = libc::epoll_event {
             events: (libc::EPOLLIN | libc::EPOLLONESHOT) as u32,
             u64: token,
         };
-        if unsafe { libc::epoll_ctl(self.epoll.0, libc::EPOLL_CTL_ADD, descriptor.0, &mut event) }
-            < 0
+        if unsafe {
+            libc::epoll_ctl(
+                self.epoll.0,
+                libc::EPOLL_CTL_ADD,
+                descriptor.0,
+                &raw mut event,
+            )
+        } < 0
         {
             return Err(last_error());
         }
@@ -109,7 +125,11 @@ impl LinuxExitPort {
     }
 
     /// Registers a nonblocking descriptor with the same child-exit reactor.
-    pub fn watch_descriptor(&mut self, descriptor: c_int) -> Result<u64, c_int> {
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
+    pub fn watch_descriptor(&self, descriptor: c_int) -> Result<u64, c_int> {
         if descriptor < 0 {
             return Err(libc::EBADF);
         }
@@ -118,7 +138,14 @@ impl LinuxExitPort {
             events: (libc::EPOLLIN | libc::EPOLLHUP | libc::EPOLLERR) as u32,
             u64: token,
         };
-        if unsafe { libc::epoll_ctl(self.epoll.0, libc::EPOLL_CTL_ADD, descriptor, &mut event) } < 0
+        if unsafe {
+            libc::epoll_ctl(
+                self.epoll.0,
+                libc::EPOLL_CTL_ADD,
+                descriptor,
+                &raw mut event,
+            )
+        } < 0
         {
             return Err(last_error());
         }
@@ -126,6 +153,10 @@ impl LinuxExitPort {
     }
 
     /// Removes a descriptor after EOF so level-triggered hangup cannot spin.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
     pub fn unwatch_descriptor(&self, descriptor: c_int) -> Result<(), c_int> {
         if unsafe { libc::epoll_ctl(self.epoll.0, libc::EPOLL_CTL_DEL, descriptor, null_mut()) } < 0
         {
@@ -134,9 +165,10 @@ impl LinuxExitPort {
         Ok(())
     }
 
-    fn allocate_token(&mut self) -> Result<u64, c_int> {
-        let token = self.next_token;
-        self.next_token = token.checked_add(1).ok_or(libc::EOVERFLOW)?;
+    fn allocate_token(&self) -> Result<u64, c_int> {
+        let token = self.next_token.get();
+        self.next_token
+            .set(token.checked_add(1).ok_or(libc::EOVERFLOW)?);
         Ok(token)
     }
 
@@ -144,11 +176,19 @@ impl LinuxExitPort {
     ///
     /// `epoll_wait` is the single reactor wait; child wait/read/write operations are
     /// never performed here. Every returned event is written into caller storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
     pub fn wait(&self, events: &mut [LinuxExitEvent]) -> Result<usize, c_int> {
         self.collect(events, -1)
     }
 
     /// Drains currently ready records once without waiting or scheduling a worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
     pub fn poll(&self, events: &mut [LinuxExitEvent]) -> Result<usize, c_int> {
         self.collect(events, 0)
     }
@@ -159,7 +199,8 @@ impl LinuxExitPort {
         }
         let mut kernel_events: [MaybeUninit<libc::epoll_event>; 64] =
             [const { MaybeUninit::uninit() }; 64];
-        let limit = events.len().min(kernel_events.len()) as c_int;
+        let limit =
+            c_int::try_from(events.len().min(kernel_events.len())).map_err(|_| libc::EINVAL)?;
         let ready = unsafe {
             libc::epoll_wait(
                 self.epoll.0,
@@ -168,29 +209,25 @@ impl LinuxExitPort {
                 timeout,
             )
         };
-        if ready < 0 {
-            return Err(last_error());
-        }
-        for (destination, source) in events
-            .iter_mut()
-            .zip(kernel_events.iter())
-            .take(ready as usize)
-        {
+        let ready = usize::try_from(ready).map_err(|_| last_error())?;
+        for (destination, source) in events.iter_mut().zip(kernel_events.iter()).take(ready) {
             let source = unsafe { source.assume_init_ref() };
             *destination = LinuxExitEvent { token: source.u64 };
         }
-        Ok(ready as usize)
+        Ok(ready)
     }
 
     /// Signals the coordinator; a full eventfd already represents a pending wake.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
     pub fn wake(&self) -> Result<(), c_int> {
         let value = 1_u64;
         loop {
-            let written = unsafe {
-                libc::write(self.wake.0, (&value as *const u64).cast(), size_of::<u64>())
-            };
-            if written == size_of::<u64>() as isize || (written < 0 && last_error() == libc::EAGAIN)
-            {
+            let written =
+                unsafe { libc::write(self.wake.0, (&raw const value).cast(), size_of::<u64>()) };
+            if is_word(written) || (written < 0 && last_error() == libc::EAGAIN) {
                 return Ok(());
             }
             if written < 0 {
@@ -205,17 +242,16 @@ impl LinuxExitPort {
     }
 
     /// Drains the coalesced wake count after the zero-token event is received.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
     pub fn drain_wake(&self) -> Result<u64, c_int> {
         loop {
             let mut value = 0_u64;
-            let read = unsafe {
-                libc::read(
-                    self.wake.0,
-                    (&mut value as *mut u64).cast(),
-                    size_of::<u64>(),
-                )
-            };
-            if read == size_of::<u64>() as isize {
+            let read =
+                unsafe { libc::read(self.wake.0, (&raw mut value).cast(), size_of::<u64>()) };
+            if is_word(read) {
                 return Ok(value);
             }
             if read < 0 {
@@ -244,12 +280,16 @@ impl LinuxPidWatch {
     }
 
     /// Returns a terminal status only after pidfd readiness, without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` value reported by the failing Linux system call.
     pub fn reap(&mut self) -> Result<Option<LinuxExitStatus>, c_int> {
         if self.reaped {
             return Ok(None);
         }
         let mut raw_status = 0;
-        let result = unsafe { libc::waitpid(self.process_id, &mut raw_status, libc::WNOHANG) };
+        let result = unsafe { libc::waitpid(self.process_id, &raw mut raw_status, libc::WNOHANG) };
         if result == 0 {
             return Ok(None);
         }
@@ -273,6 +313,10 @@ impl LinuxPidWatch {
     }
 }
 
+fn is_word(transferred: isize) -> bool {
+    usize::try_from(transferred).is_ok_and(|count| count == size_of::<u64>())
+}
+
 fn last_error() -> c_int {
     unsafe { *libc::__errno_location() }
 }
@@ -288,7 +332,7 @@ mod tests {
 
     #[test]
     fn c39_wakes_for_exit_and_control_without_semaphore_mode() {
-        let mut port = LinuxExitPort::new().expect("epoll port and wake descriptor are created");
+        let port = LinuxExitPort::new().expect("epoll port and wake descriptor are created");
         let semaphore_record =
             std::fs::read_to_string(format!("/proc/self/fdinfo/{}", port.wake.0))
                 .expect("Linux exposes eventfd mode in proc fdinfo");
@@ -308,7 +352,7 @@ mod tests {
             unsafe {
                 libc::close(barrier[1]);
                 let mut release = 0_u8;
-                let read = libc::read(barrier[0], (&mut release as *mut u8).cast(), 1);
+                let read = libc::read(barrier[0], (&raw mut release).cast(), 1);
                 libc::_exit(i32::from(read != 1));
             }
         }
@@ -376,15 +420,50 @@ mod tests {
         reaped: bool,
     }
 
+    struct ExitedChild {
+        process_id: libc::pid_t,
+        reaped: bool,
+    }
+
+    impl Drop for ExitedChild {
+        fn drop(&mut self) {
+            if !self.reaped {
+                unsafe {
+                    libc::waitpid(self.process_id, null_mut(), 0);
+                }
+            }
+        }
+    }
+
     impl HeldChild {
+        fn new() -> Self {
+            let mut barrier = [-1; 2];
+            assert_eq!(
+                unsafe { libc::pipe2(barrier.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
+            let process_id = unsafe { libc::fork() };
+            assert!(process_id >= 0, "held child forks");
+            if process_id == 0 {
+                unsafe {
+                    libc::close(barrier[1]);
+                    let mut release = 0_u8;
+                    let read = libc::read(barrier[0], (&raw mut release).cast(), 1);
+                    libc::_exit(i32::from(read != 1));
+                }
+            }
+            unsafe { libc::close(barrier[0]) };
+            Self {
+                process_id,
+                release: super::LinuxDescriptor(barrier[1]),
+                reaped: false,
+            }
+        }
+
         fn release(&self) -> Result<(), libc::c_int> {
             let byte = b'x';
             let written = unsafe {
-                libc::write(
-                    self.release.0,
-                    (&byte as *const u8).cast(),
-                    size_of_val(&byte),
-                )
+                libc::write(self.release.0, (&raw const byte).cast(), size_of_val(&byte))
             };
             if written == 1 {
                 Ok(())
@@ -403,5 +482,77 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn c41_registration_race_control_observes_already_exited_child() {
+        let process_id = unsafe { libc::fork() };
+        assert!(process_id >= 0, "race control child forks");
+        if process_id == 0 {
+            unsafe { libc::_exit(7) };
+        }
+        let mut child = ExitedChild {
+            process_id,
+            reaped: false,
+        };
+        let mut exit_record = unsafe { core::mem::zeroed::<libc::siginfo_t>() };
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    process_id.cast_unsigned(),
+                    &raw mut exit_record,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            },
+            0,
+            "waitid observes exit without reaping before registration"
+        );
+        let port = LinuxExitPort::new().expect("race control epoll port is created");
+        let mut watch = port
+            .watch(process_id)
+            .expect("already-exited pid is registered through its pidfd");
+        let mut events = [LinuxExitEvent { token: u64::MAX }; 4];
+        let ready = port
+            .poll(&mut events)
+            .expect("exited child pidfd is already readable");
+        assert_eq!(ready, 1);
+        assert_eq!(events[0].token, watch.token());
+        let status = watch
+            .reap()
+            .expect("race control reaps once readiness is observed");
+        assert_eq!(status.map(|status| status.code), Some(Some(7)));
+        child.reaped = true;
+        assert_eq!(watch.reap().expect("race control record is unique"), None);
+        std::println!(
+            "{{\"exited_before_registration\":1,\"exit_records\":1,\"reaps\":1,\"duplicate_reaps\":0}}"
+        );
+    }
+
+    #[test]
+    fn c59_exit_event_wakes_for_signal_and_reap_reports_signal_and_releases_zombie() {
+        let mut child = HeldChild::new();
+        let port = LinuxExitPort::new().expect("epoll port is created");
+        let mut watch = port
+            .watch(child.process_id)
+            .expect("child exit is registered");
+        let mut events = [LinuxExitEvent { token: u64::MAX }; 4];
+        unsafe { libc::kill(child.process_id, libc::SIGKILL) };
+        let ready = port.wait(&mut events).expect("epoll waits for child exit");
+        assert!(
+            events
+                .iter()
+                .take(ready)
+                .any(|event| event.token == watch.token()),
+            "exit event for the watched child"
+        );
+        let status = watch.reap().expect("ready exit reaps").expect("status");
+        child.reaped = true;
+        assert_eq!(status.signal, Some(libc::SIGKILL));
+        assert_eq!(status.code, None);
+        assert_eq!(
+            unsafe { libc::waitpid(child.process_id, null_mut(), libc::WNOHANG) },
+            -1,
+            "zombie is released"
+        );
     }
 }

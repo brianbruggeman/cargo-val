@@ -17,7 +17,7 @@ pub enum WindowsPipeReadCompletion {
     Bytes { length: usize },
     /// The child closed its final writer.
     Eof,
-    /// A zero-byte write completed without closing the pipe.
+    /// A zero-byte read completed without closing the pipe.
     Empty,
     /// The pending operation completed after cancellation.
     Cancelled,
@@ -71,6 +71,10 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
     /// It must remain open and this pinned slot and its borrowed storage must
     /// remain alive and unmoved until `complete` accepts the matching packet,
     /// including after `cancel` succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsPipeReadStartError`] when the slot is busy, the buffer is empty or too large, or the read fails.
     pub unsafe fn start(
         self: Pin<&mut Self>,
         parent_reader: HANDLE,
@@ -93,7 +97,7 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
                 slot.buffer.as_mut_ptr().cast(),
                 length,
                 core::ptr::null_mut(),
-                &mut slot.overlapped,
+                &raw mut slot.overlapped,
             )
         };
         if result != 0 {
@@ -126,6 +130,10 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
     ///
     /// The slot must remain pinned and alive until the matching completion is
     /// dispatched, even when the cancellation request returns success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsPipeCancelError`] when no read is pending or the cancellation request fails.
     pub unsafe fn cancel(
         self: Pin<&mut Self>,
         parent_reader: HANDLE,
@@ -134,7 +142,7 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
         if slot.state != WindowsPipeReadState::Pending {
             return Err(WindowsPipeCancelError::NotPending { state: slot.state });
         }
-        if unsafe { CancelIoEx(parent_reader, &slot.overlapped) } == 0 {
+        if unsafe { CancelIoEx(parent_reader, &raw const slot.overlapped) } == 0 {
             return Err(WindowsPipeCancelError::RequestFailed {
                 code: unsafe { GetLastError() },
             });
@@ -149,6 +157,10 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
     ///
     /// The values must come from one fresh packet for this current operation.
     /// A packet must be consumed exactly once before this slot is reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsPipeCompletionError`] when no read is pending, the packet belongs to another operation, or its length is invalid.
     pub unsafe fn complete(
         self: Pin<&mut Self>,
         completed: *mut OVERLAPPED,
@@ -162,7 +174,7 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
         ) {
             return Err(WindowsPipeCompletionError::NotPending { state: slot.state });
         }
-        if !core::ptr::eq(completed, &mut slot.overlapped) {
+        if !core::ptr::eq(completed, &raw const slot.overlapped) {
             return Err(WindowsPipeCompletionError::WrongOperation);
         }
         if error_code == 0 {
@@ -214,6 +226,10 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
     }
 
     /// Releases a consumed payload so the same fixed buffer can be read again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the current [`WindowsPipeReadState`] when no completed payload is held.
     pub fn release_completed(self: Pin<&mut Self>) -> Result<(), WindowsPipeReadState> {
         let slot = unsafe { self.get_unchecked_mut() };
         match slot.state {
@@ -272,12 +288,9 @@ pub enum WindowsPipeCompletionError {
 
 #[cfg(test)]
 mod tests {
-    use core::future::Future;
     use core::mem::MaybeUninit;
     use core::pin::pin;
     use core::sync::atomic::{AtomicU32, Ordering};
-    use core::task::{Context, Poll, Waker};
-    use proxima_primitives::pipe::Pipe;
     use std::format;
     use std::vec::Vec;
     use windows_sys::Win32::Foundation::{
@@ -311,11 +324,11 @@ mod tests {
 
         let mut storage = [MaybeUninit::uninit(); 2];
         let storage_address = storage.as_mut_ptr().cast::<u8>();
-        let mut sessions = crate::session_slots::SessionSlots::<(), 1>::new();
+        let mut sessions = crate::schedule::SessionSlots::<(), 1>::new();
         let active_slot = sessions.insert(()).expect("one session slot is available");
         let mut reader = pin!(WindowsPipeReadSlot::new(&mut storage));
         let (start_result, initial_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
+            crate::test_alloc::measure_allocations(|| unsafe {
                 reader.as_mut().start(pipe_pair.parent_read_handle())
             });
         assert!(matches!(
@@ -335,20 +348,19 @@ mod tests {
             b"out",
         );
         let ((completed, completion_key, bytes_transferred, error_code), completion_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| {
+            crate::test_alloc::measure_allocations(|| {
                 wait_for_completion(completion_port, 5_000).expect("the read completion arrives")
             });
         assert_eq!(completion_allocations, 0);
         assert_eq!(completion_key, 7);
         assert_eq!(bytes_transferred, 2);
         report_stage("stdout_first_read_completed");
-        let (_, transition_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
-                reader
-                    .as_mut()
-                    .complete(completed, bytes_transferred, error_code)
-                    .expect("the packet belongs to this pending read")
-            });
+        let (_, transition_allocations) = crate::test_alloc::measure_allocations(|| unsafe {
+            reader
+                .as_mut()
+                .complete(completed, bytes_transferred, error_code)
+                .expect("the packet belongs to this pending read")
+        });
         assert_eq!(transition_allocations, 0);
         let first_payload = reader
             .as_ref()
@@ -356,21 +368,22 @@ mod tests {
             .expect("the first payload is borrowed from session storage");
         assert_eq!(first_payload, b"ou");
         assert_eq!(first_payload.as_ptr(), storage_address);
-        let (first_event, first_event_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| {
-                accept_stdout(&mut sessions, active_slot, first_payload)
-            });
+        let (first_event, first_event_allocations) = crate::test_alloc::measure_allocations(|| {
+            accept_stdout(&mut sessions, active_slot, first_payload)
+        });
         assert_eq!(first_event_allocations, 0);
         match first_event.expect("the live session accepts stdout") {
-            crate::host_event::AcceptedHostEvent::Stdout { bytes, .. } => {
+            crate::host_event::HostEvent::Stdout { bytes, .. } => {
                 assert_eq!(bytes.as_ptr(), storage_address);
             }
-            crate::host_event::AcceptedHostEvent::Stderr { .. }
-            | crate::host_event::AcceptedHostEvent::Exit { .. } => {
+            crate::host_event::HostEvent::Stderr { .. }
+            | crate::host_event::HostEvent::StdoutEof { .. }
+            | crate::host_event::HostEvent::StderrEof { .. }
+            | crate::host_event::HostEvent::Exit { .. } => {
                 panic!("stdout completion changed event kind")
             }
         }
-        let (_, release_allocations) = crate::dispatch_stream::tests::measure_allocations(|| {
+        let (_, release_allocations) = crate::test_alloc::measure_allocations(|| {
             reader
                 .as_mut()
                 .release_completed()
@@ -380,7 +393,7 @@ mod tests {
         report_stage("stdout_first_payload_consumed");
 
         let (second_start_result, second_start_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
+            crate::test_alloc::measure_allocations(|| unsafe {
                 reader.as_mut().start(pipe_pair.parent_read_handle())
             });
         assert!(matches!(
@@ -391,7 +404,7 @@ mod tests {
         let (
             (completed, completion_key, bytes_transferred, error_code),
             second_completion_allocations,
-        ) = crate::dispatch_stream::tests::measure_allocations(|| {
+        ) = crate::test_alloc::measure_allocations(|| {
             wait_for_completion(completion_port, 5_000).expect("the unread suffix completes")
         });
         assert_eq!(second_completion_allocations, 0);
@@ -399,7 +412,7 @@ mod tests {
         assert_eq!(bytes_transferred, 1);
         report_stage("stdout_suffix_completed");
         let (_, second_transition_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
+            crate::test_alloc::measure_allocations(|| unsafe {
                 reader
                     .as_mut()
                     .complete(completed, bytes_transferred, error_code)
@@ -413,31 +426,32 @@ mod tests {
         assert_eq!(second_payload, b"t");
         assert_eq!(second_payload.as_ptr(), storage_address);
         let (second_event, second_event_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| {
+            crate::test_alloc::measure_allocations(|| {
                 accept_stdout(&mut sessions, active_slot, second_payload)
             });
         assert_eq!(second_event_allocations, 0);
         match second_event.expect("the live session accepts the suffix") {
-            crate::host_event::AcceptedHostEvent::Stdout { bytes, .. } => {
+            crate::host_event::HostEvent::Stdout { bytes, .. } => {
                 assert_eq!(bytes.as_ptr(), storage_address);
             }
-            crate::host_event::AcceptedHostEvent::Stderr { .. }
-            | crate::host_event::AcceptedHostEvent::Exit { .. } => {
+            crate::host_event::HostEvent::Stderr { .. }
+            | crate::host_event::HostEvent::StdoutEof { .. }
+            | crate::host_event::HostEvent::StderrEof { .. }
+            | crate::host_event::HostEvent::Exit { .. } => {
                 panic!("suffix completion changed event kind")
             }
         }
-        let (_, second_release_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| {
-                reader
-                    .as_mut()
-                    .release_completed()
-                    .expect("the final borrowed payload is consumed")
-            });
+        let (_, second_release_allocations) = crate::test_alloc::measure_allocations(|| {
+            reader
+                .as_mut()
+                .release_completed()
+                .expect("the final borrowed payload is consumed")
+        });
         assert_eq!(second_release_allocations, 0);
 
         report_stage("stdout_eof_starting");
         let (eof_start_result, eof_start_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
+            crate::test_alloc::measure_allocations(|| unsafe {
                 reader.as_mut().start(pipe_pair.parent_read_handle())
             });
         assert!(matches!(
@@ -454,13 +468,12 @@ mod tests {
             error_code,
             windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE
         );
-        let (_, eof_transition_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
-                reader
-                    .as_mut()
-                    .complete(completed, bytes_transferred, error_code)
-                    .expect("the EOF packet belongs to this pending read")
-            });
+        let (_, eof_transition_allocations) = crate::test_alloc::measure_allocations(|| unsafe {
+            reader
+                .as_mut()
+                .complete(completed, bytes_transferred, error_code)
+                .expect("the EOF packet belongs to this pending read")
+        });
         assert_eq!(eof_transition_allocations, 0);
         assert_eq!(reader.state(), WindowsPipeReadState::Eof);
         report_stage("stdout_eof_completed");
@@ -488,10 +501,9 @@ mod tests {
 
         let mut storage = [MaybeUninit::uninit(); 8];
         let mut reader = pin!(WindowsPipeReadSlot::new(&mut storage));
-        let (start_result, start_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
-                reader.as_mut().start(pipe_pair.parent_read_handle())
-            });
+        let (start_result, start_allocations) = crate::test_alloc::measure_allocations(|| unsafe {
+            reader.as_mut().start(pipe_pair.parent_read_handle())
+        });
         assert!(matches!(
             start_result,
             Ok(super::WindowsPipeReadStart::Pending)
@@ -529,10 +541,9 @@ mod tests {
             .release_completed()
             .expect("short-read bytes are consumed before reusing storage");
 
-        let (start_result, start_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
-                reader.as_mut().start(pipe_pair.parent_read_handle())
-            });
+        let (start_result, start_allocations) = crate::test_alloc::measure_allocations(|| unsafe {
+            reader.as_mut().start(pipe_pair.parent_read_handle())
+        });
         assert!(matches!(
             start_result,
             Ok(super::WindowsPipeReadStart::Pending)
@@ -544,7 +555,7 @@ mod tests {
         report_stage("cancel_second_read_pending");
 
         let (cancellation_result, cancellation_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
+            crate::test_alloc::measure_allocations(|| unsafe {
                 reader.as_mut().cancel(pipe_pair.parent_read_handle())
             });
         cancellation_result.expect("cancellation is requested without waiting in the call");
@@ -563,7 +574,7 @@ mod tests {
         assert_eq!(error_code, ERROR_OPERATION_ABORTED);
         report_stage("cancel_packet_received");
         let (_, cancellation_completion_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
+            crate::test_alloc::measure_allocations(|| unsafe {
                 reader
                     .as_mut()
                     .complete(completed, bytes_transferred, error_code)
@@ -596,10 +607,9 @@ mod tests {
 
         let mut storage = [MaybeUninit::uninit(); 8];
         let mut reader = pin!(WindowsPipeReadSlot::new(&mut storage));
-        let (start_result, start_allocations) =
-            crate::dispatch_stream::tests::measure_allocations(|| unsafe {
-                reader.as_mut().start(pipe_pair.parent_read_handle())
-            });
+        let (start_result, start_allocations) = crate::test_alloc::measure_allocations(|| unsafe {
+            reader.as_mut().start(pipe_pair.parent_read_handle())
+        });
         assert_eq!(
             start_result,
             Ok(super::WindowsPipeReadStart::Completed(
@@ -682,21 +692,11 @@ mod tests {
     }
 
     fn accept_stdout<'bytes>(
-        sessions: &mut crate::session_slots::SessionSlots<(), 1>,
-        slot: crate::session_slots::SessionSlotId,
+        sessions: &mut crate::schedule::SessionSlots<(), 1>,
+        slot: crate::schedule::SessionSlotId,
         bytes: &'bytes [u8],
-    ) -> Result<crate::host_event::AcceptedHostEvent<'bytes>, crate::host_event::StaleHostEvent>
+    ) -> Result<crate::host_event::HostEvent<'bytes>, crate::host_event::StaleHostEvent>
     {
-        let event_pipe = crate::host_event::HostEventPipe::new();
-        let future = event_pipe.call(crate::host_event::HostEventInput {
-            event: crate::host_event::HostEvent::Stdout { slot, bytes },
-            sessions,
-        });
-        let mut future = pin!(future);
-        let mut context = Context::from_waker(Waker::noop());
-        match Future::poll(future.as_mut(), &mut context) {
-            Poll::Ready(result) => result,
-            Poll::Pending => panic!("host-event pipe unexpectedly yielded"),
-        }
+        crate::host_event::HostEvent::Stdout { slot, bytes }.admit(sessions)
     }
 }

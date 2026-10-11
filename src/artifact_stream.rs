@@ -1,37 +1,12 @@
 use core::cell::Cell;
-use core::future::Future;
-use core::marker::PhantomData;
 
 use proxima_codec::{DelimiterCodec, FrameCodec, FrameError, FrameLimits};
-use proxima_primitives::pipe::Pipe;
 
-use crate::{ArtifactRecord, ExecutablePath, ParseError, parse_artifact};
-
-/// The storage that owns an executable path returned by [`ArtifactPipe`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathStorage {
-    /// The selected path bytes remain in the Cargo record buffer.
-    Record,
-    /// The selected path bytes were decoded into the caller's scratch buffer.
-    Scratch,
-}
-
-/// A selected path borrowing its caller-owned record or scratch buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ArtifactSelection<'buffer> {
-    /// Buffer containing the path bytes.
-    pub storage: PathStorage,
-    /// Selected executable path, valid while its source buffer is borrowed.
-    pub path: &'buffer str,
-}
-
-/// Bounded framing, EOF, and record parsing failures.
+/// Bounded framing and EOF failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactStreamError {
     /// Proxima's borrowed frame decoder rejected the frame.
     Framing(FrameError),
-    /// The C2 parser rejected a consumed record; callers should stop the stream.
-    Parsing(ParseError),
     /// EOF arrived while a nonempty record had no newline.
     UnterminatedRecord { length: usize },
     /// EOF arrived before a complete buffered record was drained.
@@ -48,61 +23,41 @@ impl From<FrameError> for ArtifactStreamError {
     }
 }
 
-impl From<ParseError> for ArtifactStreamError {
-    fn from(error: ParseError) -> Self {
-        Self::Parsing(error)
-    }
+/// One framing transition: bytes consumed from the chunk and at most one parsed record.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub enum RecordStep<Parsed> {
+    /// No complete record yet; chunk bytes were staged or the stream is idle.
+    NeedMore {
+        /// Bytes accepted from the chunk; replay the tail before reading more.
+        consumed_bytes: usize,
+    },
+    /// One complete record was framed and handed to the caller's parser.
+    Parsed {
+        /// The parser's result, which may borrow the chunk or the framer's storage.
+        parsed: Parsed,
+        /// Bytes accepted from the chunk; replay the tail before reading more.
+        consumed_bytes: usize,
+    },
 }
 
-/// One source chunk, the framer that owns its accumulated bytes, and path scratch.
-pub struct ArtifactInput<'call, 'buffer> {
-    /// Caller-owned framer that stores partial Cargo records.
-    pub framer: &'call mut ArtifactFramer<'buffer>,
-    /// Next byte chunk from the Cargo stdout source.
-    pub chunk: &'call [u8],
-    /// Caller-owned storage for a JSON escaped executable path.
-    pub scratch: &'call mut [u8],
-    /// Largest accepted JSON container depth.
-    pub max_json_depth: usize,
-}
-
-/// The consumed source-byte count and at most one discovered executable.
-#[derive(Debug)]
-pub struct ArtifactOutput<'path> {
-    /// Number of bytes accepted from the chunk; replay its remaining tail before reading more.
-    pub consumed_bytes: usize,
-    /// Whether one complete framed record was consumed, even if it was ignored.
-    pub record_consumed: bool,
-    /// One path discovered from a complete Cargo record, if present.
-    pub selection: Option<ArtifactSelection<'path>>,
-}
-
-/// Proxima [`Pipe`] that frames one byte chunk and parses at most one record.
-///
-/// The result borrows the executable path from caller-owned input or scratch
-/// storage, so the caller cannot compact either buffer while using the path.
-pub struct ArtifactPipe<'call, 'buffer>(PhantomData<&'call mut ArtifactFramer<'buffer>>);
-
-impl<'call, 'buffer> ArtifactPipe<'call, 'buffer> {
-    /// Creates a chunk-to-record pipe; its framer retains partial input state.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<'call, 'buffer> Pipe for ArtifactPipe<'call, 'buffer> {
-    type In = ArtifactInput<'call, 'buffer>;
-    type Out = ArtifactOutput<'call>;
-    type Err = ArtifactStreamError;
-
-    fn call(&self, input: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>> {
-        async move {
-            input
-                .framer
-                .next_artifact(input.chunk, input.scratch, input.max_json_depth)
-        }
-    }
+/// Why [`ArtifactFramer::next_record`] stopped, with the chunk bytes already accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordFault<ParseError> {
+    /// Framing, EOF, or poison rejected the step; the framer holds no new record.
+    Framing {
+        /// Bytes accepted from the chunk before the rejection.
+        consumed_bytes: usize,
+        /// The framing failure.
+        error: ArtifactStreamError,
+    },
+    /// The caller's parser rejected a consumed record; the framer is now poisoned.
+    Parse {
+        /// Bytes accepted from the chunk, including the rejected record.
+        consumed_bytes: usize,
+        /// The parser's failure.
+        error: ParseError,
+    },
 }
 
 /// Fixed caller-owned storage for incrementally framing Cargo JSON lines with
@@ -132,6 +87,10 @@ enum ScanState {
 
 impl<'buffer> ArtifactFramer<'buffer> {
     /// Creates a framer whose buffer can hold the configured record and newline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactStreamError::Framing`] when the record limit overflows or the buffer cannot hold a record and its newline.
     pub fn new(
         buffer: &'buffer mut [u8],
         max_record_bytes: usize,
@@ -159,6 +118,10 @@ impl<'buffer> ArtifactFramer<'buffer> {
 
     /// Copies as much of a transport chunk as fits and returns bytes consumed.
     /// A short count leaves the tail with the caller until a frame is drained.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactStreamError::InputAfterEof`] for data after EOF, or [`ArtifactStreamError::Poisoned`] after a rejected record.
     pub fn push(&mut self, chunk: &[u8]) -> Result<usize, ArtifactStreamError> {
         self.validate_input(chunk)?;
         if self.source_state.get() == SourceState::Eof {
@@ -173,6 +136,10 @@ impl<'buffer> ArtifactFramer<'buffer> {
     }
 
     /// Checks whether a source chunk is valid for the current stream state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactStreamError::InputAfterEof`] for data after EOF, or [`ArtifactStreamError::Poisoned`] after a rejected record.
     pub fn validate_input(&self, chunk: &[u8]) -> Result<(), ArtifactStreamError> {
         match self.source_state.get() {
             SourceState::Open => Ok(()),
@@ -187,32 +154,26 @@ impl<'buffer> ArtifactFramer<'buffer> {
         self.source_state.set(SourceState::Failed);
     }
 
-    /// Returns the next complete record, or `None` while its newline is absent.
-    pub fn next_frame(&self) -> Result<Option<&[u8]>, ArtifactStreamError> {
-        let Some((frame_start, frame_end)) = self.next_frame_bounds()? else {
-            return Ok(None);
-        };
-        self.consume_frame()?;
-        Ok(Some(&self.buffer[frame_start..frame_end]))
-    }
-
     /// Checks whether a complete frame is buffered without consuming it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactStreamError`] when the stream is poisoned, ended mid-record, or a record exceeds the configured limit.
     pub fn frame_ready(&self) -> Result<bool, ArtifactStreamError> {
         self.has_complete_frame()
     }
 
-    /// Returns the next complete frame without advancing the stream cursor.
-    pub fn peek_frame(&self) -> Result<Option<&[u8]>, ArtifactStreamError> {
-        let Some((frame_start, frame_end)) = self.next_frame_bounds()? else {
-            return Ok(None);
-        };
-        self.scan_state.set(ScanState::FrameReady {
-            frame_length: frame_end - frame_start,
-        });
-        Ok(Some(&self.buffer[frame_start..frame_end]))
+    /// Whether no partial or complete frame remains in caller-owned storage.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.buffered == self.consumed.get()
     }
 
     /// Advances past the current complete frame after its borrowed result is handled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactStreamError`] when the stream is poisoned, ended mid-record, or a record exceeds the configured limit.
     pub fn consume_frame(&self) -> Result<(), ArtifactStreamError> {
         let Some((frame_start, frame_end)) = self.next_frame_bounds()? else {
             return Ok(());
@@ -230,67 +191,111 @@ impl<'buffer> ArtifactFramer<'buffer> {
         Ok(())
     }
 
-    fn next_artifact<'path>(
-        &'path mut self,
-        chunk: &[u8],
-        scratch: &'path mut [u8],
-        max_json_depth: usize,
-    ) -> Result<ArtifactOutput<'path>, ArtifactStreamError> {
-        if self.source_state.get() == SourceState::Failed {
-            return Err(ArtifactStreamError::Poisoned);
-        }
-        if self.source_state.get() == SourceState::Eof && !chunk.is_empty() {
-            return Err(ArtifactStreamError::InputAfterEof);
-        }
-        let consumed_bytes =
-            if self.has_complete_frame()? || self.source_state.get() == SourceState::Eof {
-                0
-            } else {
-                self.push(chunk)?
-            };
-        let frame_bounds = self.next_frame_bounds()?;
-        let record_consumed = frame_bounds.is_some();
-        if frame_bounds.is_some() {
-            self.consume_frame()?;
-        }
-        let selection = match frame_bounds {
-            Some((frame_start, frame_end)) => {
-                let parse_result = parse_artifact(
-                    &self.buffer[frame_start..frame_end],
-                    scratch,
-                    self.max_record_bytes,
-                    max_json_depth,
-                );
-                let parsed = match parse_result {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        self.source_state.set(SourceState::Failed);
-                        return Err(ArtifactStreamError::Parsing(error));
-                    }
-                };
-                match parsed {
-                    ArtifactRecord::Ignored => None,
-                    ArtifactRecord::TestExecutable(ExecutablePath::Borrowed(path)) => {
-                        Some(ArtifactSelection {
-                            storage: PathStorage::Record,
-                            path,
-                        })
-                    }
-                    ArtifactRecord::TestExecutable(ExecutablePath::Scratch(path)) => {
-                        Some(ArtifactSelection {
-                            storage: PathStorage::Scratch,
-                            path,
-                        })
-                    }
+    /// Frames at most one record from `chunk` and hands it to `parse`.
+    ///
+    /// A record that arrives whole in `chunk` is lent to `parse` without copying;
+    /// a fragmented record is staged in the framer's storage and lent from there.
+    /// `parse` runs here so a rejected record poisons the framer in the same step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordFault::Framing`] when the stream is poisoned, past EOF, or a
+    /// record exceeds the limit, and [`RecordFault::Parse`] when `parse` fails.
+    pub fn next_record<'call, Parsed, ParseError>(
+        &'call mut self,
+        chunk: &'call [u8],
+        parse: impl FnOnce(&'call [u8]) -> Result<Parsed, ParseError>,
+    ) -> Result<RecordStep<Parsed>, RecordFault<ParseError>> {
+        self.validate_input(chunk)
+            .map_err(|error| Self::framing_fault(0, error))?;
+        let whole_record_possible = self.source_state.get() == SourceState::Open
+            && self.buffered == self.consumed.get()
+            && !self
+                .has_complete_frame()
+                .map_err(|error| Self::framing_fault(0, error))?;
+        if whole_record_possible {
+            if let Some(newline_offset) = chunk.iter().position(|byte| *byte == b'\n')
+                && newline_offset > self.max_record_bytes
+            {
+                return Err(Self::framing_fault(
+                    0,
+                    ArtifactStreamError::Framing(FrameError::FrameTooLarge {
+                        len: newline_offset,
+                    }),
+                ));
+            }
+            match self.codec.parse_frame(chunk) {
+                Ok((record, consumed_bytes)) => {
+                    return self.parse_record(record, consumed_bytes, parse);
+                }
+                Err(FrameError::Incomplete) => {}
+                Err(error) => {
+                    return Err(Self::framing_fault(0, ArtifactStreamError::Framing(error)));
                 }
             }
-            None => None,
+        }
+        let staged = self
+            .has_complete_frame()
+            .map_err(|error| Self::framing_fault(0, error))?
+            || self.source_state.get() == SourceState::Eof;
+        let consumed_bytes = if staged {
+            0
+        } else {
+            self.push(chunk)
+                .map_err(|error| Self::framing_fault(0, error))?
         };
-        Ok(ArtifactOutput {
+        let framer: &'call Self = self;
+        let Some((frame_start, frame_end)) = framer
+            .next_frame_bounds()
+            .map_err(|error| Self::framing_fault(consumed_bytes, error))?
+        else {
+            return Ok(RecordStep::NeedMore { consumed_bytes });
+        };
+        framer
+            .consume_frame()
+            .map_err(|error| Self::framing_fault(consumed_bytes, error))?;
+        framer.parse_record(
+            &framer.buffer[frame_start..frame_end],
             consumed_bytes,
-            record_consumed,
-            selection,
-        })
+            parse,
+        )
+    }
+
+    /// Largest record, excluding its newline, this framer accepts.
+    #[must_use]
+    pub const fn max_record_bytes(&self) -> usize {
+        self.max_record_bytes
+    }
+
+    const fn framing_fault<ParseError>(
+        consumed_bytes: usize,
+        error: ArtifactStreamError,
+    ) -> RecordFault<ParseError> {
+        RecordFault::Framing {
+            consumed_bytes,
+            error,
+        }
+    }
+
+    fn parse_record<'record, Parsed, ParseError>(
+        &self,
+        record: &'record [u8],
+        consumed_bytes: usize,
+        parse: impl FnOnce(&'record [u8]) -> Result<Parsed, ParseError>,
+    ) -> Result<RecordStep<Parsed>, RecordFault<ParseError>> {
+        match parse(record) {
+            Ok(parsed) => Ok(RecordStep::Parsed {
+                parsed,
+                consumed_bytes,
+            }),
+            Err(error) => {
+                self.poison();
+                Err(RecordFault::Parse {
+                    consumed_bytes,
+                    error,
+                })
+            }
+        }
     }
 
     fn next_frame_bounds(&self) -> Result<Option<(usize, usize)>, ArtifactStreamError> {
@@ -353,6 +358,10 @@ impl<'buffer> ArtifactFramer<'buffer> {
     }
 
     /// Marks the byte source complete and rejects leftover partial or undrained records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactStreamError::Poisoned`] after a rejected record, or an undrained or unterminated record error when bytes remain buffered.
     pub fn finish(&mut self) -> Result<(), ArtifactStreamError> {
         if self.source_state.get() == SourceState::Failed {
             return Err(ArtifactStreamError::Poisoned);
@@ -388,5 +397,146 @@ impl<'buffer> ArtifactFramer<'buffer> {
         self.buffered = remaining;
         self.consumed.set(0);
         self.scan_state.set(adjusted_scan_state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proxima_codec::FrameError;
+
+    use super::{ArtifactFramer, ArtifactStreamError, RecordFault, RecordStep};
+    use crate::cargo_message::CargoMessage;
+    use crate::cargo_source::parse_selection;
+
+    fn fault_error<Parsed: core::fmt::Debug, ParseError>(
+        outcome: Result<RecordStep<Parsed>, RecordFault<ParseError>>,
+    ) -> ArtifactStreamError {
+        match outcome {
+            Err(RecordFault::Framing { error, .. }) => error,
+            Err(RecordFault::Parse { .. }) => panic!("framing was expected to fail first"),
+            Ok(step) => panic!("record was accepted: {step:?}"),
+        }
+    }
+
+    #[test]
+    fn c49z_borrows_complete_record_and_stages_fragmented_record() {
+        let complete_record = b"{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"test\"],\"test\":true},\"profile\":{\"test\":true},\"package_id\":\"path+file:///fixture#0.1.0\",\"manifest_path\":\"/fixture/Cargo.toml\",\"executable\":\"/fixture/first\"}\n";
+        let (observed, allocations) = crate::test_alloc::measure_allocations(|| {
+            let mut storage = [0_u8; 256];
+            let mut scratch = [0_u8; 64];
+            let mut framer = ArtifactFramer::new(&mut storage, 255)
+                .expect("fixed artifact storage fits the record limit");
+            let step = framer
+                .next_record(complete_record, |record| {
+                    parse_selection(record, &mut scratch, 255, 4)
+                })
+                .expect("complete record parses");
+            let RecordStep::Parsed {
+                parsed,
+                consumed_bytes,
+            } = step
+            else {
+                panic!("complete record produced no step");
+            };
+            let Some(CargoMessage::TestArtifact(artifact)) = parsed else {
+                panic!("complete Cargo test artifact is selected");
+            };
+            let path = artifact.executable;
+            let expected_path = b"/fixture/first";
+            let path_offset = complete_record
+                .windows(expected_path.len())
+                .position(|window| window == expected_path)
+                .expect("fixture path occurs in the record");
+            let pointer_identity = path.as_ptr() == complete_record[path_offset..].as_ptr();
+            assert_eq!(path, "/fixture/first");
+            assert_eq!(consumed_bytes, complete_record.len());
+            (pointer_identity, path.as_ptr())
+        });
+        let (pointer_identity, original_path_pointer) = observed;
+
+        assert!(pointer_identity);
+        assert_eq!(allocations, 0);
+
+        let copied_path_storage = *b"/fixture/first";
+        let copied_path = core::str::from_utf8(&copied_path_storage)
+            .expect("copied fixture path remains valid UTF-8");
+        assert_ne!(copied_path.as_ptr(), original_path_pointer);
+        std::println!(
+            "{{\"complete_line_pointer_identity\":1,\"complete_line_payload_copies\":0,\"copy_comparator_control_rejected\":1,\"allocations\":{allocations}}}"
+        );
+
+        let first_fragment = b"{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"test\"],\"test\":true},\"profile\":{\"test\":true},\"package_id\":\"path+file:///fixture#0.1.0\",\"manifest_path\":\"/fixture/Cargo.toml\",\"executable\":\"/fixture/second\"";
+        let last_fragment = b"}\n";
+        let mut storage = [0_u8; 256];
+        let mut scratch = [0_u8; 64];
+        let mut framer =
+            ArtifactFramer::new(&mut storage, 255).expect("fixed fragment storage is large");
+        let first = framer
+            .next_record(first_fragment, |record| {
+                parse_selection(record, &mut scratch, 255, 4)
+            })
+            .expect("partial record stages");
+        assert_eq!(
+            first,
+            RecordStep::NeedMore {
+                consumed_bytes: first_fragment.len()
+            }
+        );
+
+        let second = framer
+            .next_record(last_fragment, |record| {
+                parse_selection(record, &mut scratch, 255, 4)
+            })
+            .expect("fragmented record parses");
+        let RecordStep::Parsed { parsed, .. } = second else {
+            panic!("fragmented record produced no step");
+        };
+        let Some(CargoMessage::TestArtifact(artifact)) = parsed else {
+            panic!("fragmented Cargo artifact is selected");
+        };
+        let staged_path = artifact.executable;
+        assert_eq!(staged_path, "/fixture/second");
+        assert_ne!(staged_path.as_ptr(), last_fragment.as_ptr());
+        std::println!("{{\"fragmented_record_staged\":1,\"fragmented_path_borrows_framer\":1}}");
+    }
+
+    #[test]
+    fn c49z_oversized_complete_record_matches_buffered_framing_error() {
+        let oversized_record = b"123456789\n";
+        let expected = ArtifactStreamError::Framing(FrameError::FrameTooLarge { len: 9 });
+        let mut direct_storage = [0_u8; 16];
+        let mut direct_scratch = [0_u8; 16];
+        let mut direct_framer =
+            ArtifactFramer::new(&mut direct_storage, 8).expect("storage fits test record");
+        let direct_error = fault_error(direct_framer.next_record(oversized_record, |record| {
+            parse_selection(record, &mut direct_scratch, 8, 4)
+        }));
+        assert_eq!(direct_error, expected);
+        let direct_retry = fault_error(direct_framer.next_record(oversized_record, |record| {
+            parse_selection(record, &mut direct_scratch, 8, 4)
+        }));
+        assert_eq!(direct_retry, direct_error);
+
+        let mut buffered_storage = [0_u8; 16];
+        let mut buffered_scratch = [0_u8; 16];
+        let mut buffered_framer =
+            ArtifactFramer::new(&mut buffered_storage, 8).expect("storage fits test record");
+        let staged = buffered_framer
+            .next_record(b"12345678", |record| {
+                parse_selection(record, &mut buffered_scratch, 8, 4)
+            })
+            .expect("eight bytes stage without a newline");
+        assert_eq!(staged, RecordStep::NeedMore { consumed_bytes: 8 });
+        let buffered_error = fault_error(buffered_framer.next_record(b"9\n", |record| {
+            parse_selection(record, &mut buffered_scratch, 8, 4)
+        }));
+        assert_eq!(direct_error, buffered_error);
+        let buffered_retry = fault_error(buffered_framer.next_record(b"", |record| {
+            parse_selection(record, &mut buffered_scratch, 8, 4)
+        }));
+        assert_eq!(buffered_retry, buffered_error);
+        std::println!(
+            "{{\"direct_buffered_oversize_error_equal\":1,\"direct_buffered_streams_not_poisoned\":1,\"error\":\"frame_too_large:9\"}}"
+        );
     }
 }
