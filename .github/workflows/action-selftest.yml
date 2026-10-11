@@ -1,0 +1,45 @@
+name: action selftest
+
+on:
+  push:
+    paths:
+      - action.yml
+      - .github/workflows/action-selftest.yml
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/action-selftest.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: action-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run the action against this checkout
+        id: val
+        uses: ./
+        with:
+          version: ${{ github.sha }}
+          no-fail-fast: "true"
+      - name: Assert the summary line ran tests and none failed
+        shell: bash
+        env:
+          TOTAL: ${{ steps.val.outputs.total }}
+        run: |
+          echo "$TOTAL"
+          passed="$(sed -nE 's/.*passed ([0-9]+).*/\1/p' <<<"$TOTAL")"
+          failed="$(sed -nE 's/.*failed ([0-9]+).*/\1/p' <<<"$TOTAL")"
+          test -n "$passed" && test "$passed" -gt 0
+          test -n "$failed" && test "$failed" -eq 0
