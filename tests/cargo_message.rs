@@ -175,7 +175,10 @@ fn records_without_a_test_executable_are_ignored() {
     for record in [&not_test_profile[..], &no_executable[..]] {
         assert_eq!(parse(record, &mut scratch), Ok(CargoMessage::Ignored));
     }
-    assert_eq!(parse(build_finished, &mut scratch), Ok(CargoMessage::BuildFinished));
+    assert_eq!(
+        parse(build_finished, &mut scratch),
+        Ok(CargoMessage::BuildFinished)
+    );
 }
 
 #[test]
@@ -233,4 +236,22 @@ fn a_built_bin_target_is_reported_by_its_package_and_a_bin_unit_test_is_not() {
         parse(bin_unit_test, &mut scratch),
         Ok(CargoMessage::TestArtifact(_))
     ));
+}
+
+#[test]
+fn crlf_terminated_artifact_record_selects_the_same_executable_as_lf() {
+    let mut lf_record = TEST_ARTIFACT.to_vec();
+    while matches!(lf_record.last(), Some(b'\n' | b'\r')) {
+        lf_record.pop();
+    }
+    let mut crlf_record = lf_record.clone();
+    crlf_record.extend_from_slice(b"\r\n");
+    lf_record.push(b'\n');
+    let mut lf_scratch = [0_u8; 64];
+    let mut crlf_scratch = [0_u8; 64];
+
+    let lf = parse(&lf_record, &mut lf_scratch).expect("lf record parses");
+    let crlf = parse(&crlf_record, &mut crlf_scratch).expect("crlf record parses");
+
+    assert_eq!(lf, crlf);
 }

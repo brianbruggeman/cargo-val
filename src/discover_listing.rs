@@ -77,7 +77,7 @@ impl DocParser {
     ) -> Result<(), Error> {
         for byte in bytes {
             if *byte == b'\n' {
-                let length = self.length;
+                let length = strip_carriage_return(&self.line[..self.length]).len();
                 self.length = 0;
                 self.phase = Self::step(self.phase, &self.line[..length], &mut emit)?;
             } else if self.length < LINE_CAPACITY {
@@ -132,6 +132,10 @@ impl Default for DocParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn strip_carriage_return(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 fn running_count(line: &[u8]) -> Option<usize> {
@@ -533,6 +537,44 @@ mod doc_report_tests {
         let chunks = bytes.chunks(7).collect::<Vec<_>>();
 
         assert_eq!(events(&chunks), whole);
+    }
+
+    fn lf_report() -> String {
+        REAL_REPORT.replace("\r\n", "\n")
+    }
+
+    fn crlf_report() -> String {
+        lf_report().replace('\n', "\r\n")
+    }
+
+    #[test]
+    fn c68_crlf_report_yields_the_same_events_as_lf() {
+        let crlf = crlf_report();
+
+        assert_eq!(
+            events(&[crlf.as_bytes()]),
+            events(&[lf_report().as_bytes()])
+        );
+    }
+
+    #[test]
+    fn c68_crlf_report_split_at_every_boundary_yields_the_same_events_as_lf() {
+        let crlf = crlf_report();
+        let bytes = crlf.as_bytes();
+        let expected = events(&[lf_report().as_bytes()]);
+
+        for split in 0..=bytes.len() {
+            let (head, tail) = bytes.split_at(split);
+            assert_eq!(events(&[head, tail]), expected, "split at byte {split}");
+        }
+    }
+
+    #[test]
+    fn c68_crlf_report_split_into_single_bytes_yields_the_same_events_as_lf() {
+        let crlf = crlf_report();
+        let chunks = crlf.as_bytes().chunks(1).collect::<Vec<_>>();
+
+        assert_eq!(events(&chunks), events(&[lf_report().as_bytes()]));
     }
 
     #[test]
