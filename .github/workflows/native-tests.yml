@@ -29,6 +29,10 @@ jobs:
             printf '::error title=native cargo test failure::exit status %s%%0A%s\n' "$test_status" "$failure_excerpt"
           fi
           exit "$test_status"
+      - name: Run dylib environment fixture against cargo test
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cargo test --test dylib_fixture
 
   windows-pipe:
     runs-on: windows-latest
