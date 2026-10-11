@@ -1,0 +1,111 @@
+name: cargo val
+description: Install cargo-val at a pinned git ref and run the test suite with `cargo val`. The caller installs the Rust toolchain first.
+author: brianbruggeman
+
+inputs:
+  version:
+    description: git ref (branch, tag or full commit sha) of cargo-val to install; falls back to main when empty
+    required: false
+    default: ${{ github.action_ref }}
+  args:
+    description: extra arguments passed to cargo val, split on whitespace
+    required: false
+    default: ""
+  working-directory:
+    description: directory cargo val runs in
+    required: false
+    default: "."
+  filterset:
+    description: nextest-style filterset passed as -E
+    required: false
+    default: ""
+  no-fail-fast:
+    description: pass --no-fail-fast so every test binary runs after a failure
+    required: false
+    default: "false"
+
+outputs:
+  total:
+    description: the cargo val total line
+    value: ${{ steps.run.outputs.total }}
+  sha:
+    description: the cargo-val commit that was installed
+    value: ${{ steps.resolve.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: resolve cargo-val ref
+      id: resolve
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        INSTALL_ROOT: ${{ runner.temp }}/cargo-val-root
+      run: |
+        set -euo pipefail
+        ref="${VERSION:-main}"
+        if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+          sha="$ref"
+        else
+          sha="$(git ls-remote https://github.com/brianbruggeman/cargo-val "$ref" "$ref^{}" | tail -n 1 | cut -f 1)"
+        fi
+        if [ -z "$sha" ]; then
+          echo "::error title=cargo val::cannot resolve ref '$ref' in brianbruggeman/cargo-val"
+          exit 1
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "root=$INSTALL_ROOT" >> "$GITHUB_OUTPUT"
+
+    - name: restore cargo-val binary
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.resolve.outputs.root }}
+        key: cargo-val-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.sha }}
+
+    - name: install cargo-val
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SHA: ${{ steps.resolve.outputs.sha }}
+        INSTALL_ROOT: ${{ steps.resolve.outputs.root }}
+      run: cargo install --locked --git https://github.com/brianbruggeman/cargo-val --rev "$SHA" --root "$INSTALL_ROOT" cargo-val
+
+    - name: add cargo-val to PATH
+      shell: bash
+      env:
+        INSTALL_ROOT: ${{ steps.resolve.outputs.root }}
+      run: echo "$INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+
+    - name: cargo val
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        EXTRA_ARGS: ${{ inputs.args }}
+        FILTERSET: ${{ inputs.filterset }}
+        NO_FAIL_FAST: ${{ inputs.no-fail-fast }}
+        NO_COLOR: "1"
+      run: |
+        set -o pipefail
+        arguments=(--tests)
+        if [ -n "$FILTERSET" ]; then arguments+=(-E "$FILTERSET"); fi
+        if [ "$NO_FAIL_FAST" = "true" ]; then arguments+=(--no-fail-fast); fi
+        output_file="$(mktemp)"
+        set +e
+        # shellcheck disable=SC2086
+        cargo val "${arguments[@]}" $EXTRA_ARGS 2>&1 | tee "$output_file"
+        status=$?
+        set -e
+        total="$(grep -E '^total:' "$output_file" | tail -n 1 || true)"
+        echo "total=$total" >> "$GITHUB_OUTPUT"
+        {
+          echo "### cargo val"
+          echo
+          if [ -n "$total" ]; then echo "\`$total\`"; else echo "no total line was printed (exit status $status)"; fi
+        } >> "$GITHUB_STEP_SUMMARY"
+        rm -f "$output_file"
+        if [ "$status" -ne 0 ]; then
+          echo "::error title=cargo val::exited with status $status"
+        fi
+        exit "$status"

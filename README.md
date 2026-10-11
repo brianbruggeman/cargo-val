@@ -38,3 +38,33 @@ the Proxima repository.
 - The run ends with `<binary>: discovered N, passed P, failed F, ignored I, filtered X`
   for each test binary and a `total:` line with the wall time.
 - Integration tests and benches wait until their package's `bin` targets are built.
+
+## GitHub Action
+
+Any repository can run its tests with cargo val. The caller installs the Rust
+toolchain first (the action does not); the runner installs on Linux and macOS.
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: dtolnay/rust-toolchain@stable
+  - uses: brianbruggeman/cargo-val@main
+    with:
+      filterset: 'package(my-crate)'
+      no-fail-fast: true
+```
+
+The action resolves `version` to a commit with `git ls-remote`, restores a cached
+binary keyed on runner OS, architecture and that commit, runs `cargo install
+--locked --git` on a miss, runs `cargo val --tests`, writes the `total:` line to
+the job summary and fails the step when cargo val fails.
+
+| input | default | meaning |
+| --- | --- | --- |
+| `version` | the action's own ref, else `main` | git ref (branch, tag or full sha) of cargo-val to install |
+| `args` | empty | extra arguments for `cargo val`, split on whitespace |
+| `working-directory` | `.` | directory cargo val runs in |
+| `filterset` | empty | passed as `-E` |
+| `no-fail-fast` | `false` | passed as `--no-fail-fast` |
+
+Outputs: `total` (the `total:` line) and `sha` (the installed commit).
