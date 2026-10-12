@@ -332,6 +332,16 @@ mod tests {
         )
         .expect("caller buffers fit the missing executable command");
 
+        // first failed create may open process-wide loader handles; only a second call can show a per-call leak
+        let warmup = spawn_windows_child(
+            &absolute_executable(executable),
+            &mut arguments,
+            &handle_list,
+        );
+        assert!(matches!(
+            warmup,
+            Err(WindowsSpawnError::CreateFailed { code }) if code != 0
+        ));
         let handles_before = current_process_handle_count();
         let result = spawn_windows_child(
             &absolute_executable(executable),

@@ -576,10 +576,23 @@ mod tests {
 
     #[test]
     fn per_binary_environment_and_directory_lower_for_every_test_without_allocating() {
+        let (executable, manifest_path, manifest_directory) = if cfg!(windows) {
+            (
+                "C:\\work\\target\\debug\\deps\\dylib_env-3f2a1c9d8e7b6a50",
+                "C:\\work\\dylib_env\\Cargo.toml",
+                "C:\\work\\dylib_env",
+            )
+        } else {
+            (
+                "/work/target/debug/deps/dylib_env-3f2a1c9d8e7b6a50",
+                "/work/dylib_env/Cargo.toml",
+                "/work/dylib_env",
+            )
+        };
         let artifact = TestArtifact {
-            executable: "/work/target/debug/deps/dylib_env-3f2a1c9d8e7b6a50",
+            executable,
             package_id: "path+file:///work/dylib_env#0.1.0",
-            manifest_path: "/work/dylib_env/Cargo.toml",
+            manifest_path,
             target_name: "",
             target_kind: "",
         };
@@ -628,7 +641,7 @@ mod tests {
             (directory, lowered_blocks)
         });
 
-        assert_eq!(checked, (Ok("/work/dylib_env".len() + 1), 100));
+        assert_eq!(checked, (Ok(manifest_directory.len() + 1), 100));
         assert_eq!(allocations, 0);
         let lowered = lower_windows_arguments(
             &intent,
@@ -642,7 +655,7 @@ mod tests {
         let block = std::string::String::from_utf16(lowered.environment_block())
             .expect("environment block is utf-16");
         assert!(
-            block.contains("CARGO_MANIFEST_DIR=/work/dylib_env\0"),
+            block.contains(&std::format!("CARGO_MANIFEST_DIR={manifest_directory}\0")),
             "{block:?}"
         );
         assert!(block.contains(&std::format!(

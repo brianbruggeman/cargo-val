@@ -553,11 +553,42 @@ mod tests {
 
     const SYSROOT_LIBDIR: &str = "/Users/dev/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib";
 
+    const MANIFEST_DIR: &str = if cfg!(windows) {
+        "C:\\repo\\tests\\fixtures\\dylib_env"
+    } else {
+        "/repo/tests/fixtures/dylib_env"
+    };
+    const MANIFEST_PATH: &str = if cfg!(windows) {
+        "C:\\repo\\tests\\fixtures\\dylib_env\\Cargo.toml"
+    } else {
+        "/repo/tests/fixtures/dylib_env/Cargo.toml"
+    };
+    const DEPS_EXECUTABLE: &str = if cfg!(windows) {
+        "C:\\repo\\target\\debug\\deps\\dylib_env-3f2a1c9d8e7b6a50"
+    } else {
+        "/repo/target/debug/deps/dylib_env-3f2a1c9d8e7b6a50"
+    };
+    const EXAMPLES_EXECUTABLE: &str = if cfg!(windows) {
+        "C:\\repo\\target\\debug\\examples\\demo-9c8b7a"
+    } else {
+        "/repo/target/debug/examples/demo-9c8b7a"
+    };
+    const TARGET_DEBUG: &str = if cfg!(windows) {
+        "C:\\repo\\target\\debug"
+    } else {
+        "/repo/target/debug"
+    };
+    const TARGET_DEPS: &str = if cfg!(windows) {
+        "C:\\repo\\target\\debug\\deps"
+    } else {
+        "/repo/target/debug/deps"
+    };
+
     fn artifact() -> TestArtifact<'static> {
         TestArtifact {
-            executable: "/repo/target/debug/deps/dylib_env-3f2a1c9d8e7b6a50",
+            executable: DEPS_EXECUTABLE,
             package_id: "path+file:///repo/tests/fixtures/dylib_env#0.1.0",
-            manifest_path: "/repo/tests/fixtures/dylib_env/Cargo.toml",
+            manifest_path: MANIFEST_PATH,
             target_name: "",
             target_kind: "",
         }
@@ -625,8 +656,8 @@ mod tests {
         let expected = [
             "/repo/target/debug/build/ring-4a1b0c/out",
             "/opt/homebrew/lib",
-            "/repo/target/debug",
-            "/repo/target/debug/deps",
+            TARGET_DEBUG,
+            TARGET_DEPS,
             SYSROOT_LIBDIR,
             "/usr/lib",
         ]
@@ -649,16 +680,13 @@ mod tests {
             TestEnvironmentLayout::build(&input(artifact, "", &[], Some("/x")), &mut storage)
                 .expect("environment fits");
 
-        assert_eq!(
-            layout.current_directory(&storage),
-            "/repo/tests/fixtures/dylib_env"
-        );
+        assert_eq!(layout.current_directory(&storage), MANIFEST_DIR);
         assert_eq!(
             layout.c_current_directory(&storage).to_bytes(),
-            b"/repo/tests/fixtures/dylib_env"
+            MANIFEST_DIR.as_bytes()
         );
         let expected = [
-            ("CARGO_MANIFEST_DIR", "/repo/tests/fixtures/dylib_env"),
+            ("CARGO_MANIFEST_DIR", MANIFEST_DIR),
             ("CARGO_PKG_NAME", "serde"),
             ("CARGO_PKG_VERSION", "1.0.228-rc.1+build.5"),
             ("CARGO_PKG_VERSION_MAJOR", "1"),
@@ -715,7 +743,12 @@ mod tests {
         )
         .expect("environment fits");
 
-        let expected = ["/repo/target/debug", "/repo/target/debug/deps", SYSROOT_LIBDIR].join(":");
+        let expected = [
+            "/repo/target/debug",
+            "/repo/target/debug/deps",
+            SYSROOT_LIBDIR,
+        ]
+        .join(":");
         assert_eq!(
             lookup(&layout, &storage, DYLIB_PATH_KEY),
             Some(expected.as_str())
@@ -726,7 +759,7 @@ mod tests {
     fn examples_directory_maps_to_the_artifact_and_deps_directories() {
         let mut storage = [0; 2048];
         let artifact = TestArtifact {
-            executable: "/repo/target/debug/examples/demo-9c8b7a",
+            executable: EXAMPLES_EXECUTABLE,
             ..artifact()
         };
 
@@ -735,7 +768,7 @@ mod tests {
                 .expect("environment fits");
 
         let separator = if cfg!(windows) { ";" } else { ":" };
-        let expected = ["/repo/target/debug", "/repo/target/debug/deps", "/x"].join(separator);
+        let expected = [TARGET_DEBUG, TARGET_DEPS, "/x"].join(separator);
         assert_eq!(
             lookup(&layout, &storage, DYLIB_PATH_KEY),
             Some(expected.as_str())
