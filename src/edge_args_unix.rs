@@ -13,6 +13,8 @@ pub const DYLIB_PATH_KEY_C: &CStr = c"DYLD_FALLBACK_LIBRARY_PATH";
 pub const DYLIB_PATH_KEY_C: &CStr = c"LD_LIBRARY_PATH";
 
 pub const PATH_SEPARATOR: u8 = b':';
+/// Whether the loader appends default library directories when the inherited search path is absent.
+pub const LOADER_DEFAULT_FALLBACKS: bool = cfg!(target_os = "macos");
 pub const MAIN_SEPARATOR: u8 = b'/';
 pub const DEPS_SUFFIX: &str = "/deps";
 
