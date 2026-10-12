@@ -12,7 +12,7 @@ default = ["proxima-core", "proxima-codec", "proxima-primitives"]
 proxima-codec = ["dep:proxima-codec"]
 proxima-primitives = ["dep:proxima-primitives"]
 proxima-core = ["dep:proxima-core"]
-edge-os = ["dep:prime", "proxima-primitives/alloc"]
+edge-os = ["dep:prime", "dep:proxima-runtime", "proxima-primitives/alloc"]
 
 [dependencies]
 conflaguration = { git = "https://github.com/brianbruggeman/conflaguration.git", rev = "56e25cddbc91d356d50f49264a1510dffffc2b7e", version = "2.0.0", default-features = false, features = ["derive", "alloc"] }
@@ -21,6 +21,7 @@ prime = { git = "https://github.com/brianbruggeman/proxima.git", rev = "136dd949
 proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "136dd949c723f84f81cc7c425c98459ef64ed350", version = "0.1.0", default-features = false, optional = true }
 proxima-core = { git = "https://github.com/brianbruggeman/proxima.git", rev = "136dd949c723f84f81cc7c425c98459ef64ed350", version = "0.1.0", default-features = false, features = ["io-async"], optional = true }
 proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "136dd949c723f84f81cc7c425c98459ef64ed350", version = "0.1.0", default-features = false, optional = true }
+proxima-runtime = { git = "https://github.com/brianbruggeman/proxima.git", rev = "136dd949c723f84f81cc7c425c98459ef64ed350", version = "0.1.0", default-features = false, optional = true }
 
 [build-dependencies]
 conflaguration = { git = "https://github.com/brianbruggeman/conflaguration.git", rev = "56e25cddbc91d356d50f49264a1510dffffc2b7e", version = "2.0.0", features = ["derive", "codegen"] }

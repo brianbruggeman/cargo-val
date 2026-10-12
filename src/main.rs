@@ -11,17 +11,17 @@ use cargo_val::cli::{CliAction, CliParser};
     feature = "proxima-primitives"
 ))]
 use cargo_val::host::unix_driver::run_unix;
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 use core::alloc::{GlobalAlloc, Layout};
 #[cfg(not(test))]
 use core::ffi::{CStr, c_char, c_int, c_void};
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 use core::panic::PanicInfo;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 struct NoHeapAllocator;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 // safety: the runtime uses caller-owned storage, so an accidental allocation
 // must fail instead of silently adding a heap path.
 unsafe impl GlobalAlloc for NoHeapAllocator {
@@ -32,7 +32,7 @@ unsafe impl GlobalAlloc for NoHeapAllocator {
     unsafe fn dealloc(&self, _pointer: *mut u8, _layout: Layout) {}
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: NoHeapAllocator = NoHeapAllocator;
 
@@ -169,25 +169,25 @@ pub unsafe extern "C" fn main(argument_count: c_int, arguments: *const *const c_
     }
 }
 
-#[cfg(all(not(test), unix))]
+#[cfg(all(not(test), not(feature = "edge-os"), unix))]
 fn terminate(status: c_int) -> ! {
     // safety: `_exit` terminates the process without unwinding or std runtime state.
     unsafe { _exit(status) }
 }
 
-#[cfg(all(not(test), windows))]
+#[cfg(all(not(test), not(feature = "edge-os"), windows))]
 fn terminate(status: c_int) -> ! {
     // safety: `ExitProcess` terminates the process without unwinding or std runtime state.
     unsafe { ExitProcess(status as u32) }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 #[panic_handler]
 fn panic(_information: &PanicInfo<'_>) -> ! {
     terminate(101)
 }
 
 // liballoc's precompiled rlib references the personality even under panic=abort; nothing unwinds in this bin.
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 #[unsafe(no_mangle)]
 extern "C" fn rust_eh_personality() {}
