@@ -1,5 +1,8 @@
 //! Per-binary and total count lines, and the accounting invariant between them.
 
+use std::boxed::Box;
+use std::vec;
+
 pub const MAX_TARGETS: usize = 512;
 pub const ID_CAPACITY: usize = 128;
 pub const LINE_CAPACITY: usize = ID_CAPACITY + 160;
@@ -42,7 +45,7 @@ struct Entry {
 
 /// Counters per test binary, indexed by listing order; storage is fixed.
 pub struct TargetTable {
-    entries: [Entry; MAX_TARGETS],
+    entries: Box<[Entry]>,
     count: usize,
 }
 
@@ -59,9 +62,9 @@ pub enum Tally {
 
 impl TargetTable {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            entries: [Entry {
+            entries: vec![Entry {
                 id: [0; ID_CAPACITY],
                 id_length: 0,
                 counts: Counts {
@@ -71,7 +74,7 @@ impl TargetTable {
                     ignored: 0,
                     filtered: 0,
                 },
-            }; MAX_TARGETS],
+            }; MAX_TARGETS].into_boxed_slice(),
             count: 0,
         }
     }
