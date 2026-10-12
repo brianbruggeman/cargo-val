@@ -24,9 +24,16 @@ enum SpawnPath {
     StdExact,
     StdAbsent,
     CargoValAbsent,
+    CargoValHiddenConsole,
 }
 
-const PATHS: [SpawnPath; 4] = [SpawnPath::CargoValExact, SpawnPath::StdExact, SpawnPath::StdAbsent, SpawnPath::CargoValAbsent];
+const PATHS: [SpawnPath; 5] = [
+    SpawnPath::CargoValExact,
+    SpawnPath::StdExact,
+    SpawnPath::StdAbsent,
+    SpawnPath::CargoValAbsent,
+    SpawnPath::CargoValHiddenConsole,
+];
 
 impl SpawnPath {
     fn label(self) -> &'static str {
@@ -35,6 +42,7 @@ impl SpawnPath {
             Self::StdExact => "(b) std Command output, passing test",
             Self::StdAbsent => "(c) std Command output, absent test",
             Self::CargoValAbsent => "(d) cargo-val spawn_exact, absent test",
+            Self::CargoValHiddenConsole => "(e) cargo-val spawn_exact, passing test, CREATE_NO_WINDOW",
         }
     }
 }
@@ -44,6 +52,17 @@ struct Launcher {
     directory: PathBuf,
     environment: Vec<Vec<u8>>,
     storage: RefCell<HeldLaunchStorage>,
+    hidden_console_storage: RefCell<HeldLaunchStorage>,
+}
+
+#[cfg(windows)]
+fn hidden_console_storage() -> HeldLaunchStorage {
+    held_launch_storage().with_hidden_console()
+}
+
+#[cfg(not(windows))]
+fn hidden_console_storage() -> HeldLaunchStorage {
+    held_launch_storage()
 }
 
 fn main() -> ExitCode {
@@ -123,12 +142,12 @@ fn wait_for_exit(process_id: u32) -> Result<(), String> {
 }
 
 impl Launcher {
-    fn cargo_val_launch(&self, test: &str) -> Result<(), String> {
+    fn cargo_val_launch(&self, storage: &RefCell<HeldLaunchStorage>, test: &str) -> Result<(), String> {
         let environment = self.environment.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let directory = self.directory.to_string_lossy().into_owned().into_bytes();
         let executable = self.executable.to_string_lossy().into_owned().into_bytes();
         let child = spawn_exact(
-            &mut self.storage.borrow_mut(),
+            &mut storage.borrow_mut(),
             &executable,
             test.as_bytes(),
             &[],
@@ -156,10 +175,11 @@ impl Launcher {
 
     fn launch(&self, path: SpawnPath) -> Result<(), String> {
         match path {
-            SpawnPath::CargoValExact => self.cargo_val_launch(PASSING_TEST),
+            SpawnPath::CargoValExact => self.cargo_val_launch(&self.storage, PASSING_TEST),
+            SpawnPath::CargoValHiddenConsole => self.cargo_val_launch(&self.hidden_console_storage, PASSING_TEST),
             SpawnPath::StdExact => self.std_launch(PASSING_TEST),
             SpawnPath::StdAbsent => self.std_launch(ABSENT_TEST),
-            SpawnPath::CargoValAbsent => self.cargo_val_launch(ABSENT_TEST),
+            SpawnPath::CargoValAbsent => self.cargo_val_launch(&self.storage, ABSENT_TEST),
         }
     }
 }
@@ -184,6 +204,7 @@ fn measure() -> Result<(), String> {
         directory: fixture,
         environment: inherited_environment(),
         storage: RefCell::new(held_launch_storage()),
+        hidden_console_storage: RefCell::new(hidden_console_storage()),
     };
     println!("launch_cost: {} launches per arm of {}", count, launcher.executable.display());
     for _ in 0..WARMUP {
@@ -209,6 +230,7 @@ fn report(samples: &mut [Vec<f64>]) {
     }
     println!("cargo-val construction overhead, passing test (a) - (b): {:.1} us median", median(&samples[0]) - median(&samples[1]));
     println!("cargo-val construction overhead, absent test (d) - (c): {:.1} us median", median(&samples[3]) - median(&samples[2]));
+    println!("console-flag cost, passing test (e) - (a): {:.1} us median (positive: CREATE_NO_WINDOW is slower)", median(&samples[4]) - median(&samples[0]));
     println!("image-load plus libtest startup floor (c): {:.1} us median", median(&samples[2]));
     println!("arm (a) and (d) include a pid-based wait (waitpid, or OpenProcess + WaitForSingleObject + CloseHandle on Windows)");
 }

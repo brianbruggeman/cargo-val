@@ -3,7 +3,7 @@
 use crate::ExecutablePath;
 use crate::child_completion::{ChildCompletion, ChildCompletionEvent, InvalidChildCompletionEvent};
 use crate::edge_spawn::{
-    ArgumentsError, Child, ExactError, LaunchStorage, SpawnError, spawn_exact,
+    ArgumentsError, Child, ExactError, LaunchStorage, SpawnError, spawn_exact, spawn_exact_ready,
 };
 use crate::host_event::{HostEvent, StaleHostEvent};
 use crate::outcomes::{OutcomeError, OutcomeLedger, StartError, TerminalOutcome};
@@ -173,7 +173,16 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
     /// # Errors
     ///
     /// Returns [`LaunchError`] when the table is full, the name is live or too long, the spawn fails, or accounting refuses the child.
-    pub fn launch(mut self) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
+    pub fn launch(self) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
+        self.launch_as(false)
+    }
+
+    /// Starts one exact child like [`Self::launch`], creating it frozen when `ready` so [`crate::edge_spawn::resume_ready`] starts it later.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LaunchError`] when the table is full, the name is live or too long, the spawn fails, or accounting refuses the child.
+    pub fn launch_as(mut self, ready: bool) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
         if self.owner.sessions().is_full() {
             return Err(LaunchError::Full);
         }
@@ -194,7 +203,8 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
 
         let mut name = [0; NAME_CAPACITY];
         name[..name_bytes.len()].copy_from_slice(name_bytes);
-        let child = spawn_exact(
+        let spawn = if ready { spawn_exact_ready } else { spawn_exact };
+        let child = spawn(
             self.storage,
             executable_bytes(&self.intent),
             name_bytes,

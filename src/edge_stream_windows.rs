@@ -7,7 +7,6 @@ use core::ptr::NonNull;
 use core::task::{Context, Poll};
 use std::boxed::Box;
 use std::io;
-use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle};
 
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
@@ -15,6 +14,7 @@ use proxima_primitives::pipe::{Exhausted, Pipe, UnpinPipe};
 use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED_ENTRY};
 
+use crate::edge_spawn_windows::PipeEnd;
 use crate::host::windows_pipe::{
     WindowsPipeReadCompletion, WindowsPipeReadSlot, WindowsPipeReadStart, WindowsPipeReadStartError,
 };
@@ -38,8 +38,7 @@ const STAGING_BYTES: usize = CAPTURE_BYTES as usize;
 /// at `start` (a closed pipe) queues no packet, so it yields without waiting on the gate. Merge
 /// several with `proxima_primitives::pipe::FanIn`.
 pub struct ChildStream {
-    handle: OwnedHandle,
-    gate: RefCell<Option<Readiness>>,
+    end: PipeEnd,
     slot: RefCell<WindowsPipeReadSlot<'static>>,
     staging: NonNull<[MaybeUninit<u8>]>,
     window: RefCell<[u8; CAPTURE_BYTES as usize]>,
@@ -51,11 +50,10 @@ pub struct ChildStream {
 
 impl ChildStream {
     #[must_use]
-    pub fn new(handle: OwnedHandle) -> Self {
+    pub fn new(end: PipeEnd) -> Self {
         let staging = Box::into_raw(Box::new_uninit_slice(STAGING_BYTES));
         Self {
-            handle,
-            gate: RefCell::new(None),
+            end,
             slot: RefCell::new(WindowsPipeReadSlot::new(&mut [])),
             // safety: Box::into_raw never returns null.
             staging: unsafe { NonNull::new_unchecked(staging) },
@@ -97,7 +95,7 @@ impl ChildStream {
     }
 
     fn raw(&self) -> HANDLE {
-        self.handle.as_raw_handle()
+        self.end.raw()
     }
 
     fn advance(&self, context: &Context<'_>) -> Poll<Result<io::Result<Range<u32>>, Exhausted>> {
@@ -109,6 +107,7 @@ impl ChildStream {
             Ok(Poll::Ready(Some(range))) => Poll::Ready(Ok(Ok(range))),
             Ok(Poll::Ready(None)) => {
                 self.ended.set(true);
+                self.end.drained();
                 Poll::Ready(Err(Exhausted))
             }
             Err(error) => self.fault(error),
@@ -146,11 +145,11 @@ impl ChildStream {
 
     // the handle joins the worker's completion port at the first poll, before any read can queue a packet
     fn arm(&self, context: &Context<'_>) -> io::Result<()> {
-        let mut gate = self.gate.borrow_mut();
+        let mut gate = self.end.gate().borrow_mut();
         if gate.is_some() {
             return Ok(());
         }
-        let mut opened = Readiness::completion(&self.handle.as_handle())?;
+        let mut opened = Readiness::completion(&self.end.borrowed())?;
         if opened.poll(context)? == ReadyState::OffWorker {
             return Err(io::Error::other("stream gate polled off a prime worker"));
         }
@@ -188,7 +187,7 @@ impl ChildStream {
     }
 
     fn next_completion(&self, context: &Context<'_>) -> io::Result<Poll<WindowsPipeReadCompletion>> {
-        let mut guard = self.gate.borrow_mut();
+        let mut guard = self.end.gate().borrow_mut();
         let gate = guard
             .as_mut()
             .ok_or_else(|| io::Error::other("stream gate is not armed"))?;
@@ -316,6 +315,7 @@ mod tests {
     use std::format;
     use std::io;
     use std::os::windows::io::{BorrowedHandle, OwnedHandle};
+    use crate::edge_spawn_windows::PooledEnd;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::vec::Vec;
 
@@ -346,7 +346,7 @@ mod tests {
         // safety: the pair owns the reader for as long as this borrow lasts.
         let reader = unsafe { BorrowedHandle::borrow_raw(pair.parent_read_handle()) };
         let duplicate: OwnedHandle = reader.try_clone_to_owned().expect("reader duplicates");
-        ChildStream::new(duplicate)
+        ChildStream::new(PooledEnd::unpooled(duplicate))
     }
 
     fn write_all(handle: HANDLE, bytes: &[u8]) {
