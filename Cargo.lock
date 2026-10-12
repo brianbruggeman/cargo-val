@@ -138,6 +138,7 @@ dependencies = [
  "proxima-codec",
  "proxima-core",
  "proxima-primitives",
+ "proxima-runtime",
  "serde_json",
  "temp-env",
  "windows-sys 0.61.2",

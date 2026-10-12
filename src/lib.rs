@@ -1,6 +1,6 @@
 #![no_std]
 
-#[cfg(test)]
+#[cfg(any(test, feature = "edge-os"))]
 extern crate std;
 
 #[cfg(test)]
@@ -40,6 +40,12 @@ pub mod artifact_stream;
 pub mod cargo_source;
 #[cfg(unix)]
 pub mod edge_signal_unix;
+#[cfg(all(test, feature = "edge-os", any(target_os = "macos", target_os = "linux")))]
+pub(crate) mod edge_exit;
+#[cfg(all(feature = "edge-os", target_os = "linux"))]
+pub mod edge_exit_linux;
+#[cfg(all(feature = "edge-os", target_os = "macos"))]
+pub mod edge_exit_macos;
 pub mod cli;
 pub mod host;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
