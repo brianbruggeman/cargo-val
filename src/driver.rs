@@ -43,7 +43,7 @@ use crate::edge_signal::{
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
 use crate::edge_output;
-use crate::edge_spawn::{ArgumentsError, Child, HeldLaunchStorage, SpawnError, held_launch_storage, spawn, spawn_in_group};
+use crate::edge_spawn::{ArgumentsError, Child, HeldLaunchStorage, LaunchStorage, SpawnError, held_launch_storage, spawn, spawn_in_group, spawn_listed};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
 use crate::reporter::write_report;
@@ -826,23 +826,20 @@ fn override_entries<'storage>(
 }
 
 fn spawn_list(
+    storage: &mut LaunchStorage,
     executable: &str,
     ignored: bool,
-    environment: &[&[u8]],
+    run: &ListingRun<'_>,
     overrides: &[&[u8]],
     directory: &str,
 ) -> Result<Child, RunError> {
-    let arguments: &[&[u8]] = if ignored {
-        &[b"--list", b"--ignored"]
-    } else {
-        &[b"--list"]
-    };
-    let child = spawn(
+    let child = spawn_listed(
+        storage,
         executable.as_bytes(),
-        arguments,
-        environment,
+        ignored,
+        run.environment,
         overrides,
-        Some(directory.as_bytes()),
+        directory.as_bytes(),
     )
     .map_err(|_| RunError::Spawn)?;
     track(child.process_id())?;
@@ -898,12 +895,14 @@ fn spawn_listing(
     let (overrides, override_count) = override_entries(&layout, environment)?;
     let overrides = &overrides[..override_count];
     let directory = layout.current_directory(environment);
-    let child = spawn_list(executable, false, run.environment, overrides, directory)?;
+    let mut storage = run.launch_storage.borrow_mut();
+    let child = spawn_list(&mut storage, executable, false, run, overrides, directory)?;
     let ignored_child = if run.settings.ignore == IgnoreMode::Include {
         None
     } else {
-        Some(spawn_list(executable, true, run.environment, overrides, directory)?)
+        Some(spawn_list(&mut storage, executable, true, run, overrides, directory)?)
     };
+    drop(storage);
     Ok(PendingListing {
         target,
         child: Some(child),
@@ -2820,8 +2819,6 @@ mod listing_allocation_tests {
     use crate::edge_signal::SignalPipe;
     use crate::stop::StopPolicy;
 
-    const SETUP_SPAWN_ALLOCATIONS: usize = 3;
-
     fn reap(listing: &mut PendingListing) {
         for child in [listing.child.take(), listing.ignored_child.take()].into_iter().flatten() {
             let mut status = 0;
@@ -2831,7 +2828,7 @@ mod listing_allocation_tests {
     }
 
     #[test]
-    fn spawning_a_listing_child_allocates_only_the_setup_launch() {
+    fn spawning_a_listing_child_allocates_zero_times() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
@@ -2884,6 +2881,6 @@ mod listing_allocation_tests {
         let mut listing = listing.expect("the listing child starts");
         reap(&mut listing);
         std::println!("{{\"listing_spawn_allocations\":{allocations}}}");
-        assert_eq!(allocations, SETUP_SPAWN_ALLOCATIONS);
+        assert_eq!(allocations, 0);
     }
 }
