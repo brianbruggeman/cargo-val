@@ -2,6 +2,7 @@
 
 use core::cell::{Cell, RefCell};
 use core::ffi::{CStr, c_char, c_int};
+use core::ops::Range;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 
@@ -19,16 +20,15 @@ use crate::config::{
     TargetDirError, TargetDirMode, TargetDirSources, ThreadsError, ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
-    DocEvent, DocOutcome, DocParser, ListingLine, ListingSource, ListingSourceError,
-    ListingSourceStep, parse_listing_line,
+    DocEvent, DocOutcome, DocParser, ListingLine, ListingSource, ListingSourceStep,
+    parse_listing_line,
 };
 use crate::discover_cargo::{BinGate, DiscoveryFsm};
 use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
-#[cfg(feature = "edge-os")]
-use crate::run::observe_cargo;
+use crate::run::{CARGO_LANE, LISTING_LANE, Lanes, attach, observe_cargo};
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
@@ -55,14 +55,14 @@ use crate::unix_arguments::{UnixArgumentsError, merge_environment};
 
 #[cfg(target_os = "linux")]
 use crate::host::linux_exit::{
-    LinuxExitEvent as NativeEvent, LinuxExitPort as NativePort, LinuxExitStatus as NativeStatus,
+    LinuxExitEvent as NativeEvent, LinuxExitPort as NativePort,
     LinuxPidWatch as NativeWatch,
 };
 #[cfg(target_os = "linux")]
 use crate::host::linux_pipe::LinuxPipeReader as NativeReader;
 #[cfg(target_os = "macos")]
 use crate::host::macos_exit::{
-    MacosExitEvent as NativeEvent, MacosExitPort as NativePort, MacosExitStatus as NativeStatus,
+    MacosExitEvent as NativeEvent, MacosExitPort as NativePort,
     MacosProcessWatch as NativeWatch,
 };
 #[cfg(target_os = "macos")]
@@ -117,15 +117,29 @@ impl Identity {
     }
 }
 
+/// How far a listing child's stdout has been read: still open, closed with its last lines undrained, or fully consumed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StdoutState {
+    Open,
+    Ended,
+    Drained,
+}
+
 struct PendingListing {
     target: usize,
-    child: UnixChild,
+    child: Option<UnixChild>,
     ignored_child: Option<UnixChild>,
     identity: Identity,
     path: [u8; PATH_CAPACITY],
     path_length: usize,
     environment: [u8; ENVIRONMENT_CAPACITY],
     layout: TestEnvironmentLayout,
+    ignoring: bool,
+    lane_pid: libc::pid_t,
+    stdout: StdoutState,
+    stderr_done: bool,
+    exit: Option<i32>,
+    backlog: Option<(Range<u32>, usize)>,
 }
 
 /// Run-mode failure category that the `no_std` binary can report without allocation.
@@ -589,7 +603,7 @@ fn report_filterset_error(text: &[u8], error: FilterError) {
     let _ = write_fd(2, line.bytes());
 }
 
-fn write_fd(descriptor: c_int, mut bytes: &[u8]) -> Result<(), RunError> {
+pub(crate) fn write_fd(descriptor: c_int, mut bytes: &[u8]) -> Result<(), RunError> {
     while !bytes.is_empty() {
         let written = unsafe { libc::write(descriptor, bytes.as_ptr().cast(), bytes.len()) };
         let written = usize::try_from(written).map_err(|_| RunError::Reactor)?;
@@ -611,17 +625,6 @@ fn released<Status>(status: Option<Status>, target: libc::pid_t) -> Option<Statu
         release_child(target);
     }
     status
-}
-
-fn reap_into(
-    process: &mut NativeWatch,
-    target: libc::pid_t,
-    exit_status: &mut Option<NativeStatus>,
-) -> Result<(), RunError> {
-    if let Some(status) = released(process.reap().map_err(|_| RunError::Reactor)?, target) {
-        *exit_status = Some(status);
-    }
-    Ok(())
 }
 
 fn deliver_exit(
@@ -719,27 +722,6 @@ fn reader_pair(
     ))
 }
 
-fn drain_reader(
-    reader: &mut NativeReader<'_>,
-    descriptor: c_int,
-    mut watch: Option<&mut LockWatch>,
-) -> Result<bool, RunError> {
-    let mut bytes = [0; SOURCE_CAPACITY];
-    let mut context = Context::from_waker(Waker::noop());
-    loop {
-        match Pin::new(&mut *reader).poll_read(&mut context, &mut bytes) {
-            Poll::Ready(Ok(0)) => return Ok(true),
-            Poll::Ready(Ok(length)) => {
-                write_fd(descriptor, &bytes[..length])?;
-                if let Some(watch) = watch.as_deref_mut() {
-                    announce_lock_wait(watch, &bytes[..length])?;
-                }
-            }
-            Poll::Ready(Err(_)) => return Err(RunError::Reactor),
-            Poll::Pending => return Ok(false),
-        }
-    }
-}
 
 const LOCK_LINE_CAPACITY: usize = 768;
 
@@ -1115,13 +1097,19 @@ fn spawn_listing(
     };
     Ok(PendingListing {
         target,
-        child,
+        child: Some(child),
         ignored_child,
         identity,
         path,
         path_length: executable.len(),
         environment,
         layout,
+        ignoring: false,
+        lane_pid: 0,
+        stdout: StdoutState::Open,
+        stderr_done: false,
+        exit: None,
+        backlog: None,
     })
 }
 
@@ -1194,7 +1182,6 @@ struct DocObservation {
 }
 
 impl ListingRun<'_> {
-    #[cfg(feature = "edge-os")]
     pub(crate) fn port_fd(&self) -> c_int {
         self.port.raw_fd()
     }
@@ -1257,31 +1244,6 @@ enum Flow {
     Eof,
 }
 
-// a full job set stops reading the listing, and a level-triggered readable fd left
-// registered would return from every kevent and starve the zero-ready backstop.
-#[derive(Clone, Copy)]
-enum StdoutRegistration {
-    Registered,
-    Paused,
-}
-
-impl StdoutRegistration {
-    fn sync(&mut self, stdout: &mut NativeReader<'_>, wanted: bool) -> Result<(), RunError> {
-        match (*self, wanted) {
-            (Self::Registered, false) => {
-                stdout.pause().map_err(|_| RunError::Reactor)?;
-                *self = Self::Paused;
-            }
-            (Self::Paused, true) => {
-                stdout.resume().map_err(|_| RunError::Reactor)?;
-                *self = Self::Registered;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
 fn listing_wanted(
     run: &ListingRun<'_>,
     ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
@@ -1297,18 +1259,15 @@ struct ListingScan<'scan, 'run> {
 }
 
 impl ListingScan<'_, '_> {
-    fn apply<ReadError>(
+    fn apply(
         &self,
-        step: Poll<Result<ListingSourceStep<'_, '_, '_>, ListingSourceError<ReadError>>>,
+        step: ListingSourceStep<'_, '_, '_>,
         stopped: bool,
         ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
     ) -> Result<Flow, RunError> {
         let run = self.run;
-        let Poll::Ready(step) = step else {
-            return Ok(Flow::Pause);
-        };
-        match step.map_err(|_| RunError::ListingStream)? {
+        match step {
             ListingSourceStep::Launch(intent) => {
                 if !run.policy.borrow_mut().admit_listed(run.interrupted(), stopped) {
                     return Ok(Flow::Next);
@@ -1363,164 +1322,6 @@ fn feed_ignored_lines(
             set.insert(name.as_bytes()).map_err(RunError::IgnoredSet)?;
         }
         remaining = &remaining[consumed_bytes..];
-    }
-    Ok(())
-}
-
-// the `--list --ignored` child is read to completion before the full listing launches anything
-fn collect_ignored(
-    run: &ListingRun<'_>,
-    child: UnixChild,
-    set: &mut IgnoredSet,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-) -> Result<(), RunError> {
-    let process_id = child.process_id();
-    let (mut stdout, mut stderr, mut process) = reader_pair(run.port, child)?;
-    let mut frame_bytes = [0; RESULT_LINE_CAPACITY + 1];
-    let mut framer = ArtifactFramer::new(&mut frame_bytes, RESULT_LINE_CAPACITY)
-        .map_err(|_| RunError::ListingStream)?;
-    let mut bytes = [0; SOURCE_CAPACITY];
-    let (mut stdout_eof, mut stderr_eof, mut exit_status) = (false, false, None);
-    let mut events = [NativeEvent::default(); 64];
-    let mut context = Context::from_waker(Waker::noop());
-    reap_into(&mut process, process_id, &mut exit_status)?;
-    loop {
-        run.pump_doc_tests()?;
-        while !stdout_eof {
-            match Pin::new(&mut stdout).poll_read(&mut context, &mut bytes) {
-                Poll::Ready(Ok(0)) => stdout_eof = true,
-                Poll::Ready(Ok(count)) => {
-                    feed_ignored_lines(&bytes[..count], &mut framer, set)?;
-                }
-                Poll::Ready(Err(_)) => return Err(RunError::Reactor),
-                Poll::Pending => break,
-            }
-        }
-        if !stderr_eof {
-            stderr_eof = drain_reader(&mut stderr, 2, None)?;
-        }
-        reap_into(&mut process, process_id, &mut exit_status)?;
-        if stdout_eof && stderr_eof && exit_status.is_some() {
-            break;
-        }
-        let ready = wait_for_events(run.port, run.signals, &mut events)?;
-        for event in events.iter().copied().take(ready) {
-            run.observe_doc_event(event);
-            if event.token == stdout.token() {
-                stdout.wake_read_ready();
-            } else if event.token == stderr.token() {
-                stderr.wake_read_ready();
-            } else if event.token == process.token() {
-                observe_exit(&mut process, event);
-                reap_into(&mut process, process_id, &mut exit_status)?;
-            } else {
-                test_event(run.port, event, ledger, watches, run.reporting())?;
-            }
-        }
-        reap_unreported_children(run.port, ledger, watches, run.reporting())?;
-    }
-    if exit_status.is_some_and(|status| status.code != Some(0)) && !run.interrupted() {
-        return Err(RunError::ListingFailed);
-    }
-    Ok(())
-}
-
-fn run_listing(
-    run: &ListingRun<'_>,
-    pending: PendingListing,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-) -> Result<(), RunError> {
-    let executable = core::str::from_utf8(&pending.path[..pending.path_length])
-        .map_err(|_| RunError::Arguments)?;
-    let mut ignored_set = IgnoredSet::new();
-    if let Some(ignored_child) = pending.ignored_child {
-        collect_ignored(run, ignored_child, &mut ignored_set, ledger, watches)?;
-    }
-    let listing_id = pending.child.process_id();
-    let listing_target = pending.target;
-    let (mut stdout, mut stderr, mut process) = reader_pair(run.port, pending.child)?;
-    let scan = ListingScan {
-        run,
-        target: listing_target,
-        environment: &pending.environment,
-        layout: &pending.layout,
-    };
-    let mut stdout_bytes = [0; SOURCE_CAPACITY];
-    let mut frame_bytes = [0; SOURCE_CAPACITY + 1];
-    let mut source = ListingSource::new(&mut stdout_bytes).map_err(|_| RunError::ListingStream)?;
-    let mut framer = ArtifactFramer::new(&mut frame_bytes, SOURCE_CAPACITY)
-        .map_err(|_| RunError::ListingStream)?;
-    let selection = Selection {
-        filter: run.filter,
-        exact: run.exact,
-        filterset: run.prepared,
-        package: pending.identity.package(),
-        binary: pending.identity.binary(),
-        mode: run.settings.ignore,
-        ignored: &ignored_set,
-    };
-    let filter = NameFilter::Selected(&selection);
-    let mut stderr_eof = false;
-    let mut stdout_eof = false;
-    let mut exit_status = None;
-    reap_into(&mut process, listing_id, &mut exit_status)?;
-    let mut events = [NativeEvent::default(); 64];
-    let mut context = Context::from_waker(Waker::noop());
-    let mut stdout_registration = StdoutRegistration::Registered;
-    while !stdout_eof || !stderr_eof || exit_status.is_none() {
-        run.pump_doc_tests()?;
-        if !stdout_eof && listing_wanted(run, ledger) {
-            stdout_registration.sync(&mut stdout, true)?;
-            loop {
-                let stopped = run.tripped(ledger);
-                let step = source.poll_next(
-                    Pin::new(&mut stdout),
-                    &mut framer,
-                    ledger.sessions(),
-                    ExecutablePath::Borrowed(executable),
-                    filter,
-                    &mut context,
-                );
-                match scan.apply(step, stopped, ledger, watches)? {
-                    Flow::Next => {}
-                    Flow::Pause => break,
-                    Flow::Eof => {
-                        stdout_eof = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if !stderr_eof {
-            stderr_eof = drain_reader(&mut stderr, 2, None)?;
-        }
-        reap_into(&mut process, listing_id, &mut exit_status)?;
-        if stdout_eof && stderr_eof && exit_status.is_some() {
-            break;
-        }
-        if !stdout_eof {
-            stdout_registration.sync(&mut stdout, listing_wanted(run, ledger))?;
-        }
-        let ready = wait_for_events(run.port, run.signals, &mut events)?;
-        for event in events.iter().copied().take(ready) {
-            run.observe_doc_event(event);
-            if event.token == stdout.token() {
-                stdout.wake_read_ready();
-            } else if event.token == stderr.token() {
-                stderr.wake_read_ready();
-            } else if event.token == process.token() {
-                observe_exit(&mut process, event);
-                reap_into(&mut process, listing_id, &mut exit_status)?;
-            } else {
-                test_event(run.port, event, ledger, watches, run.reporting())?;
-            }
-        }
-        reap_unreported_children(run.port, ledger, watches, run.reporting())?;
-    }
-    if exit_status.is_some_and(|status| status.code != Some(0)) && !run.interrupted() {
-        return Err(RunError::ListingFailed);
     }
     Ok(())
 }
@@ -1688,53 +1489,21 @@ fn read_metadata(child: UnixChild) -> Option<MetadataFacts> {
     (usable && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0).then(|| scan.finish())
 }
 
-#[cfg(not(feature = "edge-os"))]
-fn pause_cargo(
-    stdout: &mut NativeReader<'_>,
-    stderr: &mut NativeReader<'_>,
-    stdout_open: bool,
-    stderr_open: bool,
-) -> Result<(), RunError> {
-    if stdout_open {
-        stdout.pause().map_err(|_| RunError::Reactor)?;
-    }
-    if stderr_open {
-        stderr.pause().map_err(|_| RunError::Reactor)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "edge-os"))]
-fn resume_cargo(
-    stdout: &mut NativeReader<'_>,
-    stderr: &mut NativeReader<'_>,
-    stdout_open: bool,
-    stderr_open: bool,
-) -> Result<(), RunError> {
-    if stdout_open {
-        stdout.resume().map_err(|_| RunError::Reactor)?;
-    }
-    if stderr_open {
-        stderr.resume().map_err(|_| RunError::Reactor)?;
-    }
-    Ok(())
-}
-
-pub(crate) struct CargoDriver<'run, 'buffer> {
-    #[cfg(not(feature = "edge-os"))]
-    stdout: NativeReader<'run>,
-    #[cfg(not(feature = "edge-os"))]
-    stderr: NativeReader<'run>,
-    #[cfg(not(feature = "edge-os"))]
-    process: NativeWatch,
-    #[cfg(feature = "edge-os")]
-    marker: core::marker::PhantomData<&'run ()>,
+pub(crate) struct CargoDriver<'buffer> {
     process_id: libc::pid_t,
     framer: ArtifactFramer<'buffer>,
     scratch: &'buffer mut [u8],
     linked: LinkedDirectories<'buffer>,
     build_scripts: BuildScriptOutputs<'buffer>,
+    listing_framer: ArtifactFramer<'buffer>,
+    ignored_framer: ArtifactFramer<'buffer>,
+    ignored: &'buffer mut IgnoredSet,
+    active: Option<PendingListing>,
     pending_listing: Option<PendingListing>,
+    cargo_backlog: Option<(Range<u32>, usize)>,
+    cargo_eof: bool,
+    finishing: bool,
+    reason: &'static [u8],
     discovery: DiscoveryFsm,
     parked: ParkedArtifacts,
     dropped: usize,
@@ -1843,124 +1612,113 @@ fn start_listing(
     spawn_listing(artifact, run, linked.as_str(), build_script).map(Some)
 }
 
-impl CargoDriver<'_, '_> {
-    #[cfg(not(feature = "edge-os"))]
-    fn reap(&mut self) -> Result<(), RunError> {
-        let reaped = released(
-            self.process.reap().map_err(|_| RunError::Reactor)?,
-            self.process_id,
-        );
-        if let Some(status) = reaped {
-            self.discovery.exited(status.code.unwrap_or(1));
-        }
-        Ok(())
-    }
+pub(crate) type Ledger<'ledger> =
+    OutcomeLedger<'ledger, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>;
+pub(crate) type Watches = [Option<TestWatch>; LIVE_CAPACITY];
 
+impl CargoDriver<'_> {
     fn drained(&self, unaccounted: usize) -> bool {
         self.discovery.drained(unaccounted, self.parked.is_empty())
+            && self.active.is_none()
+            && self.pending_listing.is_none()
     }
 
-    #[cfg(not(feature = "edge-os"))]
-    fn run_listing_paused(
-        &mut self,
-        run: &ListingRun<'_>,
-        listing: PendingListing,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    ) -> Result<(), RunError> {
-        let stdout_open = !self.discovery.stdout_closed();
-        let stderr_open = !self.discovery.stderr_closed();
-        pause_cargo(&mut self.stdout, &mut self.stderr, stdout_open, stderr_open)?;
-        run_listing(run, listing, ledger, watches)?;
-        resume_cargo(&mut self.stdout, &mut self.stderr, stdout_open, stderr_open)
+    pub(crate) fn finished(&self, run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
+        self.drained(ledger.unaccounted()) && run.doc_tests_finished()
+    }
+
+    fn has_room(&self) -> bool {
+        self.active.is_none() || self.pending_listing.is_none()
+    }
+
+    pub(crate) fn cargo_open(&self) -> bool {
+        self.has_room() && self.cargo_backlog.is_none()
+    }
+
+    pub(crate) fn listing_open(&self, run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.ignoring || (active.backlog.is_none() && listing_wanted(run, ledger))
+        })
     }
 
     fn queue_listing(
         &mut self,
-        run: &ListingRun<'_>,
         started: Option<PendingListing>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+        lanes: &Lanes,
     ) -> Result<(), RunError> {
-        if let Some(next_listing) = started
-            && let Some(previous_listing) = self.pending_listing.replace(next_listing)
-        {
-            // cargo's descriptors live on prime's reactor under edge-os, so nothing on this port needs pausing
-            #[cfg(feature = "edge-os")]
-            run_listing(run, previous_listing, ledger, watches)?;
-            #[cfg(not(feature = "edge-os"))]
-            self.run_listing_paused(run, previous_listing, ledger, watches)?;
+        let Some(next) = started else {
+            return Ok(());
+        };
+        if self.active.is_some() {
+            self.pending_listing = Some(next);
+            return Ok(());
         }
+        self.begin_listing(next, lanes)
+    }
+
+    fn begin_listing(&mut self, mut listing: PendingListing, lanes: &Lanes) -> Result<(), RunError> {
+        self.ignored.clear();
+        self.listing_framer.reset();
+        self.ignored_framer.reset();
+        listing.ignoring = listing.ignored_child.is_some();
+        let child = listing
+            .ignored_child
+            .take()
+            .or_else(|| listing.child.take())
+            .ok_or(RunError::Spawn)?;
+        listing.lane_pid = attach(&lanes[LISTING_LANE], child)?;
+        self.active = Some(listing);
         Ok(())
     }
+
     fn release_parked(
         &mut self,
         run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-        reason: &[u8],
+        ledger: &Ledger<'_>,
+        lanes: &Lanes,
     ) -> Result<(), RunError> {
-        while let Some(owned) = self
-            .parked
-            .take_ready(|package_id| !self.discovery.waits(package_id))
-        {
+        while self.has_room() {
+            let Some(owned) = self
+                .parked
+                .take_ready(|package_id| !self.discovery.waits(package_id))
+            else {
+                self.drop_unreleasable(run);
+                return Ok(());
+            };
             let artifact = owned.as_artifact();
-            debug_gate_action(run.settings.debug, b" release", reason, &artifact);
+            debug_gate_action(run.settings.debug, b" release", self.reason, &artifact);
             let started =
                 start_listing(run, ledger, &artifact, &self.linked, &self.build_scripts)?;
-            self.queue_listing(run, started, ledger, watches)?;
+            self.queue_listing(started, lanes)?;
         }
         Ok(())
     }
 
-    fn finish_build(
-        &mut self,
-        run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-        reason: &[u8],
-    ) -> Result<(), RunError> {
-        self.release_parked(run, ledger, watches, reason)?;
-        while let Some(owned) = self.parked.take_ready(|_| true) {
+    fn drop_unreleasable(&mut self, run: &ListingRun<'_>) {
+        while self.finishing
+            && let Some(owned) = self.parked.take_ready(|_| true)
+        {
             self.dropped += 1;
-            debug_gate_action(run.settings.debug, b" drop", reason, &owned.as_artifact());
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "edge-os"))]
-    fn poll_artifacts(
-        &mut self,
-        context: &mut Context<'_>,
-        run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    ) -> Result<(), RunError> {
-        let mut bytes = [0; SOURCE_CAPACITY];
-        loop {
-            match Pin::new(&mut self.stdout).poll_read(context, &mut bytes) {
-                Poll::Pending => return Ok(()),
-                Poll::Ready(Err(_)) => return Err(RunError::CargoStream),
-                Poll::Ready(Ok(0)) => return self.advance(&[], true, run, ledger, watches),
-                Poll::Ready(Ok(length)) => {
-                    self.advance(&bytes[..length], false, run, ledger, watches)?;
-                }
-            }
+            debug_gate_action(run.settings.debug, b" drop", self.reason, &owned.as_artifact());
         }
     }
 
-    /// Parses one lent chunk of Cargo stdout, or the end-of-stream drain when `eof`, and acts on every record it completes.
-    pub(crate) fn advance(
+    /// Parses one lent chunk of Cargo stdout, or the end-of-stream drain when `eof`, acting on every record it completes while a listing slot is free.
+    /// Returns how many chunk bytes were consumed.
+    fn advance(
         &mut self,
         chunk: &[u8],
         eof: bool,
         run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    ) -> Result<(), RunError> {
+        ledger: &Ledger<'_>,
+        lanes: &Lanes,
+    ) -> Result<usize, RunError> {
         let mut context = Context::from_waker(Waker::noop());
         let mut offset = 0;
         loop {
+            if !self.has_room() {
+                return Ok(offset);
+            }
             let ready_before = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
             let (step, consumed) = if eof {
                 match CargoSource::poll_lent_eof(&mut self.framer, &mut *self.scratch, 16, &mut context) {
@@ -1997,7 +1755,7 @@ impl CargoDriver<'_, '_> {
                             &self.linked,
                             &self.build_scripts,
                         )?;
-                        self.queue_listing(run, started, ledger, watches)?;
+                        self.queue_listing(started, lanes)?;
                     }
                 }
                 CargoSourceStep::BinBuilt {
@@ -2006,17 +1764,20 @@ impl CargoDriver<'_, '_> {
                 } => {
                     debug_bin_built(run.settings.debug, executable, package_id);
                     self.discovery.bin_built(package_id);
-                    self.release_parked(run, ledger, watches, b"bin-built")?;
+                    self.reason = b"bin-built";
+                    self.release_parked(run, ledger, lanes)?;
                 }
                 CargoSourceStep::BuildFinished { success } => {
-                    let (event, reason): (&[u8], &[u8]) = if success {
+                    let (event, reason): (&[u8], &'static [u8]) = if success {
                         (b" build-finished success=true", b"build-succeeded")
                     } else {
                         (b" build-finished success=false", b"build-failed")
                     };
                     debug_build_end(run.settings.debug, event, self.parked.len());
                     self.discovery.build_finished(success);
-                    self.finish_build(run, ledger, watches, reason)?;
+                    self.finishing = true;
+                    self.reason = reason;
+                    self.release_parked(run, ledger, lanes)?;
                 }
                 CargoSourceStep::BuildScript(script) => {
                     for reported in script.linked_paths.iter() {
@@ -2034,12 +1795,14 @@ impl CargoDriver<'_, '_> {
                 CargoSourceStep::Eof => {
                     self.discovery.stdout_eof();
                     debug_build_end(run.settings.debug, b" stdout-eof", self.parked.len());
-                    return self.finish_build(run, ledger, watches, b"stdout-eof");
+                    self.finishing = true;
+                    self.reason = b"stdout-eof";
+                    return self.release_parked(run, ledger, lanes).map(|()| offset);
                 }
             }
             let ready = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
             if !eof && offset == chunk.len() && !ready {
-                return Ok(());
+                return Ok(offset);
             }
             if !progressed {
                 return Err(RunError::CargoStream);
@@ -2047,114 +1810,291 @@ impl CargoDriver<'_, '_> {
         }
     }
 
-    pub(crate) fn run_pending(
+    pub(crate) fn cargo_chunk(
         &mut self,
+        lanes: &Lanes,
+        range: Range<u32>,
+        offset: usize,
         run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+        ledger: &Ledger<'_>,
     ) -> Result<(), RunError> {
-        let Some(listing) = self.pending_listing.take() else {
-            return Ok(());
-        };
-        #[cfg(feature = "edge-os")]
-        run_listing(run, listing, ledger, watches)?;
-        #[cfg(not(feature = "edge-os"))]
-        self.run_listing_paused(run, listing, ledger, watches)?;
+        let slot = lanes[CARGO_LANE].0.borrow();
+        let stream = slot.as_deref().ok_or(RunError::CargoStream)?;
+        let bytes = stream.window(range.clone()).ok_or(RunError::CargoStream)?;
+        let consumed = offset + self.advance(&bytes[offset..], false, run, ledger, lanes)?;
+        let ready = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
+        self.cargo_backlog = (consumed < bytes.len() || ready).then_some((range, consumed));
         Ok(())
     }
 
-    #[cfg(feature = "edge-os")]
+    pub(crate) fn cargo_out_ended(&mut self) {
+        self.cargo_eof = true;
+    }
+
     pub(crate) fn forward_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
         write_fd(2, bytes)?;
         announce_lock_wait(&mut self.lock_watch, bytes)
     }
 
-    #[cfg(feature = "edge-os")]
     pub(crate) fn cargo_exited(&mut self, code: i32) {
         release_child(self.process_id);
         self.discovery.exited(code);
     }
 
-    #[cfg(feature = "edge-os")]
-    pub(crate) fn stdout_ended(
-        &mut self,
-        run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    ) -> Result<(), RunError> {
-        self.advance(&[], true, run, ledger, watches)?;
-        self.run_pending(run, ledger, watches)
-    }
-
-    #[cfg(feature = "edge-os")]
     pub(crate) fn stderr_ended(&mut self) {
         self.discovery.stderr_eof();
     }
 
-    #[cfg(feature = "edge-os")]
-    pub(crate) fn finished(
-        &self,
-        run: &ListingRun<'_>,
-        ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    ) -> bool {
-        self.drained(ledger.unaccounted()) && run.doc_tests_finished()
-    }
-
-    #[cfg(not(feature = "edge-os"))]
-    fn drive(
+    pub(crate) fn listing_chunk(
         &mut self,
+        lanes: &Lanes,
+        range: Range<u32>,
+        offset: usize,
         run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+        ledger: &mut Ledger<'_>,
+        watches: &mut Watches,
     ) -> Result<(), RunError> {
-        let mut events = [NativeEvent::default(); 64];
-        let mut context = Context::from_waker(Waker::noop());
-        self.reap()?;
-        while !self.drained(ledger.unaccounted()) || !run.doc_tests_finished() {
-            run.pump_doc_tests()?;
-            if !self.discovery.stdout_closed() {
-                self.poll_artifacts(&mut context, run, ledger, watches)?;
-            }
-            self.run_pending(run, ledger, watches)?;
-            if !self.discovery.stderr_closed()
-                && drain_reader(&mut self.stderr, 2, Some(&mut self.lock_watch))?
-            {
-                self.discovery.stderr_eof();
-            }
-            self.reap()?;
-            run.pump_doc_tests()?;
-            if self.drained(ledger.unaccounted()) && run.doc_tests_finished() {
-                break;
-            }
-            let ready = wait_for_events(run.port, run.signals, &mut events)?;
-            for event in events.iter().copied().take(ready) {
-                run.observe_doc_event(event);
-                self.dispatch_event(event, run, ledger, watches)?;
-            }
-            reap_unreported_children(run.port, ledger, watches, run.reporting())?;
+        let slot = lanes[LISTING_LANE].0.borrow();
+        let stream = slot.as_deref().ok_or(RunError::ListingStream)?;
+        let bytes = stream.window(range.clone()).ok_or(RunError::ListingStream)?;
+        let consumed = offset + self.listing_bytes(&bytes[offset..], run, ledger, watches)?;
+        let ready = self.listing_framer.frame_ready().map_err(|_| RunError::ListingStream)?;
+        if let Some(active) = self.active.as_mut() {
+            let stalled = !active.ignoring && (consumed < bytes.len() || ready);
+            active.backlog = stalled.then_some((range, consumed));
         }
         Ok(())
     }
 
-    #[cfg(not(feature = "edge-os"))]
-    fn dispatch_event(
+    fn listing_bytes(
         &mut self,
-        event: NativeEvent,
+        chunk: &[u8],
         run: &ListingRun<'_>,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    ) -> Result<(), RunError> {
-        let token = event.token;
-        if token == self.stdout.token() {
-            self.stdout.wake_read_ready();
-        } else if token == self.stderr.token() {
-            self.stderr.wake_read_ready();
-        } else if token == self.process.token() {
-            observe_exit(&mut self.process, event);
-            self.reap()?;
-        } else {
-            test_event(run.port, event, ledger, watches, run.reporting())?;
+        ledger: &mut Ledger<'_>,
+        watches: &mut Watches,
+    ) -> Result<usize, RunError> {
+        let Some(active) = self.active.as_ref() else {
+            return Ok(chunk.len());
+        };
+        if active.ignoring {
+            feed_ignored_lines(chunk, &mut self.ignored_framer, self.ignored)?;
+            return Ok(chunk.len());
         }
+        let executable = core::str::from_utf8(&active.path[..active.path_length])
+            .map_err(|_| RunError::Arguments)?;
+        let selection = Selection {
+            filter: run.filter,
+            exact: run.exact,
+            filterset: run.prepared,
+            package: active.identity.package(),
+            binary: active.identity.binary(),
+            mode: run.settings.ignore,
+            ignored: &*self.ignored,
+        };
+        let filter = NameFilter::Selected(&selection);
+        let scan = ListingScan {
+            run,
+            target: active.target,
+            environment: &active.environment,
+            layout: &active.layout,
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        let mut offset = 0;
+        loop {
+            let stopped = run.tripped(ledger);
+            let Poll::Ready(polled) = ListingSource::poll_lent(
+                &mut self.listing_framer,
+                ledger.sessions(),
+                &chunk[offset..],
+                ExecutablePath::Borrowed(executable),
+                filter,
+                &mut context,
+            ) else {
+                return Ok(offset);
+            };
+            let (step, consumed) = polled.map_err(|_| RunError::ListingStream)?;
+            offset += consumed;
+            if matches!(scan.apply(step, stopped, ledger, watches)?, Flow::Pause) {
+                return Ok(offset);
+            }
+            let ready = self.listing_framer.frame_ready().map_err(|_| RunError::ListingStream)?;
+            if offset == chunk.len() && !ready {
+                return Ok(offset);
+            }
+        }
+    }
+
+    fn listing_drain(
+        &mut self,
+        run: &ListingRun<'_>,
+        ledger: &mut Ledger<'_>,
+        watches: &mut Watches,
+    ) -> Result<bool, RunError> {
+        let Some(active) = self.active.as_ref() else {
+            return Ok(true);
+        };
+        let executable = core::str::from_utf8(&active.path[..active.path_length])
+            .map_err(|_| RunError::Arguments)?;
+        let selection = Selection {
+            filter: run.filter,
+            exact: run.exact,
+            filterset: run.prepared,
+            package: active.identity.package(),
+            binary: active.identity.binary(),
+            mode: run.settings.ignore,
+            ignored: &*self.ignored,
+        };
+        let filter = NameFilter::Selected(&selection);
+        let scan = ListingScan {
+            run,
+            target: active.target,
+            environment: &active.environment,
+            layout: &active.layout,
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        loop {
+            let stopped = run.tripped(ledger);
+            let Poll::Ready(polled) = ListingSource::poll_lent_eof(
+                &mut self.listing_framer,
+                ledger.sessions(),
+                ExecutablePath::Borrowed(executable),
+                filter,
+                &mut context,
+            ) else {
+                return Ok(false);
+            };
+            let step = polled.map_err(|_| RunError::ListingStream)?;
+            match scan.apply(step, stopped, ledger, watches)? {
+                Flow::Eof => return Ok(true),
+                Flow::Pause => return Ok(false),
+                Flow::Next => {}
+            }
+        }
+    }
+
+    pub(crate) fn listing_stdout_ended(&mut self) {
+        if let Some(active) = self.active.as_mut() {
+            active.stdout = if active.ignoring {
+                StdoutState::Drained
+            } else {
+                StdoutState::Ended
+            };
+        }
+    }
+
+    pub(crate) fn listing_stderr_ended(&mut self) {
+        if let Some(active) = self.active.as_mut() {
+            active.stderr_done = true;
+        }
+    }
+
+    pub(crate) fn listing_exited(&mut self, code: i32) {
+        if let Some(active) = self.active.as_mut() {
+            release_child(active.lane_pid);
+            active.exit = Some(code);
+        }
+    }
+
+    /// Advances everything that was waiting on room, a free job slot, or a finished listing, until nothing moves.
+    pub(crate) fn resume(
+        &mut self,
+        lanes: &Lanes,
+        run: &ListingRun<'_>,
+        ledger: &mut Ledger<'_>,
+        watches: &mut Watches,
+    ) -> Result<(), RunError> {
+        while self.resume_once(lanes, run, ledger, watches)? {}
+        Ok(())
+    }
+
+    fn resume_once(
+        &mut self,
+        lanes: &Lanes,
+        run: &ListingRun<'_>,
+        ledger: &mut Ledger<'_>,
+        watches: &mut Watches,
+    ) -> Result<bool, RunError> {
+        if self.settle_listing(lanes, run, ledger, watches)? {
+            return Ok(true);
+        }
+        if let Some((range, offset)) = self.listing_backlog()
+            && listing_wanted(run, ledger)
+        {
+            self.listing_chunk(lanes, range, offset, run, ledger, watches)?;
+            return Ok(self.listing_backlog().is_none_or(|(_, moved)| moved > offset));
+        }
+        let parked = self.parked.len();
+        self.release_parked(run, ledger, lanes)?;
+        if self.parked.len() != parked {
+            return Ok(true);
+        }
+        if let Some((range, offset)) = self.cargo_backlog.clone()
+            && self.has_room()
+        {
+            self.cargo_backlog = None;
+            self.cargo_chunk(lanes, range, offset, run, ledger)?;
+            return Ok(self.cargo_backlog.as_ref().is_none_or(|(_, moved)| *moved > offset));
+        }
+        if self.cargo_eof && !self.discovery.stdout_closed() && self.cargo_backlog.is_none() && self.has_room() {
+            self.advance(&[], true, run, ledger, lanes)?;
+            return Ok(self.discovery.stdout_closed());
+        }
+        Ok(false)
+    }
+
+    fn listing_backlog(&self) -> Option<(Range<u32>, usize)> {
+        self.active.as_ref().and_then(|active| active.backlog.clone())
+    }
+
+    fn settle_listing(
+        &mut self,
+        lanes: &Lanes,
+        run: &ListingRun<'_>,
+        ledger: &mut Ledger<'_>,
+        watches: &mut Watches,
+    ) -> Result<bool, RunError> {
+        let Some(active) = self.active.as_ref() else {
+            return Ok(false);
+        };
+        if active.stdout == StdoutState::Ended
+            && active.backlog.is_none()
+            && listing_wanted(run, ledger)
+        {
+            let done = self.listing_drain(run, ledger, watches)?;
+            if let Some(active) = self.active.as_mut()
+                && done
+            {
+                active.stdout = StdoutState::Drained;
+            }
+            return Ok(done);
+        }
+        if !(active.stdout == StdoutState::Drained && active.stderr_done && active.exit.is_some()) {
+            return Ok(false);
+        }
+        if active.exit.is_some_and(|code| code != 0) && !run.interrupted() {
+            return Err(RunError::ListingFailed);
+        }
+        if active.ignoring {
+            return self.start_main_listing(lanes).map(|()| true);
+        }
+        self.active = None;
+        if let Some(next) = self.pending_listing.take() {
+            self.begin_listing(next, lanes)?;
+        }
+        Ok(true)
+    }
+
+    fn start_main_listing(&mut self, lanes: &Lanes) -> Result<(), RunError> {
+        let Some(active) = self.active.as_mut() else {
+            return Ok(());
+        };
+        let child = active.child.take().ok_or(RunError::Spawn)?;
+        active.ignoring = false;
+        active.stdout = StdoutState::Open;
+        active.stderr_done = false;
+        active.exit = None;
+        active.lane_pid = attach(&lanes[LISTING_LANE], child)?;
+        self.listing_framer.reset();
         Ok(())
     }
 }
@@ -2176,21 +2116,7 @@ fn collect_libdirs(
     Ok((host_length, target_length))
 }
 
-/// Drives Cargo's artifact source and child process events from one native reactor.
-///
-/// # Errors
-///
-/// Returns [`RunError`] naming the stage that failed: arguments, environment, spawn, reactor, stream parsing, launch, or outcome accounting.
-#[cfg(not(feature = "edge-os"))]
-pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
-    let mut run = core::pin::pin!(run_body(parser));
-    match run.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(summary) => summary,
-        Poll::Pending => Err(RunError::Reactor),
-    }
-}
-
-/// Runs everything but the observation of the cargo build child, which is native-reactor blocking or a prime await by feature.
+/// Runs the whole cargo-val run: setup, the awaited prime loop, and the summary.
 ///
 /// # Errors
 ///
@@ -2202,17 +2128,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let settings = runtime_settings(&environment, &harness, parser)?;
     let mut storage = run_storage();
     let storage: &mut RunStorage<'_> = &mut storage;
-    let (
-        frame_bytes,
-        scratch,
-        linked_bytes,
-        build_script_bytes,
-        libdir_bytes,
-        inherited,
-        envp,
-        sessions,
-        watches,
-    ) = storage;
+    let (cargo_storage, (libdir_bytes, inherited, envp), (sessions, watches)) = storage;
     let inherited_count = environment
         .collect(inherited)
         .map_err(|_| RunError::Environment)?;
@@ -2240,31 +2156,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         lock_watch,
     } = start_children(parser, &settings, target_mode, &port, envp)?;
     let cargo_process_id = cargo_child.process_id();
-    #[cfg(not(feature = "edge-os"))]
-    let (stdout, stderr, process) = reader_pair(&port, cargo_child)?;
-    #[cfg(not(feature = "edge-os"))]
-    let cargo_child = ();
-    let mut driver = held(CargoDriver {
-        #[cfg(not(feature = "edge-os"))]
-        stdout,
-        #[cfg(not(feature = "edge-os"))]
-        stderr,
-        #[cfg(not(feature = "edge-os"))]
-        process,
-        #[cfg(feature = "edge-os")]
-        marker: core::marker::PhantomData,
-        process_id: cargo_process_id,
-        framer: ArtifactFramer::new(frame_bytes, FRAME_CAPACITY - 1)
-            .map_err(|_| RunError::CargoStream)?,
-        scratch,
-        linked: LinkedDirectories::new(linked_bytes),
-        build_scripts: BuildScriptOutputs::new(build_script_bytes),
-        pending_listing: None,
-        discovery: DiscoveryFsm::new(bins, gate),
-        parked: ParkedArtifacts::new(),
-        dropped: 0,
-        lock_watch,
-    });
+    let mut driver = held(new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?);
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .inspect_err(|_| unsafe {
@@ -2296,63 +2188,84 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     finish_run(parser, &run, driver.discovery.exit_code())
 }
 
-type RunStorage<'environment> = (
+type CargoStorage = (
     [u8; FRAME_CAPACITY],
     [u8; SCRATCH_CAPACITY],
     [u8; LINKED_CAPACITY],
     [u8; BUILD_SCRIPT_CAPACITY],
-    [u8; LIBDIR_CAPACITY * 2],
-    [&'environment CStr; ENV_CAPACITY],
-    [*const c_char; ENV_CAPACITY + 1],
-    SessionSlots<RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    [Option<TestWatch>; LIVE_CAPACITY],
+    [u8; SOURCE_CAPACITY + 1],
+    [u8; RESULT_LINE_CAPACITY + 1],
+    IgnoredSet,
 );
 
-#[cfg(not(feature = "edge-os"))]
-fn run_storage<'environment>() -> RunStorage<'environment> {
-    new_storage()
-}
-
-fn new_storage<'environment>() -> RunStorage<'environment> {
+type RunStorage<'environment> = (
+    CargoStorage,
     (
-        [0; FRAME_CAPACITY],
-        [0; SCRATCH_CAPACITY],
-        [0; LINKED_CAPACITY],
-        [0; BUILD_SCRIPT_CAPACITY],
-        [0; LIBDIR_CAPACITY * 2],
-        [c""; ENV_CAPACITY],
-        [core::ptr::null(); ENV_CAPACITY + 1],
-        SessionSlots::new(),
-        [const { None }; LIVE_CAPACITY],
-    )
+        [u8; LIBDIR_CAPACITY * 2],
+        [&'environment CStr; ENV_CAPACITY],
+        [*const c_char; ENV_CAPACITY + 1],
+    ),
+    (
+        SessionSlots<RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        [Option<TestWatch>; LIVE_CAPACITY],
+    ),
+);
+
+// run-sized fixed storage too large for any stack frame or future, allocated once
+fn run_storage<'environment>() -> std::boxed::Box<RunStorage<'environment>> {
+    std::boxed::Box::new((
+        (
+            [0; FRAME_CAPACITY],
+            [0; SCRATCH_CAPACITY],
+            [0; LINKED_CAPACITY],
+            [0; BUILD_SCRIPT_CAPACITY],
+            [0; SOURCE_CAPACITY + 1],
+            [0; RESULT_LINE_CAPACITY + 1],
+            IgnoredSet::new(),
+        ),
+        (
+            [0; LIBDIR_CAPACITY * 2],
+            [c""; ENV_CAPACITY],
+            [core::ptr::null(); ENV_CAPACITY + 1],
+        ),
+        (SessionSlots::new(), [const { None }; LIVE_CAPACITY]),
+    ))
 }
 
 // the driver and the run own tens of KiB each of fixed parking and target tables, too large to sit in the root future
-#[cfg(feature = "edge-os")]
 fn held<Value>(value: Value) -> std::boxed::Box<Value> {
     std::boxed::Box::new(value)
 }
 
-#[cfg(not(feature = "edge-os"))]
-const fn held<Value>(value: Value) -> Value {
-    value
-}
-
-// run-sized fixed storage too large for any stack frame or future, allocated once
-#[cfg(feature = "edge-os")]
-fn run_storage<'environment>() -> std::boxed::Box<RunStorage<'environment>> {
-    std::boxed::Box::new(new_storage())
-}
-
-#[cfg(not(feature = "edge-os"))]
-fn observe_cargo(
-    (): (),
-    driver: &mut CargoDriver<'_, '_>,
-    run: &ListingRun<'_>,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-) -> core::future::Ready<Result<(), RunError>> {
-    core::future::ready(driver.drive(run, ledger, watches))
+fn new_driver(
+    (frame, scratch, linked, scripts, listing_frame, ignored_frame, ignored): &mut CargoStorage,
+    process_id: libc::pid_t,
+    bins: BinCounts,
+    gate: BinGate,
+    lock_watch: LockWatch,
+) -> Result<CargoDriver<'_>, RunError> {
+    Ok(CargoDriver {
+        process_id,
+        framer: ArtifactFramer::new(frame, FRAME_CAPACITY - 1).map_err(|_| RunError::CargoStream)?,
+        scratch,
+        linked: LinkedDirectories::new(linked),
+        build_scripts: BuildScriptOutputs::new(scripts),
+        listing_framer: ArtifactFramer::new(listing_frame, SOURCE_CAPACITY)
+            .map_err(|_| RunError::ListingStream)?,
+        ignored_framer: ArtifactFramer::new(ignored_frame, RESULT_LINE_CAPACITY)
+            .map_err(|_| RunError::ListingStream)?,
+        ignored,
+        active: None,
+        pending_listing: None,
+        cargo_backlog: None,
+        cargo_eof: false,
+        finishing: false,
+        reason: b"",
+        discovery: DiscoveryFsm::new(bins, gate),
+        parked: ParkedArtifacts::new(),
+        dropped: 0,
+        lock_watch,
+    })
 }
 
 fn filter_text<'argument>(parser: &CliParser<'argument>) -> Result<&'argument str, RunError> {
@@ -2594,7 +2507,6 @@ fn forward_signals(
 }
 
 /// Dispatches everything the old port holds right now, without waiting, so a prime gate on the port can park again.
-#[cfg(feature = "edge-os")]
 pub(crate) fn service_port(
     run: &ListingRun<'_>,
     ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,

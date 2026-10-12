@@ -1,3 +1,4 @@
+
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::num::NonZeroI32;
@@ -22,26 +23,66 @@ use crate::edge_exit_macos::MacosExit as ExitSource;
 use crate::cli::CliParser;
 use crate::edge_stream_unix::ChildStream;
 use crate::host::unix_driver::{
-    CargoDriver, LIVE_CAPACITY, ListingRun, NAME_CAPACITY, RunError, RunSummary, TestWatch,
-    run_body, service_port,
+    CargoDriver, Ledger, ListingRun, RunError, RunSummary, Watches, run_body, service_port,
+    write_fd,
 };
 use crate::host::unix_spawn::UnixChild;
-use crate::outcomes::OutcomeLedger;
-use crate::runner::RunningUnixChild;
+
+pub(crate) const CARGO_LANE: usize = 0;
+pub(crate) const LISTING_LANE: usize = 1;
+const LANES: usize = 2;
+const ARMS: usize = LANES * 3 + 1;
+
+/// One child's stdout and stderr streams, its exit source, and whether its stdout may be read now.
+pub(crate) type Lane = (
+    RefCell<Option<Box<ChildStream>>>,
+    RefCell<Option<Box<ChildStream>>>,
+    RefCell<Option<ExitSource>>,
+    Cell<bool>,
+);
+
+pub(crate) type Lanes = [Lane; LANES];
+
+pub(crate) fn empty_lanes() -> Lanes {
+    core::array::from_fn(|_| {
+        (
+            RefCell::new(None),
+            RefCell::new(None),
+            RefCell::new(None),
+            Cell::new(true),
+        )
+    })
+}
+
+/// Gives `lane` the child's streams and exit source; an empty lane parks, so the merge never ends on it.
+///
+/// # Errors
+///
+/// Returns [`RunError::Spawn`] when the child has no usable process id.
+pub(crate) fn attach(lane: &Lane, child: UnixChild) -> Result<libc::pid_t, RunError> {
+    let (process_id, stdout, stderr) = child.into_parts();
+    let exit = ExitSource::new(NonZeroI32::new(process_id).ok_or(RunError::Spawn)?);
+    // each stream owns a 20 KiB capture window, too large to sit in the awaited future
+    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(stdout.into_fd())));
+    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(stderr.into_fd())));
+    *lane.2.borrow_mut() = Some(exit);
+    lane.3.set(true);
+    Ok(process_id)
+}
 
 pub(crate) enum Edge<'edge> {
-    Out(&'edge ChildStream, &'edge Cell<bool>),
-    Err(&'edge ChildStream, &'edge Cell<bool>),
-    Exit(&'edge ExitSource),
+    Out(usize, &'edge Lane),
+    Err(usize, &'edge Lane),
+    Exit(usize, &'edge Lane),
     Port(Option<&'edge RefCell<Readiness>>),
 }
 
 pub(crate) enum Item {
-    Out(io::Result<Range<u32>>),
-    OutEnd,
-    Err(io::Result<Range<u32>>),
-    ErrEnd,
-    Exit(io::Result<ExitStatus>),
+    Out(usize, io::Result<Range<u32>>),
+    OutEnd(usize),
+    Err(usize, io::Result<Range<u32>>),
+    ErrEnd(usize),
+    Exit(usize, io::Result<ExitStatus>),
     Port(io::Result<()>),
 }
 
@@ -54,13 +95,11 @@ impl UnpinPipe for Edge<'_> {
 
     fn call(&self, (): ()) -> impl Future<Output = Result<Item, Exhausted>> + Unpin {
         poll_fn(move |context| match self {
-            Edge::Out(stream, reported) => {
-                stream_step(stream, reported, context, Item::Out, Item::OutEnd)
+            Edge::Out(id, lane) => {
+                stream_step(&lane.0, lane.3.get(), context, (*id, Item::Out, Item::OutEnd))
             }
-            Edge::Err(stream, reported) => {
-                stream_step(stream, reported, context, Item::Err, Item::ErrEnd)
-            }
-            Edge::Exit(exit) => step(*exit, context).map_ok(Item::Exit),
+            Edge::Err(id, lane) => stream_step(&lane.1, true, context, (*id, Item::Err, Item::ErrEnd)),
+            Edge::Exit(id, lane) => exit_step(&lane.2, *id, context),
             Edge::Port(gate) => {
                 gate.map_or(Poll::Ready(Err(Exhausted)), |gate| port_step(gate, context))
             }
@@ -68,17 +107,60 @@ impl UnpinPipe for Edge<'_> {
     }
 }
 
-// the merge swallows Exhausted, so the first one is turned into an item the loop can act on
-fn stream_step(
-    stream: &ChildStream,
-    reported: &Cell<bool>,
+fn step<Source: UnpinPipe<In = (), Err = Exhausted>>(
+    source: &Source,
     context: &mut Context<'_>,
-    read: fn(io::Result<Range<u32>>) -> Item,
-    ended: Item,
+) -> Poll<Result<Source::Out, Exhausted>> {
+    let mut call = source.call(());
+    Pin::new(&mut call).poll(context)
+}
+
+type StreamItems = (usize, fn(usize, io::Result<Range<u32>>) -> Item, fn(usize) -> Item);
+
+// the merge swallows Exhausted, so the first one is turned into an item the loop can act on; a gated or empty lane parks
+fn stream_step(
+    slot: &RefCell<Option<Box<ChildStream>>>,
+    wanted: bool,
+    context: &mut Context<'_>,
+    (id, read, ended): StreamItems,
 ) -> Poll<Result<Item, Exhausted>> {
-    match step(stream, context) {
-        Poll::Ready(Err(Exhausted)) if !reported.replace(true) => Poll::Ready(Ok(ended)),
-        other => other.map_ok(read),
+    if !wanted {
+        return Poll::Pending;
+    }
+    let mut guard = slot.borrow_mut();
+    let polled = match guard.as_deref() {
+        Some(stream) => step(stream, context),
+        None => return Poll::Pending,
+    };
+    match polled {
+        Poll::Ready(Err(Exhausted)) => {
+            *guard = None;
+            Poll::Ready(Ok(ended(id)))
+        }
+        other => other.map_ok(|chunk| read(id, chunk)),
+    }
+}
+
+fn exit_step(
+    slot: &RefCell<Option<ExitSource>>,
+    id: usize,
+    context: &mut Context<'_>,
+) -> Poll<Result<Item, Exhausted>> {
+    let mut guard = slot.borrow_mut();
+    let polled = match guard.as_ref() {
+        Some(exit) => step(exit, context),
+        None => return Poll::Pending,
+    };
+    match polled {
+        Poll::Ready(Ok(status)) => {
+            *guard = None;
+            Poll::Ready(Ok(Item::Exit(id, status)))
+        }
+        Poll::Ready(Err(Exhausted)) => {
+            *guard = None;
+            Poll::Pending
+        }
+        Poll::Pending => Poll::Pending,
     }
 }
 
@@ -93,35 +175,35 @@ fn port_step(gate: &RefCell<Readiness>, context: &Context<'_>) -> Poll<Result<It
     }
 }
 
-fn step<Source: UnpinPipe<In = (), Err = Exhausted>>(
-    source: &Source,
-    context: &mut Context<'_>,
-) -> Poll<Result<Source::Out, Exhausted>> {
-    let mut call = source.call(());
-    Pin::new(&mut call).poll(context)
+fn edge<'edge>(
+    lanes: &'edge Lanes,
+    port: Option<&'edge RefCell<Readiness>>,
+    index: usize,
+) -> Edge<'edge> {
+    if index == ARMS - 1 {
+        return Edge::Port(port);
+    }
+    let lane = &lanes[index / 3];
+    match index % 3 {
+        0 => Edge::Out(index / 3, lane),
+        1 => Edge::Err(index / 3, lane),
+        _ => Edge::Exit(index / 3, lane),
+    }
 }
 
-/// Awaits the merged cargo child sources, and the old port when `port` is given, until `on_item` breaks or every source is exhausted.
+/// Awaits every lane's streams and exit, and the old port when `port` is given, until `on_item` breaks.
 /// Returns how many polls parked on the reactor.
 ///
 /// # Errors
 ///
 /// Returns the first error `on_item` reports.
-pub(crate) async fn pump_cargo(
-    stdout: &ChildStream,
-    stderr: &ChildStream,
-    exit: &ExitSource,
+pub(crate) async fn pump(
+    lanes: &Lanes,
     port: Option<&RefCell<Readiness>>,
     mut on_item: impl FnMut(Item) -> Result<ControlFlow<()>, RunError>,
 ) -> Result<usize, RunError> {
-    let (out_reported, err_reported) = (Cell::new(false), Cell::new(false));
     let merged = FanIn::new(
-        [
-            Edge::Out(stdout, &out_reported),
-            Edge::Err(stderr, &err_reported),
-            Edge::Exit(exit),
-            Edge::Port(port),
-        ],
+        core::array::from_fn::<_, ARMS, _>(|index| edge(lanes, port, index)),
         Select::RoundRobin,
     );
     let mut parks = 0;
@@ -143,51 +225,92 @@ pub(crate) async fn pump_cargo(
     }
 }
 
-/// Observes the cargo build child through prime sources only, then settles whatever its artifacts launched.
+fn exit_code(status: io::Result<ExitStatus>) -> Result<i32, RunError> {
+    status
+        .map(|status| status.code().unwrap_or(1))
+        .map_err(|_| RunError::Reactor)
+}
+
+fn handle(
+    item: Item,
+    lanes: &Lanes,
+    driver: &mut CargoDriver<'_>,
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+) -> Result<(), RunError> {
+    match item {
+        Item::Out(CARGO_LANE, range) => {
+            let range = range.map_err(|_| RunError::CargoStream)?;
+            driver.cargo_chunk(lanes, range, 0, run, ledger)
+        }
+        Item::Out(_, range) => {
+            let range = range.map_err(|_| RunError::ListingStream)?;
+            driver.listing_chunk(lanes, range, 0, run, ledger, watches)
+        }
+        Item::OutEnd(CARGO_LANE) => {
+            driver.cargo_out_ended();
+            Ok(())
+        }
+        Item::OutEnd(_) => {
+            driver.listing_stdout_ended();
+            Ok(())
+        }
+        Item::Err(lane, range) => {
+            let range = range.map_err(|_| RunError::Reactor)?;
+            let slot = lanes[lane].1.borrow();
+            let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+            let bytes = stream.window(range).ok_or(RunError::Reactor)?;
+            if lane == CARGO_LANE {
+                driver.forward_stderr(&bytes)
+            } else {
+                write_fd(2, &bytes)
+            }
+        }
+        Item::ErrEnd(CARGO_LANE) => {
+            driver.stderr_ended();
+            Ok(())
+        }
+        Item::ErrEnd(_) => {
+            driver.listing_stderr_ended();
+            Ok(())
+        }
+        Item::Exit(CARGO_LANE, status) => {
+            driver.cargo_exited(exit_code(status)?);
+            Ok(())
+        }
+        Item::Exit(_, status) => {
+            driver.listing_exited(exit_code(status)?);
+            Ok(())
+        }
+        Item::Port(ready) => {
+            ready.map_err(|_| RunError::Reactor)?;
+            service_port(run, ledger, watches)
+        }
+    }
+}
+
+/// Observes the cargo build child, its listings, and the old port through prime sources only, until every launched child is accounted for.
 ///
 /// # Errors
 ///
 /// Returns [`RunError`] when a stream faults, a record is rejected, or a launched child cannot be accounted for.
 pub(crate) async fn observe_cargo(
     child: UnixChild,
-    driver: &mut CargoDriver<'_, '_>,
+    driver: &mut CargoDriver<'_>,
     run: &ListingRun<'_>,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
 ) -> Result<(), RunError> {
-    let (process_id, stdout_descriptor, stderr_descriptor) = child.into_parts();
-    let process_id = NonZeroI32::new(process_id).ok_or(RunError::Spawn)?;
-    // each stream owns a 20 KiB capture window, too large to sit in the awaited future
-    let stdout = Box::new(ChildStream::new(stdout_descriptor.into_fd()));
-    let stderr = Box::new(ChildStream::new(stderr_descriptor.into_fd()));
-    let exit = ExitSource::new(process_id);
+    let lanes = empty_lanes();
+    attach(&lanes[CARGO_LANE], child)?;
     let port = RefCell::new(Readiness::new(run.port_fd()));
-    pump_cargo(&stdout, &stderr, &exit, Some(&port), |item| {
-        match item {
-            Item::Out(range) => {
-                let range = range.map_err(|_| RunError::CargoStream)?;
-                let bytes = stdout.window(range).ok_or(RunError::CargoStream)?;
-                driver.advance(&bytes, false, run, ledger, watches)?;
-                drop(bytes);
-                driver.run_pending(run, ledger, watches)?;
-            }
-            Item::OutEnd => driver.stdout_ended(run, ledger, watches)?,
-            Item::Err(range) => {
-                let range = range.map_err(|_| RunError::Reactor)?;
-                let bytes = stderr.window(range).ok_or(RunError::Reactor)?;
-                driver.forward_stderr(&bytes)?;
-            }
-            Item::ErrEnd => driver.stderr_ended(),
-            Item::Exit(status) => {
-                let status = status.map_err(|_| RunError::Reactor)?;
-                driver.cargo_exited(status.code().unwrap_or(1));
-            }
-            Item::Port(ready) => {
-                ready.map_err(|_| RunError::Reactor)?;
-                service_port(run, ledger, watches)?;
-            }
-        }
+    pump(&lanes, Some(&port), |item| {
+        handle(item, &lanes, driver, run, ledger, watches)?;
+        driver.resume(&lanes, run, ledger, watches)?;
         run.pump_doc_tests()?;
+        lanes[CARGO_LANE].3.set(driver.cargo_open());
+        lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
         Ok(if driver.finished(run, ledger) {
             ControlFlow::Break(())
         } else {
@@ -224,7 +347,7 @@ mod tests {
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
 
-    use super::{ChildStream, CString, ExitSource, Item, NonZeroI32, RunError, pump_cargo};
+    use super::{CARGO_LANE, CString, Item, RunError, attach, empty_lanes, pump};
     use crate::artifact_stream::ArtifactFramer;
     use crate::cargo_source::{CargoSource, CargoSourceStep};
     use crate::edge_exit::fixture::in_single_threaded_process;
@@ -331,33 +454,41 @@ mod tests {
         envp.push(core::ptr::null());
         let child = spawn_raw_unix(program.as_c_str(), &argv, &envp, None::<&CStr>, true).expect("cargo spawns");
         run_on_this_thread(CoreId(0), async move {
-            let (process_id, stdout_descriptor, stderr_descriptor) = child.into_parts();
-            let stdout = ChildStream::new(stdout_descriptor.into_fd());
-            let stderr = ChildStream::new(stderr_descriptor.into_fd());
-            let exit = ExitSource::new(NonZeroI32::new(process_id).expect("positive pid"));
+            let lanes = empty_lanes();
+            attach(&lanes[CARGO_LANE], child).expect("cargo child attaches");
             let mut frame_bytes = vec![0; FRAME_BYTES];
             let mut scratch = [0; SCRATCH_BYTES];
             let mut framer = ArtifactFramer::new(&mut frame_bytes, FRAME_BYTES - 1).expect("framer fits");
             let mut found = Vec::new();
             let mut raw = Vec::new();
-            let parks = pump_cargo(&stdout, &stderr, &exit, None, |item| {
+            let (mut exited, mut out_ended, mut err_ended) = (false, false, false);
+            let parks = pump(&lanes, None, |item| {
                 match item {
-                    Item::Out(range) => {
-                        let bytes = stdout
+                    Item::Out(_, range) => {
+                        let slot = lanes[CARGO_LANE].0.borrow();
+                        let stream = slot.as_deref().expect("stdout stream is attached");
+                        let bytes = stream
                             .window(range.expect("stdout read"))
                             .ok_or(RunError::CargoStream)?;
                         raw.extend_from_slice(&bytes);
                         collect(&mut framer, &mut scratch, &bytes, false, &mut found);
                     }
-                    Item::Err(range) => {
+                    Item::Err(_, range) => {
                         range.expect("stderr read");
                     }
-                    Item::Exit(status) => {
+                    Item::Exit(_, status) => {
                         assert_eq!(status.expect("exit status").code(), Some(0), "cargo exits cleanly");
+                        exited = true;
                     }
-                    Item::OutEnd | Item::ErrEnd | Item::Port(_) => {}
+                    Item::OutEnd(_) => out_ended = true,
+                    Item::ErrEnd(_) => err_ended = true,
+                    Item::Port(_) => {}
                 }
-                Ok(ControlFlow::Continue(()))
+                Ok(if exited && out_ended && err_ended {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
             })
             .await
             .expect("pump completes");

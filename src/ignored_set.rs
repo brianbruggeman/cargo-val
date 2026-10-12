@@ -39,6 +39,13 @@ impl IgnoredSet {
         }
     }
 
+    /// Forgets every name so the same storage serves the next binary.
+    pub fn clear(&mut self) {
+        self.slots.fill(0);
+        self.used = 0;
+        self.entries = 0;
+    }
+
     /// Number of distinct names held.
     #[must_use]
     pub const fn len(&self) -> usize {
