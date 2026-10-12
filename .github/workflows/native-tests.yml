@@ -88,3 +88,6 @@ jobs:
       - name: Time one test-binary launch per spawn path
         shell: bash
         run: cargo run --locked --release --example launch_cost
+      - name: Time a spawn-once proxima worker pool at 13k tests
+        shell: bash
+        run: cargo run --locked --release --example worker_scale
