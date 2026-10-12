@@ -36,9 +36,9 @@ use std::boxed::Box;
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
 use crate::edge_signal_unix::{SignalPipe, conventional_status, release_child, track_child};
-use crate::host::unix_env::UnixEnvironment;
-use crate::host::unix_rustc::spawn_libdir_query;
-use crate::host::unix_spawn::{UnixChild, spawn_raw_unix, spawn_raw_unix_in_new_group};
+use crate::unix_env::UnixEnvironment;
+use crate::unix_spawn::spawn_libdir_query;
+use crate::unix_spawn::{UnixChild, spawn_raw_unix, spawn_raw_unix_in_new_group};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
 use crate::reporter::write_report;
@@ -2829,7 +2829,7 @@ mod tests {
 
     #[test]
     fn real_ignored_listing_fills_the_set_at_every_chunk_size() {
-        const IGNORED: &[u8] = include_bytes!("../../tests/fixtures/listing/ignore_modes_list_ignored.txt");
+        const IGNORED: &[u8] = include_bytes!("../tests/fixtures/listing/ignore_modes_list_ignored.txt");
         for chunk_size in [1, 2, 7, 16, IGNORED.len()] {
             let set = collected(chunk_size, IGNORED).expect("real listing frames");
 
@@ -2840,7 +2840,7 @@ mod tests {
 
     #[test]
     fn full_listing_names_every_test_and_skips_the_summary() {
-        const LISTING: &[u8] = include_bytes!("../../tests/fixtures/listing/ignore_modes_list.txt");
+        const LISTING: &[u8] = include_bytes!("../tests/fixtures/listing/ignore_modes_list.txt");
         let set = collected(5, LISTING).expect("real listing frames");
 
         assert_eq!(set.len(), 3);

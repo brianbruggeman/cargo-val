@@ -24,11 +24,11 @@ use crate::edge_exit_macos::MacosExit as ExitSource;
 use crate::cli::CliParser;
 use crate::edge_signal_unix::SignalPipe;
 use crate::edge_stream_unix::ChildStream;
-use crate::host::unix_driver::{
+use crate::unix_driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
     Watches, run_body, session_ended, session_exited, session_output, write_fd,
 };
-use crate::host::unix_spawn::UnixChild;
+use crate::unix_spawn::UnixChild;
 
 pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
@@ -572,8 +572,8 @@ mod tests {
     use crate::artifact_stream::ArtifactFramer;
     use crate::cargo_source::{CargoSource, CargoSourceStep};
     use crate::edge_exit::fixture::in_single_threaded_process;
-    use crate::host::unix_rustc::spawn_libdir_query;
-    use crate::host::unix_spawn::spawn_raw_unix;
+    use crate::unix_spawn::spawn_libdir_query;
+    use crate::unix_spawn::spawn_raw_unix;
     use crate::test_dir::tempdir;
 
     use core::task::{Context, Poll};

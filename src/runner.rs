@@ -3,7 +3,7 @@
 use core::ffi::{CStr, c_char, c_int};
 
 use crate::child_completion::{ChildCompletion, ChildCompletionEvent, InvalidChildCompletionEvent};
-use crate::host::unix_spawn::{UnixChild, UnixSpawnError, spawn_unix};
+use crate::unix_spawn::{UnixChild, UnixSpawnError, spawn_unix};
 use crate::host_event::{HostEvent, StaleHostEvent};
 use crate::outcomes::{OutcomeError, OutcomeLedger, StartError, TerminalOutcome};
 use crate::reporter::{ReportError, write_report};
