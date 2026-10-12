@@ -9,9 +9,9 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 #[cfg(windows)]
-use cargo_val::edge_spawn_windows::{HeldLaunchStorage, held_launch_storage, spawn_exact};
+use cargo_val::edge_spawn_windows::{Child, HeldLaunchStorage, held_launch_storage, resume_ready, spawn_exact, spawn_exact_ready};
 #[cfg(not(windows))]
-use cargo_val::edge_spawn_unix::{HeldLaunchStorage, held_launch_storage, spawn_exact};
+use cargo_val::edge_spawn_unix::{Child, HeldLaunchStorage, held_launch_storage, resume_ready, spawn_exact, spawn_exact_ready};
 
 const FIRST_BINARY: &str = "scale_00";
 const PASSING_TEST: &str = "cases::b0_i00000";
@@ -209,16 +209,22 @@ fn measure() -> Result<(), String> {
     println!("launch_cost: {} launches per arm of {}", count, launcher.executable.display());
     for _ in 0..WARMUP {
         PATHS.iter().try_for_each(|path| launcher.launch(*path))?;
+        SPLIT_ARMS.iter().try_for_each(|arm| launcher.split_launch(*arm).map(drop))?;
     }
     let mut samples = vec![Vec::with_capacity(count); PATHS.len()];
+    let mut split_samples = vec![Vec::with_capacity(count); SPLIT_ARMS.len()];
     for _ in 0..count {
         for (slot, path) in PATHS.iter().enumerate() {
             let start = Instant::now();
             launcher.launch(*path)?;
             samples[slot].push(start.elapsed().as_secs_f64() * 1e6);
         }
+        for (slot, arm) in SPLIT_ARMS.iter().enumerate() {
+            split_samples[slot].push(launcher.split_launch(*arm)?);
+        }
     }
     report(&mut samples);
+    report_split(&mut split_samples);
     Ok(())
 }
 
@@ -233,4 +239,80 @@ fn report(samples: &mut [Vec<f64>]) {
     println!("console-flag cost, passing test (e) - (a): {:.1} us median (positive: CREATE_NO_WINDOW is slower)", median(&samples[4]) - median(&samples[0]));
     println!("image-load plus libtest startup floor (c): {:.1} us median", median(&samples[2]));
     println!("arm (a) and (d) include a pid-based wait (waitpid, or OpenProcess + WaitForSingleObject + CloseHandle on Windows)");
+}
+
+#[derive(Clone, Copy)]
+enum SplitArm {
+    CreateSuspended,
+    ChildAbsent,
+    ChildPassing,
+}
+
+const SPLIT_ARMS: [SplitArm; 3] = [SplitArm::CreateSuspended, SplitArm::ChildAbsent, SplitArm::ChildPassing];
+
+impl SplitArm {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CreateSuspended => "(f) cargo-val spawn_exact_ready, create only",
+            Self::ChildAbsent => "(g) resume -> exit, absent test",
+            Self::ChildPassing => "(h) resume -> exit, passing test",
+        }
+    }
+}
+
+impl Launcher {
+    fn ready_child(&self, test: &str) -> Result<Child, String> {
+        let environment = self.environment.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let directory = self.directory.to_string_lossy().into_owned().into_bytes();
+        let executable = self.executable.to_string_lossy().into_owned().into_bytes();
+        spawn_exact_ready(&mut self.storage.borrow_mut(), &executable, test.as_bytes(), &[], &environment, &[], &directory)
+            .map_err(|error| format!("spawn_exact_ready: {error:?}"))
+    }
+
+    fn timed_create(&self) -> Result<f64, String> {
+        let start = Instant::now();
+        let child = self.ready_child(PASSING_TEST)?;
+        let created = start.elapsed().as_secs_f64() * 1e6;
+        resume_ready(&child);
+        wait_for_exit(child.process_id())?;
+        Ok(created)
+    }
+
+    fn timed_resume_to_exit(&self, test: &str) -> Result<f64, String> {
+        let child = self.ready_child(test)?;
+        let start = Instant::now();
+        resume_ready(&child);
+        wait_for_exit(child.process_id())?;
+        Ok(start.elapsed().as_secs_f64() * 1e6)
+    }
+
+    fn split_launch(&self, arm: SplitArm) -> Result<f64, String> {
+        match arm {
+            SplitArm::CreateSuspended => self.timed_create(),
+            SplitArm::ChildAbsent => self.timed_resume_to_exit(ABSENT_TEST),
+            SplitArm::ChildPassing => self.timed_resume_to_exit(PASSING_TEST),
+        }
+    }
+}
+
+fn report_split(samples: &mut [Vec<f64>]) {
+    println!("{:<44} {:>12} {:>12}", "split arm", "median us", "p99 us");
+    for (arm, values) in SPLIT_ARMS.iter().zip(samples.iter_mut()) {
+        values.sort_by(f64::total_cmp);
+        println!("{:<44} {:>12.1} {:>12.1}", arm.label(), median(values), percentile(values, 99));
+    }
+    println!("parent create (suspended) (f): {:.1} us median", median(&samples[0]));
+    println!("child init + libtest start (g): {:.1} us median", median(&samples[1]));
+    println!("test body share (h) - (g): {:.1} us median", median(&samples[2]) - median(&samples[1]));
+    println!("{}", split_note());
+}
+
+#[cfg(windows)]
+const fn split_note() -> &'static str {
+    "(f) times only the CreateProcessW CREATE_SUSPENDED call; (g)/(h) time ResumeThread to process exit (pid-based wait included)"
+}
+
+#[cfg(not(windows))]
+const fn split_note() -> &'static str {
+    "unix mapping: no suspended state, so (f) times the spawn call alone and (g)/(h) time from spawn return to exit; resume_ready is a no-op"
 }
