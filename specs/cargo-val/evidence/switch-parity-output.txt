@@ -1,0 +1,51 @@
+cargo val: 17 names
+  arithmetic_seed_four
+  arithmetic_seed_one
+  arithmetic_seed_three
+  arithmetic_seed_two
+  branch_seed_eleven
+  branch_seed_five
+  branch_seed_seven
+  branch_seed_thirteen
+  bytes_seed_nineteen
+  bytes_seed_seventeen
+  bytes_seed_twenty_nine
+  bytes_seed_twenty_three
+  fixture::passes
+  order_seed_forty_one
+  order_seed_forty_three
+  order_seed_thirty_one
+  order_seed_thirty_seven
+  binary arithmetic_fixture: passed 4
+  binary branch_fixture: passed 4
+  binary bytes_fixture: passed 4
+  binary doc-tests: passed 0
+  binary integration_fixture: passed 1
+  binary lib: passed 0
+  binary order_fixture: passed 4
+cargo test: 17 names
+  arithmetic_seed_four
+  arithmetic_seed_one
+  arithmetic_seed_three
+  arithmetic_seed_two
+  branch_seed_eleven
+  branch_seed_five
+  branch_seed_seven
+  branch_seed_thirteen
+  bytes_seed_nineteen
+  bytes_seed_seventeen
+  bytes_seed_twenty_nine
+  bytes_seed_twenty_three
+  fixture::passes
+  order_seed_forty_one
+  order_seed_forty_three
+  order_seed_thirty_one
+  order_seed_thirty_seven
+  binary arithmetic_fixture: passed 4
+  binary branch_fixture: passed 4
+  binary bytes_fixture: passed 4
+  binary doc-tests: passed 0
+  binary integration_fixture: passed 1
+  binary lib: passed 0
+  binary order_fixture: passed 4
+parity: identical, 17 test names across 7 binaries
