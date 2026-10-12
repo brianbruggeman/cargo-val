@@ -10,7 +10,7 @@ struct BuildDefaults {
     jobs: usize,
     #[setting(default = true)]
     color: bool,
-    #[setting(default = "isolated")]
+    #[setting(default = "shared")]
     target_dir: String,
     #[setting(default = 65536)]
     spawn_string_bytes: usize,
