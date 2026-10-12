@@ -28,7 +28,7 @@ use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
-use crate::run::{CARGO_LANE, LISTING_LANE, Lanes, attach, observe_cargo};
+use crate::run::{CARGO_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, observe_cargo};
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
@@ -366,22 +366,7 @@ impl RunSummary {
 pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: libc::pid_t,
-    stdout_token: u64,
-    stderr_token: u64,
-    process: NativeWatch,
     output: ChildOutput,
-}
-
-impl TestWatch {
-    fn stream_for(&self, token: u64) -> Option<bool> {
-        if token == self.stdout_token {
-            Some(true)
-        } else if token == self.stderr_token {
-            Some(false)
-        } else {
-            None
-        }
-    }
 }
 
 struct Truncation {
@@ -654,39 +639,98 @@ fn deliver_exit(
     Ok(())
 }
 
-fn reap_unreported_children(
-    port: &NativePort,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    reporting: Reporting<'_>,
+// a session's child runs on its own prime lane; its streams and exit arrive as items shaped like the events the outcome ledger already takes
+fn start_session(
+    ledger: &Ledger<'_>,
+    watches: &mut Watches,
+    lanes: &Lanes,
+    slot: SessionSlotId,
 ) -> Result<(), RunError> {
-    for watch_slot in watches.iter_mut() {
-        let Some(watch) = watch_slot.as_mut() else {
-            continue;
+    let child = ledger
+        .sessions()
+        .get(slot)
+        .ok_or(RunError::Outcome)?
+        .child();
+    let process_id = child.process_id();
+    track(process_id)?;
+    attach_session(&lanes[JOB_BASE + slot.index()], child)?;
+    watches[slot.index()] = Some(TestWatch {
+        slot,
+        process_id,
+        output: ChildOutput::new(),
+    });
+    Ok(())
+}
+
+pub(crate) fn session_output(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+    index: usize,
+    stdout: bool,
+    bytes: &[u8],
+) -> Result<(), RunError> {
+    let Some(watch) = watches[index].as_mut() else {
+        return Ok(());
+    };
+    let slot = watch.slot;
+    for piece in bytes.chunks(SOURCE_CAPACITY) {
+        let event = if stdout {
+            watch.output.observe_stdout(piece);
+            HostEvent::Stdout { slot, bytes: piece }
+        } else {
+            watch.output.observe_stderr(piece);
+            HostEvent::Stderr { slot, bytes: piece }
         };
-        let Some(status) = released(
-            watch.process.reap().map_err(|_| RunError::Reactor)?,
-            watch.process_id,
-        ) else {
-            continue;
-        };
-        #[cfg(target_os = "macos")]
-        if watch.process.registered() {
-            port.unwatch_process(
-                ledger
-                    .sessions()
-                    .get(watch.slot)
-                    .ok_or(RunError::Outcome)?
-                    .child()
-                    .process_id(),
-            )
-            .map_err(|_| RunError::Reactor)?;
+        let outcome = deliver(ledger, event, run.reporting(), watch.output.verdict())?;
+        if let Some(outcome) = outcome {
+            if outcome == TerminalOutcome::Failed {
+                watch.output.write_failure()?;
+            }
+            watches[index] = None;
+            return Ok(());
         }
-        #[cfg(target_os = "linux")]
-        let _ = port;
-        deliver_exit(ledger, watch_slot, status.code.unwrap_or(1), reporting)?;
     }
     Ok(())
+}
+
+pub(crate) fn session_ended(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+    index: usize,
+    stdout: bool,
+) -> Result<(), RunError> {
+    let Some(watch) = watches[index].as_mut() else {
+        return Ok(());
+    };
+    let slot = watch.slot;
+    let event = if stdout {
+        HostEvent::StdoutEof { slot }
+    } else {
+        HostEvent::StderrEof { slot }
+    };
+    let outcome = deliver(ledger, event, run.reporting(), watch.output.verdict())?;
+    if let Some(outcome) = outcome {
+        if outcome == TerminalOutcome::Failed {
+            watch.output.write_failure()?;
+        }
+        watches[index] = None;
+    }
+    Ok(())
+}
+
+pub(crate) fn session_exited(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+    index: usize,
+    code: i32,
+) -> Result<(), RunError> {
+    if let Some(watch) = watches[index].as_ref() {
+        release_child(watch.process_id);
+    }
+    deliver_exit(ledger, &mut watches[index], code, run.reporting())
 }
 
 fn environment_pointers(
@@ -844,162 +888,6 @@ fn deliver(
     }
 }
 
-fn register_test(
-    port: &NativePort,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    slot: SessionSlotId,
-    reporting: Reporting<'_>,
-) -> Result<(), RunError> {
-    let child = ledger
-        .sessions()
-        .get(slot)
-        .ok_or(RunError::Outcome)?
-        .child();
-    let process_id = child.process_id();
-    track(process_id)?;
-    let mut process = port.watch(process_id).map_err(|_| RunError::Reactor)?;
-    let stdout_token = port
-        .watch_descriptor(child.stdout().raw())
-        .map_err(|_| RunError::Reactor)?;
-    let stderr_token = port
-        .watch_descriptor(child.stderr().raw())
-        .map_err(|_| RunError::Reactor)?;
-    let immediate_status = released(process.reap().map_err(|_| RunError::Reactor)?, process_id);
-    watches[slot.index()] = Some(TestWatch {
-        slot,
-        process_id,
-        stdout_token,
-        stderr_token,
-        process,
-        output: ChildOutput::new(),
-    });
-    if let Some(status) = immediate_status {
-        let outcome = deliver(
-            ledger,
-            HostEvent::Exit {
-                slot,
-                status: status.code.unwrap_or(1),
-            },
-            reporting,
-            LibtestVerdict::Unreported,
-        )?;
-        if let Some(outcome) = outcome {
-            if outcome == TerminalOutcome::Failed {
-                watches[slot.index()]
-                    .as_ref()
-                    .ok_or(RunError::Outcome)?
-                    .output
-                    .write_failure()?;
-            }
-            watches[slot.index()] = None;
-        }
-    }
-    Ok(())
-}
-
-fn test_event(
-    port: &NativePort,
-    event: NativeEvent,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-    reporting: Reporting<'_>,
-) -> Result<bool, RunError> {
-    let token = event.token;
-    for watch_slot in watches.iter_mut() {
-        let Some(watch) = watch_slot.as_mut() else {
-            continue;
-        };
-        let slot = watch.slot;
-        if let Some(stdout) = watch.stream_for(token) {
-            let descriptor = {
-                let child = ledger
-                    .sessions()
-                    .get(slot)
-                    .ok_or(RunError::Outcome)?
-                    .child();
-                if stdout {
-                    child.stdout().raw()
-                } else {
-                    child.stderr().raw()
-                }
-            };
-            let mut bytes = [0; SOURCE_CAPACITY];
-            loop {
-                let read =
-                    unsafe { libc::read(descriptor, bytes.as_mut_ptr().cast(), bytes.len()) };
-                if let Ok(length) = usize::try_from(read)
-                    && length > 0
-                {
-                    let output = &mut watch.output;
-                    if stdout {
-                        output.observe_stdout(&bytes[..length]);
-                    } else {
-                        output.observe_stderr(&bytes[..length]);
-                    }
-                    let event = if stdout {
-                        HostEvent::Stdout {
-                            slot,
-                            bytes: &bytes[..length],
-                        }
-                    } else {
-                        HostEvent::Stderr {
-                            slot,
-                            bytes: &bytes[..length],
-                        }
-                    };
-                    let outcome = deliver(ledger, event, reporting, output.verdict())?;
-                    if let Some(outcome) = outcome {
-                        if outcome == TerminalOutcome::Failed {
-                            output.write_failure()?;
-                        }
-                        *watch_slot = None;
-                        return Ok(true);
-                    }
-                    continue;
-                }
-                if read == 0 {
-                    port.unwatch_descriptor(descriptor)
-                        .map_err(|_| RunError::Reactor)?;
-                    let event = if stdout {
-                        HostEvent::StdoutEof { slot }
-                    } else {
-                        HostEvent::StderrEof { slot }
-                    };
-                    let outcome = deliver(ledger, event, reporting, watch.output.verdict())?;
-                    if let Some(outcome) = outcome {
-                        if outcome == TerminalOutcome::Failed {
-                            watch.output.write_failure()?;
-                        }
-                        *watch_slot = None;
-                    }
-                    return Ok(true);
-                }
-                let code = last_error();
-                if code == libc::EINTR {
-                    continue;
-                }
-                if code == libc::EAGAIN || code == libc::EWOULDBLOCK {
-                    return Ok(true);
-                }
-                return Err(RunError::Reactor);
-            }
-        }
-        if token == watch.process.token() {
-            observe_exit(&mut watch.process, event);
-            let reaped = released(
-                watch.process.reap().map_err(|_| RunError::Reactor)?,
-                watch.process_id,
-            );
-            if let Some(status) = reaped {
-                deliver_exit(ledger, watch_slot, status.code.unwrap_or(1), reporting)?;
-            }
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 #[cfg(target_os = "macos")]
 fn last_error() -> c_int {
     unsafe { *libc::__error() }
@@ -1114,14 +1002,12 @@ fn spawn_listing(
 }
 
 fn launch_listed(
-    run: &ListingRun<'_>,
+    scan: &ListingScan<'_, '_>,
     ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
     intent: ExactTestIntent<'_, '_, '_>,
-    target: usize,
-    environment: &[u8],
-    layout: &TestEnvironmentLayout,
 ) -> Result<(), RunError> {
+    let (run, target, environment, layout) = (scan.run, scan.target, scan.environment, scan.layout);
     let mut argument_bytes = [0; PATH_CAPACITY + NAME_CAPACITY + 64];
     let mut argument_pointers = [core::ptr::null(); 5];
     let mut environment_pointers = [core::ptr::null(); ENV_CAPACITY + MAX_ENTRIES + 1];
@@ -1150,7 +1036,7 @@ fn launch_listed(
         )
     })?;
     run.targets.borrow_mut().tally(target, Tally::Launched);
-    register_test(run.port, ledger, watches, slot, run.reporting())
+    start_session(ledger, watches, scan.lanes, slot)
 }
 
 pub(crate) struct ListingRun<'run> {
@@ -1253,6 +1139,7 @@ fn listing_wanted(
 
 struct ListingScan<'scan, 'run> {
     run: &'scan ListingRun<'run>,
+    lanes: &'scan Lanes,
     target: usize,
     environment: &'scan [u8],
     layout: &'scan TestEnvironmentLayout,
@@ -1272,7 +1159,7 @@ impl ListingScan<'_, '_> {
                 if !run.policy.borrow_mut().admit_listed(run.interrupted(), stopped) {
                     return Ok(Flow::Next);
                 }
-                launch_listed(run, ledger, watches, intent, self.target, self.environment, self.layout)?;
+                launch_listed(self, ledger, watches, intent)?;
                 if ledger.sessions().len() >= run.settings.jobs {
                     return Ok(Flow::Pause);
                 }
@@ -1857,7 +1744,7 @@ impl CargoDriver<'_> {
         let slot = lanes[LISTING_LANE].0.borrow();
         let stream = slot.as_deref().ok_or(RunError::ListingStream)?;
         let bytes = stream.window(range.clone()).ok_or(RunError::ListingStream)?;
-        let consumed = offset + self.listing_bytes(&bytes[offset..], run, ledger, watches)?;
+        let consumed = offset + self.listing_bytes(&bytes[offset..], lanes, run, ledger, watches)?;
         let ready = self.listing_framer.frame_ready().map_err(|_| RunError::ListingStream)?;
         if let Some(active) = self.active.as_mut() {
             let stalled = !active.ignoring && (consumed < bytes.len() || ready);
@@ -1869,6 +1756,7 @@ impl CargoDriver<'_> {
     fn listing_bytes(
         &mut self,
         chunk: &[u8],
+        lanes: &Lanes,
         run: &ListingRun<'_>,
         ledger: &mut Ledger<'_>,
         watches: &mut Watches,
@@ -1893,6 +1781,7 @@ impl CargoDriver<'_> {
         };
         let filter = NameFilter::Selected(&selection);
         let scan = ListingScan {
+            lanes,
             run,
             target: active.target,
             environment: &active.environment,
@@ -1926,6 +1815,7 @@ impl CargoDriver<'_> {
 
     fn listing_drain(
         &mut self,
+        lanes: &Lanes,
         run: &ListingRun<'_>,
         ledger: &mut Ledger<'_>,
         watches: &mut Watches,
@@ -1946,6 +1836,7 @@ impl CargoDriver<'_> {
         };
         let filter = NameFilter::Selected(&selection);
         let scan = ListingScan {
+            lanes,
             run,
             target: active.target,
             environment: &active.environment,
@@ -2060,7 +1951,7 @@ impl CargoDriver<'_> {
             && active.backlog.is_none()
             && listing_wanted(run, ledger)
         {
-            let done = self.listing_drain(run, ledger, watches)?;
+            let done = self.listing_drain(lanes, run, ledger, watches)?;
             if let Some(active) = self.active.as_mut()
                 && done
             {
@@ -2506,12 +2397,9 @@ fn forward_signals(
     Ok(kept)
 }
 
+
 /// Dispatches everything the old port holds right now, without waiting, so a prime gate on the port can park again.
-pub(crate) fn service_port(
-    run: &ListingRun<'_>,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-) -> Result<(), RunError> {
+pub(crate) fn service_port(run: &ListingRun<'_>) -> Result<(), RunError> {
     let mut events = [NativeEvent::default(); 64];
     loop {
         let ready = match run.port.poll(&mut events) {
@@ -2523,11 +2411,9 @@ pub(crate) fn service_port(
         let kept = forward_signals(run.signals, &mut events, ready)?;
         for event in events.iter().copied().take(kept) {
             run.observe_doc_event(event);
-            test_event(run.port, event, ledger, watches, run.reporting())?;
         }
         run.pump_doc_tests()?;
     }
-    reap_unreported_children(run.port, ledger, watches, run.reporting())?;
     run.pump_doc_tests()
 }
 
