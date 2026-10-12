@@ -1,0 +1,5 @@
+fixture::fails: test
+fixture::ignored_with_reason: test
+fixture::passes: test
+
+3 tests, 0 benchmarks
