@@ -1,10 +1,10 @@
 //! Single-owner exact child launch from one borrowed listing intent.
 
-use std::vec::Vec;
-
 use crate::ExecutablePath;
 use crate::child_completion::{ChildCompletion, ChildCompletionEvent, InvalidChildCompletionEvent};
-use crate::edge_spawn::{Child, SpawnError, spawn};
+use crate::edge_spawn::{
+    ArgumentsError, Child, ExactError, LaunchStorage, SpawnError, spawn_exact,
+};
 use crate::host_event::{HostEvent, StaleHostEvent};
 use crate::outcomes::{OutcomeError, OutcomeLedger, StartError, TerminalOutcome};
 use crate::reporter::{ReportError, write_report};
@@ -59,6 +59,8 @@ pub enum LaunchError<const NAME_CAPACITY: usize> {
     NameTooLong { required: usize, available: usize },
     /// The OS rejected child creation.
     Spawn(SpawnError),
+    /// The launch data holds a NUL byte, a malformed environment entry, or more than the fixed storage holds.
+    Arguments(ArgumentsError),
     /// An unexpected slot rejection returns the spawned child to the owner.
     CapacityChanged(RunningChild<NAME_CAPACITY>),
     /// Ledger admission failed without losing ownership of the spawned child.
@@ -76,6 +78,8 @@ pub enum LaunchCause {
     NameTooLong { required: usize, available: usize },
     /// The OS refused the launch with this raw error code.
     Spawn { os_code: i32 },
+    /// The launch data could not be lowered into the fixed storage.
+    Arguments(ArgumentsError),
     /// The slot table rejected a child that the capacity check had admitted.
     CapacityChanged,
     /// Outcome accounting refused the spawned child.
@@ -95,6 +99,7 @@ impl<const NAME_CAPACITY: usize> From<&LaunchError<NAME_CAPACITY>> for LaunchCau
                 available: *available,
             },
             LaunchError::Spawn(error) => Self::Spawn { os_code: error.os_code },
+            LaunchError::Arguments(error) => Self::Arguments(*error),
             LaunchError::CapacityChanged(_) => Self::CapacityChanged,
             LaunchError::Accounting(error) => Self::Accounting(error.error),
         }
@@ -152,6 +157,8 @@ pub struct LaunchInput<
     pub inherited_environment: &'call [&'call [u8]],
     /// Borrowed child-only environment entries that override inherited keys.
     pub child_overrides: &'call [&'call [u8]],
+    /// Fixed argv, envp, and string storage reused by every launch of the run.
+    pub storage: &'call mut LaunchStorage,
     /// Borrowed test-harness flags appended after the exact test name.
     pub harness_arguments: &'call [&'call [u8]],
     /// Directory the child starts in.
@@ -187,18 +194,19 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
 
         let mut name = [0; NAME_CAPACITY];
         name[..name_bytes.len()].copy_from_slice(name_bytes);
-        let arguments: Vec<&[u8]> = [b"--exact".as_slice(), name_bytes]
-            .into_iter()
-            .chain(self.harness_arguments.iter().copied())
-            .collect();
-        let child = spawn(
+        let child = spawn_exact(
+            self.storage,
             executable_bytes(&self.intent),
-            &arguments,
+            name_bytes,
+            self.harness_arguments,
             self.inherited_environment,
             self.child_overrides,
-            Some(self.current_directory),
+            self.current_directory,
         )
-        .map_err(LaunchError::Spawn)?;
+        .map_err(|error| match error {
+            ExactError::Arguments(error) => LaunchError::Arguments(error),
+            ExactError::Spawn(error) => LaunchError::Spawn(error),
+        })?;
         let session = RunningChild {
             child,
             name,
@@ -402,6 +410,7 @@ mod tests {
         ChildOutcomeError, OutcomeInput, OutcomeStep,
     };
     use crate::ExecutablePath;
+    use crate::edge_spawn::LaunchStorage;
     use crate::ExitSource;
     use crate::artifact_stream::ArtifactFramer;
     use crate::discover_listing::{ListingSource, ListingSourceStep};
@@ -469,6 +478,7 @@ mod tests {
             intent,
             inherited_environment: &[],
             child_overrides: &overrides,
+            storage: &mut LaunchStorage::default(),
             harness_arguments: &[],
             current_directory: b"/",
         }
@@ -496,6 +506,7 @@ mod tests {
             intent,
             inherited_environment: &[],
             child_overrides,
+            storage: &mut LaunchStorage::default(),
             harness_arguments: &[],
             current_directory: b"/",
         }
@@ -1110,6 +1121,7 @@ mod cause_tests {
         SpawnError,
     };
     use crate::ExecutablePath;
+    use crate::edge_spawn::LaunchStorage;
     use crate::outcomes::{OutcomeError, StartError};
     use crate::schedule::SessionSlots;
     use crate::test_intent::ExactTestIntent;
@@ -1127,6 +1139,7 @@ mod cause_tests {
             ),
             inherited_environment: &[],
             child_overrides: &[],
+            storage: &mut LaunchStorage::default(),
             harness_arguments: &[],
             current_directory: b"/",
         }
@@ -1172,5 +1185,80 @@ mod cause_tests {
             checked += 1;
         }
         assert_eq!(checked, 6);
+    }
+}
+
+#[cfg(all(test, unix, feature = "edge-os", feature = "proxima-core"))]
+mod arguments_cause_tests {
+    use super::{LaunchCause, LaunchError};
+    use crate::edge_spawn::ArgumentsError;
+
+    #[test]
+    fn an_arguments_refusal_keeps_its_required_and_available_sizes() {
+        let error = LaunchError::<64>::Arguments(ArgumentsError::StringBytesTooSmall {
+            required: 140_000,
+            available: 65_536,
+        });
+
+        assert_eq!(
+            LaunchCause::from(&error),
+            LaunchCause::Arguments(ArgumentsError::StringBytesTooSmall {
+                required: 140_000,
+                available: 65_536,
+            })
+        );
+    }
+}
+
+#[cfg(all(test, unix, feature = "edge-os", feature = "proxima-core"))]
+mod launch_allocation_tests {
+    use super::{LaunchInput, LaunchOwner, RunningChild};
+    use crate::ExecutablePath;
+    use crate::edge_spawn::LaunchStorage;
+    use crate::schedule::SessionSlots;
+    use crate::test_intent::ExactTestIntent;
+
+    #[test]
+    fn launching_an_exact_test_child_makes_zero_heap_allocations() {
+        let executable = std::env::current_exe().expect("test executable path is available");
+        let executable = executable.to_str().expect("test executable path is UTF-8");
+        let inherited_storage = std::env::vars()
+            .map(|(key, value)| std::format!("{key}={value}"))
+            .collect::<std::vec::Vec<_>>();
+        let inherited = inherited_storage
+            .iter()
+            .map(std::string::String::as_bytes)
+            .collect::<std::vec::Vec<_>>();
+        let mut sessions = SessionSlots::<RunningChild<64>, 1>::new();
+        let mut storage = LaunchStorage::default();
+
+        let (slot, allocations) = crate::test_alloc::measure_allocations(|| {
+            LaunchInput {
+                target: 0,
+                owner: LaunchOwner::Sessions(&mut sessions),
+                intent: ExactTestIntent::new(
+                    ExecutablePath::Borrowed(executable),
+                    "runner::cause_tests::absent_name",
+                ),
+                inherited_environment: &inherited,
+                child_overrides: &[b"CARGO_VAL_CHILD_MODE=1"],
+                storage: &mut storage,
+                harness_arguments: &[b"--ignored"],
+                current_directory: b"/",
+            }
+            .launch()
+        });
+
+        let child = sessions
+            .remove(slot.expect("the test executable starts"))
+            .expect("the child is stored")
+            .into_child();
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child.process_id().cast_signed(), &raw mut status, 0) },
+            child.process_id().cast_signed()
+        );
+        std::println!("{{\"launch_input_allocations\":{allocations},\"inherited_entries\":{}}}", inherited.len());
+        assert_eq!(allocations, 0);
     }
 }

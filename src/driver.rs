@@ -43,7 +43,7 @@ use crate::edge_signal::{
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
 use crate::edge_output;
-use crate::edge_spawn::{Child, SpawnError, spawn, spawn_in_group};
+use crate::edge_spawn::{ArgumentsError, Child, LaunchStorage, SpawnError, spawn, spawn_in_group};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
 use crate::reporter::write_report;
@@ -241,6 +241,7 @@ impl LaunchCause {
                 line.number(available);
                 line.text(b" are available");
             }
+            Self::Arguments(error) => write_arguments_error(line, error),
             Self::Spawn { os_code } => {
                 line.text(b"spawn failed with os error ");
                 line.number(usize::try_from(os_code.unsigned_abs()).unwrap_or(usize::MAX));
@@ -253,6 +254,19 @@ impl LaunchCause {
                 line.text(accounting_text(error));
             }
         }
+    }
+}
+
+fn write_arguments_error<const CAPACITY: usize>(line: &mut Line<CAPACITY>, error: ArgumentsError) {
+    line.text(b"argument lowering failed: ");
+    let (reason, sizes) = error.describe();
+    line.text(reason);
+    if let Some((required, available)) = sizes {
+        line.text(b" ");
+        line.number(required);
+        line.text(b" and ");
+        line.number(available);
+        line.text(b" are available");
     }
 }
 
@@ -908,12 +922,14 @@ fn launch_listed(
     if run.tripped(ledger) {
         run.policy.borrow_mut().launched();
     }
+    let mut storage = run.launch_storage.borrow_mut();
     let slot = LaunchInput {
         target,
         owner: LaunchOwner::Ledger(ledger),
         intent,
         inherited_environment: run.environment,
         child_overrides: &overrides[..override_count],
+        storage: &mut storage,
         harness_arguments: run.harness_arguments,
         current_directory: layout.current_directory(environment).as_bytes(),
     }
@@ -945,6 +961,7 @@ pub(crate) struct ListingRun<'run> {
     docs: DocObservation,
     policy: RefCell<StopPolicy>,
     doc: RefCell<Option<Box<DocRun>>>,
+    launch_storage: RefCell<Box<LaunchStorage>>,
 }
 
 #[derive(Default)]
@@ -1889,6 +1906,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         docs: DocObservation::default(),
         policy: RefCell::new(StopPolicy::new(settings.max_fail)),
         doc: RefCell::new(doc_tests),
+        launch_storage: RefCell::new(held_launch_storage()),
     });
     observe_cargo(cargo_child, &mut driver, &run, &mut ledger, watches).await?;
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
@@ -1937,6 +1955,11 @@ fn run_storage<'environment>() -> std::boxed::Box<RunStorage<'environment>> {
         ),
         (SessionSlots::new(), [const { None }; LIVE_CAPACITY]),
     ))
+}
+
+#[inline(never)]
+fn held_launch_storage() -> Box<LaunchStorage> {
+    Box::new(LaunchStorage::default())
 }
 
 // the driver and the run own tens of KiB each of fixed parking and target tables, too large to sit in the root future

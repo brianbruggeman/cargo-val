@@ -12,6 +12,12 @@ struct BuildDefaults {
     color: bool,
     #[setting(default = "isolated")]
     target_dir: String,
+    #[setting(default = 65536)]
+    spawn_string_bytes: usize,
+    #[setting(default = 64)]
+    spawn_argument_pointers: usize,
+    #[setting(default = 1100)]
+    spawn_environment_pointers: usize,
 }
 
 impl Validate for BuildDefaults {

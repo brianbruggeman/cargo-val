@@ -1351,6 +1351,52 @@ mod spawn {
         launch(program, arguments, environment, overrides, directory, true)
     }
 
+    /// Launch data Windows lowering cannot refuse for size: it allocates per launch, so no variant exists.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ArgumentsError {}
+
+    impl ArgumentsError {
+        /// The refusal as terse text plus, for storage refusals, the required and available sizes.
+        #[must_use]
+        pub const fn describe(self) -> (&'static [u8], Option<(usize, usize)>) {
+            match self {}
+        }
+    }
+
+    /// Stands in for the Unix fixed launch storage; Windows lowers each launch into allocated buffers.
+    #[derive(Debug, Default)]
+    pub struct LaunchStorage;
+
+    /// Why an exact test launch was refused.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ExactError {
+        /// Never produced on Windows.
+        Arguments(ArgumentsError),
+        /// The Win32 operation that refused.
+        Spawn(SpawnError),
+    }
+
+    /// Spawns one exact test child as `program --exact test_name` followed by `harness_arguments`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExactError::Spawn`] with the Win32 code of the failing step.
+    pub fn spawn_exact(
+        _storage: &mut LaunchStorage,
+        program: &[u8],
+        test_name: &[u8],
+        harness_arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: &[u8],
+    ) -> Result<Child, ExactError> {
+        let arguments = [b"--exact".as_slice(), test_name]
+            .into_iter()
+            .chain(harness_arguments.iter().copied())
+            .collect::<Vec<_>>();
+        spawn(program, &arguments, environment, overrides, Some(directory)).map_err(ExactError::Spawn)
+    }
+
     /// Ends every child of this run, as an interrupt does; children have no console to receive Ctrl+C.
     pub(crate) fn terminate_children() {
         if let Some(Ok(job)) = RUN_JOB.get() {

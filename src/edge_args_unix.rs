@@ -13,100 +13,328 @@ pub const DEPS_SUFFIX: &str = "/deps";
 
 #[cfg(all(unix, feature = "edge-os"))]
 mod lowering {
-    //! Owned Unix argv and envp for one child launch, lowered from byte slices.
+    //! Unix argv and envp lowered into C-string storage: fixed and caller-owned per test launch, allocated once per setup spawn.
 
-    use core::ffi::c_char;
+    use core::ffi::{CStr, c_char};
+    use core::ops::Range;
     use std::vec::Vec;
 
-    /// Why launch data cannot be represented as C strings.
+    use crate::build_defaults::{
+        SPAWN_ARGUMENT_POINTERS, SPAWN_ENVIRONMENT_POINTERS, SPAWN_STRING_BYTES,
+    };
+
+    /// Why launch data cannot be represented as C strings in the storage offered.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ArgumentsError {
-        /// The program, an argument, or an environment entry contains a NUL byte.
+        /// The program, an argument, the directory, or an environment entry contains a NUL byte.
         InteriorNul,
         /// An environment entry has no non-empty key followed by `=`.
         InvalidEnvironmentEntry,
+        /// The string storage cannot hold every string and its terminator.
+        StringBytesTooSmall { required: usize, available: usize },
+        /// The pointer storage cannot hold argv and its null sentinel.
+        ArgumentPointersTooSmall { required: usize, available: usize },
+        /// The pointer storage cannot hold the merged environment and its null sentinel.
+        EnvironmentPointersTooSmall { required: usize, available: usize },
     }
 
-    /// NUL-terminated argv and envp pointer tables over one owned byte buffer.
+    impl ArgumentsError {
+        /// The refusal as terse text plus, for storage refusals, the required and available sizes.
+        #[must_use]
+        pub const fn describe(self) -> (&'static [u8], Option<(usize, usize)>) {
+            match self {
+                Self::InteriorNul => (b"an argument contains a NUL byte", None),
+                Self::InvalidEnvironmentEntry => {
+                    (b"an environment entry has no key before '='", None)
+                }
+                Self::StringBytesTooSmall {
+                    required,
+                    available,
+                } => (b"argument bytes need", Some((required, available))),
+                Self::ArgumentPointersTooSmall {
+                    required,
+                    available,
+                } => (b"argument pointers need", Some((required, available))),
+                Self::EnvironmentPointersTooSmall {
+                    required,
+                    available,
+                } => (b"environment pointers need", Some((required, available))),
+            }
+        }
+    }
+
+    /// One child launch described by borrowed bytes.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Launch<'launch> {
+        /// Becomes `argv[0]` and the path handed to `posix_spawnp`.
+        pub program: &'launch [u8],
+        /// Arguments following the program name.
+        pub arguments: &'launch [&'launch [u8]],
+        /// Arguments following `arguments`, such as forwarded harness flags.
+        pub trailing: &'launch [&'launch [u8]],
+        /// Inherited environment entries in `KEY=VALUE` form.
+        pub inherited: &'launch [&'launch [u8]],
+        /// Child-only entries; each replaces any inherited entry with the same key.
+        pub overrides: &'launch [&'launch [u8]],
+        /// The child's working directory, when it differs from the parent's.
+        pub directory: Option<&'launch [u8]>,
+    }
+
+    impl<'launch> Launch<'launch> {
+        fn argument_strings(self) -> impl Iterator<Item = &'launch [u8]> + Clone {
+            core::iter::once(self.program)
+                .chain(self.arguments.iter().copied())
+                .chain(self.trailing.iter().copied())
+        }
+
+        fn environment_strings(self) -> impl Iterator<Item = &'launch [u8]> + Clone {
+            let overrides = self.overrides;
+            self.inherited
+                .iter()
+                .copied()
+                .filter(move |entry| !overridden(entry, overrides))
+                .chain(overrides.iter().copied())
+        }
+
+        fn strings(self) -> impl Iterator<Item = &'launch [u8]> + Clone {
+            self.argument_strings()
+                .chain(self.environment_strings())
+                .chain(self.directory)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct Layout {
+        bytes: usize,
+        argv: usize,
+        envp: usize,
+        program: Range<usize>,
+        directory: Option<Range<usize>>,
+    }
+
+    impl Layout {
+        fn measure(launch: Launch<'_>) -> Result<Self, ArgumentsError> {
+            for entry in launch.inherited.iter().chain(launch.overrides) {
+                environment_key(entry)?;
+            }
+            let mut bytes = 0;
+            for text in launch.strings() {
+                if text.contains(&0) {
+                    return Err(ArgumentsError::InteriorNul);
+                }
+                bytes += text.len() + 1;
+            }
+            Ok(Self {
+                bytes,
+                argv: launch.argument_strings().count() + 1,
+                envp: launch.environment_strings().count() + 1,
+                program: 0..launch.program.len() + 1,
+                directory: launch
+                    .directory
+                    .map(|text| bytes - text.len() - 1..bytes),
+            })
+        }
+
+        fn check(
+            &self,
+            string_bytes: usize,
+            argument_pointers: usize,
+            environment_pointers: usize,
+        ) -> Result<(), ArgumentsError> {
+            if self.bytes > string_bytes {
+                return Err(ArgumentsError::StringBytesTooSmall {
+                    required: self.bytes,
+                    available: string_bytes,
+                });
+            }
+            if self.argv > argument_pointers {
+                return Err(ArgumentsError::ArgumentPointersTooSmall {
+                    required: self.argv,
+                    available: argument_pointers,
+                });
+            }
+            if self.envp > environment_pointers {
+                return Err(ArgumentsError::EnvironmentPointersTooSmall {
+                    required: self.envp,
+                    available: environment_pointers,
+                });
+            }
+            Ok(())
+        }
+    }
+
+    /// NUL-terminated argv and envp pointer tables over one byte buffer, borrowed from the storage that holds them.
     #[derive(Debug)]
-    pub struct Arguments {
-        bytes: Vec<u8>,
-        argv: Vec<*const c_char>,
-        envp: Vec<*const c_char>,
+    pub struct Lowered<'storage> {
+        bytes: &'storage [u8],
+        argv: &'storage [*const c_char],
+        envp: &'storage [*const c_char],
+        layout: Layout,
     }
 
-    impl Arguments {
+    impl<'storage> Lowered<'storage> {
+        fn new(
+            bytes: &'storage [u8],
+            argv: &'storage [*const c_char],
+            envp: &'storage [*const c_char],
+            layout: Layout,
+        ) -> Self {
+            Self {
+                bytes: &bytes[..layout.bytes],
+                argv: &argv[..layout.argv],
+                envp: &envp[..layout.envp],
+                layout,
+            }
+        }
+
         /// Returns argv including its trailing null pointer.
         #[must_use]
         pub fn argv(&self) -> &[*const c_char] {
-            &self.argv
+            self.argv
         }
 
         /// Returns the inherited environment overlaid with child-only entries, including its trailing null pointer.
         #[must_use]
         pub fn envp(&self) -> &[*const c_char] {
-            &self.envp
+            self.envp
         }
 
         /// Returns every lowered string, each followed by its NUL.
         #[must_use]
         pub fn bytes(&self) -> &[u8] {
-            &self.bytes
+            self.bytes
+        }
+
+        /// Returns the program path as a C string.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ArgumentsError::InteriorNul`] when the stored program is not NUL-terminated exactly once.
+        pub fn program(&self) -> Result<&CStr, ArgumentsError> {
+            CStr::from_bytes_with_nul(&self.bytes[self.layout.program.clone()])
+                .map_err(|_| ArgumentsError::InteriorNul)
+        }
+
+        /// Returns the working directory as a C string, when one was launched with.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ArgumentsError::InteriorNul`] when the stored directory is not NUL-terminated exactly once.
+        pub fn directory(&self) -> Result<Option<&CStr>, ArgumentsError> {
+            self.layout
+                .directory
+                .clone()
+                .map(|range| {
+                    CStr::from_bytes_with_nul(&self.bytes[range])
+                        .map_err(|_| ArgumentsError::InteriorNul)
+                })
+                .transpose()
         }
     }
 
-    /// Copies one launch into owned C-string storage.
-    ///
-    /// `arguments` follow the program name, which becomes `argv[0]`. An override replaces any
-    /// inherited entry with the same key.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArgumentsError`] for an interior NUL byte or an environment entry without a key.
-    pub fn lower_arguments(
-        program: &[u8],
-        arguments: &[&[u8]],
-        inherited: &[&[u8]],
-        overrides: &[&[u8]],
-    ) -> Result<Arguments, ArgumentsError> {
-        for entry in inherited.iter().chain(overrides) {
-            environment_key(entry)?;
-        }
-        let kept = inherited.iter().filter(|entry| !overridden(entry, overrides));
-        let argument_strings = core::iter::once(program).chain(arguments.iter().copied());
-        let environment_strings = kept.copied().chain(overrides.iter().copied());
-        let mut bytes = Vec::new();
-        let argv_offsets = write_strings(argument_strings, &mut bytes)?;
-        let envp_offsets = write_strings(environment_strings, &mut bytes)?;
-        Ok(Arguments {
-            argv: pointers(&bytes, &argv_offsets),
-            envp: pointers(&bytes, &envp_offsets),
-            bytes,
-        })
+    /// Fixed argv, envp, and string storage sized by the build-time spawn constants, reused across launches.
+    #[derive(Debug)]
+    pub struct LaunchStorage {
+        bytes: [u8; SPAWN_STRING_BYTES],
+        argv: [*const c_char; SPAWN_ARGUMENT_POINTERS],
+        envp: [*const c_char; SPAWN_ENVIRONMENT_POINTERS],
     }
 
-    fn write_strings<'text>(
-        strings: impl Iterator<Item = &'text [u8]>,
-        bytes: &mut Vec<u8>,
-    ) -> Result<Vec<usize>, ArgumentsError> {
-        let mut offsets = Vec::new();
-        for text in strings {
-            if text.contains(&0) {
-                return Err(ArgumentsError::InteriorNul);
+    impl Default for LaunchStorage {
+        fn default() -> Self {
+            Self {
+                bytes: [0; SPAWN_STRING_BYTES],
+                argv: [core::ptr::null(); SPAWN_ARGUMENT_POINTERS],
+                envp: [core::ptr::null(); SPAWN_ENVIRONMENT_POINTERS],
             }
-            offsets.push(bytes.len());
-            bytes.extend_from_slice(text);
-            bytes.push(0);
         }
-        Ok(offsets)
     }
 
-    fn pointers(bytes: &[u8], offsets: &[usize]) -> Vec<*const c_char> {
-        offsets
-            .iter()
-            .map(|offset| bytes[*offset..].as_ptr().cast::<c_char>())
-            .chain(core::iter::once(core::ptr::null()))
-            .collect()
+    impl LaunchStorage {
+        /// Lowers one launch into this storage without touching the heap.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ArgumentsError`] for an interior NUL byte, an environment entry without a key, or a launch that
+        /// needs more string bytes or pointers than the storage holds, carrying the required and available sizes.
+        pub fn lower(&mut self, launch: Launch<'_>) -> Result<Lowered<'_>, ArgumentsError> {
+            let layout = Layout::measure(launch)?;
+            layout.check(SPAWN_STRING_BYTES, SPAWN_ARGUMENT_POINTERS, SPAWN_ENVIRONMENT_POINTERS)?;
+            write(launch, &mut self.bytes, &mut self.argv, &mut self.envp);
+            Ok(Lowered::new(&self.bytes, &self.argv, &self.envp, layout))
+        }
+    }
+
+    /// Argv, envp, and string storage allocated to fit one launch exactly, for spawns that run once per run.
+    #[derive(Debug)]
+    pub struct Arguments {
+        bytes: Vec<u8>,
+        argv: Vec<*const c_char>,
+        envp: Vec<*const c_char>,
+        layout: Layout,
+    }
+
+    impl Arguments {
+        /// Allocates storage for one launch and lowers it.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ArgumentsError`] for an interior NUL byte or an environment entry without a key.
+        pub fn lower(launch: Launch<'_>) -> Result<Self, ArgumentsError> {
+            let layout = Layout::measure(launch)?;
+            let mut bytes = std::vec![0; layout.bytes];
+            let mut argv = std::vec![core::ptr::null(); layout.argv];
+            let mut envp = std::vec![core::ptr::null(); layout.envp];
+            write(launch, &mut bytes, &mut argv, &mut envp);
+            Ok(Self {
+                bytes,
+                argv,
+                envp,
+                layout,
+            })
+        }
+
+        /// Borrows the lowered launch.
+        #[must_use]
+        pub fn lowered(&self) -> Lowered<'_> {
+            Lowered::new(&self.bytes, &self.argv, &self.envp, self.layout.clone())
+        }
+    }
+
+    fn write(
+        launch: Launch<'_>,
+        bytes: &mut [u8],
+        argv: &mut [*const c_char],
+        envp: &mut [*const c_char],
+    ) {
+        let mut cursor = 0;
+        for text in launch.strings() {
+            bytes[cursor..cursor + text.len()].copy_from_slice(text);
+            cursor += text.len();
+            bytes[cursor] = 0;
+            cursor += 1;
+        }
+        let bytes: &[u8] = bytes;
+        let mut offset = 0;
+        point(launch.argument_strings(), bytes, &mut offset, argv);
+        point(launch.environment_strings(), bytes, &mut offset, envp);
+    }
+
+    fn point<'text>(
+        texts: impl Iterator<Item = &'text [u8]>,
+        bytes: &[u8],
+        offset: &mut usize,
+        slots: &mut [*const c_char],
+    ) {
+        let mut count = 0;
+        for (slot, text) in slots.iter_mut().zip(texts) {
+            *slot = bytes[*offset..].as_ptr().cast::<c_char>();
+            *offset += text.len() + 1;
+            count += 1;
+        }
+        if let Some(slot) = slots.get_mut(count) {
+            *slot = core::ptr::null();
+        }
     }
 
     fn overridden(entry: &[u8], overrides: &[&[u8]]) -> bool {
@@ -132,7 +360,7 @@ mod lowering {
         use std::string::String;
         use std::vec::Vec;
 
-        use super::{ArgumentsError, lower_arguments};
+        use super::{Arguments, ArgumentsError, Launch, LaunchStorage};
 
         fn strings(pointers: &[*const c_char]) -> Vec<String> {
             pointers
@@ -146,15 +374,32 @@ mod lowering {
                 .collect()
         }
 
+        fn launch<'a>(
+            program: &'a [u8],
+            arguments: &'a [&'a [u8]],
+            inherited: &'a [&'a [u8]],
+            overrides: &'a [&'a [u8]],
+        ) -> Launch<'a> {
+            Launch {
+                program,
+                arguments,
+                trailing: &[],
+                inherited,
+                overrides,
+                directory: None,
+            }
+        }
+
         #[test]
         fn c37_lowers_exact_argv_and_child_environment() {
-            let lowered = lower_arguments(
+            let lowered = Arguments::lower(launch(
                 b"target/debug/deps/fixture",
                 &[b"--exact", b"alpha"],
                 &[b"PARENT=kept", b"CHILD=old"],
                 &[b"CHILD=override"],
-            )
+            ))
             .expect("launch data holds no NUL");
+            let lowered = lowered.lowered();
 
             assert_eq!(
                 strings(lowered.argv()),
@@ -163,24 +408,24 @@ mod lowering {
             assert_eq!(strings(lowered.envp()), ["PARENT=kept", "CHILD=override"]);
             assert!(lowered.argv()[3].is_null());
             assert!(lowered.envp()[2].is_null());
-            assert_eq!(
-                &lowered.bytes()[..26],
-                b"target/debug/deps/fixture\0"
-            );
-            std::println!(
-                "{{\"inherited_entries\":1,\"child_overrides\":1,\"argv_pairs\":1}}"
-            );
+            assert_eq!(&lowered.bytes()[..26], b"target/debug/deps/fixture\0");
+            std::println!("{{\"inherited_entries\":1,\"child_overrides\":1,\"argv_pairs\":1}}");
         }
 
         #[test]
         fn c52_forwards_ignored_flag_after_the_exact_test_name() {
-            let lowered = lower_arguments(
-                b"target/debug/deps/fixture",
-                &[b"--exact", b"fixture::ignored", b"--ignored"],
-                &[],
-                &[],
-            )
-            .expect("launch data holds no NUL");
+            let mut storage = LaunchStorage::default();
+            let lowered = storage
+                .lower(Launch {
+                    trailing: &[b"--ignored"],
+                    ..launch(
+                        b"target/debug/deps/fixture",
+                        &[b"--exact", b"fixture::ignored"],
+                        &[],
+                        &[],
+                    )
+                })
+                .expect("launch data holds no NUL");
 
             assert_eq!(
                 strings(lowered.argv()),
@@ -197,8 +442,23 @@ mod lowering {
         }
 
         #[test]
+        fn c37_lowers_the_working_directory_after_the_environment() {
+            let mut storage = LaunchStorage::default();
+            let lowered = storage
+                .lower(Launch {
+                    directory: Some(b"/work/package"),
+                    ..launch(b"/bin/fixture", &[b"--exact", b"alpha"], &[b"A=1"], &[])
+                })
+                .expect("launch data holds no NUL");
+
+            assert_eq!(lowered.program(), Ok(c"/bin/fixture"));
+            assert_eq!(lowered.directory(), Ok(Some(c"/work/package")));
+            assert_eq!(strings(lowered.envp()), ["A=1"]);
+        }
+
+        #[test]
         fn c37_rejects_an_interior_nul_in_the_test_name() {
-            let result = lower_arguments(b"fixture", &[b"--exact", b"al\0pha"], &[], &[]);
+            let result = Arguments::lower(launch(b"fixture", &[b"--exact", b"al\0pha"], &[], &[]));
 
             assert_eq!(result.unwrap_err(), ArgumentsError::InteriorNul);
             std::println!("{{\"interior_nul_control_rejected\":1}}");
@@ -206,15 +466,15 @@ mod lowering {
 
         #[test]
         fn c37_rejects_an_interior_nul_in_the_program() {
-            let result = lower_arguments(b"fix\0ture", &[], &[], &[]);
+            let result = Arguments::lower(launch(b"fix\0ture", &[], &[], &[]));
 
             assert_eq!(result.unwrap_err(), ArgumentsError::InteriorNul);
         }
 
         #[test]
         fn c37_rejects_an_environment_entry_without_a_key() {
-            let missing_separator = lower_arguments(b"fixture", &[], &[b"NOEQUALS"], &[]);
-            let empty_key = lower_arguments(b"fixture", &[], &[], &[b"=value"]);
+            let missing_separator = Arguments::lower(launch(b"fixture", &[], &[b"NOEQUALS"], &[]));
+            let empty_key = Arguments::lower(launch(b"fixture", &[], &[], &[b"=value"]));
 
             assert_eq!(
                 missing_separator.unwrap_err(),
@@ -228,15 +488,70 @@ mod lowering {
 
         #[test]
         fn c37_keeps_inherited_order_and_appends_overrides_last() {
-            let lowered = lower_arguments(
+            let lowered = Arguments::lower(launch(
                 b"fixture",
                 &[],
                 &[b"A=1", b"B=2", b"C=3"],
                 &[b"B=9", b"D=4"],
-            )
+            ))
             .expect("launch data holds no NUL");
 
-            assert_eq!(strings(lowered.envp()), ["A=1", "C=3", "B=9", "D=4"]);
+            assert_eq!(strings(lowered.lowered().envp()), ["A=1", "C=3", "B=9", "D=4"]);
+        }
+
+        #[test]
+        fn c37_reports_required_and_available_when_arguments_exceed_the_pointer_storage() {
+            let mut storage = LaunchStorage::default();
+            let available = super::SPAWN_ARGUMENT_POINTERS;
+            let flags = std::vec![b"--flag".as_slice(); available];
+
+            let result = storage.lower(Launch {
+                trailing: &flags,
+                ..launch(b"fixture", &[b"--exact", b"alpha"], &[], &[])
+            });
+
+            assert_eq!(
+                result.unwrap_err(),
+                ArgumentsError::ArgumentPointersTooSmall {
+                    required: available + 4,
+                    available,
+                }
+            );
+        }
+
+        #[test]
+        fn c37_reports_required_and_available_when_strings_exceed_the_byte_storage() {
+            let mut storage = LaunchStorage::default();
+            let available = super::SPAWN_STRING_BYTES;
+            let name = std::vec![b'a'; available];
+
+            let result = storage.lower(launch(b"fixture", &[b"--exact", &name], &[], &[]));
+
+            assert_eq!(
+                result.unwrap_err(),
+                ArgumentsError::StringBytesTooSmall {
+                    required: available + b"fixture\0--exact\0".len() + 1,
+                    available,
+                }
+            );
+        }
+
+        #[test]
+        fn c37_reports_required_and_available_when_environment_exceeds_the_pointer_storage() {
+            let mut storage = LaunchStorage::default();
+            let available = super::SPAWN_ENVIRONMENT_POINTERS;
+            let entries = std::vec![b"K=v".as_slice(); available];
+            let overrides = std::vec![b"A=1".as_slice(); 1];
+
+            let result = storage.lower(launch(b"fixture", &[], &entries, &overrides));
+
+            assert_eq!(
+                result.unwrap_err(),
+                ArgumentsError::EnvironmentPointersTooSmall {
+                    required: available + 2,
+                    available,
+                }
+            );
         }
     }
 }
