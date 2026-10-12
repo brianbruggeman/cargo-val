@@ -334,6 +334,9 @@ mod spawn {
     use std::io;
     use std::os::fd::{FromRawFd, OwnedFd};
 
+    /// The signal cargo-val sends a child it ends itself; a child killed by it reports this signal, not an ordinary exit.
+    pub const STOP_SIGNAL: c_int = libc::SIGKILL;
+
     use super::pipe_pair::{OwnedDescriptor, UnixPipeError, UnixPipePair};
     use crate::ExitSource;
     pub use crate::edge_args_unix::{ArgumentsError, LaunchStorage};
@@ -424,10 +427,10 @@ mod spawn {
             Ok(ExitSource::new(process_id))
         }
 
-        /// Kills the child outright; a child already gone is not an error.
+        /// Kills the child with `STOP_SIGNAL`; a child already gone is not an error.
         pub fn terminate(&self) {
             // safety: kill takes plain integers and reports failure through its status.
-            unsafe { libc::kill(self.process_id, libc::SIGKILL) };
+            unsafe { libc::kill(self.process_id, STOP_SIGNAL) };
         }
 
         /// Lowers the scheduling priority of the child's process group so doc tests yield cores to the build.

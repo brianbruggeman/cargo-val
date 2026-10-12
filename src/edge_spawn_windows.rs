@@ -1432,7 +1432,7 @@ pub mod pool {
 
         use super::{LaunchStorage, PipeEnd, Start};
         use crate::edge_spawn_windows::handles::{WindowsJob, WindowsOwnedHandle};
-        use crate::edge_spawn_windows::{Child, spawn_exact};
+        use crate::edge_spawn_windows::{Child, STATUS_CONTROL_C_EXIT, spawn_exact};
         use crate::test_alloc::measure_allocations;
 
         static HANDLE_COUNT_GUARD: Mutex<()> = Mutex::new(());
@@ -1687,6 +1687,29 @@ pub mod pool {
             let (output, _) = run_to_completion(child);
             assert!(output.is_empty(), "a frozen child wrote nothing");
         }
+
+        #[test]
+        fn edge_terminated_child_reports_the_cargo_val_stop_code() {
+            let fixture = Fixture::new();
+            let references = fixture.references();
+            let mut storage = LaunchStorage::new();
+            let job = WindowsJob::new().expect("a job object is created");
+            let alpha = alpha_name();
+            let child = storage
+                .launch(
+                    fixture.executable.as_bytes(),
+                    [b"--exact".as_slice(), alpha.as_bytes(), b"--nocapture"].into_iter(),
+                    (&references, &[], &fixture.directory),
+                    (&job, Start::Ready),
+                )
+                .expect("the ready child is created suspended");
+
+            child.terminate();
+
+            assert_eq!(wait_for_exit(&child), STATUS_CONTROL_C_EXIT, "a child cargo-val ends exits with the stop code, never an ordinary exit 1");
+            let (output, _) = run_to_completion(child);
+            assert!(output.is_empty(), "a terminated frozen child wrote nothing");
+        }
     }
 }
 
@@ -1732,7 +1755,8 @@ mod spawn {
     const ERROR_FILE_NOT_FOUND: i32 = 2;
     const ERROR_INVALID_PARAMETER: i32 = 87;
     const ATTRIBUTE_WORDS: usize = 64;
-    const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+    /// The exit code of every child cargo-val ends itself; no ordinary exit or crash NTSTATUS equals it.
+    pub const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
 
     /// Failures while creating a Windows child process.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1961,7 +1985,7 @@ mod spawn {
             return Ok(());
         }
         let code = unsafe { GetLastError() };
-        unsafe { TerminateProcess(process.raw(), 1) };
+        unsafe { TerminateProcess(process.raw(), STATUS_CONTROL_C_EXIT) };
         Err(WindowsSpawnError::CreateFailed { code })
     }
 
@@ -2072,9 +2096,9 @@ mod spawn {
             ExitSource::new(self.process.process.as_borrowed())
         }
 
-        /// Kills the child outright; a child already gone is not an error.
+        /// Kills the child with `STATUS_CONTROL_C_EXIT`; a child already gone is not an error.
         pub fn terminate(&self) {
-            unsafe { TerminateProcess(self.process.process.raw(), 1) };
+            unsafe { TerminateProcess(self.process.process.raw(), STATUS_CONTROL_C_EXIT) };
         }
 
         /// Lowers the child's priority class so doc tests yield cores to the build.
