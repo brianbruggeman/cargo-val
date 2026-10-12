@@ -3,13 +3,13 @@
 use core::ffi::{CStr, c_char, c_int};
 
 use crate::child_completion::{ChildCompletion, ChildCompletionEvent, InvalidChildCompletionEvent};
-use crate::unix_spawn::{UnixChild, UnixSpawnError, spawn_unix};
+use crate::edge_spawn::{UnixChild, UnixSpawnError, spawn_unix};
 use crate::host_event::{HostEvent, StaleHostEvent};
 use crate::outcomes::{OutcomeError, OutcomeLedger, StartError, TerminalOutcome};
 use crate::reporter::{ReportError, write_report};
 use crate::schedule::{SessionSlotId, SessionSlots};
 use crate::test_intent::ExactTestIntent;
-use crate::unix_arguments::{UnixArgumentsError, lower_unix_arguments};
+use crate::edge_args::{UnixArgumentsError, lower_unix_arguments};
 
 /// One owned child and its identity retained while the listing chunk is reused.
 #[derive(Debug)]
@@ -408,12 +408,9 @@ mod tests {
         UnixOutcomeError, UnixOutcomeInput, UnixOutcomeStep,
     };
     use crate::ExecutablePath;
+    use crate::ExitSource;
     use crate::artifact_stream::ArtifactFramer;
     use crate::discover_listing::{ListingSource, ListingSourceStep};
-    #[cfg(target_os = "linux")]
-    use crate::edge_exit_linux::LinuxExit as ExitSource;
-    #[cfg(target_os = "macos")]
-    use crate::edge_exit_macos::MacosExit as ExitSource;
     use crate::host_event::HostEvent;
     use core::num::NonZeroI32;
     use prime::os::core_shard::run_on_this_thread;
@@ -1138,7 +1135,7 @@ mod cause_tests {
     use crate::outcomes::{OutcomeError, StartError};
     use crate::schedule::SessionSlots;
     use crate::test_intent::ExactTestIntent;
-    use crate::unix_arguments::UnixArgumentsError;
+    use crate::edge_args::UnixArgumentsError;
 
     fn live_child() -> RunningUnixChild<64> {
         let executable = std::env::current_exe().expect("test executable path is available");

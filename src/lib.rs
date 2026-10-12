@@ -17,6 +17,7 @@ pub mod build_defaults {
 
 pub mod cargo_message;
 pub mod child_completion;
+pub mod cli;
 pub mod config;
 pub mod discover_cargo;
 pub mod filter_glob;
@@ -31,22 +32,32 @@ pub mod stop;
 pub mod summary;
 pub mod test_environment;
 
-#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod artifact_stream;
+pub mod edge_args_windows;
+#[cfg(not(windows))]
+pub mod edge_args_unix;
+
 #[cfg(all(
-    feature = "proxima-core",
+    target_os = "windows",
     feature = "proxima-codec",
     feature = "proxima-primitives"
 ))]
-pub mod cargo_source;
-#[cfg(all(unix, feature = "edge-os", feature = "proxima-core"))]
-pub mod edge_signal_unix;
+pub mod edge_spawn_windows;
+#[cfg(all(
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod edge_spawn_unix;
+#[cfg(target_os = "windows")]
+pub mod host;
 #[cfg(all(test, feature = "edge-os", any(target_os = "macos", target_os = "linux")))]
 pub(crate) mod edge_exit;
 #[cfg(all(feature = "edge-os", target_os = "linux"))]
 pub mod edge_exit_linux;
 #[cfg(all(feature = "edge-os", target_os = "macos"))]
 pub mod edge_exit_macos;
+#[cfg(all(unix, feature = "edge-os", feature = "proxima-core"))]
+pub mod edge_signal_unix;
 #[cfg(all(feature = "edge-os", unix))]
 pub mod edge_stream_unix;
 #[cfg(all(
@@ -57,9 +68,31 @@ pub mod edge_stream_unix;
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
 ))]
 pub mod edge_output_unix;
-pub mod cli;
-#[cfg(target_os = "windows")]
-pub mod host;
+
+// the one place an OS is chosen: orchestration modules name these aliases, never an OS
+#[cfg(windows)]
+pub(crate) use edge_args_windows as edge_args;
+#[cfg(not(windows))]
+pub(crate) use edge_args_unix as edge_args;
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+pub(crate) use edge_spawn_unix as edge_spawn;
+#[cfg(unix)]
+pub(crate) use edge_stream_unix as edge_stream;
+#[cfg(unix)]
+pub(crate) use edge_signal_unix as edge_signal;
+#[cfg(target_os = "linux")]
+pub(crate) use edge_exit_linux::LinuxExit as ExitSource;
+#[cfg(target_os = "macos")]
+pub(crate) use edge_exit_macos::MacosExit as ExitSource;
+
+#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
+pub mod artifact_stream;
+#[cfg(all(
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod cargo_source;
 #[cfg(all(
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
     feature = "edge-os",
@@ -67,17 +100,7 @@ pub mod host;
     feature = "proxima-codec",
     feature = "proxima-primitives"
 ))]
-pub mod unix_driver;
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-pub mod unix_env;
-#[cfg(all(unix, feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod unix_pipe_pair;
-#[cfg(all(
-    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
-    feature = "proxima-codec",
-    feature = "proxima-primitives"
-))]
-pub mod unix_spawn;
+pub mod driver;
 #[cfg(all(
     feature = "edge-os",
     feature = "proxima-core",
@@ -108,11 +131,7 @@ pub mod runner;
 pub mod selection;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod test_intent;
-#[cfg(all(unix, feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod unix_arguments;
 
-#[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
-pub mod windows_arguments;
 
 /// One Cargo artifact outcome returned by the record state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

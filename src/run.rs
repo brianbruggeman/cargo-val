@@ -16,19 +16,15 @@ use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
 use proxima_primitives::pipe::{Exhausted, FanIn, Select, SignalSource, UnpinPipe};
 
-#[cfg(target_os = "linux")]
-use crate::edge_exit_linux::LinuxExit as ExitSource;
-#[cfg(target_os = "macos")]
-use crate::edge_exit_macos::MacosExit as ExitSource;
-
+use crate::ExitSource;
 use crate::cli::CliParser;
-use crate::edge_signal_unix::SignalPipe;
-use crate::edge_stream_unix::ChildStream;
-use crate::unix_driver::{
+use crate::edge_signal::SignalPipe;
+use crate::edge_stream::ChildStream;
+use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
     Watches, run_body, session_ended, session_exited, session_output, write_fd,
 };
-use crate::unix_spawn::UnixChild;
+use crate::edge_spawn::UnixChild;
 
 pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
@@ -572,8 +568,8 @@ mod tests {
     use crate::artifact_stream::ArtifactFramer;
     use crate::cargo_source::{CargoSource, CargoSourceStep};
     use crate::edge_exit::fixture::in_single_threaded_process;
-    use crate::unix_spawn::spawn_libdir_query;
-    use crate::unix_spawn::spawn_raw_unix;
+    use crate::edge_spawn::spawn_libdir_query;
+    use crate::edge_spawn::spawn_raw_unix;
     use crate::test_dir::tempdir;
 
     use core::task::{Context, Poll};

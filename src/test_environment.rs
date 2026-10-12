@@ -12,41 +12,8 @@ use crate::cargo_message::{BuildEnvironment, BuildScript, TestArtifact};
 
 /// Most `KEY=VALUE` entries one executable can receive.
 pub const MAX_ENTRIES: usize = 64;
-
-/// Variable the platform loader searches for dynamic libraries.
-#[cfg(windows)]
-pub const DYLIB_PATH_KEY: &str = "PATH";
-/// Variable the platform loader searches for dynamic libraries.
-#[cfg(target_os = "macos")]
-pub const DYLIB_PATH_KEY: &str = "DYLD_FALLBACK_LIBRARY_PATH";
-/// Variable the platform loader searches for dynamic libraries.
-#[cfg(not(any(windows, target_os = "macos")))]
-pub const DYLIB_PATH_KEY: &str = "LD_LIBRARY_PATH";
-
-/// [`DYLIB_PATH_KEY`] as a C string for looking it up in a Unix environment table.
-#[cfg(windows)]
-pub const DYLIB_PATH_KEY_C: &CStr = c"PATH";
-/// [`DYLIB_PATH_KEY`] as a C string for looking it up in a Unix environment table.
-#[cfg(target_os = "macos")]
-pub const DYLIB_PATH_KEY_C: &CStr = c"DYLD_FALLBACK_LIBRARY_PATH";
-/// [`DYLIB_PATH_KEY`] as a C string for looking it up in a Unix environment table.
-#[cfg(not(any(windows, target_os = "macos")))]
-pub const DYLIB_PATH_KEY_C: &CStr = c"LD_LIBRARY_PATH";
-
-#[cfg(windows)]
-const PATH_SEPARATOR: u8 = b';';
-#[cfg(not(windows))]
-const PATH_SEPARATOR: u8 = b':';
-
-#[cfg(windows)]
-const MAIN_SEPARATOR: u8 = b'\\';
-#[cfg(not(windows))]
-const MAIN_SEPARATOR: u8 = b'/';
-
-#[cfg(windows)]
-const DEPS_SUFFIX: &str = "\\deps";
-#[cfg(not(windows))]
-const DEPS_SUFFIX: &str = "/deps";
+pub use crate::edge_args::{DYLIB_PATH_KEY, DYLIB_PATH_KEY_C};
+use crate::edge_args::{DEPS_SUFFIX, MAIN_SEPARATOR, PATH_SEPARATOR};
 
 /// Bounded failures while building one executable's environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
