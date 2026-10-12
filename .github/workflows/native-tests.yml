@@ -39,6 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Run clippy over Windows library and test code
+        shell: bash
+        run: cargo clippy --locked --lib --tests -- -D clippy::pedantic -D warnings
       - name: Build Windows test executable
         shell: bash
         run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib --no-run

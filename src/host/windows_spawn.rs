@@ -236,7 +236,7 @@ mod tests {
     fn current_process_handle_count() -> u32 {
         let mut count = 0;
         assert_eq!(
-            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) },
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &raw mut count) },
             1,
             "process handle count is readable"
         );
@@ -251,7 +251,7 @@ mod tests {
         );
         let mut exit_code = u32::MAX;
         assert_eq!(
-            unsafe { GetExitCodeProcess(child.raw_process_handle(), &mut exit_code) },
+            unsafe { GetExitCodeProcess(child.raw_process_handle(), &raw mut exit_code) },
             1
         );
         exit_code
@@ -584,7 +584,7 @@ mod tests {
     fn child_in_job_state(job: &WindowsJob, child: &WindowsChild) -> bool {
         let mut in_job = 0;
         assert_eq!(
-            unsafe { IsProcessInJob(child.raw_process_handle(), job.raw(), &mut in_job) },
+            unsafe { IsProcessInJob(child.raw_process_handle(), job.raw(), &raw mut in_job) },
             1,
             "job membership is queryable"
         );
@@ -602,7 +602,8 @@ mod tests {
                     job.raw(),
                     JobObjectExtendedLimitInformation,
                     (&raw mut limits).cast(),
-                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                        .expect("struct size fits u32"),
                     core::ptr::null_mut(),
                 )
             },
@@ -772,7 +773,7 @@ mod tests {
             assert!(!handle.is_null());
             assert_ne!(handle, INVALID_HANDLE_VALUE);
             let mut flags = 0;
-            assert_eq!(unsafe { GetHandleInformation(handle, &mut flags) }, 1);
+            assert_eq!(unsafe { GetHandleInformation(handle, &raw mut flags) }, 1);
         }
     }
 
