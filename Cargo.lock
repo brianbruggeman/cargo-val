@@ -986,7 +986,7 @@ dependencies = [
 [[package]]
 name = "prime"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -1024,7 +1024,7 @@ dependencies = [
 [[package]]
 name = "proxima-build"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
  "serde",
@@ -1035,7 +1035,7 @@ dependencies = [
 [[package]]
 name = "proxima-clock"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "proxima-primitives",
 ]
@@ -1043,7 +1043,7 @@ dependencies = [
 [[package]]
 name = "proxima-codec"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "bytes",
  "memchr",
@@ -1054,7 +1054,7 @@ dependencies = [
 [[package]]
 name = "proxima-config"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "arc-swap",
  "proxima-core",
@@ -1071,7 +1071,7 @@ dependencies = [
 [[package]]
 name = "proxima-core"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1088,7 +1088,7 @@ dependencies = [
 [[package]]
 name = "proxima-primitives"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "arc-swap",
  "arrayvec",
@@ -1122,7 +1122,7 @@ dependencies = [
 [[package]]
 name = "proxima-runtime"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "proxima-core",
  "thiserror",
@@ -1131,7 +1131,7 @@ dependencies = [
 [[package]]
 name = "proxima-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=136dd949c723f84f81cc7c425c98459ef64ed350#136dd949c723f84f81cc7c425c98459ef64ed350"
+source = "git+https://github.com/brianbruggeman/proxima.git?rev=b4937f58687f6e166509489ae1069d48c675abf8#b4937f58687f6e166509489ae1069d48c675abf8"
 dependencies = [
  "arc-swap",
  "bon",

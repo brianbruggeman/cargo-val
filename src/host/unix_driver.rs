@@ -2386,14 +2386,14 @@ pub struct Line<const CAPACITY: usize> {
 type LineBuffer = Line<512>;
 
 impl<const CAPACITY: usize> Line<CAPACITY> {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             bytes: [0; CAPACITY],
             length: 0,
         }
     }
 
-    fn text(&mut self, text: &[u8]) {
+    pub(crate) fn text(&mut self, text: &[u8]) {
         let room = self.bytes.len() - self.length;
         let taken = text.len().min(room);
         self.bytes[self.length..self.length + taken].copy_from_slice(&text[..taken]);
