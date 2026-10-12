@@ -33,7 +33,7 @@ fn compare() -> Result<(), String> {
         .parent()
         .and_then(Path::parent)
         .ok_or("example executable has no profile directory")?;
-    let binary = profile_directory.join("cargo-val");
+    let binary = profile_directory.join(format!("cargo-val{}", std::env::consts::EXE_SUFFIX));
     if !binary.is_file() {
         return Err(format!("{} is missing; run `cargo build --release --bin cargo-val`", binary.display()));
     }

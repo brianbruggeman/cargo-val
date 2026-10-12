@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib -- --test-threads=1 2>&1 | tee cargo-test-output.txt
+          cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core${{ runner.os == 'Windows' && ',edge-os' || '' }} --lib -- --test-threads=1 2>&1 | tee cargo-test-output.txt
           test_status=$?
           cat cargo-test-output.txt
           if [ "$test_status" -ne 0 ]; then
@@ -33,6 +33,14 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: cargo test --test dylib_fixture
+      - name: Build the release cargo-val binary
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo build --locked --release --bin cargo-val
+      - name: Compare cargo val with cargo test on the fixture workspace
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo run --locked --release --example parity
 
   windows-pipe:
     runs-on: windows-latest
@@ -44,7 +52,7 @@ jobs:
         run: cargo clippy --locked --lib --tests -- -D clippy::pedantic -D warnings
       - name: Build Windows test executable
         shell: bash
-        run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core --lib --no-run
+        run: cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core,edge-os --lib --no-run
       - name: Run C45b stdout completion test
         shell: bash
         run: bash .github/scripts/run-c45b-case.sh host::windows_pipe::tests::c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix
@@ -54,3 +62,6 @@ jobs:
       - name: Run C45b synchronous EOF test
         shell: bash
         run: bash .github/scripts/run-c45b-case.sh host::windows_pipe::tests::c45b_reports_synchronous_eof_without_an_iocp_packet
+      - name: Run the Windows edge tests
+        shell: bash
+        run: cargo test --locked --lib edge_ -- --test-threads=1
