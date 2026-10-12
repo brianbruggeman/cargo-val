@@ -8,3 +8,6 @@ name = "gate-bin"
 path = "src/main.rs"
 
 [dependencies]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(broken_bin)"] }

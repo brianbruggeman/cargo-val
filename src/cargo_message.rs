@@ -107,9 +107,14 @@ pub enum CargoMessage<'text> {
     BinArtifact {
         /// package id such as `path+file:///repo/parser#0.3.1`; equals the owning test artifacts' id.
         package_id: &'text str,
+        /// the uplifted path such as `/repo/target/debug/parser`, which cargo reports once it is linked.
+        executable: &'text str,
     },
     /// `build-finished`: cargo will emit no further artifacts.
-    BuildFinished,
+    BuildFinished {
+        /// false when a unit failed to build.
+        success: bool,
+    },
     /// A valid message that carries nothing a test launch needs.
     Ignored,
 }
@@ -329,6 +334,17 @@ struct Fields<'input> {
     out_dir: Option<Slot<'input>>,
     linked_paths: Option<Span>,
     environment: Option<Span>,
+    success: Option<bool>,
+}
+
+fn read_success(json: &mut Json<'_, '_>) -> Result<bool, ParseError> {
+    json.whitespace();
+    if json.input.get(json.offset) == Some(&b't') {
+        json.literal(b"true")?;
+        return Ok(true);
+    }
+    json.literal(b"false")?;
+    Ok(false)
 }
 
 fn read_once<'input>(
@@ -379,6 +395,11 @@ fn read_fields<'input>(json: &mut Json<'input, '_>) -> Result<Fields<'input>, Pa
             read_once(&mut fields.manifest_path, json)?;
         } else if text_equals(key, b"target") {
             json.read_target(&mut fields)?;
+        } else if text_equals(key, b"success") {
+            if fields.success.is_some() {
+                return Err(ParseError::InvalidJson);
+            }
+            fields.success = Some(read_success(json)?);
         } else if text_equals(key, b"out_dir") {
             read_once(&mut fields.out_dir, json)?;
         } else if text_equals(key, b"env") {
@@ -482,17 +503,20 @@ pub fn parse_cargo_message<'text>(
             }))
         }
         Some(Reason::CompilerArtifact) => {
-            let built_bin = fields.executable.is_some() && fields.target_kind.is_some_and(|slot| {
+            let built_bin = fields.target_kind.is_some_and(|slot| {
                 resolve(scratch, slot).is_ok_and(|kind| kind == "bin")
             });
-            match (built_bin, fields.package_id) {
-                (true, Some(package_id)) => Ok(CargoMessage::BinArtifact {
+            match (built_bin, fields.executable, fields.package_id) {
+                (true, Some(executable), Some(package_id)) => Ok(CargoMessage::BinArtifact {
                     package_id: resolve(scratch, package_id)?,
+                    executable: resolve(scratch, executable)?,
                 }),
                 _ => Ok(CargoMessage::Ignored),
             }
         }
-        Some(Reason::BuildFinished) => Ok(CargoMessage::BuildFinished),
+        Some(Reason::BuildFinished) => Ok(CargoMessage::BuildFinished {
+            success: fields.success.ok_or(ParseError::MissingArtifactField)?,
+        }),
         Some(Reason::BuildScriptExecuted) => {
             let package_id = fields.package_id.ok_or(ParseError::MissingArtifactField)?;
             let out_dir = fields.out_dir.ok_or(ParseError::MissingArtifactField)?;

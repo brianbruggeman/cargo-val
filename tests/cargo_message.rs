@@ -177,7 +177,7 @@ fn records_without_a_test_executable_are_ignored() {
     }
     assert_eq!(
         parse(build_finished, &mut scratch),
-        Ok(CargoMessage::BuildFinished)
+        Ok(CargoMessage::BuildFinished { success: true })
     );
 }
 
@@ -228,7 +228,8 @@ fn a_built_bin_target_is_reported_by_its_package_and_a_bin_unit_test_is_not() {
     assert_eq!(
         parse(bin, &mut scratch),
         Ok(CargoMessage::BinArtifact {
-            package_id: "path+file:///work/a#0.1.0"
+            package_id: "path+file:///work/a#0.1.0",
+            executable: "/work/a/target/debug/a",
         })
     );
     assert_eq!(parse(library, &mut scratch), Ok(CargoMessage::Ignored));

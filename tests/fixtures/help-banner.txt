@@ -61,7 +61,9 @@ caret before anything is built. Excluded tests are never launched and count as f
 Test executables and bins: a test or bench executable is not listed or launched until
 every bin target of its package has been built, so env!("CARGO_BIN_EXE_<name>") exists.
 The bin set comes from one `cargo metadata --no-deps`; without it the executable waits
-for build-finished. CARGO_VAL_BIN_GATE=off disables the wait.
+for build-finished. A failed build launches none of the waiting executables.
+CARGO_VAL_BIN_GATE=off disables the wait; CARGO_VAL_LOG=debug prints one stderr line
+per gate decision.
 
 Summary: after the results, one line per test binary, then a total line with wall time:
   <binary>: discovered N, passed P, failed F, ignored I, filtered X
