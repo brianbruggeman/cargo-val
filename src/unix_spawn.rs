@@ -2,7 +2,7 @@
 
 use core::ffi::{CStr, c_char, c_int};
 
-use super::unix_pipe_pair::{OwnedDescriptor, UnixPipeError, UnixPipePair};
+use crate::unix_pipe_pair::{OwnedDescriptor, UnixPipeError, UnixPipePair};
 use crate::unix_arguments::UnixArguments;
 
 /// A child process whose captured output remains owned by the host driver.
@@ -274,6 +274,54 @@ impl Drop for SpawnAttributes {
     }
 }
 
+/// Spawns `rustc --print target-libdir [--target <triple>]` without waiting for it.
+///
+/// `rustc` is the `RUSTC` environment value when present, otherwise the name
+/// resolved through `PATH`. The printed directory holds `libstd-*.dylib`, which
+/// proc-macro test binaries load.
+///
+/// # Errors
+///
+/// Returns `EINVAL` when a path or triple exceeds its storage or holds a NUL byte, else the spawn error.
+pub fn spawn_libdir_query(
+    rustc: Option<&[u8]>,
+    triple: Option<&[u8]>,
+    envp: &[*const c_char],
+) -> Result<UnixChild, UnixSpawnError> {
+    let mut rustc_bytes = [0_u8; 1024];
+    let rustc_path = c_string(rustc.unwrap_or(b"rustc"), &mut rustc_bytes)?;
+    let mut triple_bytes = [0_u8; 256];
+    let triple_text = match triple {
+        Some(triple) => Some(c_string(triple, &mut triple_bytes)?),
+        None => None,
+    };
+    let mut argv = [core::ptr::null(); 6];
+    argv[0] = rustc_path.as_ptr();
+    argv[1] = c"--print".as_ptr();
+    argv[2] = c"target-libdir".as_ptr();
+    let argument_count = match triple_text {
+        Some(triple_text) => {
+            argv[3] = c"--target".as_ptr();
+            argv[4] = triple_text.as_ptr();
+            5
+        }
+        None => 3,
+    };
+    spawn_raw_unix(rustc_path, &argv[..=argument_count], envp, None, true)
+}
+
+fn c_string<'storage>(
+    bytes: &[u8],
+    storage: &'storage mut [u8],
+) -> Result<&'storage CStr, UnixSpawnError> {
+    let target = storage
+        .get_mut(..=bytes.len())
+        .ok_or(UnixSpawnError { code: libc::EINVAL })?;
+    target[..bytes.len()].copy_from_slice(bytes);
+    target[bytes.len()] = 0;
+    CStr::from_bytes_with_nul(target).map_err(|_| UnixSpawnError { code: libc::EINVAL })
+}
+
 #[cfg(test)]
 mod tests {
     use core::mem::MaybeUninit;
@@ -285,7 +333,7 @@ mod tests {
 
     use super::{UnixSpawnError, spawn_with_pipes};
     use crate::ExecutablePath;
-    use crate::host::unix_pipe_pair::UnixPipePair;
+    use crate::unix_pipe_pair::UnixPipePair;
     use crate::test_intent::ExactTestIntent;
     use crate::unix_arguments::{UnixArguments, lower_unix_arguments};
 
@@ -321,7 +369,7 @@ mod tests {
             .map(CString::as_c_str)
             .collect::<Vec<_>>();
         let overrides = [expected_cwd.as_c_str(), child_mode.as_c_str()];
-        let intent = exact_intent(executable_text, "host::unix_spawn::tests::fixture_alpha");
+        let intent = exact_intent(executable_text, "unix_spawn::tests::fixture_alpha");
         let mut argument_bytes = [0; 4096];
         let mut argument_pointers = [core::ptr::null(); 4];
         let mut environment_pointers = [core::ptr::null(); 4096];
@@ -385,7 +433,7 @@ mod tests {
     fn c38b_failed_launch_closes_all_capture_descriptors() {
         let intent = exact_intent(
             "/cargo-val-missing-c38b-executable",
-            "host::unix_spawn::tests::fixture_alpha",
+            "unix_spawn::tests::fixture_alpha",
         );
         let pipes = UnixPipePair::new().expect("capture pipes should be created");
         let descriptors = [
