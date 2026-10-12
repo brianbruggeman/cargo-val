@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,20 @@ const FEED_ONLY: &str = "proxima worker pool (feed only, pool warm)";
 const WORKER_MAIN: &str = r#"
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct Phases {
+    tests: usize,
+    first_read: Duration,
+    spawn_join: Duration,
+    env_snapshot: Duration,
+    env_restore: Duration,
+    cwd: Duration,
+    test_body: Duration,
+    write_flush: Duration,
+    read_name: Duration,
+}
 
 fn describe(payload: &(dyn std::any::Any + Send)) -> String {
     let text = payload
@@ -34,26 +48,43 @@ fn describe(payload: &(dyn std::any::Any + Send)) -> String {
     text.replace('\n', " | ")
 }
 
-fn restore(environment: &[(OsString, OsString)], directory: Option<&std::path::Path>) {
+fn restore_environment(environment: &[(OsString, OsString)]) {
     let drifted = std::env::vars_os().map(|(key, _)| key).filter(|key| !environment.iter().any(|(kept, _)| kept == key)).collect::<Vec<_>>();
     // the test thread has been joined, so no other thread can race the environment
     unsafe {
         drifted.iter().for_each(|key| std::env::remove_var(key));
         environment.iter().for_each(|(key, value)| std::env::set_var(key, value));
     }
-    if let Some(path) = directory {
-        let _ = std::env::set_current_dir(path);
-    }
 }
 
-fn run_case(case: fn()) -> Result<(), String> {
+fn run_case(case: fn(), phases: &mut Phases) -> Result<(), String> {
+    let started = Instant::now();
     let environment = std::env::vars_os().collect::<Vec<_>>();
+    phases.env_snapshot += started.elapsed();
+    let started = Instant::now();
     let directory = std::env::current_dir().ok();
-    let outcome = std::thread::spawn(move || std::panic::catch_unwind(case)).join();
-    restore(&environment, directory.as_deref());
+    phases.cwd += started.elapsed();
+    let started = Instant::now();
+    let joined = std::thread::spawn(move || {
+        let body = Instant::now();
+        let outcome = std::panic::catch_unwind(case);
+        (body.elapsed(), outcome)
+    })
+    .join();
+    let (body, outcome) = joined.unwrap_or_else(|payload| (Duration::ZERO, Err(payload)));
+    phases.spawn_join += started.elapsed().saturating_sub(body);
+    phases.test_body += body;
+    let started = Instant::now();
+    restore_environment(&environment);
+    phases.env_restore += started.elapsed();
+    let started = Instant::now();
+    if let Some(path) = directory.as_deref() {
+        let _ = std::env::set_current_dir(path);
+    }
+    phases.cwd += started.elapsed();
     match outcome {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(payload)) | Err(payload) => Err(describe(payload.as_ref())),
+        Ok(()) => Ok(()),
+        Err(payload) => Err(describe(payload.as_ref())),
     }
 }
 
@@ -62,20 +93,54 @@ fn main() {
         CASES.iter().for_each(|(name, _)| println!("{name}: test"));
         return;
     }
+    let worker_started = Instant::now();
     std::panic::set_hook(Box::new(|_| {}));
     let mut output = std::io::stdout().lock();
-    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+    let mut input = std::io::stdin().lock();
+    let mut phases = Phases::default();
+    let mut line = String::new();
+    let mut awaiting_first = true;
+    loop {
+        line.clear();
+        let started = Instant::now();
+        let read = input.read_line(&mut line);
+        if awaiting_first {
+            phases.first_read = worker_started.elapsed();
+            awaiting_first = false;
+        } else {
+            phases.read_name += started.elapsed();
+        }
+        let Ok(read) = read else { break };
+        if read == 0 {
+            break;
+        }
         let name = line.trim();
         let Ok(position) = CASES.binary_search_by_key(&name, |(known, _)| *known) else {
             let _ = writeln!(output, "failed {name} unknown test");
             continue;
         };
-        let _ = match run_case(CASES[position].1) {
+        let outcome = run_case(CASES[position].1, &mut phases);
+        phases.tests += 1;
+        let started = Instant::now();
+        let _ = match outcome {
             Ok(()) => writeln!(output, "ok {name}"),
             Err(message) => writeln!(output, "failed {name} {message}"),
         };
         let _ = output.flush();
+        phases.write_flush += started.elapsed();
     }
+    eprintln!(
+        "worker_phases: tests={} first_read_us={} spawn_join_us={} env_snapshot_us={} env_restore_us={} cwd_us={} test_body_us={} write_flush_us={} read_name_us={}",
+        phases.tests,
+        phases.first_read.as_micros(),
+        phases.spawn_join.as_micros(),
+        phases.env_snapshot.as_micros(),
+        phases.env_restore.as_micros(),
+        phases.cwd.as_micros(),
+        phases.test_body.as_micros(),
+        phases.write_flush.as_micros(),
+        phases.read_name.as_micros(),
+    );
 }
 "#;
 
@@ -98,6 +163,28 @@ struct Worker {
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
+    stderr: ChildStderr,
+    chunks: usize,
+    round_trip: Duration,
+}
+
+const PHASE_PREFIX: &str = "worker_phases: ";
+const PHASE_COUNT: usize = 8;
+const PHASES: [&str; PHASE_COUNT] = ["first_read_us", "spawn_join_us", "env_snapshot_us", "env_restore_us", "cwd_us", "test_body_us", "write_flush_us", "read_name_us"];
+
+#[derive(Clone, Copy, Default)]
+struct WorkerPhases {
+    tests: usize,
+    micros: [u64; PHASE_COUNT],
+    chunks: usize,
+    round_trip_micros: u64,
+}
+
+struct Round {
+    wall: Duration,
+    outcomes: Outcomes,
+    created: usize,
+    phases: Vec<WorkerPhases>,
 }
 
 fn main() -> ExitCode {
@@ -244,12 +331,13 @@ fn spawn_worker(executable: &Path, directory: &Path) -> Result<Worker, String> {
         .current_dir(directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("spawn worker {}: {error}", executable.display()))?;
     let stdin = child.stdin.take().ok_or("worker stdin not piped")?;
     let stdout = child.stdout.take().ok_or("worker stdout not piped")?;
-    Ok(Worker { child, stdin, reader: BufReader::new(stdout) })
+    let stderr = child.stderr.take().ok_or("worker stderr not piped")?;
+    Ok(Worker { child, stdin, reader: BufReader::new(stdout), stderr, chunks: 0, round_trip: Duration::ZERO })
 }
 
 fn run_chunk(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)>, String> {
@@ -258,8 +346,9 @@ fn run_chunk(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)
         text.push('\n');
         text
     });
+    let started = Instant::now();
     worker.stdin.write_all(request.as_bytes()).and_then(|()| worker.stdin.flush()).map_err(|error| format!("write to worker: {error}"))?;
-    names
+    let results = names
         .iter()
         .map(|name| {
             let mut line = String::new();
@@ -271,7 +360,10 @@ fn run_chunk(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)
             }
             Ok((name.clone(), verdict == Some("ok")))
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    worker.round_trip += started.elapsed();
+    worker.chunks += 1;
+    Ok(results)
 }
 
 fn drive(worker: &mut Worker, names: &[String], cursor: &AtomicUsize) -> Result<Vec<(String, bool)>, String> {
@@ -294,13 +386,40 @@ fn run_binary(workers: &mut [Worker], names: &[String]) -> Result<Vec<(String, b
     Ok(gathered.into_iter().flatten().collect())
 }
 
-fn shut_down(workers: Vec<Worker>) {
-    for worker in workers {
-        let Worker { mut child, stdin, reader } = worker;
-        drop(stdin);
-        drop(reader);
-        let _ = child.wait();
+fn parse_phases(report: &str) -> Result<WorkerPhases, String> {
+    let fields = report.lines().find_map(|line| line.strip_prefix(PHASE_PREFIX)).ok_or_else(|| format!("worker wrote no phase line: {report:?}"))?;
+    let mut parsed = WorkerPhases::default();
+    let mut seen = 0;
+    for field in fields.split(' ') {
+        let (key, value) = field.split_once('=').ok_or_else(|| format!("malformed phase field {field:?}"))?;
+        if key == "tests" {
+            parsed.tests = value.parse().map_err(|error| format!("phase tests={value:?}: {error}"))?;
+        } else {
+            let slot = PHASES.iter().position(|known| *known == key).ok_or_else(|| format!("unknown phase {key:?}"))?;
+            parsed.micros[slot] = value.parse().map_err(|error| format!("phase {key}={value:?}: {error}"))?;
+        }
+        seen += 1;
     }
+    if seen != PHASE_COUNT + 1 {
+        return Err(format!("worker phase line has {seen} fields, expected {}: {fields:?}", PHASE_COUNT + 1));
+    }
+    Ok(parsed)
+}
+
+fn shut_down(workers: Vec<Worker>) -> Result<Vec<WorkerPhases>, String> {
+    workers
+        .into_iter()
+        .map(|worker| {
+            let Worker { mut child, stdin, reader, mut stderr, chunks, round_trip } = worker;
+            drop(stdin);
+            drop(reader);
+            let mut report = String::new();
+            stderr.read_to_string(&mut report).map_err(|error| format!("read worker stderr: {error}"))?;
+            let _ = child.wait();
+            let round_trip_micros = u64::try_from(round_trip.as_micros()).unwrap_or(u64::MAX);
+            parse_phases(&report).map(|phases| WorkerPhases { chunks, round_trip_micros, ..phases })
+        })
+        .collect()
 }
 
 fn median(values: &[f64]) -> f64 {
@@ -341,22 +460,23 @@ fn start_pools(context: &Context) -> Result<Pools, String> {
 }
 
 fn feed(pools: &mut Pools) -> Result<Outcomes, String> {
-    let mut outcomes = Outcomes::new();
-    for (workers, names) in pools.iter_mut() {
-        outcomes.extend(run_binary(workers, names)?);
-    }
-    Ok(outcomes)
+    let gathered = std::thread::scope(|scope| {
+        let handles = pools.iter_mut().map(|(workers, names)| scope.spawn(move || run_binary(workers, names))).collect::<Vec<_>>();
+        handles.into_iter().map(|handle| handle.join().map_err(|_| String::from("binary driver thread panicked"))?).collect::<Result<Vec<_>, String>>()
+    })?;
+    Ok(gathered.into_iter().flatten().collect())
 }
 
-fn end_to_end_round(context: &Context) -> Result<(Duration, Outcomes, usize), String> {
+fn end_to_end_round(context: &Context) -> Result<Round, String> {
     let start = Instant::now();
     let mut pools = start_pools(context)?;
     let outcomes = feed(&mut pools)?;
     let created = pools.iter().map(|(workers, _)| workers.len()).sum::<usize>();
+    let mut phases = Vec::new();
     for (workers, _) in pools {
-        shut_down(workers);
+        phases.extend(shut_down(workers)?);
     }
-    Ok((start.elapsed(), outcomes, created))
+    Ok(Round { wall: start.elapsed(), outcomes, created, phases })
 }
 
 fn feed_round(pools: &mut Pools) -> Result<(Duration, Outcomes), String> {
@@ -385,6 +505,48 @@ fn check(label: &str, outcomes: &Outcomes, expected: &Outcomes, problems: &mut V
     }
 }
 
+fn check_phases(label: &str, round: &Round, expected: usize, problems: &mut Vec<String>) {
+    let tests = round.phases.iter().map(|worker| worker.tests).sum::<usize>();
+    let chunks = round.phases.iter().map(|worker| worker.chunks).sum::<usize>();
+    if round.phases.len() != round.created || tests != expected || chunks == 0 {
+        problems.push(format!("{label}: {} phase lines for {} workers, {tests} phase tests against {expected} expected, {chunks} chunks", round.phases.len(), round.created));
+    }
+}
+
+fn seconds(micros: u64) -> f64 {
+    Duration::from_micros(micros).as_secs_f64()
+}
+
+fn per_test_us(total_seconds: f64, tests: usize) -> f64 {
+    total_seconds * 1e6 / as_float(tests)
+}
+
+fn print_phases(phases: &[WorkerPhases], timed_wall: Duration, created: usize) {
+    let totals = phases.iter().fold([0_u64; PHASE_COUNT], |mut totals, worker| {
+        totals.iter_mut().zip(worker.micros).for_each(|(total, micros)| *total += micros);
+        totals
+    });
+    let tests = phases.iter().map(|worker| worker.tests).sum::<usize>();
+    let available = timed_wall.as_secs_f64() * as_float(created);
+    let attributed = totals.iter().map(|micros| seconds(*micros)).sum::<f64>();
+    let unattributed = (available - attributed).max(0.0);
+    println!("worker_phases summary: {} worker lines across {ROUNDS} timed rounds, {tests} tests, available worker-time {available:.3} s (end-to-end wall x workers)", phases.len());
+    println!("{:<20} {:>14} {:>10} {:>14} {:>12}", "phase", "total us", "us/test", "% attributed", "% of round");
+    for (name, micros) in PHASES.iter().zip(totals) {
+        let total = seconds(micros);
+        println!("{name:<20} {micros:>14} {:>10.2} {:>14.2} {:>12.2}", per_test_us(total, tests), total / attributed * 100.0, total / available * 100.0);
+    }
+    println!("{:<20} {:>14.0} {:>10.2} {:>14} {:>12.2}", "unattributed", unattributed * 1e6, per_test_us(unattributed, tests), "-", unattributed / available * 100.0);
+    println!("{:<20} {:>14.0} {:>10.2} {:>14} {:>12.2}", "available", available * 1e6, per_test_us(available, tests), "-", 100.0);
+    let chunks = phases.iter().map(|worker| worker.chunks).sum::<usize>();
+    let trip = seconds(phases.iter().map(|worker| worker.round_trip_micros).sum::<u64>());
+    println!(
+        "driver chunk round trip: {chunks} chunks of up to {CHUNK} names, total {trip:.3} s (request write to last answer read), mean {:.1} us per chunk, {:.2} us per test",
+        trip * 1e6 / as_float(chunks),
+        per_test_us(trip, tests)
+    );
+}
+
 fn measure() -> Result<bool, String> {
     let context = context()?;
     let expected = expected(context.shape);
@@ -399,27 +561,33 @@ fn measure() -> Result<bool, String> {
     generate(&context)?;
     build(&context)?;
     let mut problems = Vec::new();
-    let (_, warm_outcomes, created) = end_to_end_round(&context)?;
-    check("warm end to end", &warm_outcomes, &expected, &mut problems);
+    let warm = end_to_end_round(&context)?;
+    check("warm end to end", &warm.outcomes, &expected, &mut problems);
+    let created = warm.created;
     let mut warm_pool = start_pools(&context)?;
     check("warm feed", &feed(&mut warm_pool)?, &expected, &mut problems);
     let (mut end_to_end, mut feed_only) = (Vec::new(), Vec::new());
     let mut last = Outcomes::new();
+    let (mut phases, mut timed_wall) = (Vec::new(), Duration::ZERO);
     for round in 1..=ROUNDS {
-        let (wall, outcomes, _) = end_to_end_round(&context)?;
-        check(&format!("end to end round {round}"), &outcomes, &expected, &mut problems);
-        end_to_end.push(wall.as_secs_f64());
+        let timed = end_to_end_round(&context)?;
+        check(&format!("end to end round {round}"), &timed.outcomes, &expected, &mut problems);
+        check_phases(&format!("end to end round {round}"), &timed, expected.len(), &mut problems);
+        end_to_end.push(timed.wall.as_secs_f64());
+        timed_wall += timed.wall;
+        phases.extend(timed.phases);
         let (wall, outcomes) = feed_round(&mut warm_pool)?;
         check(&format!("feed only round {round}"), &outcomes, &expected, &mut problems);
         feed_only.push(wall.as_secs_f64());
         last = outcomes;
     }
     for (workers, _) in warm_pool {
-        shut_down(workers);
+        shut_down(workers)?;
     }
     print_table(&end_to_end, &feed_only, &last, created);
     for problem in &problems {
         println!("worker_scale: OUTCOME MISMATCH: {problem}");
     }
+    print_phases(&phases, timed_wall, created);
     Ok(problems.is_empty())
 }
