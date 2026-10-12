@@ -13,7 +13,7 @@ use crate::cargo_message::{BuildEnvironment, BuildScript, TestArtifact};
 /// Most `KEY=VALUE` entries one executable can receive.
 pub const MAX_ENTRIES: usize = 64;
 pub use crate::edge_args::{DYLIB_PATH_KEY, DYLIB_PATH_KEY_C};
-use crate::edge_args::{DEPS_SUFFIX, MAIN_SEPARATOR, PATH_SEPARATOR};
+use crate::edge_args::{DEPS_SUFFIX, LOADER_DEFAULT_FALLBACKS, MAIN_SEPARATOR, PATH_SEPARATOR};
 
 /// Bounded failures while building one executable's environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,7 +397,7 @@ fn push_default_fallbacks(
     value_start: usize,
     home: Option<&str>,
 ) -> Result<(), TestEnvironmentError> {
-    if !cfg!(target_os = "macos") {
+    if !LOADER_DEFAULT_FALLBACKS {
         return Ok(());
     }
     if let Some(home) = home {

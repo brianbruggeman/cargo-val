@@ -1123,7 +1123,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix, feature = "proxima-core"))]
+#[cfg(all(test, feature = "proxima-core"))]
 mod cause_tests {
     use core::ffi::{CStr, c_char};
 

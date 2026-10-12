@@ -5,6 +5,8 @@ use core::ffi::CStr;
 pub const DYLIB_PATH_KEY: &str = "PATH";
 pub const DYLIB_PATH_KEY_C: &CStr = c"PATH";
 pub const PATH_SEPARATOR: u8 = b';';
+/// Whether the loader appends default library directories when the inherited search path is absent.
+pub const LOADER_DEFAULT_FALLBACKS: bool = false;
 pub const MAIN_SEPARATOR: u8 = b'\\';
 pub const DEPS_SUFFIX: &str = "\\deps";
 
