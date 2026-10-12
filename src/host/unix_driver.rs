@@ -22,11 +22,12 @@ use crate::discover_listing::{
     DocEvent, DocOutcome, DocParser, ListingLine, ListingSource, ListingSourceError,
     ListingSourceStep, parse_listing_line,
 };
+use crate::discover_cargo::{Arrival, BinGate, DebugEvent, DiscoveryFsm, Output, Reason};
 use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
-use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
+use crate::parked_artifacts::ParkFault;
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
 use crate::edge_signal_unix::{SignalPipe, conventional_status, release_child, track_child};
 use crate::host::unix_env::UnixEnvironment;
@@ -1719,51 +1720,9 @@ struct CargoDriver<'run, 'buffer> {
     scratch: &'buffer mut [u8],
     linked: LinkedDirectories<'buffer>,
     build_scripts: BuildScriptOutputs<'buffer>,
-    stdout_eof: bool,
-    stderr_eof: bool,
-    exit_code: Option<i32>,
     pending_listing: Option<PendingListing>,
-    bins: BinCounts,
-    gate: BinGate,
-    build: BuildState,
-    dropped: usize,
-    parked: ParkedArtifacts,
+    discovery: DiscoveryFsm,
     lock_watch: LockWatch,
-}
-
-// a test or bench executable may use CARGO_BIN_EXE_<name>, so it waits for its package's bins
-/// How a test or bench executable learns that its package's bins exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BinGate {
-    Off,
-    Metadata,
-    BuildFinished,
-}
-
-impl BinGate {
-    const fn name(self) -> &'static [u8] {
-        match self {
-            Self::Off => b"off",
-            Self::Metadata => b"metadata",
-            Self::BuildFinished => b"build-finished",
-        }
-    }
-}
-
-/// What cargo said about the build so far; only a build that succeeded proves every bin exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuildState {
-    Running,
-    Succeeded,
-    Failed,
-}
-
-fn waits_for_bins(bins: &BinCounts, gate: BinGate, build: BuildState, package_id: &str) -> bool {
-    match (build, gate) {
-        (BuildState::Succeeded, _) | (_, BinGate::Off) => false,
-        (_, BinGate::Metadata) => bins.awaiting(package_id),
-        (_, BinGate::BuildFinished) => true,
-    }
 }
 
 fn gate_debug(enabled: bool, describe: impl FnOnce(&mut Line<1024>)) {
@@ -1812,11 +1771,35 @@ fn debug_bin_built(enabled: bool, executable: &str, package_id: &str) {
     });
 }
 
-fn debug_build_end(enabled: bool, event: &[u8], parked: usize) {
+fn debug_event(enabled: bool, event: &DebugEvent<'_>) {
+    match event {
+        DebugEvent::BuildEnded { end, parked } => gate_debug(enabled, |line| {
+            line.text(end.text());
+            line.text(b" parked=");
+            line.number(*parked);
+        }),
+        DebugEvent::Dropped { reason, artifact } => {
+            let held = artifact.as_artifact();
+            gate_debug(enabled, |line| {
+                line.text(b" drop reason=");
+                line.text(reason.text());
+                line.text(b" target=");
+                line.text(held.target_name.as_bytes());
+                line.text(b" package=");
+                line.text(held.package_id.as_bytes());
+            });
+        }
+    }
+}
+
+fn debug_release(enabled: bool, reason: Reason, artifact: &TestArtifact<'_>) {
     gate_debug(enabled, |line| {
-        line.text(event);
-        line.text(b" parked=");
-        line.number(parked);
+        line.text(b" release reason=");
+        line.text(reason.text());
+        line.text(b" target=");
+        line.text(artifact.target_name.as_bytes());
+        line.text(b" package=");
+        line.text(artifact.package_id.as_bytes());
     });
 }
 
@@ -1863,17 +1846,13 @@ impl CargoDriver<'_, '_> {
             self.process_id,
         );
         if let Some(status) = reaped {
-            self.exit_code = Some(status.code.unwrap_or(1));
+            self.discovery.exited(status.code.unwrap_or(1));
         }
         Ok(())
     }
 
     fn drained(&self, unaccounted: usize) -> bool {
-        self.stdout_eof
-            && self.stderr_eof
-            && self.exit_code.is_some()
-            && unaccounted == 0
-            && self.parked.is_empty()
+        self.discovery.drained(unaccounted)
     }
 
     fn run_listing_paused(
@@ -1883,68 +1862,50 @@ impl CargoDriver<'_, '_> {
         ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
     ) -> Result<(), RunError> {
-        let stdout_open = !self.stdout_eof;
-        let stderr_open = !self.stderr_eof;
+        let stdout_open = !self.discovery.stdout_closed();
+        let stderr_open = !self.discovery.stderr_closed();
         pause_cargo(&mut self.stdout, &mut self.stderr, stdout_open, stderr_open)?;
         run_listing(run, listing, ledger, watches)?;
         resume_cargo(&mut self.stdout, &mut self.stderr, stdout_open, stderr_open)
     }
 
-    fn release_parked(
+    fn queue_listing(
         &mut self,
         run: &ListingRun<'_>,
+        started: Option<PendingListing>,
         ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
-        reason: &[u8],
     ) -> Result<(), RunError> {
-        loop {
-            let (bins, gate, build) = (&self.bins, self.gate, self.build);
-            let Some(owned) = self
-                .parked
-                .take_ready(|package_id| !waits_for_bins(bins, gate, build, package_id))
-            else {
-                return Ok(());
-            };
-            let artifact = owned.as_artifact();
-            gate_debug(run.settings.debug, |line| {
-                line.text(b" release reason=");
-                line.text(reason);
-                line.text(b" target=");
-                line.text(artifact.target_name.as_bytes());
-                line.text(b" package=");
-                line.text(artifact.package_id.as_bytes());
-            });
-            let started =
-                start_listing(run, ledger, &artifact, &self.linked, &self.build_scripts)?;
-            if let Some(next_listing) = started
-                && let Some(previous_listing) = self.pending_listing.replace(next_listing)
-            {
-                self.run_listing_paused(run, previous_listing, ledger, watches)?;
-            }
+        if let Some(next_listing) = started
+            && let Some(previous_listing) = self.pending_listing.replace(next_listing)
+        {
+            self.run_listing_paused(run, previous_listing, ledger, watches)?;
         }
+        Ok(())
     }
-
-    fn finish_build(
+    fn apply_discovery(
         &mut self,
-        build: BuildState,
-        reason: &[u8],
         run: &ListingRun<'_>,
         ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
     ) -> Result<(), RunError> {
-        self.build = build;
-        self.release_parked(run, ledger, watches, reason)?;
-        while let Some(owned) = self.parked.take_ready(|_| true) {
-            let artifact = owned.as_artifact();
-            self.dropped += 1;
-            gate_debug(run.settings.debug, |line| {
-                line.text(b" drop reason=");
-                line.text(reason);
-                line.text(b" target=");
-                line.text(artifact.target_name.as_bytes());
-                line.text(b" package=");
-                line.text(artifact.package_id.as_bytes());
-            });
+        while let Some(output) = self.discovery.next_output() {
+            match output {
+                Output::Debug(event) => debug_event(run.settings.debug, &event),
+                Output::List(released) => {
+                    let (reason, held) = (released.reason, *released.artifact);
+                    let artifact = held.as_artifact();
+                    debug_release(run.settings.debug, reason, &artifact);
+                    let started = start_listing(
+                        run,
+                        ledger,
+                        &artifact,
+                        &self.linked,
+                        &self.build_scripts,
+                    )?;
+                    self.queue_listing(run, started, ledger, watches)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1966,16 +1927,11 @@ impl CargoDriver<'_, '_> {
             );
             match step {
                 Poll::Ready(Ok(CargoSourceStep::Artifact(artifact))) => {
-                    let gated = matches!(artifact.target_kind, "test" | "bench")
-                        && waits_for_bins(
-                            &self.bins,
-                            self.gate,
-                            self.build,
-                            artifact.package_id,
-                        );
-                    debug_artifact(run.settings.debug, gated, self.gate, &artifact);
-                    if gated {
-                        self.parked.park(&artifact).map_err(RunError::Parked)?;
+                    let arrival = self.discovery.arrival(&artifact);
+                    let gate = self.discovery.gate();
+                    debug_artifact(run.settings.debug, arrival == Arrival::Park, gate, &artifact);
+                    if arrival == Arrival::Park {
+                        self.discovery.park(&artifact).map_err(RunError::Parked)?;
                         continue;
                     }
                     let started = start_listing(
@@ -1985,29 +1941,19 @@ impl CargoDriver<'_, '_> {
                         &self.linked,
                         &self.build_scripts,
                     )?;
-                    if let Some(next_listing) = started
-                        && let Some(previous_listing) = self.pending_listing.replace(next_listing)
-                    {
-                        self.run_listing_paused(run, previous_listing, ledger, watches)?;
-                    }
+                    self.queue_listing(run, started, ledger, watches)?;
                 }
                 Poll::Ready(Ok(CargoSourceStep::BinBuilt {
                     package_id,
                     executable,
                 })) => {
                     debug_bin_built(run.settings.debug, executable, package_id);
-                    self.bins.note_built(package_id);
-                    self.release_parked(run, ledger, watches, b"bin-built")?;
+                    self.discovery.bin_built(package_id);
+                    self.apply_discovery(run, ledger, watches)?;
                 }
                 Poll::Ready(Ok(CargoSourceStep::BuildFinished { success })) => {
-                    let (build, event, reason): (_, &[u8], &[u8]) = if success {
-                        (BuildState::Succeeded, b" build-finished success=true", b"build-succeeded")
-                    } else {
-                        (BuildState::Failed, b" build-finished success=false", b"build-failed")
-                    };
-                    debug_build_end(run.settings.debug, event, self.parked.len());
-                    self.finish_build(build, reason, run, ledger, watches)?;
-                    self.finish_build(build, reason, run, ledger, watches)?;
+                    self.discovery.build_finished(success);
+                    self.apply_discovery(run, ledger, watches)?;
                 }
                 Poll::Ready(Ok(CargoSourceStep::BuildScript(script))) => {
                     for reported in script.linked_paths.iter() {
@@ -2025,13 +1971,8 @@ impl CargoDriver<'_, '_> {
                     | CargoSourceStep::Ignored,
                 )) => {}
                 Poll::Ready(Ok(CargoSourceStep::Eof)) => {
-                    self.stdout_eof = true;
-                    let build = match self.build {
-                        BuildState::Running => BuildState::Failed,
-                        settled => settled,
-                    };
-                    debug_build_end(run.settings.debug, b" stdout-eof", self.parked.len());
-                    return self.finish_build(build, b"stdout-eof", run, ledger, watches);
+                    self.discovery.stdout_eof();
+                    return self.apply_discovery(run, ledger, watches);
                 }
                 Poll::Ready(Err(_)) => return Err(RunError::CargoStream),
                 Poll::Pending => return Ok(()),
@@ -2050,14 +1991,16 @@ impl CargoDriver<'_, '_> {
         self.reap()?;
         while !self.drained(ledger.unaccounted()) || !run.doc_tests_finished() {
             run.pump_doc_tests()?;
-            if !self.stdout_eof {
+            if !self.discovery.stdout_closed() {
                 self.poll_artifacts(&mut context, run, ledger, watches)?;
             }
             if let Some(listing) = self.pending_listing.take() {
                 self.run_listing_paused(run, listing, ledger, watches)?;
             }
-            if !self.stderr_eof {
-                self.stderr_eof = drain_reader(&mut self.stderr, 2, Some(&mut self.lock_watch))?;
+            if !self.discovery.stderr_closed()
+                && drain_reader(&mut self.stderr, 2, Some(&mut self.lock_watch))?
+            {
+                self.discovery.stderr_eof();
             }
             self.reap()?;
             run.pump_doc_tests()?;
@@ -2171,15 +2114,8 @@ pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
         scratch: &mut scratch,
         linked: LinkedDirectories::new(&mut linked_bytes),
         build_scripts: BuildScriptOutputs::new(&mut build_script_bytes),
-        stdout_eof: false,
-        stderr_eof: false,
-        exit_code: None,
         pending_listing: None,
-        bins,
-        gate,
-        build: BuildState::Running,
-        dropped: 0,
-        parked: ParkedArtifacts::new(),
+        discovery: DiscoveryFsm::new(bins, gate),
         lock_watch,
     };
     let mut sessions = SessionSlots::<RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>::new();
@@ -2214,10 +2150,10 @@ pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
         doc: RefCell::new(doc_tests),
     };
     driver.drive(&run, &mut ledger, &mut watches)?;
-    if driver.dropped > 0 && driver.exit_code == Some(0) {
+    if driver.discovery.lost_artifacts_on_clean_exit() {
         return Err(RunError::CargoStream);
     }
-    finish_run(parser, &run, driver.exit_code)
+    finish_run(parser, &run, driver.discovery.exit_code())
 }
 
 struct StartedChildren<'port> {

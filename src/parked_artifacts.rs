@@ -48,7 +48,7 @@ fn text(bytes: &[u8]) -> &str {
 }
 
 impl OwnedArtifact {
-    const EMPTY: Self = Self {
+    pub const EMPTY: Self = Self {
         executable: [0; PATH_CAPACITY],
         executable_length: 0,
         manifest_path: [0; PATH_CAPACITY],
