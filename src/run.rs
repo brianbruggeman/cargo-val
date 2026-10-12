@@ -8,6 +8,7 @@ use core::task::{Context, Poll};
 use std::boxed::Box;
 use std::ffi::CString;
 use std::io;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::ExitStatus;
 use std::vec::Vec;
 
@@ -23,14 +24,15 @@ use crate::edge_exit_macos::MacosExit as ExitSource;
 use crate::cli::CliParser;
 use crate::edge_stream_unix::ChildStream;
 use crate::host::unix_driver::{
-    CargoDriver, Ledger, ListingRun, RunError, RunSummary, Watches, run_body, service_port,
-    write_fd,
+    CargoDriver, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary, Watches, run_body,
+    service_port, session_ended, session_exited, session_output, write_fd,
 };
 use crate::host::unix_spawn::UnixChild;
 
 pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
-const LANES: usize = 2;
+pub(crate) const JOB_BASE: usize = 2;
+const LANES: usize = JOB_BASE + LIVE_CAPACITY;
 const ARMS: usize = LANES * 3 + 1;
 
 /// One child's stdout and stderr streams, its exit source, and whether its stdout may be read now.
@@ -68,6 +70,29 @@ pub(crate) fn attach(lane: &Lane, child: UnixChild) -> Result<libc::pid_t, RunEr
     *lane.2.borrow_mut() = Some(exit);
     lane.3.set(true);
     Ok(process_id)
+}
+
+/// Gives a session's lane duplicates of its child's streams, since the ledger's session keeps the originals until it retires.
+///
+/// # Errors
+///
+/// Returns [`RunError::Spawn`] when a descriptor cannot be duplicated or the child has no usable process id.
+pub(crate) fn attach_session(lane: &Lane, child: &UnixChild) -> Result<(), RunError> {
+    let exit = ExitSource::new(NonZeroI32::new(child.process_id()).ok_or(RunError::Spawn)?);
+    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(duplicate(child.stdout().raw())?)));
+    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(duplicate(child.stderr().raw())?)));
+    *lane.2.borrow_mut() = Some(exit);
+    lane.3.set(true);
+    Ok(())
+}
+
+fn duplicate(descriptor: libc::c_int) -> Result<OwnedFd, RunError> {
+    // safety: the descriptor is an open pipe end owned by the session, and the duplicate is owned by the returned OwnedFd alone.
+    let copy = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Err(RunError::Spawn);
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(copy) })
 }
 
 pub(crate) enum Edge<'edge> {
@@ -244,17 +269,13 @@ fn handle(
             let range = range.map_err(|_| RunError::CargoStream)?;
             driver.cargo_chunk(lanes, range, 0, run, ledger)
         }
-        Item::Out(_, range) => {
+        Item::Out(LISTING_LANE, range) => {
             let range = range.map_err(|_| RunError::ListingStream)?;
             driver.listing_chunk(lanes, range, 0, run, ledger, watches)
         }
-        Item::OutEnd(CARGO_LANE) => {
-            driver.cargo_out_ended();
-            Ok(())
-        }
-        Item::OutEnd(_) => {
-            driver.listing_stdout_ended();
-            Ok(())
+        Item::Out(lane, range) => session_chunk(lanes, lane, true, range, run, ledger, watches),
+        Item::Err(lane, range) if lane >= JOB_BASE => {
+            session_chunk(lanes, lane, false, range, run, ledger, watches)
         }
         Item::Err(lane, range) => {
             let range = range.map_err(|_| RunError::Reactor)?;
@@ -267,27 +288,56 @@ fn handle(
                 write_fd(2, &bytes)
             }
         }
+        Item::OutEnd(CARGO_LANE) => {
+            driver.cargo_out_ended();
+            Ok(())
+        }
+        Item::OutEnd(LISTING_LANE) => {
+            driver.listing_stdout_ended();
+            Ok(())
+        }
+        Item::OutEnd(lane) => session_ended(run, ledger, watches, lane - JOB_BASE, true),
         Item::ErrEnd(CARGO_LANE) => {
             driver.stderr_ended();
             Ok(())
         }
-        Item::ErrEnd(_) => {
+        Item::ErrEnd(LISTING_LANE) => {
             driver.listing_stderr_ended();
             Ok(())
         }
+        Item::ErrEnd(lane) => session_ended(run, ledger, watches, lane - JOB_BASE, false),
         Item::Exit(CARGO_LANE, status) => {
             driver.cargo_exited(exit_code(status)?);
             Ok(())
         }
-        Item::Exit(_, status) => {
+        Item::Exit(LISTING_LANE, status) => {
             driver.listing_exited(exit_code(status)?);
             Ok(())
         }
+        Item::Exit(lane, status) => {
+            session_exited(run, ledger, watches, lane - JOB_BASE, exit_code(status)?)
+        }
         Item::Port(ready) => {
             ready.map_err(|_| RunError::Reactor)?;
-            service_port(run, ledger, watches)
+            service_port(run)
         }
     }
+}
+
+fn session_chunk(
+    lanes: &Lanes,
+    lane: usize,
+    stdout: bool,
+    range: io::Result<Range<u32>>,
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+) -> Result<(), RunError> {
+    let range = range.map_err(|_| RunError::Reactor)?;
+    let slot = if stdout { lanes[lane].0.borrow() } else { lanes[lane].1.borrow() };
+    let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+    let bytes = stream.window(range).ok_or(RunError::Reactor)?;
+    session_output(run, ledger, watches, lane - JOB_BASE, stdout, &bytes)
 }
 
 /// Observes the cargo build child, its listings, and the old port through prime sources only, until every launched child is accounted for.
@@ -302,7 +352,7 @@ pub(crate) async fn observe_cargo(
     ledger: &mut Ledger<'_>,
     watches: &mut Watches,
 ) -> Result<(), RunError> {
-    let lanes = empty_lanes();
+    let lanes = Box::new(empty_lanes());
     attach(&lanes[CARGO_LANE], child)?;
     let port = RefCell::new(Readiness::new(run.port_fd()));
     pump(&lanes, Some(&port), |item| {
