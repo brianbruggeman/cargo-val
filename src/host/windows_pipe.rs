@@ -8,7 +8,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED, GetLastError, HANDLE,
 };
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
-use windows_sys::Win32::System::IO::{CancelIoEx, OVERLAPPED};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 /// One result delivered after the associated completion packet is dispatched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +149,27 @@ impl<'storage> WindowsPipeReadSlot<'storage> {
         }
         slot.state = WindowsPipeReadState::Cancelling;
         Ok(())
+    }
+
+    /// Cancels a pending read and waits until the kernel is done with the slot's storage.
+    ///
+    /// # Safety
+    ///
+    /// `parent_reader` must be the handle the read was started on and must still be open.
+    pub unsafe fn abandon(self: Pin<&mut Self>, parent_reader: HANDLE) {
+        let slot = unsafe { self.get_unchecked_mut() };
+        if !matches!(
+            slot.state,
+            WindowsPipeReadState::Pending | WindowsPipeReadState::Cancelling
+        ) {
+            return;
+        }
+        let mut transferred = 0;
+        unsafe {
+            CancelIoEx(parent_reader, &raw const slot.overlapped);
+            GetOverlappedResult(parent_reader, &raw const slot.overlapped, &raw mut transferred, 1);
+        }
+        slot.state = WindowsPipeReadState::Idle;
     }
 
     /// Accepts one completion packet from the slot's associated IOCP.

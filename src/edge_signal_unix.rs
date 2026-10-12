@@ -3,6 +3,7 @@
 use core::cell::Cell;
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicI32, Ordering};
+use std::io;
 
 use prime::os::readiness::Readiness;
 use proxima_core::signal::Signal;
@@ -112,9 +113,12 @@ impl SignalPipe {
     }
 
     /// A prime gate that opens while a signal byte waits to be drained.
-    #[must_use]
-    pub fn gate(&self) -> Readiness {
-        Readiness::new(self.read_end)
+    ///
+    /// # Errors
+    ///
+    /// Never fails on this OS; the result matches the edges whose gate duplicates a handle.
+    pub fn gate(&self) -> io::Result<Readiness> {
+        Ok(Readiness::new(self.read_end))
     }
 
     /// Fires once, when [`drain`](Self::drain) first forwards a signal.

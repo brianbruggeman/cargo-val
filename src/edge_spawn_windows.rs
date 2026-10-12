@@ -5,6 +5,8 @@ pub mod handles {
 
     use core::ffi::c_void;
     use core::mem::{MaybeUninit, size_of};
+    use std::io;
+    use std::os::windows::io::{BorrowedHandle, FromRawHandle, OwnedHandle};
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
@@ -26,6 +28,7 @@ pub mod handles {
     };
 
     /// Owns one Win32 handle shared by child launch and host I/O adapters.
+    #[derive(Debug)]
     pub(crate) struct WindowsOwnedHandle(HANDLE);
 
     impl WindowsOwnedHandle {
@@ -35,6 +38,30 @@ pub mod handles {
 
         pub(crate) const fn raw(&self) -> HANDLE {
             self.0
+        }
+
+        /// Gives the handle to a std owner, which closes it instead of this type.
+        pub(crate) fn into_owned(self) -> OwnedHandle {
+            let released = core::mem::ManuallyDrop::new(self);
+            // safety: the handle is open and `released` never closes it, so exactly one owner remains.
+            unsafe { OwnedHandle::from_raw_handle(released.0) }
+        }
+
+        /// Releases the raw handle without closing it; the caller closes it.
+        pub(crate) fn into_raw(self) -> HANDLE {
+            core::mem::ManuallyDrop::new(self).0
+        }
+
+        /// Duplicates the handle for a second owner.
+        pub(crate) fn try_clone(&self) -> io::Result<OwnedHandle> {
+            // safety: the handle is open for as long as `self` lives, which outlives this borrow.
+            unsafe { BorrowedHandle::borrow_raw(self.0) }.try_clone_to_owned()
+        }
+
+        /// Lends the handle to a prime gate.
+        pub(crate) fn as_borrowed(&self) -> BorrowedHandle<'_> {
+            // safety: the handle is open for as long as `self` lives, which outlives this borrow.
+            unsafe { BorrowedHandle::borrow_raw(self.0) }
         }
     }
 
@@ -104,6 +131,17 @@ pub mod handles {
         #[must_use]
         pub const fn raw(&self) -> HANDLE {
             self.handle.raw()
+        }
+    }
+
+    // a job handle is a kernel object that any thread may use
+    unsafe impl Send for WindowsJob {}
+    unsafe impl Sync for WindowsJob {}
+
+    impl WindowsJob {
+        /// Releases the job handle without closing it; the caller closes it.
+        pub(crate) fn into_raw(self) -> HANDLE {
+            self.handle.into_raw()
         }
     }
 
@@ -319,7 +357,6 @@ pub mod handles {
         };
 
         use super::{WindowsHandleList, WindowsHandleListError};
-        use crate::ExecutablePath;
         use crate::edge_args_windows::lower_windows_arguments;
 
         pub(crate) const CHILD_PROBE_NAME: &str =
@@ -365,14 +402,11 @@ pub mod handles {
             (TestHandle(read_handle), TestHandle(write_handle))
         }
 
-        pub(crate) fn exact_test_intent<'executable, 'name>(
-            executable: &'executable str,
-            test_name: &'name str,
-        ) -> crate::test_intent::ExactTestIntent<'executable, 'static, 'name> {
-            crate::test_intent::ExactTestIntent {
-                executable: ExecutablePath::Borrowed(executable),
-                test_name,
-            }
+        pub(crate) fn exact_test_intent<'text>(
+            executable: &'text str,
+            test_name: &'text str,
+        ) -> [&'text str; 3] {
+            [executable, "--exact", test_name]
         }
 
         fn launch_probe(
@@ -700,6 +734,11 @@ pub mod pipe_pair {
         pub fn close_child_write_handle(&mut self) {
             self.child_writer = None;
         }
+
+        /// Keeps the overlapped parent reader and closes the child writer if it is still open.
+        pub(crate) fn into_parent_reader(self) -> WindowsOwnedHandle {
+            self.parent_reader
+        }
     }
 
     #[cfg(test)]
@@ -886,14 +925,44 @@ mod spawn {
     //! Nonblocking ownership of Windows child process handles.
 
     use core::ffi::c_void;
+    use core::mem::MaybeUninit;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    use std::io;
+    use std::os::windows::io::OwnedHandle;
+    use std::path::{Path, PathBuf};
+    use std::string::String;
+    use std::sync::OnceLock;
+    use std::vec::Vec;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, TerminateJobObject};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_SUSPENDED, CreateProcessW, PROCESS_INFORMATION, ResumeThread, SetPriorityClass,
+        TerminateProcess,
+    };
 
+    use crate::ExitSource;
     use crate::edge_args_windows::WindowsArguments;
-    use crate::edge_args_windows::windows_creation_flags;
-    use crate::edge_spawn_windows::handles::WindowsHandleList;
-    use crate::edge_spawn_windows::handles::WindowsOwnedHandle;
+    use crate::edge_args_windows::{
+        WINDOWS_BELOW_NORMAL_PRIORITY, WindowsArgumentsError, lower_arguments, windows_creation_flags,
+        write_executable_path, write_working_directory,
+    };
+    use crate::edge_signal_windows::register_group;
+    use crate::edge_spawn_windows::handles::{
+        WindowsHandleList, WindowsJob, WindowsJobError, WindowsOwnedHandle,
+    };
+    use crate::edge_spawn_windows::pipe_pair::WindowsPipePair;
+
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    const ATTRIBUTE_WORDS: usize = 64;
+    const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
 
     /// Failures while creating a Windows child process.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -909,6 +978,7 @@ mod spawn {
     }
 
     /// A launched child whose process handle remains owned until drop.
+    #[derive(Debug)]
     pub struct WindowsChild {
         process: WindowsOwnedHandle,
         process_id: u32,
@@ -1006,6 +1076,25 @@ mod spawn {
         environment: &ChildEnvironment<'_>,
         working_directory: &ChildWorkingDirectory<'_>,
     ) -> Result<WindowsChild, WindowsSpawnError> {
+        spawn_windows_child_grouped(
+            executable,
+            command_line,
+            handle_list,
+            environment,
+            working_directory,
+            None,
+        )
+    }
+
+    /// Creates the child suspended when `group` is given, joins it to that nested job, then resumes it, so no grandchild escapes the group.
+    fn spawn_windows_child_grouped(
+        executable: &[u16],
+        command_line: &mut [u16],
+        handle_list: &WindowsHandleList<'_>,
+        environment: &ChildEnvironment<'_>,
+        working_directory: &ChildWorkingDirectory<'_>,
+        group: Option<&WindowsJob>,
+    ) -> Result<WindowsChild, WindowsSpawnError> {
         let startup_info = core::ptr::from_ref(handle_list.startup_info()).cast();
         let mut process_information = PROCESS_INFORMATION::default();
         if !is_terminated_path(executable) {
@@ -1033,7 +1122,7 @@ mod spawn {
                 core::ptr::null(),
                 core::ptr::null(),
                 1,
-                windows_creation_flags(),
+                windows_creation_flags() | if group.is_some() { CREATE_SUSPENDED } else { 0 },
                 environment_pointer,
                 working_directory_pointer,
                 startup_info,
@@ -1053,11 +1142,29 @@ mod spawn {
         }
 
         let process = WindowsOwnedHandle::new(process_information.hProcess);
-        drop(WindowsOwnedHandle::new(process_information.hThread));
+        let thread = WindowsOwnedHandle::new(process_information.hThread);
+        if let Some(group) = group {
+            join_group_and_resume(&process, &thread, group)?;
+        }
         Ok(WindowsChild {
             process,
             process_id: process_information.dwProcessId,
         })
+    }
+
+    fn join_group_and_resume(
+        process: &WindowsOwnedHandle,
+        thread: &WindowsOwnedHandle,
+        group: &WindowsJob,
+    ) -> Result<(), WindowsSpawnError> {
+        let joined = unsafe { AssignProcessToJobObject(group.raw(), process.raw()) } != 0;
+        let resumed = joined && unsafe { ResumeThread(thread.raw()) } != u32::MAX;
+        if resumed {
+            return Ok(());
+        }
+        let code = unsafe { GetLastError() };
+        unsafe { TerminateProcess(process.raw(), 1) };
+        Err(WindowsSpawnError::CreateFailed { code })
     }
 
     fn is_terminated_path(path: &[u16]) -> bool {
@@ -1070,6 +1177,311 @@ mod spawn {
     fn close_if_valid(handle: HANDLE) {
         if valid_handle(handle) {
             unsafe { CloseHandle(handle) };
+        }
+    }
+
+    /// A child process whose captured output remains owned by the host driver.
+    #[derive(Debug)]
+    pub struct Child {
+        process: WindowsChild,
+        stdout: WindowsOwnedHandle,
+        stderr: WindowsOwnedHandle,
+    }
+
+    /// A spawn failure: the raw Win32 error code of the operation that refused.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SpawnError {
+        /// The `GetLastError` value, or `ERROR_INVALID_PARAMETER` for launch data Windows cannot hold.
+        pub os_code: i32,
+    }
+
+    impl From<WindowsArgumentsError> for SpawnError {
+        fn from(_: WindowsArgumentsError) -> Self {
+            Self {
+                os_code: ERROR_INVALID_PARAMETER,
+            }
+        }
+    }
+
+    impl From<WindowsSpawnError> for SpawnError {
+        fn from(error: WindowsSpawnError) -> Self {
+            match error {
+                WindowsSpawnError::CreateFailed { code } => Self::from_code(code),
+                _ => Self {
+                    os_code: ERROR_INVALID_PARAMETER,
+                },
+            }
+        }
+    }
+
+    impl SpawnError {
+        fn from_code(code: u32) -> Self {
+            Self {
+                os_code: code.cast_signed(),
+            }
+        }
+
+        fn last() -> Self {
+            Self::from_code(unsafe { GetLastError() })
+        }
+    }
+
+    impl Child {
+        /// Returns the process identifier watched by the host event source.
+        #[must_use]
+        pub const fn process_id(&self) -> u32 {
+            self.process.process_id()
+        }
+
+        /// Transfers the two overlapped capture handles to completion-driven host readers.
+        #[must_use]
+        pub fn into_parts(self) -> (u32, OwnedHandle, OwnedHandle) {
+            (
+                self.process.process_id(),
+                self.stdout.into_owned(),
+                self.stderr.into_owned(),
+            )
+        }
+
+        /// Duplicates both capture handles for a reader while this child keeps the originals.
+        ///
+        /// # Errors
+        ///
+        /// Returns the `DuplicateHandle` error when a handle cannot be duplicated.
+        pub fn duplicate_streams(&self) -> io::Result<(OwnedHandle, OwnedHandle)> {
+            Ok((self.stdout.try_clone()?, self.stderr.try_clone()?))
+        }
+
+        /// The source that reports this child's exit.
+        ///
+        /// # Errors
+        ///
+        /// Returns the `DuplicateHandle` error when the process handle cannot be duplicated.
+        pub fn exit_source(&self) -> io::Result<ExitSource> {
+            ExitSource::new(self.process.process.as_borrowed())
+        }
+
+        /// Kills the child outright; a child already gone is not an error.
+        pub fn terminate(&self) {
+            unsafe { TerminateProcess(self.process.process.raw(), 1) };
+        }
+
+        /// Lowers the child's priority class so doc tests yield cores to the build.
+        ///
+        /// # Errors
+        ///
+        /// Returns the `SetPriorityClass` code when Windows refuses.
+        pub fn lower_priority(&self) -> Result<(), SpawnError> {
+            if unsafe { SetPriorityClass(self.process.process.raw(), WINDOWS_BELOW_NORMAL_PRIORITY) } == 0 {
+                return Err(SpawnError::last());
+            }
+            Ok(())
+        }
+    }
+
+    /// Spawns `program` with `arguments`, the inherited `environment` overlaid by `overrides`, and captures both streams.
+    ///
+    /// A `program` without a path separator is searched on `PATH`, as `.exe`. `directory` becomes the child's working
+    /// directory. The child joins the run's job, so it dies with this process.
+    ///
+    /// # Errors
+    ///
+    /// Returns the Win32 code of the failing step, or `ERROR_INVALID_PARAMETER` for launch data that is not Unicode text.
+    pub fn spawn(
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: Option<&[u8]>,
+    ) -> Result<Child, SpawnError> {
+        launch(program, arguments, environment, overrides, directory, false)
+    }
+
+    /// Spawns like [`spawn`] but inside a nested job of its own, so one termination reaches the child and everything it spawns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the Win32 code of the failing step, or `ERROR_INVALID_PARAMETER` for launch data that is not Unicode text.
+    pub fn spawn_in_group(
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: Option<&[u8]>,
+    ) -> Result<Child, SpawnError> {
+        launch(program, arguments, environment, overrides, directory, true)
+    }
+
+    /// Ends every child of this run, as an interrupt does; children have no console to receive Ctrl+C.
+    pub(crate) fn terminate_children() {
+        if let Some(Ok(job)) = RUN_JOB.get() {
+            unsafe { TerminateJobObject(job.raw(), STATUS_CONTROL_C_EXIT) };
+        }
+    }
+
+    static RUN_JOB: OnceLock<Result<WindowsJob, SpawnError>> = OnceLock::new();
+    static PIPE_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
+    fn run_job() -> Result<&'static WindowsJob, SpawnError> {
+        RUN_JOB
+            .get_or_init(|| {
+                WindowsJob::new().map_err(job_error)
+            })
+            .as_ref()
+            .map_err(|error| *error)
+    }
+
+    fn launch(
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: Option<&[u8]>,
+        in_group: bool,
+    ) -> Result<Child, SpawnError> {
+        let executable = resolve_program(program, environment)?;
+        let mut executable_units = alloc_units(&executable);
+        let executable_path = write_executable_path(&executable, &mut executable_units)?;
+        let directory_text = directory
+            .map(core::str::from_utf8)
+            .transpose()
+            .map_err(|_| SpawnError {
+                os_code: ERROR_INVALID_PARAMETER,
+            })?;
+        let mut directory_units = directory_text.map(alloc_units);
+        let working_directory = match (directory_text, directory_units.as_mut()) {
+            (Some(text), Some(units)) => Some(write_working_directory(text, units)?),
+            _ => None,
+        };
+        let (mut command_line, mut environment_block, mut environment_order) =
+            (Vec::new(), Vec::new(), Vec::new());
+        let mut lowered = lower_arguments(
+            program,
+            arguments,
+            environment,
+            overrides,
+            &mut command_line,
+            &mut environment_block,
+            &mut environment_order,
+        )?;
+        let (stdout_pipe, stderr_pipe, stdin) = open_stdio()?;
+        let handles = [
+            stdin.raw(),
+            stdout_pipe.child_write_handle().ok_or_else(SpawnError::last)?,
+            stderr_pipe.child_write_handle().ok_or_else(SpawnError::last)?,
+        ];
+        let mut storage = [MaybeUninit::<usize>::uninit(); ATTRIBUTE_WORDS];
+        let handle_list = WindowsHandleList::new_in_job(&handles, run_job()?, &mut storage)
+            .map_err(|_| SpawnError {
+                os_code: ERROR_INVALID_PARAMETER,
+            })?;
+        let (command_line, environment_block) = lowered.create_process_buffers();
+        let group = in_group.then(WindowsJob::new).transpose().map_err(job_error)?;
+        let process = spawn_windows_child_grouped(
+            executable_path,
+            command_line,
+            &handle_list,
+            &ChildEnvironment::Block(environment_block),
+            &working_directory.map_or(ChildWorkingDirectory::Inherit, ChildWorkingDirectory::Borrowed),
+            group.as_ref(),
+        )?;
+        if let Some(group) = group {
+            register_group(process.process_id(), group.into_raw());
+        }
+        drop(handle_list);
+        let (mut stdout_pipe, mut stderr_pipe) = (stdout_pipe, stderr_pipe);
+        stdout_pipe.close_child_write_handle();
+        stderr_pipe.close_child_write_handle();
+        Ok(Child {
+            process,
+            stdout: stdout_pipe.into_parent_reader(),
+            stderr: stderr_pipe.into_parent_reader(),
+        })
+    }
+
+    fn job_error(error: WindowsJobError) -> SpawnError {
+        match error {
+            WindowsJobError::CreateFailed { code } | WindowsJobError::LimitFailed { code } => {
+                SpawnError::from_code(code)
+            }
+            WindowsJobError::SizeOverflow => SpawnError {
+                os_code: ERROR_INVALID_PARAMETER,
+            },
+        }
+    }
+
+    fn alloc_units(text: &str) -> Vec<u16> {
+        std::vec![0; text.encode_utf16().count() + 1]
+    }
+
+    fn open_stdio() -> Result<(WindowsPipePair, WindowsPipePair, WindowsOwnedHandle), SpawnError> {
+        let sequence = PIPE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let process_id = std::process::id();
+        let pair = |stream: &str| {
+            let name = std::format!("\\\\.\\pipe\\cargo-val-{process_id}-{sequence}-{stream}");
+            let units: Vec<u16> = name.encode_utf16().chain([0]).collect();
+            WindowsPipePair::new(&units).map_err(|_| SpawnError::last())
+        };
+        let stdout = pair("stdout")?;
+        let stderr = pair("stderr")?;
+        Ok((stdout, stderr, open_null_input()?))
+    }
+
+    fn open_null_input() -> Result<WindowsOwnedHandle, SpawnError> {
+        let security = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(core::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
+            lpSecurityDescriptor: core::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let name: Vec<u16> = "NUL".encode_utf16().chain([0]).collect();
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &raw const security,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                core::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err(SpawnError::last());
+        }
+        Ok(WindowsOwnedHandle::new(handle))
+    }
+
+    /// An absolute path for `program`: itself when it names a path, else the first `PATH` match, which `CreateProcessW` would not search for an application name.
+    fn resolve_program(program: &[u8], environment: &[&[u8]]) -> Result<String, SpawnError> {
+        let name = core::str::from_utf8(program).map_err(|_| SpawnError {
+            os_code: ERROR_INVALID_PARAMETER,
+        })?;
+        if name.contains(['\\', '/', ':']) {
+            return Ok(String::from(name));
+        }
+        let search = search_path(environment);
+        std::env::split_paths(&search)
+            .flat_map(|directory| candidates(&directory, name))
+            .find(|candidate| candidate.is_file())
+            .and_then(|found| std::path::absolute(found).ok())
+            .and_then(|found| found.to_str().map(String::from))
+            .ok_or(SpawnError {
+                os_code: ERROR_FILE_NOT_FOUND,
+            })
+    }
+
+    fn candidates(directory: &Path, name: &str) -> [PathBuf; 2] {
+        [directory.join(name), directory.join(std::format!("{name}.exe"))]
+    }
+
+    fn search_path(environment: &[&[u8]]) -> std::ffi::OsString {
+        let inherited = environment.iter().find_map(|entry| {
+            let (key, value) = entry.split_at(entry.iter().position(|byte| *byte == b'=')?);
+            key.eq_ignore_ascii_case(b"PATH").then(|| &value[1..])
+        });
+        match inherited.map(core::str::from_utf8) {
+            Some(Ok(path)) => path.into(),
+            _ => std::env::var_os("PATH").unwrap_or_default(),
         }
     }
 

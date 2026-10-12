@@ -957,8 +957,8 @@ pub(crate) struct DocObservation {
 }
 
 impl ListingRun<'_> {
-    pub(crate) fn signal_gate(&self) -> Readiness {
-        self.signals.gate()
+    pub(crate) fn signal_gate(&self) -> Result<Readiness, RunError> {
+        self.signals.gate().map_err(|_| RunError::Reactor)
     }
 
     pub(crate) fn interrupt_source(&self) -> SignalSource {
