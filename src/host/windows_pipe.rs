@@ -311,15 +311,8 @@ mod tests {
         let mut pipe_pair =
             WindowsPipePair::new(&unique_pipe_name()).expect("the named pipe pair is created");
         report_stage("stdout_pipe_pair_created");
-        let completion_port =
-            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) };
-        assert!(!completion_port.is_null());
-        let completion_port = WindowsOwnedHandle::new(completion_port);
-        let completion_port = completion_port.raw();
-        let associated_port = unsafe {
-            CreateIoCompletionPort(pipe_pair.parent_read_handle(), completion_port, 7, 0)
-        };
-        assert_eq!(associated_port, completion_port);
+        let port_owner = associated_completion_port(&pipe_pair, 7);
+        let completion_port = port_owner.raw();
         report_stage("stdout_iocp_associated");
 
         let mut storage = [MaybeUninit::uninit(); 2];
@@ -327,15 +320,7 @@ mod tests {
         let mut sessions = crate::schedule::SessionSlots::<(), 1>::new();
         let active_slot = sessions.insert(()).expect("one session slot is available");
         let mut reader = pin!(WindowsPipeReadSlot::new(&mut storage));
-        let (start_result, initial_allocations) =
-            crate::test_alloc::measure_allocations(|| unsafe {
-                reader.as_mut().start(pipe_pair.parent_read_handle())
-            });
-        assert!(matches!(
-            start_result,
-            Ok(super::WindowsPipeReadStart::Pending)
-        ));
-        assert_eq!(initial_allocations, 0);
+        start_expecting_pending(&mut reader, pipe_pair.parent_read_handle());
         assert_eq!(reader.state(), WindowsPipeReadState::Pending);
         assert_eq!(wait_for_completion(completion_port, 0), None);
         assert_eq!(unsafe { GetLastError() }, WAIT_TIMEOUT);
@@ -347,32 +332,121 @@ mod tests {
                 .expect("child writer is live"),
             b"out",
         );
-        let ((completed, completion_key, bytes_transferred, error_code), completion_allocations) =
-            crate::test_alloc::measure_allocations(|| {
-                wait_for_completion(completion_port, 5_000).expect("the read completion arrives")
-            });
-        assert_eq!(completion_allocations, 0);
-        assert_eq!(completion_key, 7);
-        assert_eq!(bytes_transferred, 2);
-        report_stage("stdout_first_read_completed");
-        let (_, transition_allocations) = crate::test_alloc::measure_allocations(|| unsafe {
-            reader
-                .as_mut()
-                .complete(completed, bytes_transferred, error_code)
-                .expect("the packet belongs to this pending read")
+        let (completion, completion_allocations) = crate::test_alloc::measure_allocations(|| {
+            wait_for_completion(completion_port, 5_000).expect("the read completion arrives")
         });
-        assert_eq!(transition_allocations, 0);
+        assert_eq!(completion_allocations, 0);
+        assert_eq!(completion.1, 7);
+        assert_eq!(completion.2, 2);
+        report_stage("stdout_first_read_completed");
+        complete_without_allocating(&mut reader, completion);
         let first_payload = reader
             .as_ref()
             .completed_bytes()
             .expect("the first payload is borrowed from session storage");
         assert_eq!(first_payload, b"ou");
         assert_eq!(first_payload.as_ptr(), storage_address);
-        let (first_event, first_event_allocations) = crate::test_alloc::measure_allocations(|| {
-            accept_stdout(&mut sessions, active_slot, first_payload)
+        assert_stdout_borrows(&mut sessions, active_slot, first_payload, storage_address);
+        release_without_allocating(&mut reader);
+        report_stage("stdout_first_payload_consumed");
+
+        start_expecting_pending(&mut reader, pipe_pair.parent_read_handle());
+        let (completion, second_completion_allocations) =
+            crate::test_alloc::measure_allocations(|| {
+                wait_for_completion(completion_port, 5_000).expect("the unread suffix completes")
+            });
+        assert_eq!(second_completion_allocations, 0);
+        assert_eq!(completion.1, 7);
+        assert_eq!(completion.2, 1);
+        report_stage("stdout_suffix_completed");
+        complete_without_allocating(&mut reader, completion);
+        let second_payload = reader
+            .as_ref()
+            .completed_bytes()
+            .expect("the suffix is borrowed from session storage");
+        assert_eq!(second_payload, b"t");
+        assert_eq!(second_payload.as_ptr(), storage_address);
+        assert_stdout_borrows(&mut sessions, active_slot, second_payload, storage_address);
+        release_without_allocating(&mut reader);
+
+        report_stage("stdout_eof_starting");
+        start_expecting_pending(&mut reader, pipe_pair.parent_read_handle());
+        pipe_pair.close_child_write_handle();
+        report_stage("stdout_writer_closed");
+        let completion =
+            wait_for_completion(completion_port, 5_000).expect("pipe closure completes the read");
+        assert_eq!(completion.1, 7);
+        assert_eq!(
+            completion.3,
+            windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE
+        );
+        complete_without_allocating(&mut reader, completion);
+        assert_eq!(reader.state(), WindowsPipeReadState::Eof);
+        report_stage("stdout_eof_completed");
+        std::println!(
+            "{{\"read_completions\":3,\"stdout_chunks\":[\"ou\",\"t\"],\"borrowed_payloads\":2,\"payload_copies\":0,\"eof_records\":1,\"slot_transition_allocations\":0,\"synchronous_reads\":0}}"
+        );
+    }
+
+    fn associated_completion_port(pipe_pair: &WindowsPipePair, key: usize) -> WindowsOwnedHandle {
+        let port =
+            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) };
+        assert!(!port.is_null());
+        let owner = WindowsOwnedHandle::new(port);
+        let associated_port =
+            unsafe { CreateIoCompletionPort(pipe_pair.parent_read_handle(), owner.raw(), key, 0) };
+        assert_eq!(associated_port, owner.raw());
+        owner
+    }
+
+    fn start_expecting_pending(
+        reader: &mut core::pin::Pin<&mut WindowsPipeReadSlot<'_>>,
+        parent_reader: HANDLE,
+    ) {
+        let (start_result, allocations) = crate::test_alloc::measure_allocations(|| unsafe {
+            reader.as_mut().start(parent_reader)
         });
-        assert_eq!(first_event_allocations, 0);
-        match first_event.expect("the live session accepts stdout") {
+        assert!(matches!(
+            start_result,
+            Ok(super::WindowsPipeReadStart::Pending)
+        ));
+        assert_eq!(allocations, 0);
+    }
+
+    fn complete_without_allocating(
+        reader: &mut core::pin::Pin<&mut WindowsPipeReadSlot<'_>>,
+        completion: (*mut OVERLAPPED, usize, u32, u32),
+    ) {
+        let (completed, _, bytes_transferred, error_code) = completion;
+        let (_, allocations) = crate::test_alloc::measure_allocations(|| unsafe {
+            reader
+                .as_mut()
+                .complete(completed, bytes_transferred, error_code)
+                .expect("the packet belongs to this pending read")
+        });
+        assert_eq!(allocations, 0);
+    }
+
+    fn release_without_allocating(reader: &mut core::pin::Pin<&mut WindowsPipeReadSlot<'_>>) {
+        let ((), allocations) = crate::test_alloc::measure_allocations(|| {
+            reader
+                .as_mut()
+                .release_completed()
+                .expect("the borrowed payload is consumed before reuse");
+        });
+        assert_eq!(allocations, 0);
+    }
+
+    fn assert_stdout_borrows(
+        sessions: &mut crate::schedule::SessionSlots<(), 1>,
+        slot: crate::schedule::SessionSlotId,
+        payload: &[u8],
+        storage_address: *const u8,
+    ) {
+        let (event, allocations) =
+            crate::test_alloc::measure_allocations(|| accept_stdout(sessions, slot, payload));
+        assert_eq!(allocations, 0);
+        match event.expect("the live session accepts stdout") {
             crate::host_event::HostEvent::Stdout { bytes, .. } => {
                 assert_eq!(bytes.as_ptr(), storage_address);
             }
@@ -383,103 +457,6 @@ mod tests {
                 panic!("stdout completion changed event kind")
             }
         }
-        let (_, release_allocations) = crate::test_alloc::measure_allocations(|| {
-            reader
-                .as_mut()
-                .release_completed()
-                .expect("the borrowed payload is consumed before reuse")
-        });
-        assert_eq!(release_allocations, 0);
-        report_stage("stdout_first_payload_consumed");
-
-        let (second_start_result, second_start_allocations) =
-            crate::test_alloc::measure_allocations(|| unsafe {
-                reader.as_mut().start(pipe_pair.parent_read_handle())
-            });
-        assert!(matches!(
-            second_start_result,
-            Ok(super::WindowsPipeReadStart::Pending)
-        ));
-        assert_eq!(second_start_allocations, 0);
-        let (
-            (completed, completion_key, bytes_transferred, error_code),
-            second_completion_allocations,
-        ) = crate::test_alloc::measure_allocations(|| {
-            wait_for_completion(completion_port, 5_000).expect("the unread suffix completes")
-        });
-        assert_eq!(second_completion_allocations, 0);
-        assert_eq!(completion_key, 7);
-        assert_eq!(bytes_transferred, 1);
-        report_stage("stdout_suffix_completed");
-        let (_, second_transition_allocations) =
-            crate::test_alloc::measure_allocations(|| unsafe {
-                reader
-                    .as_mut()
-                    .complete(completed, bytes_transferred, error_code)
-                    .expect("the packet belongs to this pending read")
-            });
-        assert_eq!(second_transition_allocations, 0);
-        let second_payload = reader
-            .as_ref()
-            .completed_bytes()
-            .expect("the suffix is borrowed from session storage");
-        assert_eq!(second_payload, b"t");
-        assert_eq!(second_payload.as_ptr(), storage_address);
-        let (second_event, second_event_allocations) =
-            crate::test_alloc::measure_allocations(|| {
-                accept_stdout(&mut sessions, active_slot, second_payload)
-            });
-        assert_eq!(second_event_allocations, 0);
-        match second_event.expect("the live session accepts the suffix") {
-            crate::host_event::HostEvent::Stdout { bytes, .. } => {
-                assert_eq!(bytes.as_ptr(), storage_address);
-            }
-            crate::host_event::HostEvent::Stderr { .. }
-            | crate::host_event::HostEvent::StdoutEof { .. }
-            | crate::host_event::HostEvent::StderrEof { .. }
-            | crate::host_event::HostEvent::Exit { .. } => {
-                panic!("suffix completion changed event kind")
-            }
-        }
-        let (_, second_release_allocations) = crate::test_alloc::measure_allocations(|| {
-            reader
-                .as_mut()
-                .release_completed()
-                .expect("the final borrowed payload is consumed")
-        });
-        assert_eq!(second_release_allocations, 0);
-
-        report_stage("stdout_eof_starting");
-        let (eof_start_result, eof_start_allocations) =
-            crate::test_alloc::measure_allocations(|| unsafe {
-                reader.as_mut().start(pipe_pair.parent_read_handle())
-            });
-        assert!(matches!(
-            eof_start_result,
-            Ok(super::WindowsPipeReadStart::Pending)
-        ));
-        assert_eq!(eof_start_allocations, 0);
-        pipe_pair.close_child_write_handle();
-        report_stage("stdout_writer_closed");
-        let (completed, completion_key, bytes_transferred, error_code) =
-            wait_for_completion(completion_port, 5_000).expect("pipe closure completes the read");
-        assert_eq!(completion_key, 7);
-        assert_eq!(
-            error_code,
-            windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE
-        );
-        let (_, eof_transition_allocations) = crate::test_alloc::measure_allocations(|| unsafe {
-            reader
-                .as_mut()
-                .complete(completed, bytes_transferred, error_code)
-                .expect("the EOF packet belongs to this pending read")
-        });
-        assert_eq!(eof_transition_allocations, 0);
-        assert_eq!(reader.state(), WindowsPipeReadState::Eof);
-        report_stage("stdout_eof_completed");
-        std::println!(
-            "{{\"read_completions\":3,\"stdout_chunks\":[\"ou\",\"t\"],\"borrowed_payloads\":2,\"payload_copies\":0,\"eof_records\":1,\"slot_transition_allocations\":0,\"synchronous_reads\":0}}"
-        );
     }
 
     #[test]
@@ -636,9 +613,9 @@ mod tests {
         let completed = unsafe {
             GetQueuedCompletionStatus(
                 completion_port,
-                &mut bytes_transferred,
-                &mut completion_key,
-                &mut overlapped,
+                &raw mut bytes_transferred,
+                &raw mut completion_key,
+                &raw mut overlapped,
                 timeout_milliseconds,
             )
         };
@@ -670,7 +647,7 @@ mod tests {
                     handle,
                     bytes.as_ptr(),
                     u32::try_from(bytes.len()).expect("test payload length fits u32"),
-                    &mut bytes_written,
+                    &raw mut bytes_written,
                     core::ptr::null_mut(),
                 )
             },
@@ -695,8 +672,7 @@ mod tests {
         sessions: &mut crate::schedule::SessionSlots<(), 1>,
         slot: crate::schedule::SessionSlotId,
         bytes: &'bytes [u8],
-    ) -> Result<crate::host_event::HostEvent<'bytes>, crate::host_event::StaleHostEvent>
-    {
+    ) -> Result<crate::host_event::HostEvent<'bytes>, crate::host_event::StaleHostEvent> {
         crate::host_event::HostEvent::Stdout { slot, bytes }.admit(sessions)
     }
 }

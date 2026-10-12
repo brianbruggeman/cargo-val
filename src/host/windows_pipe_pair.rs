@@ -155,7 +155,7 @@ mod tests {
     fn current_process_handle_count() -> u32 {
         let mut count = 0;
         assert_eq!(
-            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) },
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &raw mut count) },
             1,
             "process handle count is readable"
         );
@@ -186,11 +186,11 @@ mod tests {
         let mut parent_flags = 0;
         let mut child_flags = 0;
         assert_eq!(
-            unsafe { GetHandleInformation(parent_reader, &mut parent_flags) },
+            unsafe { GetHandleInformation(parent_reader, &raw mut parent_flags) },
             1
         );
         assert_eq!(
-            unsafe { GetHandleInformation(child_writer, &mut child_flags) },
+            unsafe { GetHandleInformation(child_writer, &raw mut child_flags) },
             1
         );
         assert_eq!(parent_flags & HANDLE_FLAG_INHERIT, 0);
@@ -211,16 +211,19 @@ mod tests {
                 ReadFile(
                     parent_reader,
                     read_buffer.as_mut_ptr(),
-                    read_buffer.len() as u32,
-                    &mut bytes_read,
-                    &mut overlapped,
+                    u32::try_from(read_buffer.len()).expect("buffer length fits u32"),
+                    &raw mut bytes_read,
+                    &raw mut overlapped,
                 )
             },
             0,
             "an empty overlapped read remains pending"
         );
         assert_eq!(unsafe { GetLastError() }, ERROR_IO_PENDING);
-        assert_eq!(unsafe { CancelIoEx(parent_reader, &overlapped) }, 1);
+        assert_eq!(
+            unsafe { CancelIoEx(parent_reader, &raw const overlapped) },
+            1
+        );
         assert_eq!(
             unsafe { WaitForSingleObject(event.raw(), 5_000) },
             WAIT_OBJECT_0,
@@ -229,15 +232,15 @@ mod tests {
         drop(event);
 
         let (control_reader, control_writer) = create_pipe();
-        let control_input = [b'x'];
+        let control_input = *b"x";
         let mut control_bytes_written = 0;
         assert_eq!(
             unsafe {
                 WriteFile(
                     control_writer.raw(),
                     control_input.as_ptr(),
-                    control_input.len() as u32,
-                    &mut control_bytes_written,
+                    u32::try_from(control_input.len()).expect("buffer length fits u32"),
+                    &raw mut control_bytes_written,
                     core::ptr::null_mut(),
                 )
             },
@@ -253,9 +256,9 @@ mod tests {
                 ReadFile(
                     control_reader.raw(),
                     control_output.as_mut_ptr(),
-                    control_output.len() as u32,
-                    &mut control_bytes_read,
-                    &mut control_overlapped,
+                    u32::try_from(control_output.len()).expect("buffer length fits u32"),
+                    &raw mut control_bytes_read,
+                    &raw mut control_overlapped,
                 )
             },
             1,

@@ -336,15 +336,22 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn create_pipe() -> (TestHandle, TestHandle) {
-        let mut security = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        let security = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).expect("struct size fits u32"),
             lpSecurityDescriptor: core::ptr::null_mut(),
             bInheritHandle: 1,
         };
         let mut read_handle = core::ptr::null_mut();
         let mut write_handle = core::ptr::null_mut();
         assert_eq!(
-            unsafe { CreatePipe(&mut read_handle, &mut write_handle, &mut security, 0,) },
+            unsafe {
+                CreatePipe(
+                    &raw mut read_handle,
+                    &raw mut write_handle,
+                    &raw const security,
+                    0,
+                )
+            },
             1,
             "fixture pipe handles are created"
         );
@@ -376,7 +383,7 @@ pub(crate) mod tests {
             .chain([0])
             .collect::<std::vec::Vec<_>>();
         let mut process_information = unsafe { core::mem::zeroed() };
-        let startup_info = startup_info as *const STARTUPINFOEXW;
+        let startup_info = core::ptr::from_ref::<STARTUPINFOEXW>(startup_info);
         let startup_info = startup_info.cast();
         let creation_flags = CREATE_UNICODE_ENVIRONMENT
             | if extended {
@@ -396,7 +403,7 @@ pub(crate) mod tests {
                     environment_block.as_ptr().cast::<c_void>(),
                     core::ptr::null(),
                     startup_info,
-                    &mut process_information,
+                    &raw mut process_information,
                 )
             },
             1,
@@ -409,7 +416,7 @@ pub(crate) mod tests {
         );
         let mut exit_code = u32::MAX;
         assert_eq!(
-            unsafe { GetExitCodeProcess(process_information.hProcess, &mut exit_code) },
+            unsafe { GetExitCodeProcess(process_information.hProcess, &raw mut exit_code) },
             1,
             "child process exit code is readable"
         );
@@ -485,7 +492,8 @@ pub(crate) mod tests {
         .expect("caller buffers fit the inheritance control");
         let (command_line, environment_block) = unrestricted.create_process_buffers();
         let mut basic_startup = STARTUPINFOEXW::default();
-        basic_startup.StartupInfo.cb = size_of::<STARTUPINFOW>() as u32;
+        basic_startup.StartupInfo.cb =
+            u32::try_from(size_of::<STARTUPINFOW>()).expect("struct size fits u32");
         basic_startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         basic_startup.StartupInfo.hStdInput = stdin_read.0;
         basic_startup.StartupInfo.hStdOutput = stdout_write.0;
@@ -512,7 +520,7 @@ pub(crate) mod tests {
         let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 1];
         let mut handle_count_before = 0;
         assert_eq!(
-            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut handle_count_before) },
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &raw mut handle_count_before) },
             1
         );
         let result = WindowsHandleList::new(&stdio_handles, &mut attribute_storage);
@@ -522,7 +530,7 @@ pub(crate) mod tests {
         ));
         let mut handle_count_after = 0;
         assert_eq!(
-            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut handle_count_after) },
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &raw mut handle_count_after) },
             1
         );
         assert_eq!(handle_count_after, handle_count_before);
@@ -539,7 +547,7 @@ pub(crate) mod tests {
             .expect("sentinel handle value is decimal");
         let sentinel = sentinel as HANDLE;
         let mut flags = 0;
-        let sentinel_inherited = unsafe { GetHandleInformation(sentinel, &mut flags) } != 0;
+        let sentinel_inherited = unsafe { GetHandleInformation(sentinel, &raw mut flags) } != 0;
         let expected = std::env::var("CARGO_VAL_EXPECT_SENTINEL")
             .expect("expected sentinel state is supplied by parent");
         assert_eq!(sentinel_inherited, expected == "1");
@@ -547,7 +555,7 @@ pub(crate) mod tests {
             let handle = unsafe { GetStdHandle(standard_handle) };
             assert!(!handle.is_null());
             assert_ne!(handle, INVALID_HANDLE_VALUE);
-            assert_eq!(unsafe { GetHandleInformation(handle, &mut flags) }, 1);
+            assert_eq!(unsafe { GetHandleInformation(handle, &raw mut flags) }, 1);
         }
     }
 }

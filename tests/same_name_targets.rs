@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
