@@ -402,3 +402,74 @@ fn help_prints_the_banner_file_and_documents_the_new_options() {
         assert!(banner.contains(needle), "{needle}");
     }
 }
+
+#[cfg(unix)]
+fn gate_lines(stderr: &str) -> Vec<String> {
+    let fixture = format!(
+        "path+file://{}/tests/fixtures/bin_gate",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    stderr
+        // cargo orders the bin artifact record against its bin-built message by timing
+        .lines()
+        .filter(|line| line.starts_with("cargo-val: debug: gate") && !line.contains(" launch kind=bin "))
+        .map(|line| {
+            let line = line.replace(&fixture, "<fixture>");
+            match line.split_once("executable=") {
+                Some((head, tail)) => {
+                    let (path, rest) = tail.split_once(" package=").expect("package follows executable");
+                    let (_, built) = path.split_once("/debug/").expect("bin lives under debug");
+                    format!("{head}executable=<target>/debug/{built} package={rest}")
+                }
+                None => line,
+            }
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() {
+    let result = bin_gate_hold::cold_run(
+        "lines",
+        &[("CARGO_VAL_LOG", "debug")],
+        bin_gate_hold::Release::AfterTestArtifactLinks,
+    );
+
+    assert_eq!(
+        gate_lines(&result.stderr),
+        [
+            "cargo-val: debug: gate metadata spawned=yes bin-packages=1",
+            "cargo-val: debug: gate park kind=test target=uses_bin gate=metadata package=<fixture>#0.1.0",
+            "cargo-val: debug: gate bin-built on-disk=yes executable=<target>/debug/gate-bin package=<fixture>#0.1.0",
+            "cargo-val: debug: gate release reason=bin-built target=uses_bin package=<fixture>#0.1.0",
+            "cargo-val: debug: gate build-finished success=true parked=0",
+            "cargo-val: debug: gate stdout-eof parked=0",
+        ],
+        "{}",
+        result.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn gate_debug_lines_for_park_then_failed_build_then_drop_are_byte_exact() {
+    let result = bin_gate_hold::cold_run(
+        "drop-lines",
+        &[("RUSTFLAGS", "--cfg broken_bin"), ("CARGO_VAL_LOG", "debug")],
+        bin_gate_hold::Release::AfterTestArtifactLinks,
+    );
+
+    assert_eq!(
+        gate_lines(&result.stderr),
+        [
+            "cargo-val: debug: gate metadata spawned=yes bin-packages=1",
+            "cargo-val: debug: gate park kind=test target=uses_bin gate=metadata package=<fixture>#0.1.0",
+            "cargo-val: debug: gate build-finished success=false parked=1",
+            "cargo-val: debug: gate drop reason=build-failed target=uses_bin package=<fixture>#0.1.0",
+            "cargo-val: debug: gate stdout-eof parked=0",
+        ],
+        "{}",
+        result.stderr
+    );
+}
