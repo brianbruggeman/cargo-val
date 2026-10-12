@@ -18,6 +18,7 @@ pub mod build_defaults {
 pub mod cargo_message;
 pub mod child_completion;
 pub mod config;
+pub mod discover_cargo;
 pub mod filter_glob;
 pub mod filterset;
 pub mod ignored_set;
