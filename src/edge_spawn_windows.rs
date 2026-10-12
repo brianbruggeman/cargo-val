@@ -349,7 +349,7 @@ pub mod handles {
         use windows_sys::Win32::System::Console::{
             GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
         };
-        use windows_sys::Win32::System::Pipes::CreatePipe;
+        use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
         use windows_sys::Win32::System::Threading::{
             CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
             GetCurrentProcess, GetExitCodeProcess, GetProcessHandleCount, STARTF_USESTDHANDLES,
@@ -358,9 +358,7 @@ pub mod handles {
 
         use super::{WindowsHandleList, WindowsHandleListError};
         use crate::edge_args_windows::lower_windows_arguments;
-
-        pub(crate) const CHILD_PROBE_NAME: &str =
-            "host::windows_handles::tests::child_handle_probe";
+        use crate::test_probe::{ProbeOutcome, probe_name, verify_probe_output};
 
         pub(crate) struct TestHandle(HANDLE);
 
@@ -400,6 +398,35 @@ pub mod handles {
                 "fixture pipe handles are created"
             );
             (TestHandle(read_handle), TestHandle(write_handle))
+        }
+
+        pub(crate) fn captured_output(read: &TestHandle) -> std::string::String {
+            let mut buffer = [0_u8; 8192];
+            let mut available = 0_u32;
+            assert_eq!(
+                unsafe {
+                    PeekNamedPipe(
+                        read.0,
+                        buffer.as_mut_ptr().cast(),
+                        u32::try_from(buffer.len()).expect("buffer length fits u32"),
+                        &raw mut available,
+                        core::ptr::null_mut(),
+                        core::ptr::null_mut(),
+                    )
+                },
+                1,
+                "child stdout pipe is peekable"
+            );
+            std::string::String::from_utf8_lossy(&buffer[..available as usize]).into_owned()
+        }
+
+        pub(crate) fn assert_child_ran(read: &TestHandle, expected: ProbeOutcome) {
+            let stdout = captured_output(read);
+            if let Err(error) = verify_probe_output(&stdout, expected) {
+                panic!(
+                    "child probe did not run exactly one test as {expected:?}: {error:?}; child stdout was {stdout:?}"
+                );
+            }
         }
 
         pub(crate) fn exact_test_intent<'text>(
@@ -474,6 +501,7 @@ pub mod handles {
             let (stdout_read, stdout_write) = create_pipe();
             let (stderr_read, stderr_write) = create_pipe();
             let (sentinel_read, sentinel_write) = create_pipe();
+            let (control_stdout_read, control_stdout_write) = create_pipe();
             let stdio_handles = [stdin_read.0, stdout_write.0, stderr_write.0];
             let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
             let handle_list = WindowsHandleList::new(&stdio_handles, &mut attribute_storage)
@@ -491,7 +519,8 @@ pub mod handles {
             let executable_path = executable_path
                 .to_str()
                 .expect("Windows test executable path is representable as UTF-8");
-            let intent = exact_test_intent(executable_path, CHILD_PROBE_NAME);
+            let probe_name = probe_name!(child_handle_probe);
+            let intent = exact_test_intent(executable_path, &probe_name);
             let mut command_line = [0_u16; 2048];
             let mut environment_block = [0_u16; 256];
             let mut environment_order = [usize::MAX; 2];
@@ -515,10 +544,12 @@ pub mod handles {
                 restricted_exit, 0,
                 "restricted child does not inherit sentinel"
             );
+            assert_child_ran(&stdout_read, ProbeOutcome::Passed);
 
             let unrestricted_environment = "CARGO_VAL_EXPECT_SENTINEL=1";
             let overrides = [sentinel_environment.as_str(), unrestricted_environment];
-            let intent = exact_test_intent(executable_path, CHILD_PROBE_NAME);
+            let probe_name = probe_name!(child_handle_probe);
+            let intent = exact_test_intent(executable_path, &probe_name);
             let mut unrestricted_command_line = [0_u16; 2048];
             let mut unrestricted_environment_block = [0_u16; 256];
             let mut unrestricted_order = [usize::MAX; 2];
@@ -537,7 +568,7 @@ pub mod handles {
                 u32::try_from(size_of::<STARTUPINFOW>()).expect("struct size fits u32");
             basic_startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
             basic_startup.StartupInfo.hStdInput = stdin_read.0;
-            basic_startup.StartupInfo.hStdOutput = stdout_write.0;
+            basic_startup.StartupInfo.hStdOutput = control_stdout_write.0;
             basic_startup.StartupInfo.hStdError = stderr_write.0;
             basic_startup.lpAttributeList = core::ptr::null_mut();
             let control_exit = launch_probe(command_line, environment_block, &basic_startup, false);
@@ -545,11 +576,19 @@ pub mod handles {
                 control_exit, 0,
                 "unrestricted control observes inherited sentinel"
             );
+            assert_child_ran(&control_stdout_read, ProbeOutcome::Passed);
             std::println!(
                 "{{\"stdio_handles\":{},\"restricted_sentinel_inherited\":0,\"unrestricted_control_sentinel_inherited\":1,\"restricted_exit\":{restricted_exit},\"control_exit\":{control_exit}}}",
                 handle_list.handles().len()
             );
-            drop((stdin_write, stdout_read, stderr_read, sentinel_write));
+            drop((
+                stdin_write,
+                stdout_read,
+                stderr_read,
+                sentinel_write,
+                control_stdout_read,
+                control_stdout_write,
+            ));
         }
 
         #[test]
@@ -1492,6 +1531,7 @@ mod spawn {
         use std::format;
         use std::os::windows::ffi::OsStrExt;
         use std::path::{Path, PathBuf};
+        use std::string::String;
         use std::vec::Vec;
 
         use windows_sys::Win32::Foundation::{
@@ -1522,17 +1562,29 @@ mod spawn {
             WINDOWS_JOB_KILL_ON_JOB_CLOSE, WINDOWS_JOB_PRIORITY_CLASS, lower_windows_arguments,
             windows_creation_flags, windows_job_limit_flags, write_executable_path,
         };
-        use crate::edge_spawn_windows::handles::tests::{create_pipe, exact_test_intent};
+        use crate::edge_spawn_windows::handles::tests::{
+            assert_child_ran, captured_output, create_pipe, exact_test_intent,
+        };
+        use crate::test_probe::{
+            ProbeOutcome, ProbeRunError, probe_name, verify_probe_output,
+        };
         use crate::edge_spawn_windows::handles::{WindowsHandleList, WindowsJob};
 
-        const CHILD_PROCESS_PROBE_NAME: &str = "host::windows_spawn::tests::child_process_probe";
-        const CHILD_ENVIRONMENT_PROBE_NAME: &str =
-            "host::windows_spawn::tests::child_environment_probe";
-        const CHILD_VALUE_KEY: &str = "CARGO_VAL_C44C_CHILD_VALUE";
+                const CHILD_VALUE_KEY: &str = "CARGO_VAL_C44C_CHILD_VALUE";
         const EXPECT_PRESENT_KEY: &str = "CARGO_VAL_C44C_EXPECT_PRESENT";
         const EXPECT_DIRECTORY_KEY: &str = "CARGO_VAL_C44D_EXPECT_DIRECTORY";
-        const CHILD_DIRECTORY_PROBE_NAME: &str =
-            "host::windows_spawn::tests::child_working_directory_probe";
+
+        fn process_probe_name() -> String {
+            probe_name!(child_process_probe)
+        }
+
+        fn environment_probe_name() -> String {
+            probe_name!(child_environment_probe)
+        }
+
+        fn directory_probe_name() -> String {
+            probe_name!(child_working_directory_probe)
+        }
 
         fn current_process_handle_count() -> u32 {
             let mut count = 0;
@@ -1561,7 +1613,7 @@ mod spawn {
         #[test]
         fn c44b_launches_one_exact_child_and_owns_one_process_handle() {
             let (stdin_read, _stdin_write) = create_pipe();
-            let (_stdout_read, stdout_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
             let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
             let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
@@ -1571,7 +1623,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_PROCESS_PROBE_NAME);
+            let probe = process_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let mut command_line = [0_u16; 2048];
             let mut environment_block = [0_u16; 2];
             let mut environment_order = [];
@@ -1597,10 +1650,55 @@ mod spawn {
             assert_eq!(current_process_handle_count(), handles_before + 1);
             let exit_code = wait_for_child_exit(&child);
             assert_eq!(exit_code, 0);
+            assert_child_ran(&stdout_read, ProbeOutcome::Passed);
             drop(child);
             assert_eq!(current_process_handle_count(), handles_before);
             std::println!(
                 "{{\"children_started\":1,\"owned_process_handles\":1,\"owned_handles_after_drop\":0,\"child_exit_code\":{exit_code}}}"
+            );
+        }
+
+        #[test]
+        fn nonexistent_probe_name_runs_zero_tests_and_fails_the_ran_one_test_guard() {
+            let (stdin_read, _stdin_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
+            let (_stderr_read, stderr_write) = create_pipe();
+            let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
+            let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
+            let handle_list = WindowsHandleList::new(&handles, &mut attribute_storage)
+                .expect("caller storage builds the stdio handle whitelist");
+            let executable = std::env::current_exe().expect("test executable path exists");
+            let executable = executable
+                .to_str()
+                .expect("Windows test executable path is valid UTF-8");
+            let intent = exact_test_intent(executable, "host::windows_spawn::tests::child_process_probe");
+            let mut command_line = [0_u16; 2048];
+            let mut environment_block = [0_u16; 2];
+            let mut environment_order = [];
+            let mut arguments = lower_windows_arguments(
+                &intent,
+                &[],
+                &[],
+                &mut command_line,
+                &mut environment_block,
+                &mut environment_order,
+            )
+            .expect("caller buffers fit the exact child test command");
+
+            let child = spawn_windows_child(
+                &absolute_executable(executable),
+                &mut arguments,
+                &handle_list,
+            )
+            .expect("CreateProcessW starts the stale-name child");
+            let exit_code = wait_for_child_exit(&child);
+            let stdout = captured_output(&stdout_read);
+
+            assert_eq!(exit_code, 0, "a zero-test run exits cleanly, which is the hazard");
+            assert_eq!(
+                verify_probe_output(&stdout, ProbeOutcome::Passed),
+                Err(ProbeRunError::ZeroTests),
+                "child stdout was {stdout:?}"
             );
         }
 
@@ -1619,7 +1717,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("temporary executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_PROCESS_PROBE_NAME);
+            let probe = process_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let mut command_line = [0_u16; 2048];
             let mut environment_block = [0_u16; 2];
             let mut environment_order = [];
@@ -1669,7 +1768,7 @@ mod spawn {
         #[test]
         fn c44c_child_receives_unicode_environment_override_without_parent_mutation() {
             let (stdin_read, _stdin_write) = create_pipe();
-            let (_stdout_read, stdout_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
             let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
             let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
@@ -1679,7 +1778,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_ENVIRONMENT_PROBE_NAME);
+            let probe = environment_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let system_root = env::var("SystemRoot").expect("Windows provides SystemRoot");
             let inherited_system_root = format!("SystemRoot={system_root}");
             let inherited_environment = [inherited_system_root.as_str()];
@@ -1711,6 +1811,7 @@ mod spawn {
             assert_eq!(current_process_handle_count(), handles_before + 1);
             let exit_code = wait_for_child_exit(&child);
             assert_eq!(exit_code, 0);
+            assert_child_ran(&stdout_read, ProbeOutcome::Passed);
             drop(child);
             assert_eq!(current_process_handle_count(), handles_before);
             assert_eq!(env::var_os(CHILD_VALUE_KEY), parent_value);
@@ -1722,7 +1823,7 @@ mod spawn {
         #[test]
         fn c44c_child_environment_control_omits_unlisted_values() {
             let (stdin_read, _stdin_write) = create_pipe();
-            let (_stdout_read, stdout_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
             let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
             let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
@@ -1732,7 +1833,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_ENVIRONMENT_PROBE_NAME);
+            let probe = environment_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let system_root = env::var("SystemRoot").expect("Windows provides SystemRoot");
             let inherited_system_root = format!("SystemRoot={system_root}");
             let inherited_environment = [inherited_system_root.as_str()];
@@ -1761,6 +1863,7 @@ mod spawn {
             assert_eq!(current_process_handle_count(), handles_before + 1);
             let exit_code = wait_for_child_exit(&child);
             assert_eq!(exit_code, 0);
+            assert_child_ran(&stdout_read, ProbeOutcome::Passed);
             drop(child);
             assert_eq!(current_process_handle_count(), handles_before);
             assert_eq!(env::var_os(CHILD_VALUE_KEY), parent_value);
@@ -1772,7 +1875,7 @@ mod spawn {
         #[test]
         fn c44d_child_uses_requested_working_directory_without_parent_mutation() {
             let (stdin_read, _stdin_write) = create_pipe();
-            let (_stdout_read, stdout_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
             let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
             let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
@@ -1782,7 +1885,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_DIRECTORY_PROBE_NAME);
+            let probe = directory_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let child_directory =
                 crate::test_dir::tempdir().expect("child working directory exists");
             let child_directory_text = child_directory
@@ -1817,6 +1921,7 @@ mod spawn {
             )
             .expect("CreateProcessW accepts the requested child directory");
             assert_eq!(wait_for_child_exit(&child), 0);
+            assert_child_ran(&stdout_read, ProbeOutcome::Passed);
             drop(child);
             assert_eq!(
                 env::current_dir().expect("parent directory remains readable"),
@@ -1828,7 +1933,7 @@ mod spawn {
         #[test]
         fn c44d_wrong_directory_control_is_rejected_by_child_probe() {
             let (stdin_read, _stdin_write) = create_pipe();
-            let (_stdout_read, stdout_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
             let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
             let mut attribute_storage = [MaybeUninit::<usize>::uninit(); 64];
@@ -1838,7 +1943,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_DIRECTORY_PROBE_NAME);
+            let probe = directory_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let child_directory =
                 crate::test_dir::tempdir().expect("expected child directory exists");
             let child_directory_text = child_directory
@@ -1873,6 +1979,7 @@ mod spawn {
             )
             .expect("CreateProcessW accepts the parent directory for the control");
             assert_ne!(wait_for_child_exit(&child), 0);
+            assert_child_ran(&stdout_read, ProbeOutcome::Failed);
             drop(child);
             assert_eq!(
                 env::current_dir().expect("parent directory remains readable"),
@@ -1955,7 +2062,7 @@ mod spawn {
         #[test]
         fn c67_child_is_created_inside_the_run_job_and_thread_handle_is_closed() {
             let (stdin_read, _stdin_write) = create_pipe();
-            let (_stdout_read, stdout_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
             let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
             let job = WindowsJob::new().expect("the run job is created");
@@ -1966,7 +2073,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_PROCESS_PROBE_NAME);
+            let probe = process_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let mut command_line = [0_u16; 2048];
             let mut environment_block = [0_u16; 2];
             let mut environment_order = [];
@@ -1994,6 +2102,7 @@ mod spawn {
                 "only the process handle remains; the thread handle is closed"
             );
             assert_eq!(wait_for_child_exit(&child), 0);
+            assert_child_ran(&stdout_read, ProbeOutcome::Passed);
             drop(child);
             assert_eq!(current_process_handle_count(), handles_before);
             std::println!("{{\"child_in_job\":1,\"handles_retained_per_child\":1}}");
@@ -2002,7 +2111,7 @@ mod spawn {
         #[test]
         fn c67_child_without_job_list_is_outside_the_run_job() {
             let (stdin_read, _stdin_write) = create_pipe();
-            let (_stdout_read, stdout_write) = create_pipe();
+            let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
             let handles = [stdin_read.raw(), stdout_write.raw(), stderr_write.raw()];
             let job = WindowsJob::new().expect("the run job is created");
@@ -2013,7 +2122,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_PROCESS_PROBE_NAME);
+            let probe = process_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let mut command_line = [0_u16; 2048];
             let mut environment_block = [0_u16; 2];
             let mut environment_order = [];
@@ -2038,6 +2148,7 @@ mod spawn {
                 "control child has no job"
             );
             assert_eq!(wait_for_child_exit(&child), 0);
+            assert_child_ran(&stdout_read, ProbeOutcome::Passed);
         }
 
         #[test]
@@ -2053,7 +2164,8 @@ mod spawn {
             let executable = executable
                 .to_str()
                 .expect("Windows test executable path is valid UTF-8");
-            let intent = exact_test_intent(executable, CHILD_PROCESS_PROBE_NAME);
+            let probe = process_probe_name();
+            let intent = exact_test_intent(executable, &probe);
             let mut command_line = [0_u16; 2048];
             let mut environment_block = [0_u16; 2];
             let mut environment_order = [];
