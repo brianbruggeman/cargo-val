@@ -1404,6 +1404,23 @@ mod spawn {
         spawn(program, &arguments, environment, overrides, Some(directory)).map_err(ExactError::Spawn)
     }
 
+    /// Spawns one listing child as `program --list`, or `program --list --ignored`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExactError::Spawn`] with the Win32 code of the failing step.
+    pub fn spawn_listed(
+        _storage: &mut LaunchStorage,
+        program: &[u8],
+        ignored: bool,
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: &[u8],
+    ) -> Result<Child, ExactError> {
+        let arguments: &[&[u8]] = if ignored { &[b"--list", b"--ignored"] } else { &[b"--list"] };
+        spawn(program, arguments, environment, overrides, Some(directory)).map_err(ExactError::Spawn)
+    }
+
     /// Ends every child of this run, as an interrupt does; children have no console to receive Ctrl+C.
     pub(crate) fn terminate_children() {
         if let Some(Ok(job)) = RUN_JOB.get() {

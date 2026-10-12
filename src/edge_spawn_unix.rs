@@ -540,11 +540,42 @@ mod spawn {
         directory: &[u8],
     ) -> Result<Child, ExactError> {
         let exact_test = [b"--exact".as_slice(), test_name];
+        spawn_stored(storage, program, &exact_test, harness_arguments, environment, overrides, directory)
+    }
+
+    /// Spawns one listing child as `program --list`, or `program --list --ignored`, lowering its launch into `storage`
+    /// so the call makes no heap allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExactError::Arguments`] with required and available sizes when the launch does not fit `storage`,
+    /// and [`ExactError::Spawn`] with the pipe, file-action, or `posix_spawn` code otherwise.
+    pub fn spawn_listed(
+        storage: &mut LaunchStorage,
+        program: &[u8],
+        ignored: bool,
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: &[u8],
+    ) -> Result<Child, ExactError> {
+        let listing: &[&[u8]] = if ignored { &[b"--list", b"--ignored"] } else { &[b"--list"] };
+        spawn_stored(storage, program, listing, &[], environment, overrides, directory)
+    }
+
+    fn spawn_stored(
+        storage: &mut LaunchStorage,
+        program: &[u8],
+        arguments: &[&[u8]],
+        trailing: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: &[u8],
+    ) -> Result<Child, ExactError> {
         let lowered = storage
             .lower(Launch {
                 program,
-                arguments: &exact_test,
-                trailing: harness_arguments,
+                arguments,
+                trailing,
                 inherited: environment,
                 overrides,
                 directory: Some(directory),
