@@ -4,6 +4,8 @@ use core::cell::Cell;
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicI32, Ordering};
 
+use proxima_core::signal::Signal;
+
 const FORWARDED: [c_int; 2] = [libc::SIGINT, libc::SIGTERM];
 const TARGET_CAPACITY: usize = 72;
 const CONVENTIONAL_BASE: i32 = 128;
@@ -14,14 +16,14 @@ static WRITE_END: AtomicI32 = AtomicI32::new(-1);
 // every live child this process spawned: a pid, or a negated pgid for a child that leads its own group; 0 means free
 static TARGETS: [AtomicI32; TARGET_CAPACITY] = [const { AtomicI32::new(0) }; TARGET_CAPACITY];
 
-/// A self-pipe whose read end is registered with the event loop and whose write end the handler feeds.
+/// A self-pipe whose read end a prime gate watches and whose write end the handler feeds.
 #[derive(Debug)]
 pub struct SignalPipe {
     read_end: c_int,
     write_end: c_int,
-    token: u64,
     installed: bool,
     received: Cell<Option<c_int>>,
+    interrupt: Signal,
 }
 
 /// Makes every later signal reach `target`: a child's pid, or the negated pid of a child that leads its own process group.
@@ -55,22 +57,21 @@ pub const fn conventional_status(signal: c_int) -> i32 {
 }
 
 impl SignalPipe {
-    /// Installs the SIGINT and SIGTERM handlers and registers the read end through `register`.
+    /// Installs the SIGINT and SIGTERM handlers behind a self-pipe.
     ///
     /// # Errors
     ///
-    /// Returns the `errno` value of the failing pipe, registration, or `sigaction` call, or
+    /// Returns the `errno` value of the failing pipe or `sigaction` call, or
     /// `EBUSY` when another `SignalPipe` is already installed in this process.
-    pub fn install(register: impl FnOnce(c_int) -> Result<u64, c_int>) -> Result<Self, c_int> {
+    pub fn install() -> Result<Self, c_int> {
         let (read_end, write_end) = create_pipe()?;
         let mut pipe = Self {
             read_end,
             write_end,
-            token: 0,
             installed: false,
             received: Cell::new(None),
+            interrupt: Signal::new(),
         };
-        pipe.token = register(read_end)?;
         WRITE_END
             .compare_exchange(-1, write_end, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| libc::EBUSY)?;
@@ -81,10 +82,16 @@ impl SignalPipe {
         Ok(pipe)
     }
 
-    /// Reactor token that identifies readiness of this pipe.
+    /// The read end, readable while a signal byte waits, for a gate on a reactor.
     #[must_use]
-    pub const fn token(&self) -> u64 {
-        self.token
+    pub const fn read_fd(&self) -> c_int {
+        self.read_end
+    }
+
+    /// Fires once, when [`drain`](Self::drain) first forwards a signal.
+    #[must_use]
+    pub const fn interrupt(&self) -> &Signal {
+        &self.interrupt
     }
 
     /// The first signal observed by [`drain`](Self::drain), if any.
@@ -122,6 +129,7 @@ impl SignalPipe {
     fn forward(&self, signal: c_int) {
         if self.received.get().is_none() {
             self.received.set(Some(signal));
+            self.interrupt.fire();
         }
         TARGETS
             .iter()

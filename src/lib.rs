@@ -39,7 +39,7 @@ pub mod artifact_stream;
     feature = "proxima-primitives"
 ))]
 pub mod cargo_source;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "edge-os", feature = "proxima-core"))]
 pub mod edge_signal_unix;
 #[cfg(all(test, feature = "edge-os", any(target_os = "macos", target_os = "linux")))]
 pub(crate) mod edge_exit;

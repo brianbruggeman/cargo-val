@@ -3,11 +3,9 @@
 use core::cell::{Cell, RefCell};
 use core::ffi::{CStr, c_char, c_int};
 use core::ops::Range;
-use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 
 use conflaguration::{BorrowedSettings, SettingsSource, resolve_color};
-use proxima_core::io::AsyncRead;
 
 use crate::ExecutablePath;
 use crate::artifact_stream::{ArtifactFramer, RecordStep};
@@ -28,13 +26,18 @@ use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
-use crate::run::{CARGO_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, observe_cargo};
+use crate::run::{
+    CARGO_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
+    observe_cargo, observe_doc,
+};
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
+use proxima_primitives::pipe::SignalSource;
+use std::boxed::Box;
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
 use crate::edge_signal_unix::{SignalPipe, conventional_status, release_child, track_child};
 use crate::host::unix_env::UnixEnvironment;
-use crate::host::unix_rustc::RustcLibdirQuery;
+use crate::host::unix_rustc::spawn_libdir_query;
 use crate::host::unix_spawn::{UnixChild, spawn_raw_unix, spawn_raw_unix_in_new_group};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
@@ -52,21 +55,6 @@ use crate::test_environment::{
 };
 use crate::test_intent::ExactTestIntent;
 use crate::unix_arguments::{UnixArgumentsError, merge_environment};
-
-#[cfg(target_os = "linux")]
-use crate::host::linux_exit::{
-    LinuxExitEvent as NativeEvent, LinuxExitPort as NativePort,
-    LinuxPidWatch as NativeWatch,
-};
-#[cfg(target_os = "linux")]
-use crate::host::linux_pipe::LinuxPipeReader as NativeReader;
-#[cfg(target_os = "macos")]
-use crate::host::macos_exit::{
-    MacosExitEvent as NativeEvent, MacosExitPort as NativePort,
-    MacosProcessWatch as NativeWatch,
-};
-#[cfg(target_os = "macos")]
-use crate::host::macos_pipe::MacosPipeReader as NativeReader;
 
 pub(crate) const LIVE_CAPACITY: usize = 64;
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
@@ -604,14 +592,6 @@ fn track(target: libc::pid_t) -> Result<(), RunError> {
     track_child(target).map_err(|_| RunError::Reactor)
 }
 
-// the pid is untracked the moment it is reaped, before the kernel can hand it to an unrelated process
-fn released<Status>(status: Option<Status>, target: libc::pid_t) -> Option<Status> {
-    if status.is_some() {
-        release_child(target);
-    }
-    status
-}
-
 fn deliver_exit(
     ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     watch_slot: &mut Option<TestWatch>,
@@ -747,26 +727,6 @@ fn environment_pointers(
     Ok(entries.len() + 1)
 }
 
-fn reader_pair(
-    port: &NativePort,
-    child: UnixChild,
-) -> Result<(NativeReader<'_>, NativeReader<'_>, NativeWatch), RunError> {
-    let (process_id, stdout, stderr) = child.into_parts();
-    let watch = port.watch(process_id).map_err(|_| RunError::Reactor)?;
-    let stdout_token = port
-        .watch_descriptor(stdout.raw())
-        .map_err(|_| RunError::Reactor)?;
-    let stderr_token = port
-        .watch_descriptor(stderr.raw())
-        .map_err(|_| RunError::Reactor)?;
-    Ok((
-        NativeReader::new(stdout, port, stdout_token),
-        NativeReader::new(stderr, port, stderr_token),
-        watch,
-    ))
-}
-
-
 const LOCK_LINE_CAPACITY: usize = 768;
 
 // one line per child, so a wait on another cargo process is never silent
@@ -886,15 +846,6 @@ fn deliver(
             Ok(None)
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-fn last_error() -> c_int {
-    unsafe { *libc::__error() }
-}
-#[cfg(target_os = "linux")]
-fn last_error() -> c_int {
-    unsafe { *libc::__errno_location() }
 }
 
 fn override_entries<'storage>(
@@ -1040,7 +991,6 @@ fn launch_listed(
 }
 
 pub(crate) struct ListingRun<'run> {
-    port: &'run NativePort,
     signals: &'run SignalPipe,
     filter: &'run str,
     exact: bool,
@@ -1055,11 +1005,11 @@ pub(crate) struct ListingRun<'run> {
     prepared: Option<&'run Prepared<'run>>,
     docs: DocObservation,
     policy: RefCell<StopPolicy>,
-    doc: RefCell<Option<DocRun<'run>>>,
+    doc: RefCell<Option<Box<DocRun>>>,
 }
 
 #[derive(Default)]
-struct DocObservation {
+pub(crate) struct DocObservation {
     passed: Cell<usize>,
     failed: Cell<usize>,
     ignored: Cell<usize>,
@@ -1068,8 +1018,16 @@ struct DocObservation {
 }
 
 impl ListingRun<'_> {
-    pub(crate) fn port_fd(&self) -> c_int {
-        self.port.raw_fd()
+    pub(crate) fn signal_fd(&self) -> c_int {
+        self.signals.read_fd()
+    }
+
+    pub(crate) fn interrupt_source(&self) -> SignalSource {
+        SignalSource::new(self.signals.interrupt())
+    }
+
+    pub(crate) fn drain_signals(&self) -> Result<(), RunError> {
+        self.signals.drain().map_err(|_| RunError::Reactor)
     }
 
     fn interrupted(&self) -> bool {
@@ -1102,25 +1060,26 @@ impl ListingRun<'_> {
         self.doc
             .try_borrow_mut()
             .ok()
-            .and_then(|mut doc| doc.as_mut().map(DocRun::state_for_trip))
+            .and_then(|mut doc| doc.as_mut().map(|doc| doc.state_for_trip()))
             .unwrap_or(DocAtTrip::NotSpawned)
     }
 
-    pub(crate) fn pump_doc_tests(&self) -> Result<(), RunError> {
+    pub(crate) fn take_doc_child(&self) -> Option<UnixChild> {
+        self.doc.borrow_mut().as_mut().and_then(|doc| doc.take_child())
+    }
+
+    pub(crate) fn with_doc(
+        &self,
+        act: impl FnOnce(&mut DocRun, bool, &DocObservation) -> Result<(), RunError>,
+    ) -> Result<(), RunError> {
         match self.doc.borrow_mut().as_mut() {
-            Some(doc) => doc.pump(self.settings.color, &self.docs),
+            Some(doc) => act(doc, self.settings.color, &self.docs),
             None => Ok(()),
         }
     }
 
-    fn observe_doc_event(&self, event: NativeEvent) {
-        if let Some(doc) = self.doc.borrow_mut().as_mut() {
-            doc.observe_exit_event(event);
-        }
-    }
-
     fn doc_tests_finished(&self) -> bool {
-        self.doc.borrow().as_ref().is_none_or(DocRun::finished)
+        self.doc.borrow().as_ref().is_none_or(|doc| doc.finished())
     }
 }
 
@@ -1321,59 +1280,17 @@ fn spawn_metadata(parser: &CliParser<'_>, envp: &[*const c_char]) -> Result<Unix
     spawn_raw_unix(c"cargo", &argv[..=count], envp, None, true).map_err(|_| RunError::Spawn)
 }
 
-// blocks until the short-lived metadata child finishes; none of the run's own children can be affected
-fn read_metadata(child: UnixChild) -> Option<MetadataFacts> {
-    let (process_id, stdout, stderr) = child.into_parts();
-    let mut descriptors = [
-        libc::pollfd {
-            fd: stdout.raw(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: stderr.raw(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-    ];
-    let mut scan = MetadataScan::new();
-    let mut bytes = [0; SOURCE_CAPACITY];
+// the short-lived metadata child is awaited alone; none of the run's own children are polled meanwhile
+async fn read_metadata(child: UnixChild) -> Option<Box<MetadataFacts>> {
+    // the scanner's tens of KiB of text storage would otherwise sit in every enclosing future
+    let mut scan = Box::new(MetadataScan::new());
     let mut usable = true;
-    while descriptors.iter().any(|descriptor| descriptor.fd >= 0) {
-        // safety: `descriptors` is a live array of two pollfd for the call's duration.
-        let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
-        if ready < 0 && last_error() == libc::EINTR {
-            continue;
-        }
-        if ready < 0 {
-            usable = false;
-            break;
-        }
-        for (index, descriptor) in descriptors.iter_mut().enumerate() {
-            if descriptor.fd < 0 || descriptor.revents == 0 {
-                continue;
-            }
-            // safety: the descriptor is open and `bytes` is writable for its length.
-            let read = unsafe { libc::read(descriptor.fd, bytes.as_mut_ptr().cast(), bytes.len()) };
-            match usize::try_from(read) {
-                Ok(0) => descriptor.fd = -1,
-                Ok(length) if index == 0 && usable => {
-                    usable = scan.feed(&bytes[..length]).is_ok();
-                }
-                Ok(_) => {}
-                Err(_) if matches!(last_error(), libc::EINTR | libc::EAGAIN) => {}
-                Err(_) => {
-                    descriptor.fd = -1;
-                    usable = false;
-                }
-            }
-        }
-    }
-    let mut status = 0;
-    // safety: `status` is a valid out pointer and `process_id` is this function's own child.
-    while unsafe { libc::waitpid(process_id, &raw mut status, 0) } < 0 && last_error() == libc::EINTR {}
-    drop((stdout, stderr));
-    (usable && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0).then(|| scan.finish())
+    let code = collect_child(child, |bytes| {
+        usable = usable && scan.feed(bytes).is_ok();
+    })
+    .await
+    .ok()?;
+    (usable && code == 0).then(|| Box::new((*scan).finish()))
 }
 
 pub(crate) struct CargoDriver<'buffer> {
@@ -1463,7 +1380,7 @@ fn debug_gate_action(enabled: bool, action: &[u8], reason: &[u8], artifact: &Tes
     });
 }
 
-fn resolve_bin_gate(settings: &Settings, spawned: bool, facts: Option<MetadataFacts>) -> (BinCounts, BinGate) {
+fn resolve_bin_gate(settings: &Settings, spawned: bool, facts: Option<Box<MetadataFacts>>) -> (BinCounts, BinGate) {
     let counts = facts.map(|found| found.bins);
     gate_debug(settings.debug, |line| {
         line.text(b" metadata spawned=");
@@ -1990,22 +1907,6 @@ impl CargoDriver<'_> {
     }
 }
 
-fn collect_libdirs(
-    host_query: RustcLibdirQuery,
-    target_query: Option<RustcLibdirQuery>,
-    host_libdir: &mut [u8],
-    target_libdir: &mut [u8],
-) -> Result<(usize, usize), RunError> {
-    let host_length = host_query
-        .finish(host_libdir)
-        .map_err(|_| RunError::RustcLibdir)?;
-    let target_length = target_query
-        .map(|query| query.finish(target_libdir))
-        .transpose()
-        .map_err(|_| RunError::RustcLibdir)?
-        .unwrap_or(0);
-    Ok((host_length, target_length))
-}
 
 /// Runs the whole cargo-val run: setup, the awaited prime loop, and the summary.
 ///
@@ -2031,31 +1932,30 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let target_source = BorrowedSettings::new(&target_pairs[..usize::from(configured_target.is_some())]);
     let target_mode = resolve_target_dir(&target_source, parser)?;
     if parser.doc_selection() == DocSelection::Only {
-        return run_doc_only(parser, &settings, target_mode, started_millis, envp);
+        return run_doc_only(parser, &settings, target_mode, started_millis, envp).await;
     }
     let queries = start_libdir_queries(&environment, parser, envp)?;
     let inherited_dylib_path = utf8_variable(&environment, DYLIB_PATH_KEY_C)?;
     let home = utf8_variable(&environment, c"HOME")?;
     let filter = filter_text(parser)?;
-    let port = NativePort::new().map_err(|_| RunError::Reactor)?;
-    let signals = install_signals(&port)?;
+    let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
     let StartedChildren {
         cargo: cargo_child,
         doc_tests,
         bins,
         gate,
         lock_watch,
-    } = start_children(parser, &settings, target_mode, &port, envp)?;
+    } = start_children(parser, &settings, target_mode, envp).await?;
     let cargo_process_id = cargo_child.process_id();
     let mut driver = held(new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?);
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
+        .await
         .inspect_err(|_| unsafe {
             libc::kill(cargo_process_id, libc::SIGKILL);
         })?;
-    let prepared = settings.filterset.as_ref().map(Filterset::prepare);
+    let prepared = held(settings.filterset.as_ref().map(Filterset::prepare));
     let run = held(ListingRun {
-        port: &port,
         signals: &signals,
         filter,
         exact: parser.exact(),
@@ -2067,7 +1967,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         inherited_dylib_path,
         home,
         settings: &settings,
-        prepared: prepared.as_ref(),
+        prepared: (*prepared).as_ref(),
         docs: DocObservation::default(),
         policy: RefCell::new(StopPolicy::new(settings.max_fail)),
         doc: RefCell::new(doc_tests),
@@ -2176,38 +2076,36 @@ const fn ignore_arguments(mode: IgnoreMode) -> &'static [&'static [u8]] {
     }
 }
 
-struct StartedChildren<'port> {
+struct StartedChildren {
     cargo: UnixChild,
-    doc_tests: Option<DocRun<'port>>,
+    doc_tests: Option<Box<DocRun>>,
     bins: BinCounts,
     gate: BinGate,
     lock_watch: LockWatch,
 }
 
 // isolated mode reads the metadata first because the build directories come from it; the other modes overlap the read with the builds
-fn start_children<'port>(
+async fn start_children(
     parser: &CliParser<'_>,
     settings: &Settings,
     target_mode: TargetDirMode<'_>,
-    port: &'port NativePort,
     envp: &[*const c_char],
-) -> Result<StartedChildren<'port>, RunError> {
+) -> Result<StartedChildren, RunError> {
     let isolating = target_mode == TargetDirMode::Isolated;
     let mut metadata_child = (settings.bin_gate || isolating)
         .then(|| spawn_metadata(parser, envp))
         .and_then(Result::ok);
     let spawned = metadata_child.is_some();
     let mut facts = None;
-    if isolating {
-        facts = metadata_child.take().and_then(read_metadata);
+    if isolating && let Some(child) = metadata_child.take() {
+        facts = read_metadata(child).await;
     }
-    let directories = build_directories(target_mode, facts.as_ref())?;
+    let directories = build_directories(target_mode, facts.as_deref())?;
     let cargo = spawn_cargo(parser, envp, directories.as_ref().map(|chosen| &chosen.test))?;
     track(cargo.process_id())?;
     let mut doc_tests = match parser.doc_selection() {
         DocSelection::Excluded | DocSelection::Only => None,
         DocSelection::Included => Some(spawn_doc_tests(
-            port,
             parser,
             settings.ignore,
             envp,
@@ -2215,10 +2113,10 @@ fn start_children<'port>(
         )?),
     };
     if let Some(child) = metadata_child {
-        facts = read_metadata(child);
+        facts = read_metadata(child).await;
     }
     let mut lock_watch = LockWatch::new();
-    match (&directories, facts.as_ref().and_then(MetadataFacts::target_directory)) {
+    match (&directories, facts.as_deref().and_then(MetadataFacts::target_directory)) {
         (Some(chosen), _) => lock_watch.set_directory(chosen.test.directory()),
         (None, Some(shared)) => {
             lock_watch.set_directory(shared);
@@ -2272,17 +2170,17 @@ fn build_directories(
     }
 }
 
-type LibdirQueries = (RustcLibdirQuery, Option<RustcLibdirQuery>);
+type LibdirQueries = (UnixChild, Option<UnixChild>);
 
 fn start_libdir_queries(
     environment: &UnixEnvironment<'_>,
     parser: &CliParser<'_>,
     envp: &[*const c_char],
 ) -> Result<LibdirQueries, RunError> {
-    let host_query = RustcLibdirQuery::start(environment.get(c"RUSTC"), None, envp)
+    let host_query = spawn_libdir_query(environment.get(c"RUSTC"), None, envp)
         .map_err(|_| RunError::RustcLibdir)?;
     let target_query = target_triple(parser.cargo_arguments())
-        .map(|triple| RustcLibdirQuery::start(environment.get(c"RUSTC"), Some(triple), envp))
+        .map(|triple| spawn_libdir_query(environment.get(c"RUSTC"), Some(triple), envp))
         .transpose()
         .map_err(|_| RunError::RustcLibdir)?;
     Ok((host_query, target_query))
@@ -2299,13 +2197,16 @@ fn utf8_variable<'environment>(
         .map_err(|_| RunError::Environment)
 }
 
-fn resolve_libdirs(
+async fn resolve_libdirs(
     queries: LibdirQueries,
     buffer: &mut [u8; LIBDIR_CAPACITY * 2],
 ) -> Result<([&str; 2], usize), RunError> {
     let (host_buffer, target_buffer) = buffer.split_at_mut(LIBDIR_CAPACITY);
-    let (host_length, target_length) =
-        collect_libdirs(queries.0, queries.1, host_buffer, target_buffer)?;
+    let host_length = collect_libdir(queries.0, host_buffer).await?;
+    let target_length = match queries.1 {
+        Some(query) => collect_libdir(query, target_buffer).await?,
+        None => 0,
+    };
     let directories = [
         core::str::from_utf8(&host_buffer[..host_length]).map_err(|_| RunError::RustcLibdir)?,
         core::str::from_utf8(&target_buffer[..target_length]).map_err(|_| RunError::RustcLibdir)?,
@@ -2346,75 +2247,6 @@ fn monotonic_millis() -> u64 {
         return 0;
     }
     u64::try_from(now.tv_sec).unwrap_or(0) * 1000 + u64::try_from(now.tv_nsec / 1_000_000).unwrap_or(0)
-}
-
-#[cfg(target_os = "macos")]
-fn observe_exit(watch: &mut NativeWatch, event: NativeEvent) {
-    watch.observe(&event);
-}
-
-#[cfg(target_os = "linux")]
-fn observe_exit(_watch: &mut NativeWatch, _event: NativeEvent) {}
-
-#[cfg(target_os = "macos")]
-fn wait_ready(port: &NativePort, events: &mut [NativeEvent]) -> Result<usize, c_int> {
-    port.wait_for(events, 100)
-}
-
-#[cfg(target_os = "linux")]
-fn wait_ready(port: &NativePort, events: &mut [NativeEvent]) -> Result<usize, c_int> {
-    port.wait(events)
-}
-
-// the signal event is consumed here so every loop that waits also forwards, and none sees its token
-fn wait_for_events(
-    port: &NativePort,
-    signals: &SignalPipe,
-    events: &mut [NativeEvent],
-) -> Result<usize, RunError> {
-    let ready = match wait_ready(port, events) {
-        Ok(ready) => ready,
-        Err(libc::EINTR) => 0,
-        Err(_) => return Err(RunError::Reactor),
-    };
-    forward_signals(signals, events, ready)
-}
-
-fn forward_signals(
-    signals: &SignalPipe,
-    events: &mut [NativeEvent],
-    ready: usize,
-) -> Result<usize, RunError> {
-    let mut kept = 0;
-    for index in 0..ready {
-        if events[index].token == signals.token() {
-            signals.drain().map_err(|_| RunError::Reactor)?;
-        } else {
-            events[kept] = events[index];
-            kept += 1;
-        }
-    }
-    Ok(kept)
-}
-
-
-/// Dispatches everything the old port holds right now, without waiting, so a prime gate on the port can park again.
-pub(crate) fn service_port(run: &ListingRun<'_>) -> Result<(), RunError> {
-    let mut events = [NativeEvent::default(); 64];
-    loop {
-        let ready = match run.port.poll(&mut events) {
-            Ok(0) => break,
-            Ok(ready) => ready,
-            Err(libc::EINTR) => continue,
-            Err(_) => return Err(RunError::Reactor),
-        };
-        let kept = forward_signals(run.signals, &mut events, ready)?;
-        for event in events.iter().copied().take(kept) {
-            run.observe_doc_event(event);
-        }
-        run.pump_doc_tests()?;
-    }
-    run.pump_doc_tests()
 }
 
 type LineBuffer = Line<512>;
@@ -2509,10 +2341,8 @@ enum DocPhase {
     Interrupted,
 }
 
-struct DocRun<'port> {
-    stdout: NativeReader<'port>,
-    stderr: NativeReader<'port>,
-    process: NativeWatch,
+pub(crate) struct DocRun {
+    child: Option<UnixChild>,
     process_id: libc::pid_t,
     parser: DocParser,
     stdout_eof: bool,
@@ -2524,13 +2354,12 @@ struct DocRun<'port> {
     lock_watch: LockWatch,
 }
 
-fn spawn_doc_tests<'port>(
-    port: &'port NativePort,
+fn spawn_doc_tests(
     parser: &CliParser<'_>,
     ignore: IgnoreMode,
     envp: &[*const c_char],
     directory: Option<&ChildDirectory>,
-) -> Result<DocRun<'port>, RunError> {
+) -> Result<Box<DocRun>, RunError> {
     let mut argv = [core::ptr::null(); DOC_ARGUMENT_CAPACITY];
     let mut count = 0;
     let mut push = |argument: *const c_char| -> Result<(), RunError> {
@@ -2574,15 +2403,12 @@ fn spawn_doc_tests<'port>(
     let process_id = child.process_id();
     track(-process_id)?;
     lower_priority(process_id)?;
-    let (stdout, stderr, process) = reader_pair(port, child)?;
     let mut lock_watch = LockWatch::new();
     if let Some(directory) = directory {
         lock_watch.set_directory(directory.directory());
     }
-    Ok(DocRun {
-        stdout,
-        stderr,
-        process,
+    Ok(Box::new(DocRun {
+        child: Some(child),
         process_id,
         parser: DocParser::new(),
         stdout_eof: false,
@@ -2592,7 +2418,7 @@ fn spawn_doc_tests<'port>(
         stderr_bytes: [0; DOC_STDERR_CAPACITY],
         stderr_length: 0,
         lock_watch,
-    })
+    }))
 }
 
 fn lower_priority(process_id: libc::pid_t) -> Result<(), RunError> {
@@ -2604,47 +2430,43 @@ fn lower_priority(process_id: libc::pid_t) -> Result<(), RunError> {
     write_fd(2, b"cargo-val: could not lower the doc test priority\n")
 }
 
-impl DocRun<'_> {
-    fn finished(&self) -> bool {
+impl DocRun {
+    pub(crate) fn finished(&self) -> bool {
         self.stdout_eof && self.stderr_eof && self.exit_code.is_some()
     }
 
-    fn pump(&mut self, color: bool, observation: &DocObservation) -> Result<(), RunError> {
-        let mut context = Context::from_waker(Waker::noop());
-        let mut bytes = [0; SOURCE_CAPACITY];
-        while !self.stdout_eof {
-            match Pin::new(&mut self.stdout).poll_read(&mut context, &mut bytes) {
-                Poll::Ready(Ok(0)) => self.stdout_eof = true,
-                Poll::Ready(Ok(length)) => {
-                    let phase = &mut self.phase;
-                    self.parser.feed(&bytes[..length], |event| {
-                        record_doc_event(event, phase, color, observation)
-                    })?;
-                }
-                Poll::Ready(Err(_)) => return Err(RunError::Reactor),
-                Poll::Pending => break,
-            }
-        }
-        while !self.stderr_eof {
-            match Pin::new(&mut self.stderr).poll_read(&mut context, &mut bytes) {
-                Poll::Ready(Ok(0)) => self.stderr_eof = true,
-                Poll::Ready(Ok(length)) => {
-                    self.keep_stderr(&bytes[..length]);
-                    announce_lock_wait(&mut self.lock_watch, &bytes[..length])?;
-                }
-                Poll::Ready(Err(_)) => return Err(RunError::Reactor),
-                Poll::Pending => break,
-            }
-        }
-        if self.exit_code.is_none()
-            && let Some(status) = released(
-                self.process.reap().map_err(|_| RunError::Reactor)?,
-                -self.process_id,
-            )
-        {
-            self.exit_code = Some(status.code.unwrap_or(1));
-        }
-        Ok(())
+    pub(crate) fn take_child(&mut self) -> Option<UnixChild> {
+        self.child.take()
+    }
+
+    pub(crate) fn stdout_chunk(
+        &mut self,
+        bytes: &[u8],
+        color: bool,
+        observation: &DocObservation,
+    ) -> Result<(), RunError> {
+        let phase = &mut self.phase;
+        self.parser.feed(bytes, |event| {
+            record_doc_event(event, phase, color, observation)
+        })
+    }
+
+    pub(crate) fn stdout_ended(&mut self) {
+        self.stdout_eof = true;
+    }
+
+    pub(crate) fn stderr_chunk(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+        self.keep_stderr(bytes);
+        announce_lock_wait(&mut self.lock_watch, bytes)
+    }
+
+    pub(crate) fn stderr_ended(&mut self) {
+        self.stderr_eof = true;
+    }
+
+    pub(crate) fn exited(&mut self, code: i32) {
+        release_child(-self.process_id);
+        self.exit_code = Some(code);
     }
 
     fn keep_stderr(&mut self, bytes: &[u8]) {
@@ -2653,12 +2475,6 @@ impl DocRun<'_> {
         self.stderr_bytes[self.stderr_length..self.stderr_length + taken]
             .copy_from_slice(&bytes[..taken]);
         self.stderr_length += taken;
-    }
-
-    fn observe_exit_event(&mut self, event: NativeEvent) {
-        if event.token == self.process.token() {
-            observe_exit(&mut self.process, event);
-        }
     }
 
     fn state_for_trip(&mut self) -> DocAtTrip {
@@ -2770,7 +2586,7 @@ impl ListingRun<'_> {
 }
 
 fn close_doc_tests(
-    doc: &DocRun<'_>,
+    doc: &DocRun,
     implicit: bool,
     observation: &DocObservation,
 ) -> Result<DocTotals, RunError> {
@@ -2856,44 +2672,35 @@ fn conclude(
     })
 }
 
-fn run_doc_only(
+async fn run_doc_only(
     parser: &CliParser<'_>,
     settings: &Settings,
     target_mode: TargetDirMode<'_>,
     started_millis: u64,
     envp: &[*const c_char],
 ) -> Result<RunSummary, RunError> {
-    let port = NativePort::new().map_err(|_| RunError::Reactor)?;
-    let signals = install_signals(&port)?;
-    let facts = (!matches!(target_mode, TargetDirMode::Path(_)))
+    let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
+    let metadata_child = (!matches!(target_mode, TargetDirMode::Path(_)))
         .then(|| spawn_metadata(parser, envp))
-        .and_then(Result::ok)
-        .and_then(read_metadata);
-    let directories = build_directories(target_mode, facts.as_ref())?;
+        .and_then(Result::ok);
+    let facts = match metadata_child {
+        Some(child) => read_metadata(child).await,
+        None => None,
+    };
+    let directories = build_directories(target_mode, facts.as_deref())?;
     let mut doc = spawn_doc_tests(
-        &port,
         parser,
         settings.ignore,
         envp,
         directories.as_ref().map(|chosen| &chosen.doc),
     )?;
     if directories.is_none()
-        && let Some(shared) = facts.as_ref().and_then(MetadataFacts::target_directory)
+        && let Some(shared) = facts.as_deref().and_then(MetadataFacts::target_directory)
     {
         doc.lock_watch.set_directory(shared);
     }
     let observation = DocObservation::default();
-    let mut events = [NativeEvent::default(); 64];
-    loop {
-        doc.pump(settings.color, &observation)?;
-        if doc.finished() {
-            break;
-        }
-        let ready = wait_for_events(&port, &signals, &mut events)?;
-        for event in events.iter().copied().take(ready) {
-            doc.observe_exit_event(event);
-        }
-    }
+    observe_doc(&mut doc, &signals, settings.color, &observation).await?;
     interrupted(&signals)?;
     let totals = close_doc_tests(&doc, false, &observation)?;
     conclude(
@@ -2904,11 +2711,6 @@ fn run_doc_only(
         None,
         Some(totals),
     )
-}
-
-fn install_signals(port: &NativePort) -> Result<SignalPipe, RunError> {
-    SignalPipe::install(|descriptor| port.watch_descriptor(descriptor))
-        .map_err(|_| RunError::Reactor)
 }
 
 fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {

@@ -392,7 +392,8 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
 #[cfg(all(
     test,
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
-    feature = "proxima-core"
+    feature = "proxima-core",
+    feature = "edge-os"
 ))]
 mod tests {
     use core::convert::Infallible;
@@ -410,15 +411,16 @@ mod tests {
     use crate::artifact_stream::ArtifactFramer;
     use crate::discover_listing::{ListingSource, ListingSourceStep};
     #[cfg(target_os = "linux")]
-    use crate::host::linux_exit::{
-        LinuxExitEvent as MacosExitEvent, LinuxExitPort as MacosExitPort,
-        LinuxExitStatus as MacosExitStatus, LinuxPidWatch as MacosProcessWatch,
-    };
+    use crate::edge_exit_linux::LinuxExit as ExitSource;
     #[cfg(target_os = "macos")]
-    use crate::host::macos_exit::{
-        MacosExitEvent, MacosExitPort, MacosExitStatus, MacosProcessWatch,
-    };
+    use crate::edge_exit_macos::MacosExit as ExitSource;
     use crate::host_event::HostEvent;
+    use core::num::NonZeroI32;
+    use prime::os::core_shard::run_on_this_thread;
+    use proxima_primitives::pipe::UnpinPipe;
+    use proxima_runtime::CoreId;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
     use crate::outcomes::{OutcomeLedger, TerminalOutcome};
     use crate::schedule::{SessionSlotId, SessionSlots};
     use crate::selection::NameFilter;
@@ -600,10 +602,9 @@ mod tests {
 
     fn launch_watched<const NAME_CAPACITY: usize, const CAPACITY: usize>(
         ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
-        port: &mut MacosExitPort,
         intent: ExactTestIntent<'_, '_, '_>,
         child_overrides: &[&CStr],
-    ) -> (SessionSlotId, MacosProcessWatch) {
+    ) -> (SessionSlotId, NonZeroI32) {
         let slot =
             launch_accounted(ledger, intent, child_overrides).expect("child starts through ledger");
         let process_id = ledger
@@ -612,16 +613,15 @@ mod tests {
             .expect("slot live")
             .child()
             .process_id();
-        (slot, watch(port, process_id))
+        (slot, watch(process_id))
     }
 
     fn account_passed<const NAME_CAPACITY: usize, const CAPACITY: usize>(
         ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
-        port: &mut MacosExitPort,
         passed: SessionSlotId,
-        passed_watch: MacosProcessWatch,
+        passed_watch: NonZeroI32,
     ) -> (usize, usize) {
-        let passed_status = terminal_status(reap(port, passed_watch));
+        let passed_status = terminal_status(reap(passed_watch));
         assert_eq!(passed_status, 0);
         let mut passed_report = [0_u8; 16];
         assert_eq!(
@@ -659,10 +659,10 @@ mod tests {
         (child.stdout().raw(), child.stderr().raw())
     }
 
-    fn terminal_status(status: MacosExitStatus) -> i32 {
+    fn terminal_status(status: ExitStatus) -> i32 {
         status
-            .code
-            .unwrap_or_else(|| -status.signal.expect("signal exit has a number"))
+            .code()
+            .unwrap_or_else(|| -status.signal().expect("signal exit has a number"))
     }
 
     fn drain_descriptor(descriptor: libc::c_int) {
@@ -713,36 +713,19 @@ mod tests {
         }
     }
 
-    fn watch(port: &mut MacosExitPort, process_id: libc::pid_t) -> MacosProcessWatch {
-        match port.watch(process_id) {
-            Ok(watch) => watch,
-            Err(code) => {
-                let kill_result = unsafe { libc::kill(process_id, 0) };
-                let kill_error = std::io::Error::last_os_error();
-                let mut raw_status = 0;
-                let wait_result =
-                    unsafe { libc::waitpid(process_id, &raw mut raw_status, libc::WNOHANG) };
-                let wait_error = std::io::Error::last_os_error();
-                panic!(
-                    "kqueue watch failed: pid={process_id}, code={code}, kill_result={kill_result}, kill_error={kill_error}, wait_result={wait_result}, wait_error={wait_error}, raw_status={raw_status}"
-                );
-            }
-        }
+    fn watch(process_id: libc::pid_t) -> NonZeroI32 {
+        NonZeroI32::new(process_id).expect("spawned child has a process id")
     }
 
-    fn reap(port: &mut MacosExitPort, mut watch: MacosProcessWatch) -> MacosExitStatus {
-        let mut events = [MacosExitEvent::default(); 4];
-        loop {
-            if let Some(status) = watch.reap().expect("nonblocking reap succeeds") {
-                return status;
-            }
-            let count = port.wait(&mut events).expect("kqueue reports a child exit");
-            assert!(count > 0);
-            #[cfg(target_os = "macos")]
-            for event in events.iter().take(count) {
-                watch.observe(event);
-            }
-        }
+    fn reap(watch: NonZeroI32) -> ExitStatus {
+        run_on_this_thread(CoreId(0), async move {
+            let exit = ExitSource::new(watch);
+            UnpinPipe::call(&exit, ())
+                .await
+                .expect("exit source reports once")
+                .expect("child exit is reaped")
+        })
+        .expect("root completes")
     }
 
     fn assert_libtest_output(
@@ -792,7 +775,6 @@ mod tests {
         };
         let mut sessions = SessionSlots::<RunningUnixChild<64>, 1>::new();
         let mut context = Context::from_waker(Waker::noop());
-        let mut port = MacosExitPort::new().expect("kqueue is available");
         let mut observed_names = [[0_u8; 64]; 2];
         let mut observed_name_lengths = [0; 2];
 
@@ -832,7 +814,7 @@ mod tests {
                 .expect("child remains live")
                 .child()
                 .process_id();
-            let child_watch = watch(&mut port, process_id);
+            let child_watch = watch(process_id);
             let reads_at_full = reader.read_calls;
             let chunks_at_full = reader.next_chunk;
             assert!(matches!(
@@ -855,8 +837,8 @@ mod tests {
                 ));
                 assert_eq!(sessions.len(), 1);
             }
-            let status = reap(&mut port, child_watch);
-            assert_eq!(status.code, Some(0));
+            let status = reap(child_watch);
+            assert_eq!(status.code(), Some(0));
             let session = sessions
                 .get(launched)
                 .expect("completed child remains live");
@@ -904,14 +886,13 @@ mod tests {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut sessions = SessionSlots::<RunningUnixChild<64>, 2>::new();
-        let mut port = MacosExitPort::new().expect("kqueue is available");
         let alpha = launch(&mut sessions, intent(executable, ALPHA_NAME)).expect("alpha starts");
         let first_process_id = sessions
             .get(alpha)
             .expect("alpha stored")
             .child()
             .process_id();
-        let first_watch = watch(&mut port, first_process_id);
+        let first_watch = watch(first_process_id);
         assert!(matches!(
             launch(&mut sessions, intent(executable, ALPHA_NAME)),
             Err(UnixLaunchError::Duplicate)
@@ -924,11 +905,11 @@ mod tests {
             .expect("beta stored")
             .child()
             .process_id();
-        let second_watch = watch(&mut port, second_process_id);
+        let second_watch = watch(second_process_id);
         assert_ne!(first_process_id, second_process_id);
         assert_eq!(sessions.len(), 2);
         for (slot, child_watch) in [(alpha, first_watch), (beta, second_watch)] {
-            assert_eq!(reap(&mut port, child_watch).code, Some(0));
+            assert_eq!(reap(child_watch).code(), Some(0));
             let session = sessions.get(slot).expect("exited child remains live");
             let stdout = capture_stream(session.child().stdout().raw());
             let stderr = capture_stream(session.child().stderr().raw());
@@ -954,17 +935,14 @@ mod tests {
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut sessions = SessionSlots::<RunningUnixChild<64>, 2>::new();
         let mut ledger = OutcomeLedger::new(&mut sessions).expect("table starts empty");
-        let mut port = MacosExitPort::new().expect("kqueue is available");
 
         let (passed, passed_watch) = launch_watched(
             &mut ledger,
-            &mut port,
             intent(executable, ALPHA_NAME),
             &[c"CARGO_VAL_C51A_CHILD=1"],
         );
         let (failed, failed_watch) = launch_watched(
             &mut ledger,
-            &mut port,
             intent(executable, FAIL_NAME),
             &[c"CARGO_VAL_C51B_FAIL=1"],
         );
@@ -972,9 +950,9 @@ mod tests {
         assert_eq!(ledger.unaccounted(), 2);
 
         let (passed_bytes, passed_reads) =
-            account_passed(&mut ledger, &mut port, passed, passed_watch);
+            account_passed(&mut ledger, passed, passed_watch);
 
-        let failed_status = terminal_status(reap(&mut port, failed_watch));
+        let failed_status = terminal_status(reap(failed_watch));
         assert_ne!(failed_status, 0);
         let mut failed_report = [0_u8; 16];
         let (failed_stdout, failed_stderr) = stream_descriptors(&ledger, failed);
@@ -1026,7 +1004,6 @@ mod tests {
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut sessions = SessionSlots::<RunningUnixChild<64>, 1>::new();
         let mut ledger = OutcomeLedger::new(&mut sessions).expect("table starts empty");
-        let mut port = MacosExitPort::new().expect("kqueue is available");
         let slot = launch_accounted(
             &mut ledger,
             intent(executable, ALPHA_NAME),
@@ -1039,8 +1016,8 @@ mod tests {
             .expect("child live")
             .child()
             .process_id();
-        let child_watch = watch(&mut port, process_id);
-        let status = terminal_status(reap(&mut port, child_watch));
+        let child_watch = watch(process_id);
+        let status = terminal_status(reap(child_watch));
         assert_eq!(status, 0);
         let mut report = [0_u8; 16];
         let exit = HostEvent::Exit { slot, status };
