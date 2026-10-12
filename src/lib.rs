@@ -23,6 +23,7 @@ pub mod filter_glob;
 pub mod filterset;
 pub mod ignored_set;
 pub mod isolated_target;
+pub mod line;
 pub mod metadata_scan;
 pub mod parked_artifacts;
 pub mod schedule;
@@ -58,6 +59,14 @@ pub mod edge_stream_unix;
 pub mod edge_output_unix;
 pub mod cli;
 pub mod host;
+#[cfg(all(
+    feature = "edge-os",
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives",
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
+))]
+pub mod run;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod host_event;
 #[cfg(all(

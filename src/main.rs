@@ -1,10 +1,11 @@
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
+#![cfg_attr(all(not(test), not(feature = "edge-os")), no_std)]
+#![cfg_attr(all(not(test), not(feature = "edge-os")), no_main)]
 
 #[cfg(not(test))]
 use cargo_val::cli::{CliAction, CliParser};
 #[cfg(all(
     not(test),
+    not(feature = "edge-os"),
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
     feature = "proxima-core",
     feature = "proxima-codec",
@@ -13,10 +14,16 @@ use cargo_val::cli::{CliAction, CliParser};
 use cargo_val::host::unix_driver::run_unix;
 #[cfg(all(not(test), not(feature = "edge-os")))]
 use core::alloc::{GlobalAlloc, Layout};
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 use core::ffi::{CStr, c_char, c_int, c_void};
 #[cfg(all(not(test), not(feature = "edge-os")))]
 use core::panic::PanicInfo;
+#[cfg(all(not(test), feature = "edge-os"))]
+use std::ffi::{CString, OsString};
+#[cfg(all(not(test), feature = "edge-os"))]
+use std::io::{self, Write};
+#[cfg(all(not(test), feature = "edge-os"))]
+use std::process::ExitCode;
 
 #[cfg(all(not(test), not(feature = "edge-os")))]
 struct NoHeapAllocator;
@@ -51,7 +58,7 @@ const VERSION_BANNER: &[u8] = concat!("cargo-val ", env!("CARGO_PKG_VERSION"), "
 ))]
 const NOT_IMPLEMENTED: &[u8] = b"cargo-val is not implemented yet; use --help for usage\n";
 
-#[cfg(all(not(test), unix))]
+#[cfg(all(not(test), not(feature = "edge-os"), unix))]
 #[cfg_attr(target_vendor = "apple", link(name = "System"))]
 #[cfg_attr(not(target_vendor = "apple"), link(name = "c"))]
 unsafe extern "C" {
@@ -59,7 +66,7 @@ unsafe extern "C" {
     fn _exit(status: c_int) -> !;
 }
 
-#[cfg(all(not(test), windows))]
+#[cfg(all(not(test), not(feature = "edge-os"), windows))]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetStdHandle(standard_handle: c_int) -> *mut c_void;
@@ -73,7 +80,7 @@ unsafe extern "system" {
     fn ExitProcess(status: u32) -> !;
 }
 
-#[cfg(all(not(test), unix))]
+#[cfg(all(not(test), not(feature = "edge-os"), unix))]
 fn write_fd(descriptor: c_int, mut bytes: &[u8]) -> Result<(), ()> {
     while !bytes.is_empty() {
         // safety: the OS entry point provides a valid output descriptor and the
@@ -88,7 +95,7 @@ fn write_fd(descriptor: c_int, mut bytes: &[u8]) -> Result<(), ()> {
     Ok(())
 }
 
-#[cfg(all(not(test), windows))]
+#[cfg(all(not(test), not(feature = "edge-os"), windows))]
 fn write_fd(descriptor: c_int, mut bytes: &[u8]) -> Result<(), ()> {
     let standard_handle = if descriptor == 1 { -11 } else { -12 };
     // safety: the CRT provides the standard output or error handle for this process.
@@ -114,7 +121,7 @@ fn write_fd(descriptor: c_int, mut bytes: &[u8]) -> Result<(), ()> {
     Ok(())
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "edge-os")))]
 /// # Safety
 /// `arguments` must point to `argument_count` valid nul-terminated strings, as the C runtime provides.
 #[unsafe(no_mangle)]
@@ -191,3 +198,92 @@ fn panic(_information: &PanicInfo<'_>) -> ! {
 #[cfg(all(not(test), not(feature = "edge-os")))]
 #[unsafe(no_mangle)]
 extern "C" fn rust_eh_personality() {}
+
+#[cfg(all(not(test), feature = "edge-os"))]
+fn main() -> ExitCode {
+    let arguments: Result<Vec<CString>, _> = std::env::args_os()
+        .skip(1)
+        .map(|argument| CString::new(OsString::into_encoded_bytes(argument)))
+        .collect();
+    let Ok(arguments) = arguments else {
+        let _ = writeln!(io::stderr(), "cargo-val: an argument contains a nul byte");
+        return ExitCode::from(2);
+    };
+    match banner_exit(&arguments) {
+        Some(code) => code,
+        None => run_arguments(arguments),
+    }
+}
+
+// cargo arguments are forwarded as C strings, so each one keeps its nul terminator in memory behind the slice
+#[cfg(all(not(test), feature = "edge-os"))]
+fn banner_exit(arguments: &[CString]) -> Option<ExitCode> {
+    let mut parser = CliParser::new();
+    for argument in arguments {
+        parser.push(argument.to_bytes());
+        match parser.action() {
+            CliAction::Run => {}
+            CliAction::Help => return Some(banner_status(HELP_BANNER)),
+            CliAction::Version => return Some(banner_status(VERSION_BANNER)),
+        }
+    }
+    None
+}
+
+#[cfg(all(not(test), feature = "edge-os"))]
+fn banner_status(banner: &[u8]) -> ExitCode {
+    ExitCode::from(u8::from(io::stdout().write_all(banner).is_err()))
+}
+
+#[cfg(all(
+    not(test),
+    feature = "edge-os",
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+fn run_arguments(arguments: Vec<CString>) -> ExitCode {
+    let root = prime::os::core_shard::run_on_this_thread(
+        proxima_runtime::CoreId(0),
+        cargo_val::run::drive(arguments),
+    );
+    match root {
+        Ok(Ok(summary)) => exit_status(summary.exit_code()),
+        Ok(Err(error)) => {
+            let _ = io::stderr().write_all(error.render().bytes());
+            exit_status(error.exit_code())
+        }
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "cargo-val: prime root failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(all(
+    not(test),
+    feature = "edge-os",
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+fn exit_status(code: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+#[cfg(all(
+    not(test),
+    feature = "edge-os",
+    not(all(
+        any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
+        feature = "proxima-core",
+        feature = "proxima-codec",
+        feature = "proxima-primitives"
+    ))
+))]
+fn run_arguments(_arguments: Vec<CString>) -> ExitCode {
+    let _ = io::stderr().write_all(NOT_IMPLEMENTED);
+    ExitCode::from(2)
+}
