@@ -166,6 +166,26 @@ impl Pipe for OutputSink {
     }
 }
 
+/// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until the kernel takes them.
+///
+/// The synchronous twin of [`OutputSink`] for the sync report paths that cannot await a gate.
+///
+/// # Errors
+///
+/// Returns the OS error of a failed write, or `WriteZero` when the descriptor accepts no bytes.
+pub fn write(descriptor: i32, mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        // safety: the pointer and length come from a live slice, and the descriptor is a plain integer.
+        let written = unsafe { libc::write(descriptor, bytes.as_ptr().cast(), bytes.len()) };
+        let count = usize::try_from(written).map_err(|_| io::Error::last_os_error())?;
+        if count == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        bytes = &bytes[count..];
+    }
+    Ok(())
+}
+
 fn file_mode(descriptor: &OwnedFd) -> io::Result<libc::mode_t> {
     let mut status: libc::stat = unsafe { core::mem::zeroed() };
     if unsafe { libc::fstat(descriptor.as_raw_fd(), &raw mut status) } != 0 {

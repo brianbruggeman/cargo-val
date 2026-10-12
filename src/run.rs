@@ -1,14 +1,11 @@
 
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
-use core::num::NonZeroI32;
 use core::ops::{ControlFlow, Range};
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::boxed::Box;
-use std::ffi::CString;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::ExitStatus;
 use std::vec::Vec;
 
@@ -24,7 +21,7 @@ use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
     Watches, run_body, session_ended, session_exited, session_output, write_fd,
 };
-use crate::edge_spawn::UnixChild;
+use crate::edge_spawn::Child;
 
 pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
@@ -58,13 +55,13 @@ pub(crate) fn empty_lanes() -> Lanes {
 ///
 /// # Errors
 ///
-/// Returns [`RunError::Spawn`] when the child has no usable process id.
-pub(crate) fn attach(lane: &Lane, child: UnixChild) -> Result<libc::pid_t, RunError> {
+/// Returns [`RunError::Spawn`] when the child has no usable exit source.
+pub(crate) fn attach(lane: &Lane, child: Child) -> Result<u32, RunError> {
+    let exit = child.exit_source().map_err(|_| RunError::Spawn)?;
     let (process_id, stdout, stderr) = child.into_parts();
-    let exit = ExitSource::new(NonZeroI32::new(process_id).ok_or(RunError::Spawn)?);
     // each stream owns a 20 KiB capture window, too large to sit in the awaited future
-    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(stdout.into_fd())));
-    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(stderr.into_fd())));
+    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(stdout)));
+    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(stderr)));
     *lane.2.borrow_mut() = Some(exit);
     lane.3.set(true);
     Ok(process_id)
@@ -74,23 +71,15 @@ pub(crate) fn attach(lane: &Lane, child: UnixChild) -> Result<libc::pid_t, RunEr
 ///
 /// # Errors
 ///
-/// Returns [`RunError::Spawn`] when a descriptor cannot be duplicated or the child has no usable process id.
-pub(crate) fn attach_session(lane: &Lane, child: &UnixChild) -> Result<(), RunError> {
-    let exit = ExitSource::new(NonZeroI32::new(child.process_id()).ok_or(RunError::Spawn)?);
-    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(duplicate(child.stdout().raw())?)));
-    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(duplicate(child.stderr().raw())?)));
+/// Returns [`RunError::Spawn`] when a stream cannot be duplicated or the child has no usable exit source.
+pub(crate) fn attach_session(lane: &Lane, child: &Child) -> Result<(), RunError> {
+    let exit = child.exit_source().map_err(|_| RunError::Spawn)?;
+    let (stdout, stderr) = child.duplicate_streams().map_err(|_| RunError::Spawn)?;
+    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(stdout)));
+    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(stderr)));
     *lane.2.borrow_mut() = Some(exit);
     lane.3.set(true);
     Ok(())
-}
-
-fn duplicate(descriptor: libc::c_int) -> Result<OwnedFd, RunError> {
-    // safety: the descriptor is an open pipe end owned by the session, and the duplicate is owned by the returned OwnedFd alone.
-    let copy = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
-    if copy < 0 {
-        return Err(RunError::Spawn);
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(copy) })
 }
 
 pub(crate) enum Edge<'edge> {
@@ -402,7 +391,7 @@ pub(crate) async fn observe_doc(
     if let Some(child) = doc.take_child() {
         attach(&lanes[DOC_LANE], child)?;
     }
-    let gate = RefCell::new(Readiness::new(signals.read_fd()));
+    let gate = RefCell::new(signals.gate());
     let interrupt = SignalSource::new(signals.interrupt());
     pump(&lanes, Some((&gate, &interrupt)), |item| {
         match item {
@@ -429,7 +418,7 @@ pub(crate) async fn observe_doc(
 ///
 /// Returns [`RunError`] when the child cannot be attached or a stream faults.
 pub(crate) async fn collect_child(
-    child: UnixChild,
+    child: Child,
     mut on_stdout: impl FnMut(&[u8]),
 ) -> Result<i32, RunError> {
     let lanes = Box::new(empty_lanes());
@@ -463,7 +452,7 @@ pub(crate) async fn collect_child(
 /// # Errors
 ///
 /// Returns [`RunError::RustcLibdir`] when rustc fails, prints nothing, or prints more than `output` holds.
-pub(crate) async fn collect_libdir(child: UnixChild, output: &mut [u8]) -> Result<usize, RunError> {
+pub(crate) async fn collect_libdir(child: Child, output: &mut [u8]) -> Result<usize, RunError> {
     let mut length = 0;
     let mut overflow = false;
     let code = collect_child(child, |bytes| {
@@ -507,7 +496,7 @@ fn session_chunk(
 ///
 /// Returns [`RunError`] when a stream faults, a record is rejected, or a launched child cannot be accounted for.
 pub(crate) async fn observe_cargo(
-    child: UnixChild,
+    child: Child,
     driver: &mut CargoDriver<'_>,
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
@@ -518,7 +507,7 @@ pub(crate) async fn observe_cargo(
     if let Some(doc_child) = run.take_doc_child() {
         attach(&lanes[DOC_LANE], doc_child)?;
     }
-    let signal = RefCell::new(Readiness::new(run.signal_fd()));
+    let signal = RefCell::new(run.signal_gate());
     let interrupt = run.interrupt_source();
     pump(&lanes, Some((&signal, &interrupt)), |item| {
         handle(item, &lanes, driver, run, ledger, watches)?;
@@ -540,17 +529,16 @@ pub(crate) async fn observe_cargo(
 /// # Errors
 ///
 /// Returns [`RunError`] naming the stage that failed.
-pub async fn drive(arguments: Vec<CString>) -> Result<RunSummary, RunError> {
+pub async fn drive(arguments: Vec<Vec<u8>>) -> Result<RunSummary, RunError> {
     let mut parser = CliParser::new();
     for argument in &arguments {
-        parser.push(argument.to_bytes());
+        parser.push(argument);
     }
     run_body(&parser).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    use core::ffi::{CStr, c_char};
     use core::ops::ControlFlow;
     use core::task::Waker;
     use std::process::Command;
@@ -562,14 +550,13 @@ mod tests {
     use proxima_runtime::CoreId;
 
     use super::{
-        CARGO_LANE, CString, Item, NonZeroI32, RunError, UnixChild, attach, collect_libdir, empty_lanes,
-        pump,
+        CARGO_LANE, Item, RunError, Child, attach, collect_libdir, empty_lanes, pump,
     };
     use crate::artifact_stream::ArtifactFramer;
     use crate::cargo_source::{CargoSource, CargoSourceStep};
     use crate::edge_exit::fixture::in_single_threaded_process;
-    use crate::edge_spawn::spawn_libdir_query;
-    use crate::edge_spawn::spawn_raw_unix;
+    use crate::driver::spawn_libdir_query;
+    use crate::edge_spawn::spawn;
     use crate::test_dir::tempdir;
 
     use core::task::{Context, Poll};
@@ -648,29 +635,22 @@ mod tests {
         artifacts_of(&output.stdout)
     }
 
-    fn environment() -> Vec<CString> {
+    fn environment() -> Vec<Vec<u8>> {
         std::env::vars_os()
             .map(|(key, value)| {
                 let mut entry = key.into_encoded_bytes();
                 entry.push(b'=');
                 entry.extend(value.into_encoded_bytes());
-                CString::new(entry).expect("environment entries hold no nul")
+                entry
             })
             .collect()
     }
 
     fn observed_through_prime(arguments: &[String]) -> (Vec<String>, Vec<u8>, usize) {
-        let program = CString::new(arguments[0].as_str()).expect("program name");
-        let owned: Vec<CString> = arguments
-            .iter()
-            .map(|argument| CString::new(argument.as_str()).expect("argument"))
-            .collect();
-        let mut argv: Vec<*const c_char> = owned.iter().map(|argument| argument.as_ptr()).collect();
-        argv.push(core::ptr::null());
+        let rest: Vec<&[u8]> = arguments[1..].iter().map(String::as_bytes).collect();
         let variables = environment();
-        let mut envp: Vec<*const c_char> = variables.iter().map(|entry| entry.as_ptr()).collect();
-        envp.push(core::ptr::null());
-        let child = spawn_raw_unix(program.as_c_str(), &argv, &envp, None::<&CStr>, true).expect("cargo spawns");
+        let inherited: Vec<&[u8]> = variables.iter().map(Vec::as_slice).collect();
+        let child = spawn(arguments[0].as_bytes(), &rest, &inherited, &[], None).expect("cargo spawns");
         run_on_this_thread(CoreId(0), async move {
             let lanes = empty_lanes();
             attach(&lanes[CARGO_LANE], child).expect("cargo child attaches");
@@ -716,14 +696,8 @@ mod tests {
         .expect("root completes")
     }
 
-    fn inherited_environment() -> (Vec<CString>, Vec<*const c_char>) {
-        let entries = environment();
-        let mut pointers: Vec<*const c_char> = entries.iter().map(|entry| entry.as_ptr()).collect();
-        pointers.push(core::ptr::null());
-        (entries, pointers)
-    }
 
-    fn libdir_through_prime(child: UnixChild) -> Result<std::string::String, RunError> {
+    fn libdir_through_prime(child: Child) -> Result<std::string::String, RunError> {
         run_on_this_thread(CoreId(0), async move {
             let mut output = [0_u8; 1024];
             let length = collect_libdir(child, &mut output).await?;
@@ -734,8 +708,9 @@ mod tests {
 
     #[test]
     fn host_libdir_is_the_directory_that_holds_libstd() {
-        let (_entries, pointers) = inherited_environment();
-        let child = spawn_libdir_query(None, None, &pointers).expect("rustc spawns");
+        let entries = environment();
+        let inherited: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+        let child = spawn_libdir_query(None, None, &inherited).expect("rustc spawns");
 
         let libdir = libdir_through_prime(child).expect("rustc prints its target libdir");
 
@@ -753,21 +728,26 @@ mod tests {
 
         let directory = tempdir().expect("scratch directory");
         let gate = directory.path().join("gate");
-        let gate_c = CString::new(gate.as_os_str().as_bytes()).expect("gate path");
+        let gate_c = std::ffi::CString::new(gate.as_os_str().as_bytes()).expect("gate path");
         assert_eq!(unsafe { libc::mkfifo(gate_c.as_ptr(), 0o600) }, 0, "mkfifo");
-        let (_entries, pointers) = inherited_environment();
+        let entries = environment();
+        let inherited: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
         // exec of a freshly written file is held by the OS for 16-67 s under load, so the
         // fake rustc is the installed /bin/sh, which never pays that first-exec assessment.
-        let argv = [
-            c"sh".as_ptr(),
-            c"-c".as_ptr(),
-            c"read release < \"$1\"; echo /opt/fake-toolchain/lib".as_ptr(),
-            c"sh".as_ptr(),
-            gate_c.as_ptr(),
-            core::ptr::null(),
-        ];
-        let child = spawn_raw_unix(c"/bin/sh", &argv, &pointers, None, false).expect("fake rustc spawns");
-        let process_id = NonZeroI32::new(child.process_id()).expect("positive pid");
+        let child = spawn(
+            b"/bin/sh",
+            &[
+                b"-c",
+                b"read release < \"$1\"; echo /opt/fake-toolchain/lib",
+                b"sh",
+                gate.as_os_str().as_bytes(),
+            ],
+            &inherited,
+            &[],
+            None,
+        )
+        .expect("fake rustc spawns");
+        let process_id = core::num::NonZeroI32::new(child.process_id().cast_signed()).expect("positive pid");
         assert!(
             prime::os::child::try_reap(process_id).expect("probe succeeds").is_none(),
             "rustc was still running when spawn returned"
@@ -786,8 +766,9 @@ mod tests {
 
     #[test]
     fn unknown_target_is_reported_as_an_output_failure() {
-        let (_entries, pointers) = inherited_environment();
-        let child = spawn_libdir_query(None, Some(b"not-a-real-triple"), &pointers).expect("rustc spawns");
+        let entries = environment();
+        let inherited: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+        let child = spawn_libdir_query(None, Some(b"not-a-real-triple"), &inherited).expect("rustc spawns");
 
         let result = libdir_through_prime(child);
 

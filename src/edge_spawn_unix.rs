@@ -327,33 +327,46 @@ pub mod pipe_pair {
 }
 
 mod spawn {
-    //! Unix child creation using borrowed launch data and owned capture descriptors.
+    //! Unix child creation using lowered launch data and owned capture descriptors.
 
     use core::ffi::{CStr, c_char, c_int};
+    use core::num::NonZeroI32;
+    use std::ffi::CString;
+    use std::io;
+    use std::os::fd::{FromRawFd, OwnedFd};
 
     use super::pipe_pair::{OwnedDescriptor, UnixPipeError, UnixPipePair};
-    use crate::edge_args_unix::UnixArguments;
+    use crate::ExitSource;
+    use crate::edge_args_unix::{ArgumentsError, lower_arguments};
+
+    const DOC_NICE: c_int = 10;
 
     /// A child process whose captured output remains owned by the host driver.
     #[derive(Debug)]
-    pub struct UnixChild {
+    pub struct Child {
         process_id: libc::pid_t,
         stdout: OwnedDescriptor,
         stderr: OwnedDescriptor,
     }
 
-    /// A `posix_spawn` or file-action error code.
+    /// A spawn failure: the raw `errno`-style code of the operation that refused.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct UnixSpawnError {
-        /// The error code returned directly by the POSIX operation.
-        pub code: c_int,
+    pub struct SpawnError {
+        /// The error code returned directly by the POSIX operation, or `EINVAL` for launch data it cannot hold.
+        pub os_code: i32,
     }
 
-    impl UnixChild {
+    impl From<ArgumentsError> for SpawnError {
+        fn from(_: ArgumentsError) -> Self {
+            Self { os_code: libc::EINVAL }
+        }
+    }
+
+    impl Child {
         /// Returns the process identifier watched by the host event source.
         #[must_use]
-        pub fn process_id(&self) -> libc::pid_t {
-            self.process_id
+        pub fn process_id(&self) -> u32 {
+            self.process_id.cast_unsigned()
         }
 
         /// Returns the nonblocking stdout descriptor owned by the parent.
@@ -370,101 +383,140 @@ mod spawn {
 
         /// Transfers the two capture descriptors to poll-driven host readers.
         #[must_use]
-        pub fn into_parts(self) -> (libc::pid_t, OwnedDescriptor, OwnedDescriptor) {
-            (self.process_id, self.stdout, self.stderr)
+        pub fn into_parts(self) -> (u32, OwnedFd, OwnedFd) {
+            (self.process_id.cast_unsigned(), self.stdout.into_fd(), self.stderr.into_fd())
+        }
+
+        /// Duplicates both capture descriptors for a reader while this child keeps the originals.
+        ///
+        /// # Errors
+        ///
+        /// Returns the `fcntl` error when a descriptor cannot be duplicated.
+        pub fn duplicate_streams(&self) -> io::Result<(OwnedFd, OwnedFd)> {
+            Ok((duplicate(self.stdout.raw())?, duplicate(self.stderr.raw())?))
+        }
+
+        /// The source that reports this child's exit.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the child has no usable process id.
+        pub fn exit_source(&self) -> io::Result<ExitSource> {
+            let process_id = NonZeroI32::new(self.process_id)
+                .ok_or_else(|| io::Error::other("child has no process id"))?;
+            Ok(ExitSource::new(process_id))
+        }
+
+        /// Kills the child outright; a child already gone is not an error.
+        pub fn terminate(&self) {
+            // safety: kill takes plain integers and reports failure through its status.
+            unsafe { libc::kill(self.process_id, libc::SIGKILL) };
+        }
+
+        /// Lowers the scheduling priority of the child's process group so doc tests yield cores to the build.
+        ///
+        /// # Errors
+        ///
+        /// Returns the `setpriority` code when the kernel refuses.
+        pub fn lower_priority(&self) -> Result<(), SpawnError> {
+            let who = libc::id_t::try_from(self.process_id).map_err(|_| SpawnError { os_code: libc::EINVAL })?;
+            // safety: setpriority takes plain integers and reports failure through its status.
+            if unsafe { libc::setpriority(libc::PRIO_PGRP, who, DOC_NICE) } == 0 {
+                return Ok(());
+            }
+            Err(SpawnError {
+                os_code: io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO),
+            })
         }
     }
 
-    /// Spawns one exact-test intent in `current_directory` and captures both streams.
+    fn duplicate(descriptor: c_int) -> io::Result<OwnedFd> {
+        // safety: the descriptor is an open pipe end owned by the child, and the duplicate is owned by the returned OwnedFd alone.
+        let copy = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
+        if copy < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+    }
+
+    /// Spawns `program` with `arguments`, the inherited `environment` overlaid by `overrides`, and captures both streams.
+    ///
+    /// A `program` without a slash is searched on `PATH`. `directory` becomes the child's working directory.
     ///
     /// # Errors
     ///
-    /// Returns the pipe, file-action, or `posix_spawn` error code.
-    pub fn spawn_unix(
-        arguments: &UnixArguments<'_>,
-        current_directory: &CStr,
-    ) -> Result<UnixChild, UnixSpawnError> {
+    /// Returns the pipe, file-action, or `posix_spawn` error code, or `EINVAL` for launch data holding a NUL.
+    pub fn spawn(
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: Option<&[u8]>,
+    ) -> Result<Child, SpawnError> {
+        launch(program, arguments, environment, overrides, directory, false)
+    }
+
+    /// Spawns like [`spawn`] but as the leader of a new process group, so one `killpg` reaches the child and everything it spawns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pipe, file-action, or `posix_spawn` error code, or `EINVAL` for launch data holding a NUL.
+    pub fn spawn_in_group(
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: Option<&[u8]>,
+    ) -> Result<Child, SpawnError> {
+        launch(program, arguments, environment, overrides, directory, true)
+    }
+
+    fn launch(
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: Option<&[u8]>,
+        new_group: bool,
+    ) -> Result<Child, SpawnError> {
         let pipes = UnixPipePair::new()
-            .map_err(|error: UnixPipeError| UnixSpawnError { code: error.code })?;
-        spawn_with_pipes(arguments, current_directory, pipes)
+            .map_err(|error: UnixPipeError| SpawnError { os_code: error.code })?;
+        spawn_with_pipes(program, arguments, environment, overrides, directory, pipes, new_group)
     }
 
     fn spawn_with_pipes(
-        arguments: &UnixArguments<'_>,
-        current_directory: &CStr,
-        pipes: UnixPipePair,
-    ) -> Result<UnixChild, UnixSpawnError> {
-        spawn_raw_with_pipes(
-            unsafe { CStr::from_ptr(arguments.argv()[0]) },
-            arguments.argv(),
-            arguments.envp(),
-            Some(current_directory),
-            false,
-            pipes,
-            false,
-        )
-    }
-
-    /// Spawns a borrowed argv through the same owned capture-pipe path.
-    ///
-    /// # Errors
-    ///
-    /// Returns the pipe, file-action, or `posix_spawn` error code.
-    pub fn spawn_raw_unix(
-        executable: &CStr,
-        argv: &[*const c_char],
-        envp: &[*const c_char],
-        current_directory: Option<&CStr>,
-        search_path: bool,
-    ) -> Result<UnixChild, UnixSpawnError> {
-        let pipes = UnixPipePair::new()
-            .map_err(|error: UnixPipeError| UnixSpawnError { code: error.code })?;
-        spawn_raw_with_pipes(
-            executable,
-            argv,
-            envp,
-            current_directory,
-            search_path,
-            pipes,
-            false,
-        )
-    }
-
-    /// Spawns like [`spawn_raw_unix`] but as the leader of a new process group, so one `killpg`
-    /// reaches the child and everything it spawns.
-    ///
-    /// # Errors
-    ///
-    /// Returns the pipe, file-action, or `posix_spawn` error code.
-    pub fn spawn_raw_unix_in_new_group(
-        executable: &CStr,
-        argv: &[*const c_char],
-        envp: &[*const c_char],
-        current_directory: Option<&CStr>,
-        search_path: bool,
-    ) -> Result<UnixChild, UnixSpawnError> {
-        let pipes = UnixPipePair::new()
-            .map_err(|error: UnixPipeError| UnixSpawnError { code: error.code })?;
-        spawn_raw_with_pipes(
-            executable,
-            argv,
-            envp,
-            current_directory,
-            search_path,
-            pipes,
-            true,
-        )
-    }
-
-    fn spawn_raw_with_pipes(
-        executable: &CStr,
-        argv: &[*const c_char],
-        envp: &[*const c_char],
-        current_directory: Option<&CStr>,
-        search_path: bool,
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: Option<&[u8]>,
         pipes: UnixPipePair,
         new_group: bool,
-    ) -> Result<UnixChild, UnixSpawnError> {
+    ) -> Result<Child, SpawnError> {
+        let lowered = lower_arguments(program, arguments, environment, overrides)?;
+        let executable = CString::new(program).map_err(|_| SpawnError { os_code: libc::EINVAL })?;
+        let directory = directory
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| SpawnError { os_code: libc::EINVAL })?;
+        spawn_lowered(
+            &executable,
+            lowered.argv(),
+            lowered.envp(),
+            directory.as_deref(),
+            pipes,
+            new_group,
+        )
+    }
+
+    fn spawn_lowered(
+        executable: &CStr,
+        argv: &[*const c_char],
+        envp: &[*const c_char],
+        current_directory: Option<&CStr>,
+        pipes: UnixPipePair,
+        new_group: bool,
+    ) -> Result<Child, SpawnError> {
         let mut actions = FileActions::new()?;
         let mut attributes = SpawnAttributes::new(new_group)?;
         #[cfg(target_os = "macos")]
@@ -505,39 +557,32 @@ mod spawn {
         }
 
         let mut process_id = 0;
-        let argv = argv.as_ptr().cast::<*mut c_char>();
-        let envp = envp.as_ptr().cast::<*mut c_char>();
-        let spawn = if search_path {
-            libc::posix_spawnp
-        } else {
-            libc::posix_spawn
-        };
         let result = unsafe {
-            spawn(
+            libc::posix_spawnp(
                 &raw mut process_id,
                 executable.as_ptr(),
                 actions.raw(),
                 attributes.raw(),
-                argv,
-                envp,
+                argv.as_ptr().cast::<*mut c_char>(),
+                envp.as_ptr().cast::<*mut c_char>(),
             )
         };
         if result != 0 {
-            return Err(UnixSpawnError { code: result });
+            return Err(SpawnError { os_code: result });
         }
         let (stdout, stderr) = pipes.into_parent_reads();
-        Ok(UnixChild {
+        Ok(Child {
             process_id,
             stdout,
             stderr,
         })
     }
 
-    fn add_action(result: c_int) -> Result<(), UnixSpawnError> {
+    fn add_action(result: c_int) -> Result<(), SpawnError> {
         if result == 0 {
             Ok(())
         } else {
-            Err(UnixSpawnError { code: result })
+            Err(SpawnError { os_code: result })
         }
     }
 
@@ -552,7 +597,7 @@ mod spawn {
     struct FileActions(libc::posix_spawn_file_actions_t);
 
     impl FileActions {
-        fn new() -> Result<Self, UnixSpawnError> {
+        fn new() -> Result<Self, SpawnError> {
             let mut actions = core::mem::MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
             add_action(unsafe { libc::posix_spawn_file_actions_init(actions.as_mut_ptr()) })?;
             Ok(Self(unsafe { actions.assume_init() }))
@@ -574,7 +619,7 @@ mod spawn {
     struct SpawnAttributes(libc::posix_spawnattr_t);
 
     impl SpawnAttributes {
-        fn new(new_group: bool) -> Result<Self, UnixSpawnError> {
+        fn new(new_group: bool) -> Result<Self, SpawnError> {
             let mut attributes = core::mem::MaybeUninit::<libc::posix_spawnattr_t>::uninit();
             add_action(unsafe { libc::posix_spawnattr_init(attributes.as_mut_ptr()) })?;
             let mut owner = Self(unsafe { attributes.assume_init() });
@@ -589,7 +634,7 @@ mod spawn {
             }
             if flags != 0 {
                 let flags = libc::c_short::try_from(flags)
-                    .map_err(|_| UnixSpawnError { code: libc::EINVAL })?;
+                    .map_err(|_| SpawnError { os_code: libc::EINVAL })?;
                 add_action(unsafe { libc::posix_spawnattr_setflags(&raw mut owner.0, flags) })?;
             }
             Ok(owner)
@@ -608,68 +653,16 @@ mod spawn {
         }
     }
 
-    /// Spawns `rustc --print target-libdir [--target <triple>]` without waiting for it.
-    ///
-    /// `rustc` is the `RUSTC` environment value when present, otherwise the name
-    /// resolved through `PATH`. The printed directory holds `libstd-*.dylib`, which
-    /// proc-macro test binaries load.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EINVAL` when a path or triple exceeds its storage or holds a NUL byte, else the spawn error.
-    pub fn spawn_libdir_query(
-        rustc: Option<&[u8]>,
-        triple: Option<&[u8]>,
-        envp: &[*const c_char],
-    ) -> Result<UnixChild, UnixSpawnError> {
-        let mut rustc_bytes = [0_u8; 1024];
-        let rustc_path = c_string(rustc.unwrap_or(b"rustc"), &mut rustc_bytes)?;
-        let mut triple_bytes = [0_u8; 256];
-        let triple_text = match triple {
-            Some(triple) => Some(c_string(triple, &mut triple_bytes)?),
-            None => None,
-        };
-        let mut argv = [core::ptr::null(); 6];
-        argv[0] = rustc_path.as_ptr();
-        argv[1] = c"--print".as_ptr();
-        argv[2] = c"target-libdir".as_ptr();
-        let argument_count = match triple_text {
-            Some(triple_text) => {
-                argv[3] = c"--target".as_ptr();
-                argv[4] = triple_text.as_ptr();
-                5
-            }
-            None => 3,
-        };
-        spawn_raw_unix(rustc_path, &argv[..=argument_count], envp, None, true)
-    }
-
-    fn c_string<'storage>(
-        bytes: &[u8],
-        storage: &'storage mut [u8],
-    ) -> Result<&'storage CStr, UnixSpawnError> {
-        let target = storage
-            .get_mut(..=bytes.len())
-            .ok_or(UnixSpawnError { code: libc::EINVAL })?;
-        target[..bytes.len()].copy_from_slice(bytes);
-        target[bytes.len()] = 0;
-        CStr::from_bytes_with_nul(target).map_err(|_| UnixSpawnError { code: libc::EINVAL })
-    }
-
     #[cfg(test)]
     mod tests {
         use core::mem::MaybeUninit;
 
-        use core::ffi::CStr;
-        use std::ffi::CString;
         use std::format;
+        use std::string::String;
         use std::vec::Vec;
 
-        use super::{UnixSpawnError, spawn_with_pipes};
-        use crate::ExecutablePath;
-        use crate::edge_args_unix::{UnixArguments, lower_unix_arguments};
+        use super::{SpawnError, spawn_with_pipes};
         use crate::edge_spawn_unix::pipe_pair::UnixPipePair;
-        use crate::test_intent::ExactTestIntent;
 
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         struct DescriptorIdentity {
@@ -693,32 +686,14 @@ mod spawn {
             let working_directory_text = working_directory_path
                 .to_str()
                 .expect("temporary directory path is valid UTF-8");
-            let expected_cwd =
-                CString::new(format!("CARGO_VAL_EXPECTED_CWD={working_directory_text}"))
-                    .expect("temporary directory has no NUL byte");
-            let child_mode = CString::new("CARGO_VAL_CHILD_MODE=1")
-                .expect("constant environment key has no NUL byte");
+            let expected_cwd = format!("CARGO_VAL_EXPECTED_CWD={working_directory_text}");
             let inherited_storage = inherited_environment();
-            let inherited = inherited_storage
-                .iter()
-                .map(CString::as_c_str)
-                .collect::<Vec<_>>();
-            let overrides = [expected_cwd.as_c_str(), child_mode.as_c_str()];
-            let intent = exact_intent(
-                executable_text,
-                "edge_spawn_unix::spawn::tests::fixture_alpha",
-            );
-            let mut argument_bytes = [0; 4096];
-            let mut argument_pointers = [core::ptr::null(); 4];
-            let mut environment_pointers = [core::ptr::null(); 4096];
-            let arguments = lower_arguments(
-                &intent,
-                &inherited,
-                &overrides,
-                &mut argument_bytes,
-                &mut argument_pointers,
-                &mut environment_pointers,
-            );
+            let inherited = inherited_storage.iter().map(String::as_bytes).collect::<Vec<_>>();
+            let overrides = [expected_cwd.as_bytes(), b"CARGO_VAL_CHILD_MODE=1".as_slice()];
+            let arguments = [
+                b"--exact".as_slice(),
+                b"edge_spawn_unix::spawn::tests::fixture_alpha".as_slice(),
+            ];
             let pipes = UnixPipePair::new().expect("capture pipes should be created");
             let pipe_descriptors = [
                 pipes.stdout().parent_read().raw(),
@@ -727,10 +702,16 @@ mod spawn {
                 pipes.stderr().child_write().raw(),
             ];
             let pipe_identities = pipe_descriptors.map(descriptor_identity);
-            let working_directory_cstr =
-                CString::new(working_directory_text).expect("temporary directory has no NUL byte");
-            let child = spawn_with_pipes(&arguments, &working_directory_cstr, pipes)
-                .expect("child should launch in the selected directory");
+            let child = spawn_with_pipes(
+                executable_text.as_bytes(),
+                &arguments,
+                &inherited,
+                &overrides,
+                Some(working_directory_text.as_bytes()),
+                pipes,
+                false,
+            )
+            .expect("child should launch in the selected directory");
 
             assert!(child.process_id() > 0);
             assert_ne!(child.stdout().raw(), child.stderr().raw());
@@ -742,8 +723,8 @@ mod spawn {
             assert_closed(pipe_descriptors[3], pipe_identities[3]);
             let mut status = 0;
             assert_eq!(
-                unsafe { libc::waitpid(child.process_id(), &raw mut status, 0) },
-                child.process_id()
+                unsafe { libc::waitpid(child.process_id().cast_signed(), &raw mut status, 0) },
+                child.process_id().cast_signed()
             );
             let mut stdout_bytes = [0; 8192];
             let mut stderr_bytes = [0; 8192];
@@ -769,10 +750,6 @@ mod spawn {
 
         #[test]
         fn c38b_failed_launch_closes_all_capture_descriptors() {
-            let intent = exact_intent(
-                "/cargo-val-missing-c38b-executable",
-                "edge_spawn_unix::spawn::tests::fixture_alpha",
-            );
             let pipes = UnixPipePair::new().expect("capture pipes should be created");
             let descriptors = [
                 pipes.stdout().parent_read().raw(),
@@ -781,23 +758,17 @@ mod spawn {
                 pipes.stderr().child_write().raw(),
             ];
             let identities = descriptors.map(descriptor_identity);
-            let inherited: [&CStr; 0] = [];
-            let overrides: [&CStr; 0] = [];
-            let mut argument_bytes = [0; 96];
-            let mut argument_pointers = [core::ptr::null(); 4];
-            let mut environment_pointers = [core::ptr::null(); 1];
-            let arguments = lower_arguments(
-                &intent,
-                &inherited,
-                &overrides,
-                &mut argument_bytes,
-                &mut argument_pointers,
-                &mut environment_pointers,
+            let result = spawn_with_pipes(
+                b"/cargo-val-missing-c38b-executable",
+                &[b"--exact", b"edge_spawn_unix::spawn::tests::fixture_alpha"],
+                &[],
+                &[],
+                Some(b"/"),
+                pipes,
+                false,
             );
-            let working_directory = CString::new("/").expect("root path has no NUL byte");
-            let result = spawn_with_pipes(&arguments, &working_directory, pipes);
             match result {
-                Err(error) => assert_eq!(error, UnixSpawnError { code: libc::ENOENT }),
+                Err(error) => assert_eq!(error, SpawnError { os_code: libc::ENOENT }),
                 Ok(_) => panic!("missing executable unexpectedly launched"),
             }
             for (descriptor, identity) in descriptors.into_iter().zip(identities) {
@@ -833,38 +804,9 @@ mod spawn {
             );
         }
 
-        fn exact_intent<'name>(
-            executable: &'name str,
-            test_name: &'name str,
-        ) -> crate::test_intent::ExactTestIntent<'name, 'static, 'name> {
-            ExactTestIntent::new(ExecutablePath::Borrowed(executable), test_name)
-        }
-        fn lower_arguments<'storage>(
-            intent: &crate::test_intent::ExactTestIntent<'_, '_, '_>,
-            inherited: &[&'storage CStr],
-            overrides: &[&'storage CStr],
-            argument_bytes: &'storage mut [u8],
-            argument_pointers: &'storage mut [*const core::ffi::c_char],
-            environment_pointers: &'storage mut [*const core::ffi::c_char],
-        ) -> UnixArguments<'storage> {
-            lower_unix_arguments(
-                intent,
-                inherited,
-                overrides,
-                &[],
-                argument_bytes,
-                argument_pointers,
-                environment_pointers,
-            )
-            .expect("caller storage fits the child launch")
-        }
-
-        fn inherited_environment() -> Vec<CString> {
+        fn inherited_environment() -> Vec<String> {
             std::env::vars()
-                .map(|(key, value)| {
-                    CString::new(format!("{key}={value}"))
-                        .expect("environment entries cannot contain NUL bytes")
-                })
+                .map(|(key, value)| format!("{key}={value}"))
                 .collect()
         }
 
