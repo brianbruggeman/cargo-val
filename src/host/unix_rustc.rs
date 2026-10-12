@@ -63,7 +63,15 @@ impl RustcLibdirQuery {
             }
             None => 3,
         };
-        let child = spawn_raw_unix(rustc_path, &argv[..=argument_count], envp, None, true)
+        Self::spawn(rustc_path, &argv[..=argument_count], envp)
+    }
+
+    fn spawn(
+        program: &CStr,
+        argv: &[*const c_char],
+        envp: &[*const c_char],
+    ) -> Result<Self, RustcLibdirError> {
+        let child = spawn_raw_unix(program, argv, envp, None, true)
             .map_err(|_| RustcLibdirError::Spawn)?;
         let (process_id, stdout, stderr) = child.into_parts();
         Ok(Self {
@@ -223,7 +231,6 @@ fn last_error() -> c_int {
 mod tests {
     use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     use super::{RustcLibdirError, RustcLibdirQuery, rustc_target_libdir};
@@ -264,23 +271,22 @@ mod tests {
         let gate = directory.path().join("gate");
         let gate_c = std::ffi::CString::new(gate.as_os_str().as_bytes()).expect("gate path");
         assert_eq!(unsafe { libc::mkfifo(gate_c.as_ptr(), 0o600) }, 0, "mkfifo");
-        let script = directory.path().join("fake-rustc");
-        std::fs::write(
-            &script,
-            std::format!(
-                "#!/bin/sh\nread release < {}\necho /opt/fake-toolchain/lib\n",
-                gate.display()
-            ),
-        )
-        .expect("write fake rustc");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake rustc executable");
         let entries = inherited();
         let mut pointers: std::vec::Vec<*const core::ffi::c_char> =
             entries.iter().map(|entry| entry.as_ptr()).collect();
         pointers.push(core::ptr::null());
+        // exec of a freshly written file is held by the OS for 16-67 s under load, so the
+        // fake rustc is the installed /bin/sh, which never pays that first-exec assessment.
+        let argv = [
+            c"sh".as_ptr(),
+            c"-c".as_ptr(),
+            c"read release < \"$1\"; echo /opt/fake-toolchain/lib".as_ptr(),
+            c"sh".as_ptr(),
+            gate_c.as_ptr(),
+            core::ptr::null(),
+        ];
 
-        let query = RustcLibdirQuery::start(Some(script.as_os_str().as_bytes()), None, &pointers)
+        let query = RustcLibdirQuery::spawn(c"/bin/sh", &argv, &pointers)
             .expect("fake rustc spawns");
 
         let process_id = query.unreaped.expect("child is unreaped after start");
