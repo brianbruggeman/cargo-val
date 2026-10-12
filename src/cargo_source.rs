@@ -32,9 +32,17 @@ pub enum CargoSourceStep<'path> {
     /// One build script reported search paths and variables for its package's test executables.
     BuildScript(BuildScript<'path>),
     /// A non-test `bin` executable of the package with this id was built; its `CARGO_BIN_EXE_<name>` path now exists.
-    BinBuilt(&'path str),
+    BinBuilt {
+        /// package id such as `path+file:///repo/parser#0.3.1`.
+        package_id: &'path str,
+        /// the uplifted path such as `/repo/target/debug/parser`, as cargo reported it.
+        executable: &'path str,
+    },
     /// Cargo finished building; no artifact follows.
-    BuildFinished,
+    BuildFinished {
+        /// false when a unit failed to build, so executables still waiting for a bin will never get it.
+        success: bool,
+    },
     /// The reader produced bytes in this step, or zero when it reported EOF.
     Read {
         /// Bytes newly read from Cargo stdout in this step.
@@ -210,13 +218,23 @@ impl<'buffer> CargoSource<'buffer> {
                 consumed_bytes,
             } => (CargoSourceStep::BuildScript(script), consumed_bytes),
             RecordStep::Parsed {
-                parsed: Some(CargoMessage::BinArtifact { package_id }),
+                parsed:
+                    Some(CargoMessage::BinArtifact {
+                        package_id,
+                        executable,
+                    }),
                 consumed_bytes,
-            } => (CargoSourceStep::BinBuilt(package_id), consumed_bytes),
+            } => (
+                CargoSourceStep::BinBuilt {
+                    package_id,
+                    executable,
+                },
+                consumed_bytes,
+            ),
             RecordStep::Parsed {
-                parsed: Some(CargoMessage::BuildFinished),
+                parsed: Some(CargoMessage::BuildFinished { success }),
                 consumed_bytes,
-            } => (CargoSourceStep::BuildFinished, consumed_bytes),
+            } => (CargoSourceStep::BuildFinished { success }, consumed_bytes),
             RecordStep::Parsed {
                 parsed: Some(CargoMessage::Ignored) | None,
                 consumed_bytes,
@@ -347,8 +365,8 @@ mod tests {
                     }
                     Poll::Ready(Ok(
                         CargoSourceStep::Ignored
-                        | CargoSourceStep::BinBuilt(_)
-                        | CargoSourceStep::BuildFinished,
+                        | CargoSourceStep::BinBuilt { .. }
+                        | CargoSourceStep::BuildFinished { .. },
                     )) => {
                         ignored_records += 1;
                     }
@@ -419,7 +437,7 @@ mod tests {
         else {
             panic!("ignored record produced no parsed step");
         };
-        assert!(matches!(parsed, Some(CargoMessage::BuildFinished)));
+        assert!(matches!(parsed, Some(CargoMessage::BuildFinished { success: true })));
         let second_step = framer
             .next_record(&source_storage[consumed..CARGO_RECORDS.len()], |record| {
                 parse_selection(record, &mut scratch, max_record_bytes, 4)
@@ -520,8 +538,8 @@ mod tests {
                 Poll::Ready(Ok(
                     CargoSourceStep::Artifact(_)
                     | CargoSourceStep::BuildScript(_)
-                    | CargoSourceStep::BinBuilt(_)
-                    | CargoSourceStep::BuildFinished,
+                    | CargoSourceStep::BinBuilt { .. }
+                    | CargoSourceStep::BuildFinished { .. },
                 )) => {
                     panic!("only one artifact was emitted")
                 }
@@ -573,7 +591,7 @@ mod tests {
                     assert_eq!(path, "/fixture/first");
                     break child_watch.reap().expect("exit probe succeeds").is_none();
                 }
-                Poll::Ready(Ok(Step::Ignored | Step::BinBuilt(_) | Step::BuildFinished)) => {
+                Poll::Ready(Ok(Step::Ignored | Step::BinBuilt { .. } | Step::BuildFinished { .. })) => {
                     ignored_records += 1;
                 }
                 Poll::Ready(Ok(
@@ -693,8 +711,8 @@ mod tests {
                     | CargoSourceStep::NeedMore
                     | CargoSourceStep::Ignored
                     | CargoSourceStep::BuildScript(_)
-                    | CargoSourceStep::BinBuilt(_)
-                    | CargoSourceStep::BuildFinished,
+                    | CargoSourceStep::BinBuilt { .. }
+                    | CargoSourceStep::BuildFinished { .. },
                 )) => {}
                 Poll::Ready(Ok(CargoSourceStep::Eof)) => break paths,
                 other => panic!("async read path failed: {other:?}"),

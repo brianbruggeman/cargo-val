@@ -410,8 +410,8 @@ mod tests {
                     CargoSourceStep::Read { .. }
                     | CargoSourceStep::NeedMore
                     | CargoSourceStep::Ignored
-                    | CargoSourceStep::BinBuilt(_)
-                    | CargoSourceStep::BuildFinished,
+                    | CargoSourceStep::BinBuilt { .. }
+                    | CargoSourceStep::BuildFinished { .. },
                 )) => {}
                 Poll::Ready(Ok(CargoSourceStep::Eof)) => return true,
                 Poll::Pending => return false,
@@ -469,8 +469,8 @@ mod tests {
                 }
                 Poll::Ready(Ok(
                     CargoSourceStep::Ignored
-                    | CargoSourceStep::BinBuilt(_)
-                    | CargoSourceStep::BuildFinished,
+                    | CargoSourceStep::BinBuilt { .. }
+                    | CargoSourceStep::BuildFinished { .. },
                 )) => ignored_records += 1,
                 Poll::Ready(Ok(
                     CargoSourceStep::Read { .. }

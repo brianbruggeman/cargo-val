@@ -346,6 +346,34 @@ fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
 
 #[cfg(unix)]
 #[test]
+fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build() {
+    let result = bin_gate_hold::cold_run(
+        "broken",
+        &[("RUSTFLAGS", "--cfg broken_bin"), ("CARGO_VAL_LOG", "debug")],
+        bin_gate_hold::Release::AfterTestArtifactLinks,
+    );
+    let context = format!("{}{}", result.stdout, result.stderr);
+
+    assert_eq!(result.status, Some(2), "{context}");
+    assert!(result.stderr.contains("cargo test build failed"), "{context}");
+    assert!(
+        result.stderr.contains("cargo-val: debug: gate park kind=test target=uses_bin"),
+        "{context}"
+    );
+    assert!(
+        result.stderr.contains("cargo-val: debug: gate drop reason=build-failed target=uses_bin"),
+        "{context}"
+    );
+    assert!(
+        !result
+            .stdout
+            .contains("the_bin_target_exists_when_the_test_starts"),
+        "{context}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn the_same_fixture_fails_with_the_bin_gate_off() {
     let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails);
     let failed = result
