@@ -391,7 +391,7 @@ pub(crate) async fn observe_doc(
     if let Some(child) = doc.take_child() {
         attach(&lanes[DOC_LANE], child)?;
     }
-    let gate = RefCell::new(signals.gate());
+    let gate = RefCell::new(signals.gate().map_err(|_| RunError::Reactor)?);
     let interrupt = SignalSource::new(signals.interrupt());
     pump(&lanes, Some((&gate, &interrupt)), |item| {
         match item {
@@ -507,7 +507,7 @@ pub(crate) async fn observe_cargo(
     if let Some(doc_child) = run.take_doc_child() {
         attach(&lanes[DOC_LANE], doc_child)?;
     }
-    let signal = RefCell::new(run.signal_gate());
+    let signal = RefCell::new(run.signal_gate()?);
     let interrupt = run.interrupt_source();
     pump(&lanes, Some((&signal, &interrupt)), |item| {
         handle(item, &lanes, driver, run, ledger, watches)?;

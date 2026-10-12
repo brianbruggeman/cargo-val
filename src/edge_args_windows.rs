@@ -1,9 +1,6 @@
 //! Windows edge for lowering the command line and environment block, plus the host path conventions.
 
-use core::ffi::CStr;
-
 pub const DYLIB_PATH_KEY: &str = "PATH";
-pub const DYLIB_PATH_KEY_C: &CStr = c"PATH";
 pub const PATH_SEPARATOR: u8 = b';';
 /// Whether the loader appends default library directories when the inherited search path is absent.
 pub const LOADER_DEFAULT_FALLBACKS: bool = false;
@@ -15,9 +12,6 @@ mod lowering {
     //! Caller-owned UTF-16 command-line and environment storage for `CreateProcessW`.
 
     use core::cmp::Ordering;
-
-    use crate::ExecutablePath;
-    use crate::test_intent::ExactTestIntent;
 
     /// Bounded failures while lowering a borrowed intent for a Windows process launch.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +30,8 @@ mod lowering {
         DuplicateEnvironmentOverride,
         /// The executable path is neither drive-absolute nor UNC, so `CreateProcessW` would search `PATH`.
         ExecutableNotAbsolute,
+        /// An argument or environment entry is not valid Unicode, which UTF-16 launch data needs.
+        NotUnicode,
     }
 
     /// Mutable, caller-owned buffers ready for `CreateProcessW`.
@@ -64,9 +60,9 @@ mod lowering {
         }
     }
 
-    /// Lowers one exact-test intent and environment overlay into caller-owned UTF-16 buffers.
+    /// Lowers one argument vector and environment overlay into caller-owned UTF-16 buffers.
     ///
-    /// The environment ordering slice holds indexes into `inherited_environment`
+    /// `arguments` is the whole command line, program name first. The environment ordering slice holds indexes into `inherited_environment`
     /// followed by `child_overrides`. All capacity errors are checked before either
     /// output buffer is changed.
     ///
@@ -74,17 +70,13 @@ mod lowering {
     ///
     /// Returns [`WindowsArgumentsError`] for interior NUL units, malformed or duplicate environment entries, or caller storage that is too small.
     pub fn lower_windows_arguments<'storage>(
-        intent: &ExactTestIntent<'_, '_, '_>,
+        arguments: &[&str],
         inherited_environment: &[&str],
         child_overrides: &[&str],
         command_line: &'storage mut [u16],
         environment_block: &'storage mut [u16],
         environment_order: &mut [usize],
     ) -> Result<WindowsArguments<'storage>, WindowsArgumentsError> {
-        let executable = match intent.executable() {
-            ExecutablePath::Borrowed(path) | ExecutablePath::Scratch(path) => path,
-        };
-        let arguments = [executable, "--exact", intent.test_name()];
         let mut required_command_units = 1;
         for (index, argument) in arguments.iter().enumerate() {
             if argument.contains('\0') {
@@ -171,7 +163,7 @@ mod lowering {
             child_overrides,
         )?;
 
-        let command_offset = write_command_line(&arguments, command_line);
+        let command_offset = write_command_line(arguments, command_line);
         write_environment_block(
             &environment_order[..order_count],
             inherited_environment,
@@ -183,6 +175,68 @@ mod lowering {
             command_line: &mut command_line[..=command_offset],
             environment_block: &mut environment_block[..required_environment_units],
         })
+    }
+
+    /// Lowers byte launch data into growable UTF-16 buffers, sizing each from what the lowering reports it needs.
+    ///
+    /// `program` and `arguments` become the whole command line; the program is quoted like any argument.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsArgumentsError`] for interior NUL units, text that is not Unicode, or malformed or duplicate environment entries.
+    #[cfg(feature = "edge-os")]
+    pub fn lower_arguments<'storage>(
+        program: &[u8],
+        arguments: &[&[u8]],
+        inherited: &[&[u8]],
+        overrides: &[&[u8]],
+        command_line: &'storage mut std::vec::Vec<u16>,
+        environment_block: &'storage mut std::vec::Vec<u16>,
+        environment_order: &mut std::vec::Vec<usize>,
+    ) -> Result<WindowsArguments<'storage>, WindowsArgumentsError> {
+        let argument_texts = texts(core::iter::once(program).chain(arguments.iter().copied()))?;
+        let inherited_texts = texts(inherited.iter().copied())?;
+        let override_texts = texts(overrides.iter().copied())?;
+        loop {
+            let lowered = lower_windows_arguments(
+                &argument_texts,
+                &inherited_texts,
+                &override_texts,
+                command_line,
+                environment_block,
+                environment_order,
+            );
+            match lowered.map(|_| ()) {
+                Ok(()) => break,
+                Err(WindowsArgumentsError::CommandLineStorageTooSmall { required, .. }) => {
+                    command_line.resize(required, 0);
+                }
+                Err(WindowsArgumentsError::EnvironmentStorageTooSmall { required, .. }) => {
+                    environment_block.resize(required, 0);
+                }
+                Err(WindowsArgumentsError::EnvironmentOrderStorageTooSmall { required, .. }) => {
+                    environment_order.resize(required, 0);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        lower_windows_arguments(
+            &argument_texts,
+            &inherited_texts,
+            &override_texts,
+            command_line,
+            environment_block,
+            environment_order,
+        )
+    }
+
+    #[cfg(feature = "edge-os")]
+    fn texts<'bytes>(
+        entries: impl Iterator<Item = &'bytes [u8]>,
+    ) -> Result<std::vec::Vec<&'bytes str>, WindowsArgumentsError> {
+        entries
+            .map(|entry| core::str::from_utf8(entry).map_err(|_| WindowsArgumentsError::NotUnicode))
+            .collect()
     }
 
     /// Encodes one test binary's working directory as the NUL-terminated UTF-16 `CreateProcessW` expects.
@@ -480,20 +534,13 @@ mod lowering {
     mod tests {
 
         use super::{WindowsArgumentsError, lower_windows_arguments, write_working_directory};
-        use crate::ExecutablePath;
         use crate::cargo_message::TestArtifact;
         use crate::test_environment::{
             DYLIB_PATH_KEY, MAX_ENTRIES, TestEnvironmentInput, TestEnvironmentLayout,
         };
 
-        fn exact_intent<'name>(
-            executable: &'static str,
-            test_name: &'name str,
-        ) -> crate::test_intent::ExactTestIntent<'static, 'static, 'name> {
-            crate::test_intent::ExactTestIntent {
-                executable: ExecutablePath::Borrowed(executable),
-                test_name,
-            }
+        fn exact_intent<'name>(executable: &'name str, test_name: &'name str) -> [&'name str; 3] {
+            [executable, "--exact", test_name]
         }
 
         #[test]
@@ -784,3 +831,96 @@ mod lowering {
 }
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub use lowering::*;
+
+#[cfg(all(windows, feature = "edge-os"))]
+mod environment {
+    //! The process environment, read once as UTF-8 `KEY=VALUE` entries for the runtime settings boundary.
+
+    use std::string::String;
+    use std::sync::OnceLock;
+    use std::vec::Vec;
+
+    use windows_sys::Win32::System::Environment::{FreeEnvironmentStringsW, GetEnvironmentStringsW};
+
+    static SNAPSHOT: OnceLock<Vec<u8>> = OnceLock::new();
+
+    /// A borrowed snapshot of the process environment, one NUL-terminated UTF-8 entry after another.
+    pub struct Environment<'environment> {
+        entries: &'environment [u8],
+    }
+
+    impl<'environment> Environment<'environment> {
+        /// Reads the process environment block on first use and lends the snapshot afterwards.
+        ///
+        /// # Safety
+        /// The caller must keep other threads from changing the process environment while the first read runs.
+        #[must_use]
+        pub unsafe fn current() -> Self {
+            Self {
+                entries: SNAPSHOT.get_or_init(read_block),
+            }
+        }
+
+        fn entries(&self) -> impl Iterator<Item = &'environment [u8]> {
+            self.entries
+                .split(|byte| *byte == 0)
+                .filter(|entry| !entry.is_empty())
+        }
+
+        /// Lends each entry as `KEY=VALUE` bytes into fixed caller storage for child inheritance.
+        ///
+        /// # Errors
+        ///
+        /// Returns the entry count the environment holds, plus one, when `output` cannot hold every entry.
+        pub fn collect(&self, output: &mut [&'environment [u8]]) -> Result<usize, usize> {
+            let mut count = 0;
+            for entry in self.entries() {
+                if count == output.len() {
+                    return Err(count + 1);
+                }
+                output[count] = entry;
+                count += 1;
+            }
+            Ok(count)
+        }
+
+        /// Lends the bytes after `KEY=`, preserving empty-present versus absent; keys compare ASCII case-insensitively as Windows does.
+        #[must_use]
+        pub fn get(&self, key: &[u8]) -> Option<&'environment [u8]> {
+            if key.is_empty() {
+                return None;
+            }
+            self.entries().find_map(|entry| {
+                let separator = entry.iter().skip(1).position(|byte| *byte == b'=')? + 1;
+                let (name, rest) = entry.split_at(separator);
+                name.eq_ignore_ascii_case(key).then(|| &rest[1..])
+            })
+        }
+    }
+
+    fn read_block() -> Vec<u8> {
+        let block = unsafe { GetEnvironmentStringsW() };
+        if block.is_null() {
+            return Vec::new();
+        }
+        let mut bytes = Vec::new();
+        let mut cursor = block.cast_const();
+        loop {
+            let mut length = 0;
+            while unsafe { *cursor.add(length) } != 0 {
+                length += 1;
+            }
+            if length == 0 {
+                break;
+            }
+            let entry = unsafe { core::slice::from_raw_parts(cursor, length) };
+            bytes.extend_from_slice(String::from_utf16_lossy(entry).as_bytes());
+            bytes.push(0);
+            cursor = unsafe { cursor.add(length + 1) };
+        }
+        unsafe { FreeEnvironmentStringsW(block) };
+        bytes
+    }
+}
+#[cfg(all(windows, feature = "edge-os"))]
+pub use environment::*;
