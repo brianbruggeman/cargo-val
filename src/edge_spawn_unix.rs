@@ -663,6 +663,7 @@ mod spawn {
 
         use super::{SpawnError, spawn_with_pipes};
         use crate::edge_spawn_unix::pipe_pair::UnixPipePair;
+        use crate::test_probe::probe_name;
 
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         struct DescriptorIdentity {
@@ -690,10 +691,8 @@ mod spawn {
             let inherited_storage = inherited_environment();
             let inherited = inherited_storage.iter().map(String::as_bytes).collect::<Vec<_>>();
             let overrides = [expected_cwd.as_bytes(), b"CARGO_VAL_CHILD_MODE=1".as_slice()];
-            let arguments = [
-                b"--exact".as_slice(),
-                b"edge_spawn_unix::spawn::tests::fixture_alpha".as_slice(),
-            ];
+            let probe = probe_name!(fixture_alpha);
+            let arguments = [b"--exact".as_slice(), probe.as_bytes()];
             let pipes = UnixPipePair::new().expect("capture pipes should be created");
             let pipe_descriptors = [
                 pipes.stdout().parent_read().raw(),

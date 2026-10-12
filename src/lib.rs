@@ -7,6 +7,9 @@ extern crate std;
 mod test_dir;
 
 #[cfg(test)]
+pub(crate) mod test_probe;
+
+#[cfg(test)]
 pub(crate) mod test_alloc;
 
 use core::str;
