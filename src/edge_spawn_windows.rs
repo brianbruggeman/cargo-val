@@ -1367,6 +1367,13 @@ mod spawn {
     #[derive(Debug, Default)]
     pub struct LaunchStorage;
 
+    pub type HeldLaunchStorage = LaunchStorage;
+
+    #[must_use]
+    pub const fn held_launch_storage() -> HeldLaunchStorage {
+        LaunchStorage
+    }
+
     /// Why an exact test launch was refused.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ExactError {

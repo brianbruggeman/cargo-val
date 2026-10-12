@@ -339,6 +339,14 @@ mod spawn {
     pub use crate::edge_args_unix::{ArgumentsError, LaunchStorage};
     use crate::edge_args_unix::{Arguments, Launch, Lowered};
 
+    pub type HeldLaunchStorage = std::boxed::Box<LaunchStorage>;
+
+    #[inline(never)]
+    #[must_use]
+    pub fn held_launch_storage() -> HeldLaunchStorage {
+        std::boxed::Box::new(LaunchStorage::default())
+    }
+
     const DOC_NICE: c_int = 10;
 
     /// A child process whose captured output remains owned by the host driver.
