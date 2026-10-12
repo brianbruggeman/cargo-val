@@ -1,10 +1,12 @@
-//! Which packages have `bin` targets, read from `cargo metadata --no-deps --format-version 1`
+//! Which packages have `bin` targets, plus the workspace root and target directory, read from `cargo metadata --no-deps --format-version 1`
 //! one byte at a time over fixed storage, so the scan needs no heap and no whole-document buffer.
 
 const MAX_PACKAGES: usize = 256;
 const ID_CAPACITY: usize = 192;
 const MAX_DEPTH: usize = 8;
-const TEXT_CAPACITY: usize = ID_CAPACITY;
+/// Longest `target_directory` or `workspace_root` the scan keeps; a longer path makes it report none.
+pub const PATH_CAPACITY: usize = 512;
+const TEXT_CAPACITY: usize = PATH_CAPACITY;
 
 /// Why the metadata could not be used; the caller falls back to waiting for `build-finished`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,8 @@ enum Key {
     Id,
     Targets,
     Kind,
+    TargetDirectory,
+    WorkspaceRoot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +109,57 @@ impl Default for BinCounts {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PathText {
+    bytes: [u8; PATH_CAPACITY],
+    length: usize,
+}
+
+impl PathText {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; PATH_CAPACITY],
+            length: 0,
+        }
+    }
+
+    // a JSON escape means the raw bytes are not the path, so the path is reported as absent
+    fn set(&mut self, text: &[u8], overflow: bool) {
+        if overflow || text.contains(&b'\\') {
+            self.length = 0;
+            return;
+        }
+        self.bytes[..text.len()].copy_from_slice(text);
+        self.length = text.len();
+    }
+
+    fn get(&self) -> Option<&[u8]> {
+        (self.length > 0).then(|| &self.bytes[..self.length])
+    }
+}
+
+/// What the metadata document held: bin counts per package and the two directories.
+pub struct MetadataFacts {
+    /// Per package with at least one `bin` target.
+    pub bins: BinCounts,
+    target_directory: PathText,
+    workspace_root: PathText,
+}
+
+impl MetadataFacts {
+    /// Cargo's resolved target directory (`--target-dir`, `CARGO_TARGET_DIR`, `build.target-dir`, else `<workspace>/target`).
+    #[must_use]
+    pub fn target_directory(&self) -> Option<&[u8]> {
+        self.target_directory.get()
+    }
+
+    /// The workspace root directory.
+    #[must_use]
+    pub fn workspace_root(&self) -> Option<&[u8]> {
+        self.workspace_root.get()
+    }
+}
+
 /// Byte-fed scanner; feed the whole metadata document, then read [`Self::finish`].
 pub struct MetadataScan {
     stack: [Frame; MAX_DEPTH],
@@ -118,6 +173,8 @@ pub struct MetadataScan {
     package_id_overflow: bool,
     package_bins: usize,
     counts: BinCounts,
+    target_directory: PathText,
+    workspace_root: PathText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +205,8 @@ impl MetadataScan {
             package_id_overflow: false,
             package_bins: 0,
             counts: BinCounts::new(),
+            target_directory: PathText::new(),
+            workspace_root: PathText::new(),
         }
     }
 
@@ -167,10 +226,14 @@ impl MetadataScan {
         Ok(())
     }
 
-    /// The counts, once the whole document was fed.
+    /// The facts, once the whole document was fed.
     #[must_use]
-    pub fn finish(self) -> BinCounts {
-        self.counts
+    pub fn finish(self) -> MetadataFacts {
+        MetadataFacts {
+            bins: self.counts,
+            target_directory: self.target_directory,
+            workspace_root: self.workspace_root,
+        }
     }
 
     fn string_byte(&mut self, byte: u8) {
@@ -207,16 +270,24 @@ impl MetadataScan {
                 b"id" => Key::Id,
                 b"targets" => Key::Targets,
                 b"kind" => Key::Kind,
+                b"target_directory" => Key::TargetDirectory,
+                b"workspace_root" => Key::WorkspaceRoot,
                 _ => Key::Other,
             };
             if let Some(frame) = self.top() {
                 frame.key = key;
                 frame.expect_key = false;
             }
+        } else if depth == 1 && self.stack[0].object && self.stack[0].key == Key::TargetDirectory {
+            self.target_directory.set(&self.text[..text_length], overflow);
+        } else if depth == 1 && self.stack[0].object && self.stack[0].key == Key::WorkspaceRoot {
+            self.workspace_root.set(&self.text[..text_length], overflow);
         } else if depth == 3 && self.stack[2].key == Key::Id && self.in_package() {
-            self.package_id_overflow = overflow;
-            self.package_id_length = text_length;
-            self.package_id = self.text;
+            self.package_id_overflow = overflow || text_length > ID_CAPACITY;
+            if !self.package_id_overflow {
+                self.package_id_length = text_length;
+                self.package_id[..text_length].copy_from_slice(&self.text[..text_length]);
+            }
         } else if depth == 6 && self.in_kind_list() && &self.text[..text_length] == b"bin" {
             self.package_bins += 1;
         }
@@ -319,7 +390,8 @@ mod tests {
         for chunk in TWO_PACKAGES.as_bytes().chunks(7) {
             scan.feed(chunk).expect("document fits");
         }
-        let mut counts = scan.finish();
+        let facts = scan.finish();
+        let mut counts = facts.bins;
 
         assert_eq!(counts.packages(), 1);
         assert!(counts.awaiting("path+file:///repo/parser#0.3.1"));
@@ -334,5 +406,32 @@ mod tests {
     fn a_document_deeper_than_the_fixed_stack_is_refused() {
         let mut scan = Box::new(MetadataScan::new());
         assert_eq!(scan.feed(b"[[[[[[[[["), Err(ScanFault::TooDeep));
+    }
+
+    #[test]
+    fn reports_the_target_directory_and_workspace_root_of_the_root_object_only() {
+        let document = r#"{"packages":[{"name":"x","id":"path+file:///w#0.1.0","manifest_path":"/w/Cargo.toml","targets":[]}],"workspace_members":[],"workspace_root":"/Users/dev/work space","target_directory":"/tmp/cargo_target","version":1}"#;
+        let mut scan = Box::new(MetadataScan::new());
+        for chunk in document.as_bytes().chunks(5) {
+            scan.feed(chunk).expect("document fits");
+        }
+        let facts = scan.finish();
+
+        assert_eq!(facts.target_directory(), Some(&b"/tmp/cargo_target"[..]));
+        assert_eq!(facts.workspace_root(), Some(&b"/Users/dev/work space"[..]));
+    }
+
+    #[test]
+    fn an_escaped_or_overlong_directory_is_reported_as_absent() {
+        let overlong = std::format!(
+            r#"{{"packages":[],"workspace_root":"/{}","target_directory":"/a\"b","version":1}}"#,
+            "d".repeat(super::PATH_CAPACITY)
+        );
+        let mut scan = Box::new(MetadataScan::new());
+        scan.feed(overlong.as_bytes()).expect("document fits");
+        let facts = scan.finish();
+
+        assert_eq!(facts.workspace_root(), None);
+        assert_eq!(facts.target_directory(), None);
     }
 }

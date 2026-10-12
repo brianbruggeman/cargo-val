@@ -10,6 +10,8 @@ struct BuildDefaults {
     jobs: usize,
     #[setting(default = true)]
     color: bool,
+    #[setting(default = "isolated")]
+    target_dir: String,
 }
 
 impl Validate for BuildDefaults {
