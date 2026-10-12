@@ -14,9 +14,10 @@ targets with `cargo val --tests`. The runtime is `no_std` and installs a
 rejecting global allocator. Its async driver starts each selected test process
 as listing records arrive and writes colored results unless `NO_COLOR` is set.
 
-The current command path is connected for macOS and GNU/Linux. Windows host
-primitives and native fixtures exist, but the Windows runner is not connected
-to the executable yet. Performance evidence is workload-dependent: see
+The command path is connected for macOS, GNU/Linux, and Windows. The Windows
+edges (completion-port reads, process-exit and Ctrl+C gates, one job object per
+run) are exercised by the native `windows-latest` jobs in
+`.github/workflows/native-tests.yml`. Performance evidence is workload-dependent: see
 [`specs/cargo-val/TASKS.md`](specs/cargo-val/TASKS.md)
 and the retained per-run records under `specs/cargo-val/evidence/c54b/`.
 

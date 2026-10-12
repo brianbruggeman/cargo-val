@@ -24,7 +24,7 @@ Status: **built** (in tree, uncommitted) · **designed** · **queued** · **late
 - **designed** — runs on Prime (executor + reactor); no hand-written event loop (today: hand loop calls `kevent` directly)
 - **designed** — core (run FSM + stages) no_std and alloc-free; edges are opt-in backends: `edge-os` (Prime reactor: kqueue / epoll+pidfd / IOCP) and `edge-vm` (proxima-vm micro-VM per test)
 - **designed** — platform differences only in edge pipes; one platform-neutral FSM orchestrates
-- **designed** — Windows: completion-port reads, one job object per run, below-normal priority, no thread pool
+- **built** — Windows: completion-port reads, one job object per run, below-normal priority, no thread pool; the native `windows-latest` run is the measurement
 - **built** — Windows child creation: job via `JOB_LIST`, 3-handle list, no console window, absolute exe path
 
 ## Scheduling

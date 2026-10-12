@@ -5,7 +5,7 @@ set -o pipefail
 
 cargo test \
   --no-default-features \
-  --features proxima-codec,proxima-primitives,proxima-core \
+  --features proxima-codec,proxima-primitives,proxima-core,edge-os \
   --lib "$1" \
   -- --exact --nocapture --test-threads=1 2>&1 |
   awk '
