@@ -421,6 +421,19 @@ mod tests {
         reaped: bool,
     }
 
+    fn await_exit_without_reaping(process_id: libc::pid_t) {
+        let mut exit_record = unsafe { core::mem::zeroed::<libc::siginfo_t>() };
+        let observed = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                process_id.cast_unsigned(),
+                &raw mut exit_record,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(observed, 0, "waitid observes the exit without reaping");
+    }
+
     impl Drop for ExitedChild {
         fn drop(&mut self) {
             if !self.reaped {
@@ -532,19 +545,7 @@ mod tests {
             process_id,
             reaped: false,
         };
-        let mut exit_record = unsafe { core::mem::zeroed::<libc::siginfo_t>() };
-        assert_eq!(
-            unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    process_id.cast_unsigned(),
-                    &raw mut exit_record,
-                    libc::WEXITED | libc::WNOWAIT,
-                )
-            },
-            0,
-            "waitid observes exit without reaping before registration"
-        );
+        await_exit_without_reaping(process_id);
         let port = MacosExitPort::new().expect("race control kqueue is created");
         let mut watch = port
             .watch(process_id)
@@ -569,16 +570,7 @@ mod tests {
             .expect("live child is registered");
         assert!(watch.registered(), "a live child owns a kqueue exit filter");
         unsafe { libc::kill(child.process_id, libc::SIGKILL) };
-        let mut exit_record = unsafe { core::mem::zeroed::<libc::siginfo_t>() };
-        let observed = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.process_id.cast_unsigned(),
-                &raw mut exit_record,
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        assert_eq!(observed, 0, "waitid observes the kill without reaping");
+        await_exit_without_reaping(child.process_id);
         let mut late = port
             .watch(child.process_id)
             .expect("an exited child still resolves to a watch");
@@ -655,6 +647,7 @@ mod tests {
             0
         );
         child.release();
+        await_exit_without_reaping(child.process_id);
         let ready = port
             .wait_for(&mut events, 100)
             .expect("bounded wait returns without an exit filter");
