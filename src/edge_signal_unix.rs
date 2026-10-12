@@ -4,6 +4,7 @@ use core::cell::Cell;
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicI32, Ordering};
 
+use prime::os::readiness::Readiness;
 use proxima_core::signal::Signal;
 
 const FORWARDED: [c_int; 2] = [libc::SIGINT, libc::SIGTERM];
@@ -26,12 +27,41 @@ pub struct SignalPipe {
     interrupt: Signal,
 }
 
-/// Makes every later signal reach `target`: a child's pid, or the negated pid of a child that leads its own process group.
+/// Makes every later signal reach the child with process id `target`.
 ///
 /// # Errors
 ///
 /// Returns `ENOSPC` when every slot is taken.
-pub fn track_child(target: libc::pid_t) -> Result<(), c_int> {
+pub fn track_child(target: u32) -> Result<(), c_int> {
+    track(target.cast_signed())
+}
+
+/// Makes every later signal reach the process group a child leads, which has process id `target`.
+///
+/// # Errors
+///
+/// Returns `ENOSPC` when every slot is taken.
+pub fn track_group(target: u32) -> Result<(), c_int> {
+    track(-target.cast_signed())
+}
+
+/// Stops forwarding to the child with process id `target`; call it as soon as the child is reaped so a recycled pid is never signalled.
+pub fn release_child(target: u32) {
+    release(target.cast_signed());
+}
+
+/// Stops forwarding to the process group led by `target`.
+pub fn release_group(target: u32) {
+    release(-target.cast_signed());
+}
+
+/// Sends SIGINT to the whole process group `target` leads.
+pub fn interrupt_group(target: u32) {
+    // safety: killpg takes plain integers and reports failure through its status.
+    unsafe { libc::killpg(target.cast_signed(), libc::SIGINT) };
+}
+
+fn track(target: libc::pid_t) -> Result<(), c_int> {
     TARGETS
         .iter()
         .any(|slot| {
@@ -42,8 +72,7 @@ pub fn track_child(target: libc::pid_t) -> Result<(), c_int> {
         .ok_or(libc::ENOSPC)
 }
 
-/// Stops forwarding to `target`; call it as soon as the child is reaped so a recycled pid is never signalled.
-pub fn release_child(target: libc::pid_t) {
+fn release(target: libc::pid_t) {
     TARGETS.iter().any(|slot| {
         slot.compare_exchange(target, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
@@ -82,10 +111,10 @@ impl SignalPipe {
         Ok(pipe)
     }
 
-    /// The read end, readable while a signal byte waits, for a gate on a reactor.
+    /// A prime gate that opens while a signal byte waits to be drained.
     #[must_use]
-    pub const fn read_fd(&self) -> c_int {
-        self.read_end
+    pub fn gate(&self) -> Readiness {
+        Readiness::new(self.read_end)
     }
 
     /// Fires once, when [`drain`](Self::drain) first forwards a signal.

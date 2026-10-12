@@ -1,7 +1,6 @@
 //! One poll-driven owner of Cargo discovery, libtest listings, and child outcomes.
 
 use core::cell::{Cell, RefCell};
-use core::ffi::{CStr, c_char, c_int};
 use core::ops::Range;
 use core::task::{Context, Poll, Waker};
 
@@ -31,30 +30,35 @@ use crate::run::{
     observe_cargo, observe_doc,
 };
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
+use prime::os::readiness::Readiness;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
+use std::sync::OnceLock;
+use std::time::Instant;
+use std::vec::Vec;
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
-use crate::edge_signal::{SignalPipe, conventional_status, release_child, track_child};
-use crate::edge_args::UnixEnvironment;
-use crate::edge_spawn::spawn_libdir_query;
-use crate::edge_spawn::{UnixChild, spawn_raw_unix, spawn_raw_unix_in_new_group};
+use crate::edge_signal::{
+    SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group,
+};
+use crate::edge_args::{DYLIB_PATH_KEY, Environment};
+use crate::edge_output;
+use crate::edge_spawn::{Child, SpawnError, spawn, spawn_in_group};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
 use crate::reporter::write_report;
 use crate::runner::{
-    LaunchCause, LibtestVerdict, RunningUnixChild, UnixLaunchInput, UnixLaunchOwner,
-    UnixOutcomeError, UnixOutcomeInput, UnixOutcomeStep,
+    LaunchCause, LibtestVerdict, RunningChild, LaunchInput, LaunchOwner,
+    ChildOutcomeError, OutcomeInput, OutcomeStep,
 };
 use crate::schedule::{SessionSlotId, SessionSlots};
 use crate::selection::{NameFilter, Selection};
 use crate::stop::{self, DocAtTrip, Observation, StopPolicy, StopReport};
 use crate::test_environment::{
-    BuildScriptOutput, BuildScriptOutputs, DYLIB_PATH_KEY_C, LinkedDirectories, MAX_ENTRIES,
+    BuildScriptOutput, BuildScriptOutputs, LinkedDirectories, MAX_ENTRIES,
     TestEnvironmentInput, TestEnvironmentLayout,
 };
 use crate::test_intent::ExactTestIntent;
-use crate::edge_args::{UnixArgumentsError, merge_environment};
 
 pub(crate) const LIVE_CAPACITY: usize = 64;
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
@@ -115,15 +119,15 @@ enum StdoutState {
 
 struct PendingListing {
     target: usize,
-    child: Option<UnixChild>,
-    ignored_child: Option<UnixChild>,
+    child: Option<Child>,
+    ignored_child: Option<Child>,
     identity: Identity,
     path: [u8; PATH_CAPACITY],
     path_length: usize,
     environment: [u8; ENVIRONMENT_CAPACITY],
     layout: TestEnvironmentLayout,
     ignoring: bool,
-    lane_pid: libc::pid_t,
+    lane_pid: u32,
     stdout: StdoutState,
     stderr_done: bool,
     exit: Option<i32>,
@@ -157,7 +161,7 @@ pub enum RunError {
     Launch(LaunchCause),
     Outcome,
     CargoFailed,
-    Interrupted(c_int),
+    Interrupted(i32),
     ListingFailed,
 }
 
@@ -237,10 +241,9 @@ impl LaunchCause {
                 line.number(available);
                 line.text(b" are available");
             }
-            Self::Arguments(error) => write_arguments_error(line, error),
-            Self::Spawn { errno } => {
-                line.text(b"posix_spawn failed with errno ");
-                line.number(usize::try_from(errno.unsigned_abs()).unwrap_or(usize::MAX));
+            Self::Spawn { os_code } => {
+                line.text(b"spawn failed with os error ");
+                line.number(usize::try_from(os_code.unsigned_abs()).unwrap_or(usize::MAX));
             }
             Self::CapacityChanged => {
                 line.text(b"the live-test table rejected the child after its capacity check");
@@ -250,39 +253,6 @@ impl LaunchCause {
                 line.text(accounting_text(error));
             }
         }
-    }
-}
-
-fn write_arguments_error<const CAPACITY: usize>(
-    line: &mut Line<CAPACITY>,
-    error: UnixArgumentsError,
-) {
-    line.text(b"argument lowering failed: ");
-    let (reason, sizes): (&[u8], Option<(usize, usize)>) = match error {
-        UnixArgumentsError::InteriorNul => (b"an argument contains a NUL byte", None),
-        UnixArgumentsError::InvalidEnvironmentEntry => {
-            (b"an environment entry has no key before '='", None)
-        }
-        UnixArgumentsError::ArgumentStorageTooSmall {
-            required,
-            available,
-        } => (b"argument bytes need", Some((required, available))),
-        UnixArgumentsError::ArgumentPointersTooSmall {
-            required,
-            available,
-        } => (b"argument pointers need", Some((required, available))),
-        UnixArgumentsError::EnvironmentPointersTooSmall {
-            required,
-            available,
-        } => (b"environment pointers need", Some((required, available))),
-    };
-    line.text(reason);
-    if let Some((required, available)) = sizes {
-        line.text(b" ");
-        line.number(required);
-        line.text(b" and ");
-        line.number(available);
-        line.text(b" are available");
     }
 }
 
@@ -353,7 +323,7 @@ impl RunSummary {
 
 pub(crate) struct TestWatch {
     slot: SessionSlotId,
-    process_id: libc::pid_t,
+    process_id: u32,
     output: ChildOutput,
 }
 
@@ -484,26 +454,26 @@ struct Settings {
 }
 
 fn runtime_settings(
-    environment: &UnixEnvironment<'_>,
+    environment: &Environment<'_>,
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
     let mut pairs = [("", ""); 11];
     let mut count = 0;
-    for (key, c_key) in [
-        ("RUST_TEST_THREADS", c"RUST_TEST_THREADS"),
-        ("CARGO_VAL_JOBS", c"CARGO_VAL_JOBS"),
-        ("CARGO_VAL_MAX_FAIL", c"CARGO_VAL_MAX_FAIL"),
-        ("CARGO_VAL_FAIL_FAST", c"CARGO_VAL_FAIL_FAST"),
-        ("CARGO_VAL_NO_TESTS", c"CARGO_VAL_NO_TESTS"),
-        ("CARGO_VAL_COLOR", c"CARGO_VAL_COLOR"),
-        ("NO_COLOR", c"NO_COLOR"),
-        ("CARGO_VAL_IGNORED", c"CARGO_VAL_IGNORED"),
-        ("CARGO_VAL_FILTERSET", c"CARGO_VAL_FILTERSET"),
-        ("CARGO_VAL_BIN_GATE", c"CARGO_VAL_BIN_GATE"),
-        ("CARGO_VAL_LOG", c"CARGO_VAL_LOG"),
+    for key in [
+        "RUST_TEST_THREADS",
+        "CARGO_VAL_JOBS",
+        "CARGO_VAL_MAX_FAIL",
+        "CARGO_VAL_FAIL_FAST",
+        "CARGO_VAL_NO_TESTS",
+        "CARGO_VAL_COLOR",
+        "NO_COLOR",
+        "CARGO_VAL_IGNORED",
+        "CARGO_VAL_FILTERSET",
+        "CARGO_VAL_BIN_GATE",
+        "CARGO_VAL_LOG",
     ] {
-        if let Some(value) = environment.get(c_key) {
+        if let Some(value) = environment.get(key.as_bytes()) {
             pairs[count] = (
                 key,
                 core::str::from_utf8(value).map_err(|_| RunError::Settings)?,
@@ -576,24 +546,16 @@ fn report_filterset_error(text: &[u8], error: FilterError) {
     let _ = write_fd(2, line.bytes());
 }
 
-pub(crate) fn write_fd(descriptor: c_int, mut bytes: &[u8]) -> Result<(), RunError> {
-    while !bytes.is_empty() {
-        let written = unsafe { libc::write(descriptor, bytes.as_ptr().cast(), bytes.len()) };
-        let written = usize::try_from(written).map_err(|_| RunError::Reactor)?;
-        if written == 0 {
-            return Err(RunError::Reactor);
-        }
-        bytes = &bytes[written..];
-    }
-    Ok(())
+pub(crate) fn write_fd(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
+    edge_output::write(descriptor, bytes).map_err(|_| RunError::Reactor)
 }
 
-fn track(target: libc::pid_t) -> Result<(), RunError> {
+fn track(target: u32) -> Result<(), RunError> {
     track_child(target).map_err(|_| RunError::Reactor)
 }
 
 fn deliver_exit(
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     watch_slot: &mut Option<TestWatch>,
     exit_code: i32,
     reporting: Reporting<'_>,
@@ -713,20 +675,6 @@ pub(crate) fn session_exited(
     deliver_exit(ledger, &mut watches[index], code, run.reporting())
 }
 
-fn environment_pointers(
-    entries: &[&CStr],
-    pointers: &mut [*const c_char],
-) -> Result<usize, RunError> {
-    if pointers.len() < entries.len() + 1 {
-        return Err(RunError::Environment);
-    }
-    for (index, entry) in entries.iter().enumerate() {
-        pointers[index] = entry.as_ptr();
-    }
-    pointers[entries.len()] = core::ptr::null();
-    Ok(entries.len() + 1)
-}
-
 const LOCK_LINE_CAPACITY: usize = 768;
 
 // one line per child, so a wait on another cargo process is never silent
@@ -787,7 +735,7 @@ fn report_nothing_ran(reporting: Reporting<'_>, target: Option<usize>, name: &[u
 }
 
 fn deliver(
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     event: HostEvent<'_>,
     reporting: Reporting<'_>,
     verdict: LibtestVerdict,
@@ -809,8 +757,8 @@ fn deliver(
         }
     };
     let slot = event_slot(&event);
-    let target = ledger.sessions().get(slot).map(RunningUnixChild::target);
-    let step = UnixOutcomeInput {
+    let target = ledger.sessions().get(slot).map(RunningChild::target);
+    let step = OutcomeInput {
         ledger,
         event,
         report_output: &mut report[name_length..],
@@ -819,13 +767,13 @@ fn deliver(
     }
     .apply()
     .map_err(|error| match error {
-        UnixOutcomeError::NothingRan => {
+        ChildOutcomeError::NothingRan => {
             report_nothing_ran(reporting, target, &report[..name_length.saturating_sub(1)])
         }
         _ => RunError::Outcome,
     })?;
     match step {
-        UnixOutcomeStep::Reported {
+        OutcomeStep::Reported {
             outcome,
             report_bytes,
         } => {
@@ -842,7 +790,7 @@ fn deliver(
             }
             Ok(Some(outcome))
         }
-        UnixOutcomeStep::Pending | UnixOutcomeStep::Stdout(_) | UnixOutcomeStep::Stderr(_) => {
+        OutcomeStep::Pending | OutcomeStep::Stdout(_) | OutcomeStep::Stderr(_) => {
             Ok(None)
         }
     }
@@ -851,36 +799,37 @@ fn deliver(
 fn override_entries<'storage>(
     layout: &TestEnvironmentLayout,
     environment: &'storage [u8],
-) -> Result<([&'storage CStr; MAX_ENTRIES], usize), RunError> {
-    let mut entries = [c""; MAX_ENTRIES];
+) -> Result<([&'storage [u8]; MAX_ENTRIES], usize), RunError> {
+    let mut entries: [&[u8]; MAX_ENTRIES] = [b""; MAX_ENTRIES];
     for (index, entry) in entries.iter_mut().enumerate().take(layout.len()) {
         *entry = layout
-            .c_entry(environment, index)
-            .ok_or(RunError::TestEnvironment)?;
+            .entry(environment, index)
+            .ok_or(RunError::TestEnvironment)?
+            .as_bytes();
     }
     Ok((entries, layout.len()))
 }
 
 fn spawn_list(
-    executable: &CStr,
+    executable: &str,
     ignored: bool,
-    envp: &[*const c_char],
-    directory: &CStr,
-) -> Result<UnixChild, RunError> {
-    let mut argv = [
-        executable.as_ptr(),
-        c"--list".as_ptr(),
-        core::ptr::null(),
-        core::ptr::null(),
-    ];
-    let argument_count = if ignored {
-        argv[2] = c"--ignored".as_ptr();
-        4
+    environment: &[&[u8]],
+    overrides: &[&[u8]],
+    directory: &str,
+) -> Result<Child, RunError> {
+    let arguments: &[&[u8]] = if ignored {
+        &[b"--list", b"--ignored"]
     } else {
-        3
+        &[b"--list"]
     };
-    let child = spawn_raw_unix(executable, &argv[..argument_count], envp, Some(directory), false)
-        .map_err(|_| RunError::Spawn)?;
+    let child = spawn(
+        executable.as_bytes(),
+        arguments,
+        environment,
+        overrides,
+        Some(directory.as_bytes()),
+    )
+    .map_err(|_| RunError::Spawn)?;
     track(child.process_id())?;
     Ok(child)
 }
@@ -921,18 +870,14 @@ fn spawn_listing(
     .map_err(|_| RunError::TestEnvironment)?;
     let mut path = [0; PATH_CAPACITY];
     path[..executable.len()].copy_from_slice(executable.as_bytes());
-    let executable_cstr =
-        CStr::from_bytes_with_nul(&path[..=executable.len()]).map_err(|_| RunError::Arguments)?;
     let (overrides, override_count) = override_entries(&layout, &environment)?;
-    let mut envp = [core::ptr::null(); ENV_CAPACITY + MAX_ENTRIES + 1];
-    merge_environment(run.environment, &overrides[..override_count], &mut envp)
-        .map_err(|_| RunError::Environment)?;
-    let directory = layout.c_current_directory(&environment);
-    let child = spawn_list(executable_cstr, false, &envp, directory)?;
+    let overrides = &overrides[..override_count];
+    let directory = layout.current_directory(&environment);
+    let child = spawn_list(executable, false, run.environment, overrides, directory)?;
     let ignored_child = if run.settings.ignore == IgnoreMode::Include {
         None
     } else {
-        Some(spawn_list(executable_cstr, true, &envp, directory)?)
+        Some(spawn_list(executable, true, run.environment, overrides, directory)?)
     };
     Ok(PendingListing {
         target,
@@ -954,29 +899,23 @@ fn spawn_listing(
 
 fn launch_listed(
     scan: &ListingScan<'_, '_>,
-    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
     intent: ExactTestIntent<'_, '_, '_>,
 ) -> Result<(), RunError> {
     let (run, target, environment, layout) = (scan.run, scan.target, scan.environment, scan.layout);
-    let mut argument_bytes = [0; PATH_CAPACITY + NAME_CAPACITY + 64];
-    let mut argument_pointers = [core::ptr::null(); 5];
-    let mut environment_pointers = [core::ptr::null(); ENV_CAPACITY + MAX_ENTRIES + 1];
     let (overrides, override_count) = override_entries(layout, environment)?;
     if run.tripped(ledger) {
         run.policy.borrow_mut().launched();
     }
-    let slot = UnixLaunchInput {
+    let slot = LaunchInput {
         target,
-        owner: UnixLaunchOwner::Ledger(ledger),
+        owner: LaunchOwner::Ledger(ledger),
         intent,
         inherited_environment: run.environment,
         child_overrides: &overrides[..override_count],
         harness_arguments: run.harness_arguments,
-        current_directory: layout.c_current_directory(environment),
-        argument_bytes: &mut argument_bytes,
-        argument_pointers: &mut argument_pointers,
-        environment_pointers: &mut environment_pointers,
+        current_directory: layout.current_directory(environment).as_bytes(),
     }
     .launch()
     .map_err(|error| {
@@ -997,7 +936,7 @@ pub(crate) struct ListingRun<'run> {
     targets: RefCell<TargetTable>,
     started_millis: u64,
     harness_arguments: &'run [&'run [u8]],
-    environment: &'run [&'run CStr],
+    environment: &'run [&'run [u8]],
     library_directories: &'run [&'run str],
     inherited_dylib_path: Option<&'run str>,
     home: Option<&'run str>,
@@ -1018,8 +957,8 @@ pub(crate) struct DocObservation {
 }
 
 impl ListingRun<'_> {
-    pub(crate) fn signal_fd(&self) -> c_int {
-        self.signals.read_fd()
+    pub(crate) fn signal_gate(&self) -> Readiness {
+        self.signals.gate()
     }
 
     pub(crate) fn interrupt_source(&self) -> SignalSource {
@@ -1043,7 +982,7 @@ impl ListingRun<'_> {
 
     fn tripped(
         &self,
-        ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     ) -> bool {
         let failures = ledger.snapshot().failed + self.docs.failed.get();
         let observation = self.policy.borrow().observe_failures(failures);
@@ -1064,7 +1003,7 @@ impl ListingRun<'_> {
             .unwrap_or(DocAtTrip::NotSpawned)
     }
 
-    pub(crate) fn take_doc_child(&self) -> Option<UnixChild> {
+    pub(crate) fn take_doc_child(&self) -> Option<Child> {
         self.doc.borrow_mut().as_mut().and_then(|doc| doc.take_child())
     }
 
@@ -1091,7 +1030,7 @@ enum Flow {
 
 fn listing_wanted(
     run: &ListingRun<'_>,
-    ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
 ) -> bool {
     stop::listing_wanted(run.tripped(ledger), ledger.sessions().len(), run.settings.jobs)
 }
@@ -1109,7 +1048,7 @@ impl ListingScan<'_, '_> {
         &self,
         step: ListingSourceStep<'_, '_, '_>,
         stopped: bool,
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
     ) -> Result<Flow, RunError> {
         let run = self.run;
@@ -1209,44 +1148,35 @@ fn validated_harness<'argument>(
 
 fn spawn_cargo(
     parser: &CliParser<'_>,
-    envp: &[*const c_char],
+    environment: &[&[u8]],
     directory: Option<&ChildDirectory>,
-) -> Result<UnixChild, RunError> {
-    let mut argv = [core::ptr::null(); 64];
+) -> Result<Child, RunError> {
     let forwarded = parser.cargo_arguments();
-    if forwarded.len() + 6 > argv.len() {
+    if forwarded.iter().any(|argument| argument.contains(&0)) {
         return Err(RunError::Arguments);
     }
-    argv[0] = c"cargo".as_ptr();
-    argv[1] = c"test".as_ptr();
-    argv[2] = c"--no-run".as_ptr();
-    argv[3] = c"--message-format=json".as_ptr();
-    let mut count = 4;
+    let mut arguments: Vec<&[u8]> = Vec::from([
+        b"test".as_slice(),
+        b"--no-run".as_slice(),
+        b"--message-format=json".as_slice(),
+    ]);
     if let Some(directory) = directory {
-        argv[count] = directory.argument().as_ptr();
-        count += 1;
+        arguments.push(directory.argument());
     }
-    for argument in forwarded {
-        if argument.contains(&0) {
-            return Err(RunError::Arguments);
-        }
-        argv[count] = argument.as_ptr().cast();
-        count += 1;
-    }
-    spawn_raw_unix(c"cargo", &argv[..=count], envp, None, true).map_err(|_| RunError::Spawn)
+    arguments.extend_from_slice(forwarded);
+    spawn(b"cargo", &arguments, environment, &[], None).map_err(|_| RunError::Spawn)
 }
 
 const METADATA_VALUE_FLAGS: [&[u8]; 4] = [b"--manifest-path", b"-m", b"--config", b"-Z"];
 const METADATA_BOOLEAN_FLAGS: [&[u8]; 3] = [b"--locked", b"--frozen", b"--offline"];
 
 // the bin set comes from one `cargo metadata --no-deps`; a spawn failure just leaves build-finished as the signal
-fn spawn_metadata(parser: &CliParser<'_>, envp: &[*const c_char]) -> Result<UnixChild, RunError> {
-    let mut argv = [core::ptr::null(); 64];
-    let mut count = 0;
-    for fixed in [c"cargo", c"metadata", c"--no-deps", c"--format-version=1"] {
-        argv[count] = fixed.as_ptr();
-        count += 1;
-    }
+fn spawn_metadata(parser: &CliParser<'_>, environment: &[&[u8]]) -> Result<Child, RunError> {
+    let mut arguments: Vec<&[u8]> = Vec::from([
+        b"metadata".as_slice(),
+        b"--no-deps".as_slice(),
+        b"--format-version=1".as_slice(),
+    ]);
     let forwarded = parser.cargo_arguments();
     let mut locked = false;
     let mut index = 0;
@@ -1262,11 +1192,10 @@ fn spawn_metadata(parser: &CliParser<'_>, envp: &[*const c_char]) -> Result<Unix
         if takes_value || joined || boolean {
             let end = (index + width).min(forwarded.len());
             for part in &forwarded[index..end] {
-                if part.contains(&0) || count + 2 >= argv.len() {
+                if part.contains(&0) {
                     return Err(RunError::Arguments);
                 }
-                argv[count] = part.as_ptr().cast();
-                count += 1;
+                arguments.push(part);
             }
             index = end;
         } else {
@@ -1274,14 +1203,13 @@ fn spawn_metadata(parser: &CliParser<'_>, envp: &[*const c_char]) -> Result<Unix
         }
     }
     if !locked {
-        argv[count] = c"--locked".as_ptr();
-        count += 1;
+        arguments.push(b"--locked");
     }
-    spawn_raw_unix(c"cargo", &argv[..=count], envp, None, true).map_err(|_| RunError::Spawn)
+    spawn(b"cargo", &arguments, environment, &[], None).map_err(|_| RunError::Spawn)
 }
 
 // the short-lived metadata child is awaited alone; none of the run's own children are polled meanwhile
-async fn read_metadata(child: UnixChild) -> Option<Box<MetadataFacts>> {
+async fn read_metadata(child: Child) -> Option<Box<MetadataFacts>> {
     // the scanner's tens of KiB of text storage would otherwise sit in every enclosing future
     let mut scan = Box::new(MetadataScan::new());
     let mut usable = true;
@@ -1294,7 +1222,7 @@ async fn read_metadata(child: UnixChild) -> Option<Box<MetadataFacts>> {
 }
 
 pub(crate) struct CargoDriver<'buffer> {
-    process_id: libc::pid_t,
+    process_id: u32,
     framer: ArtifactFramer<'buffer>,
     scratch: &'buffer mut [u8],
     linked: LinkedDirectories<'buffer>,
@@ -1326,13 +1254,7 @@ fn gate_debug(enabled: bool, describe: impl FnOnce(&mut Line<1024>)) {
 }
 
 fn exists(path: &str) -> bool {
-    let mut bytes = [0_u8; 1100];
-    if path.len() >= bytes.len() {
-        return false;
-    }
-    bytes[..path.len()].copy_from_slice(path.as_bytes());
-    // safety: the zero fill after `path` terminates the string and `bytes` outlives the call.
-    unsafe { libc::access(bytes.as_ptr().cast(), libc::F_OK) == 0 }
+    std::path::Path::new(path).exists()
 }
 
 fn debug_artifact(enabled: bool, gated: bool, gate: BinGate, artifact: &TestArtifact<'_>) {
@@ -1400,7 +1322,7 @@ fn resolve_bin_gate(settings: &Settings, spawned: bool, facts: Option<Box<Metada
 
 fn start_listing(
     run: &ListingRun<'_>,
-    ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     artifact: &TestArtifact<'_>,
     linked: &LinkedDirectories<'_>,
     build_scripts: &BuildScriptOutputs<'_>,
@@ -1417,7 +1339,7 @@ fn start_listing(
 }
 
 pub(crate) type Ledger<'ledger> =
-    OutcomeLedger<'ledger, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>;
+    OutcomeLedger<'ledger, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>;
 pub(crate) type Watches = [Option<TestWatch>; LIVE_CAPACITY];
 
 impl CargoDriver<'_> {
@@ -1916,27 +1838,25 @@ impl CargoDriver<'_> {
 pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
     let started_millis = monotonic_millis();
     let harness = validated_harness(parser)?;
-    let environment = unsafe { UnixEnvironment::current() };
+    let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
     let mut storage = run_storage();
     let storage: &mut RunStorage<'_> = &mut storage;
-    let (cargo_storage, (libdir_bytes, inherited, envp), (sessions, watches)) = storage;
+    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches)) = storage;
     let inherited_count = environment
         .collect(inherited)
         .map_err(|_| RunError::Environment)?;
     let inherited = &inherited[..inherited_count];
-    let envp_count = environment_pointers(inherited, envp)?;
-    let envp = &envp[..envp_count];
-    let configured_target = utf8_variable(&environment, c"CARGO_VAL_TARGET_DIR")?;
+    let configured_target = utf8_variable(&environment, b"CARGO_VAL_TARGET_DIR")?;
     let target_pairs = [("CARGO_VAL_TARGET_DIR", configured_target.unwrap_or(""))];
     let target_source = BorrowedSettings::new(&target_pairs[..usize::from(configured_target.is_some())]);
     let target_mode = resolve_target_dir(&target_source, parser)?;
     if parser.doc_selection() == DocSelection::Only {
-        return run_doc_only(parser, &settings, target_mode, started_millis, envp).await;
+        return run_doc_only(parser, &settings, target_mode, started_millis, inherited).await;
     }
-    let queries = start_libdir_queries(&environment, parser, envp)?;
-    let inherited_dylib_path = utf8_variable(&environment, DYLIB_PATH_KEY_C)?;
-    let home = utf8_variable(&environment, c"HOME")?;
+    let queries = start_libdir_queries(&environment, parser, inherited)?;
+    let inherited_dylib_path = utf8_variable(&environment, DYLIB_PATH_KEY.as_bytes())?;
+    let home = utf8_variable(&environment, b"HOME")?;
     let filter = filter_text(parser)?;
     let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
     let StartedChildren {
@@ -1945,15 +1865,13 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         bins,
         gate,
         lock_watch,
-    } = start_children(parser, &settings, target_mode, envp).await?;
+    } = start_children(parser, &settings, target_mode, inherited).await?;
     let cargo_process_id = cargo_child.process_id();
     let mut driver = held(new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?);
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .await
-        .inspect_err(|_| unsafe {
-            libc::kill(cargo_process_id, libc::SIGKILL);
-        })?;
+        .inspect_err(|_| cargo_child.terminate())?;
     let prepared = held(settings.filterset.as_ref().map(Filterset::prepare));
     let run = held(ListingRun {
         signals: &signals,
@@ -1993,11 +1911,10 @@ type RunStorage<'environment> = (
     CargoStorage,
     (
         [u8; LIBDIR_CAPACITY * 2],
-        [&'environment CStr; ENV_CAPACITY],
-        [*const c_char; ENV_CAPACITY + 1],
+        [&'environment [u8]; ENV_CAPACITY],
     ),
     (
-        SessionSlots<RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        SessionSlots<RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         [Option<TestWatch>; LIVE_CAPACITY],
     ),
 );
@@ -2016,8 +1933,7 @@ fn run_storage<'environment>() -> std::boxed::Box<RunStorage<'environment>> {
         ),
         (
             [0; LIBDIR_CAPACITY * 2],
-            [c""; ENV_CAPACITY],
-            [core::ptr::null(); ENV_CAPACITY + 1],
+            [b""; ENV_CAPACITY],
         ),
         (SessionSlots::new(), [const { None }; LIVE_CAPACITY]),
     ))
@@ -2030,7 +1946,7 @@ fn held<Value>(value: Value) -> std::boxed::Box<Value> {
 
 fn new_driver(
     (frame, scratch, linked, scripts, listing_frame, ignored_frame, ignored): &mut CargoStorage,
-    process_id: libc::pid_t,
+    process_id: u32,
     bins: BinCounts,
     gate: BinGate,
     lock_watch: LockWatch,
@@ -2077,7 +1993,7 @@ const fn ignore_arguments(mode: IgnoreMode) -> &'static [&'static [u8]] {
 }
 
 struct StartedChildren {
-    cargo: UnixChild,
+    cargo: Child,
     doc_tests: Option<Box<DocRun>>,
     bins: BinCounts,
     gate: BinGate,
@@ -2089,11 +2005,11 @@ async fn start_children(
     parser: &CliParser<'_>,
     settings: &Settings,
     target_mode: TargetDirMode<'_>,
-    envp: &[*const c_char],
+    environment: &[&[u8]],
 ) -> Result<StartedChildren, RunError> {
     let isolating = target_mode == TargetDirMode::Isolated;
     let mut metadata_child = (settings.bin_gate || isolating)
-        .then(|| spawn_metadata(parser, envp))
+        .then(|| spawn_metadata(parser, environment))
         .and_then(Result::ok);
     let spawned = metadata_child.is_some();
     let mut facts = None;
@@ -2101,14 +2017,14 @@ async fn start_children(
         facts = read_metadata(child).await;
     }
     let directories = build_directories(target_mode, facts.as_deref())?;
-    let cargo = spawn_cargo(parser, envp, directories.as_ref().map(|chosen| &chosen.test))?;
+    let cargo = spawn_cargo(parser, environment, directories.as_ref().map(|chosen| &chosen.test))?;
     track(cargo.process_id())?;
     let mut doc_tests = match parser.doc_selection() {
         DocSelection::Excluded | DocSelection::Only => None,
         DocSelection::Included => Some(spawn_doc_tests(
             parser,
             settings.ignore,
-            envp,
+            environment,
             directories.as_ref().map(|chosen| &chosen.doc),
         )?),
     };
@@ -2170,31 +2086,52 @@ fn build_directories(
     }
 }
 
-type LibdirQueries = (UnixChild, Option<UnixChild>);
+type LibdirQueries = (Child, Option<Child>);
 
 fn start_libdir_queries(
-    environment: &UnixEnvironment<'_>,
+    environment: &Environment<'_>,
     parser: &CliParser<'_>,
-    envp: &[*const c_char],
+    inherited: &[&[u8]],
 ) -> Result<LibdirQueries, RunError> {
-    let host_query = spawn_libdir_query(environment.get(c"RUSTC"), None, envp)
+    let host_query = spawn_libdir_query(environment.get(b"RUSTC"), None, inherited)
         .map_err(|_| RunError::RustcLibdir)?;
     let target_query = target_triple(parser.cargo_arguments())
-        .map(|triple| spawn_libdir_query(environment.get(c"RUSTC"), Some(triple), envp))
+        .map(|triple| spawn_libdir_query(environment.get(b"RUSTC"), Some(triple), inherited))
         .transpose()
         .map_err(|_| RunError::RustcLibdir)?;
     Ok((host_query, target_query))
 }
 
 fn utf8_variable<'environment>(
-    environment: &UnixEnvironment<'environment>,
-    key: &CStr,
+    environment: &Environment<'environment>,
+    key: &[u8],
 ) -> Result<Option<&'environment str>, RunError> {
     environment
         .get(key)
         .map(core::str::from_utf8)
         .transpose()
         .map_err(|_| RunError::Environment)
+}
+
+/// Spawns `rustc --print target-libdir [--target <triple>]` without waiting for it.
+///
+/// `rustc` is the `RUSTC` environment value when present, otherwise the name resolved through `PATH`.
+/// The printed directory holds the standard library the test binaries load.
+///
+/// # Errors
+///
+/// Returns the spawn error.
+pub(crate) fn spawn_libdir_query(
+    rustc: Option<&[u8]>,
+    triple: Option<&[u8]>,
+    environment: &[&[u8]],
+) -> Result<Child, SpawnError> {
+    let mut arguments: Vec<&[u8]> = Vec::from([b"--print".as_slice(), b"target-libdir".as_slice()]);
+    if let Some(triple) = triple {
+        arguments.push(b"--target");
+        arguments.push(triple);
+    }
+    spawn(rustc.unwrap_or(b"rustc"), &arguments, environment, &[], None)
 }
 
 async fn resolve_libdirs(
@@ -2237,22 +2174,14 @@ fn finish_run(
 }
 
 fn monotonic_millis() -> u64 {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // safety: `now` is a valid timespec for the duration of the call.
-    let status = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut now) };
-    if status != 0 {
-        return 0;
-    }
-    u64::try_from(now.tv_sec).unwrap_or(0) * 1000 + u64::try_from(now.tv_nsec / 1_000_000).unwrap_or(0)
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 type LineBuffer = Line<512>;
 
 impl<const CAPACITY: usize> Line<CAPACITY> {
-    fn write(&self, descriptor: c_int) -> Result<(), RunError> {
+    fn write(&self, descriptor: i32) -> Result<(), RunError> {
         write_fd(descriptor, self.bytes())
     }
 }
@@ -2305,9 +2234,7 @@ fn write_no_tests(parser: &CliParser<'_>, ignore: IgnoreMode) -> Result<(), RunE
     line.write(2)
 }
 
-const DOC_ARGUMENT_CAPACITY: usize = 72;
 const DOC_STDERR_CAPACITY: usize = 16384;
-const DOC_NICE: c_int = 10;
 const NO_LIBRARY_MESSAGE: &[u8] = b"no library targets found";
 
 /// What became of the doc-test child once the run ended.
@@ -2342,8 +2269,8 @@ enum DocPhase {
 }
 
 pub(crate) struct DocRun {
-    child: Option<UnixChild>,
-    process_id: libc::pid_t,
+    child: Option<Child>,
+    process_id: u32,
     parser: DocParser,
     stdout_eof: bool,
     stderr_eof: bool,
@@ -2357,24 +2284,12 @@ pub(crate) struct DocRun {
 fn spawn_doc_tests(
     parser: &CliParser<'_>,
     ignore: IgnoreMode,
-    envp: &[*const c_char],
+    environment: &[&[u8]],
     directory: Option<&ChildDirectory>,
 ) -> Result<Box<DocRun>, RunError> {
-    let mut argv = [core::ptr::null(); DOC_ARGUMENT_CAPACITY];
-    let mut count = 0;
-    let mut push = |argument: *const c_char| -> Result<(), RunError> {
-        if count + 1 >= DOC_ARGUMENT_CAPACITY {
-            return Err(RunError::Arguments);
-        }
-        argv[count] = argument;
-        count += 1;
-        Ok(())
-    };
-    push(c"cargo".as_ptr())?;
-    push(c"test".as_ptr())?;
-    push(c"--doc".as_ptr())?;
+    let mut arguments: Vec<&[u8]> = Vec::from([b"test".as_slice(), b"--doc".as_slice()]);
     if let Some(directory) = directory {
-        push(directory.argument().as_ptr())?;
+        arguments.push(directory.argument());
     }
     for argument in parser
         .cargo_arguments()
@@ -2385,24 +2300,25 @@ fn spawn_doc_tests(
         if argument.contains(&0) {
             return Err(RunError::Arguments);
         }
-        push(argument.as_ptr().cast())?;
+        arguments.push(argument);
     }
     if parser.exact() || ignore != IgnoreMode::Skip {
-        push(c"--".as_ptr())?;
+        arguments.push(b"--");
     }
     if parser.exact() {
-        push(c"--exact".as_ptr())?;
+        arguments.push(b"--exact");
     }
     match ignore {
         IgnoreMode::Skip => {}
-        IgnoreMode::Only => push(c"--ignored".as_ptr())?,
-        IgnoreMode::Include => push(c"--include-ignored".as_ptr())?,
+        IgnoreMode::Only => arguments.push(b"--ignored"),
+        IgnoreMode::Include => arguments.push(b"--include-ignored"),
     }
-    let child = spawn_raw_unix_in_new_group(c"cargo", &argv[..=count], envp, None, true)
-        .map_err(|_| RunError::Spawn)?;
+    let child = spawn_in_group(b"cargo", &arguments, environment, &[], None).map_err(|_| RunError::Spawn)?;
     let process_id = child.process_id();
-    track(-process_id)?;
-    lower_priority(process_id)?;
+    track_group(process_id).map_err(|_| RunError::Reactor)?;
+    if child.lower_priority().is_err() {
+        write_fd(2, b"cargo-val: could not lower the doc test priority\n")?;
+    }
     let mut lock_watch = LockWatch::new();
     if let Some(directory) = directory {
         lock_watch.set_directory(directory.directory());
@@ -2421,21 +2337,12 @@ fn spawn_doc_tests(
     }))
 }
 
-fn lower_priority(process_id: libc::pid_t) -> Result<(), RunError> {
-    let who = libc::id_t::try_from(process_id).map_err(|_| RunError::Spawn)?;
-    let status = unsafe { libc::setpriority(libc::PRIO_PGRP, who, DOC_NICE) };
-    if status == 0 {
-        return Ok(());
-    }
-    write_fd(2, b"cargo-val: could not lower the doc test priority\n")
-}
-
 impl DocRun {
     pub(crate) fn finished(&self) -> bool {
         self.stdout_eof && self.stderr_eof && self.exit_code.is_some()
     }
 
-    pub(crate) fn take_child(&mut self) -> Option<UnixChild> {
+    pub(crate) fn take_child(&mut self) -> Option<Child> {
         self.child.take()
     }
 
@@ -2465,7 +2372,7 @@ impl DocRun {
     }
 
     pub(crate) fn exited(&mut self, code: i32) {
-        release_child(-self.process_id);
+        release_group(self.process_id);
         self.exit_code = Some(code);
     }
 
@@ -2483,7 +2390,7 @@ impl DocRun {
         } else if self.phase == DocPhase::Executing {
             DocAtTrip::ExecutingLeftToFinish
         } else {
-            unsafe { libc::killpg(self.process_id, libc::SIGINT) };
+            interrupt_group(self.process_id);
             self.phase = DocPhase::Interrupted;
             DocAtTrip::InterruptedBeforeExecuting
         }
@@ -2677,11 +2584,11 @@ async fn run_doc_only(
     settings: &Settings,
     target_mode: TargetDirMode<'_>,
     started_millis: u64,
-    envp: &[*const c_char],
+    environment: &[&[u8]],
 ) -> Result<RunSummary, RunError> {
     let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
     let metadata_child = (!matches!(target_mode, TargetDirMode::Path(_)))
-        .then(|| spawn_metadata(parser, envp))
+        .then(|| spawn_metadata(parser, environment))
         .and_then(Result::ok);
     let facts = match metadata_child {
         Some(child) => read_metadata(child).await,
@@ -2691,7 +2598,7 @@ async fn run_doc_only(
     let mut doc = spawn_doc_tests(
         parser,
         settings.ignore,
-        envp,
+        environment,
         directories.as_ref().map(|chosen| &chosen.doc),
     )?;
     if directories.is_none()
@@ -2724,7 +2631,6 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError};
-    use crate::edge_args::UnixArgumentsError;
 
     fn rendered(cause: LaunchCause) -> std::string::String {
         let line: ErrorLine = RunError::Launch(cause).render();
@@ -2750,21 +2656,8 @@ mod tests {
                 "cargo-val: exact test launch failed: test name needs 1500 bytes and 1024 are available\n",
             ),
             (
-                LaunchCause::Arguments(UnixArgumentsError::InteriorNul),
-                "cargo-val: exact test launch failed: argument lowering failed: an argument contains a NUL byte\n",
-            ),
-            (
-                LaunchCause::Arguments(UnixArgumentsError::EnvironmentPointersTooSmall {
-                    required: 130,
-                    available: 128,
-                }),
-                "cargo-val: exact test launch failed: argument lowering failed: environment pointers need 130 and 128 are available\n",
-            ),
-            (
-                LaunchCause::Spawn {
-                    errno: libc::ENOENT,
-                },
-                "cargo-val: exact test launch failed: posix_spawn failed with errno 2\n",
+                LaunchCause::Spawn { os_code: 2 },
+                "cargo-val: exact test launch failed: spawn failed with os error 2\n",
             ),
             (
                 LaunchCause::CapacityChanged,
@@ -2780,15 +2673,15 @@ mod tests {
             assert_eq!(rendered(cause), expected);
             checked += 1;
         }
-        assert_eq!(checked, 8);
+        assert_eq!(checked, 6);
     }
 
     #[test]
     fn longest_launch_failure_line_fits_the_error_line() {
-        let longest = LaunchCause::Arguments(UnixArgumentsError::EnvironmentPointersTooSmall {
+        let longest = LaunchCause::NameTooLong {
             required: usize::MAX,
             available: usize::MAX,
-        });
+        };
         let line = rendered(longest);
         assert!(line.ends_with("are available\n"), "{line}");
         assert!(line.len() < ERROR_LINE_CAPACITY);

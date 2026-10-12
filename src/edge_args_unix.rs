@@ -1,16 +1,9 @@
 //! Unix edge for lowering argv, envp, and process environment, plus the host path conventions.
 
-use core::ffi::CStr;
-
 #[cfg(target_os = "macos")]
 pub const DYLIB_PATH_KEY: &str = "DYLD_FALLBACK_LIBRARY_PATH";
 #[cfg(not(target_os = "macos"))]
 pub const DYLIB_PATH_KEY: &str = "LD_LIBRARY_PATH";
-
-#[cfg(target_os = "macos")]
-pub const DYLIB_PATH_KEY_C: &CStr = c"DYLD_FALLBACK_LIBRARY_PATH";
-#[cfg(not(target_os = "macos"))]
-pub const DYLIB_PATH_KEY_C: &CStr = c"LD_LIBRARY_PATH";
 
 pub const PATH_SEPARATOR: u8 = b':';
 /// Whether the loader appends default library directories when the inherited search path is absent.
@@ -18,424 +11,236 @@ pub const LOADER_DEFAULT_FALLBACKS: bool = cfg!(target_os = "macos");
 pub const MAIN_SEPARATOR: u8 = b'/';
 pub const DEPS_SUFFIX: &str = "/deps";
 
-#[cfg(all(unix, feature = "proxima-codec", feature = "proxima-primitives"))]
+#[cfg(all(unix, feature = "edge-os"))]
 mod lowering {
-    //! Caller-owned Unix argv and environment storage for one borrowed test intent.
+    //! Owned Unix argv and envp for one child launch, lowered from byte slices.
 
-    use core::ffi::{CStr, c_char};
+    use core::ffi::c_char;
+    use std::vec::Vec;
 
-    use crate::ExecutablePath;
-    use crate::test_intent::ExactTestIntent;
-
-    /// Bounded failures while lowering a borrowed intent for `posix_spawn`.
+    /// Why launch data cannot be represented as C strings.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum UnixArgumentsError {
-        /// The executable or exact-test arguments contain an interior NUL byte.
+    pub enum ArgumentsError {
+        /// The program, an argument, or an environment entry contains a NUL byte.
         InteriorNul,
-        /// The caller's byte storage cannot hold every argument and its terminator.
-        ArgumentStorageTooSmall { required: usize, available: usize },
-        /// The caller's pointer storage cannot hold argv and its null sentinel.
-        ArgumentPointersTooSmall { required: usize, available: usize },
         /// An environment entry has no non-empty key followed by `=`.
         InvalidEnvironmentEntry,
-        /// The caller's pointer storage cannot hold the merged environment and sentinel.
-        EnvironmentPointersTooSmall { required: usize, available: usize },
     }
 
-    /// Borrowed C pointer arrays backed by caller-owned pointer and byte storage.
-    #[derive(Debug, PartialEq, Eq)]
-    pub struct UnixArguments<'storage> {
-        argument_bytes: &'storage [u8],
-        argv: &'storage [*const c_char],
-        envp: &'storage [*const c_char],
+    /// NUL-terminated argv and envp pointer tables over one owned byte buffer.
+    #[derive(Debug)]
+    pub struct Arguments {
+        bytes: Vec<u8>,
+        argv: Vec<*const c_char>,
+        envp: Vec<*const c_char>,
     }
 
-    impl UnixArguments<'_> {
-        /// Returns the C strings in the argv backing storage without copying them.
-        #[must_use]
-        pub fn argument_bytes(&self) -> &[u8] {
-            self.argument_bytes
-        }
-
+    impl Arguments {
         /// Returns argv including its trailing null pointer.
         #[must_use]
         pub fn argv(&self) -> &[*const c_char] {
-            self.argv
+            &self.argv
         }
 
-        /// Returns the inherited environment overlaid with child-only entries.
+        /// Returns the inherited environment overlaid with child-only entries, including its trailing null pointer.
         #[must_use]
         pub fn envp(&self) -> &[*const c_char] {
-            self.envp
+            &self.envp
+        }
+
+        /// Returns every lowered string, each followed by its NUL.
+        #[must_use]
+        pub fn bytes(&self) -> &[u8] {
+            &self.bytes
         }
     }
 
-    /// Copies one borrowed test intent into caller-owned C-string storage.
+    /// Copies one launch into owned C-string storage.
     ///
-    /// The returned pointers remain valid while `argument_bytes`, `argument_pointers`,
-    /// `environment_pointers`, and all input `CStr`s remain alive. No heap storage is used.
+    /// `arguments` follow the program name, which becomes `argv[0]`. An override replaces any
+    /// inherited entry with the same key.
     ///
     /// # Errors
     ///
-    /// Returns [`UnixArgumentsError`] for interior NUL bytes, malformed environment entries, or caller storage that is too small.
-    pub fn lower_unix_arguments<'storage>(
-        intent: &ExactTestIntent<'_, '_, '_>,
-        inherited_environment: &[&'storage CStr],
-        child_overrides: &[&'storage CStr],
-        harness_arguments: &[&[u8]],
-        argument_bytes: &'storage mut [u8],
-        argument_pointers: &'storage mut [*const c_char],
-        environment_pointers: &'storage mut [*const c_char],
-    ) -> Result<UnixArguments<'storage>, UnixArgumentsError> {
-        let executable = match intent.executable() {
-            ExecutablePath::Borrowed(path) | ExecutablePath::Scratch(path) => path.as_bytes(),
-        };
-        let arguments = [b"--exact".as_slice(), intent.test_name().as_bytes()];
-        let mut required_argument_bytes = executable.len() + 1;
-        for argument in arguments {
-            if argument.contains(&0) {
-                return Err(UnixArgumentsError::InteriorNul);
-            }
-            required_argument_bytes += argument.len() + 1;
+    /// Returns [`ArgumentsError`] for an interior NUL byte or an environment entry without a key.
+    pub fn lower_arguments(
+        program: &[u8],
+        arguments: &[&[u8]],
+        inherited: &[&[u8]],
+        overrides: &[&[u8]],
+    ) -> Result<Arguments, ArgumentsError> {
+        for entry in inherited.iter().chain(overrides) {
+            environment_key(entry)?;
         }
-        for argument in harness_arguments {
-            if argument.contains(&0) {
-                return Err(UnixArgumentsError::InteriorNul);
-            }
-            required_argument_bytes += argument.len() + 1;
-        }
-        if executable.contains(&0) {
-            return Err(UnixArgumentsError::InteriorNul);
-        }
-        if argument_bytes.len() < required_argument_bytes {
-            return Err(UnixArgumentsError::ArgumentStorageTooSmall {
-                required: required_argument_bytes,
-                available: argument_bytes.len(),
-            });
-        }
-        let required_argument_pointers = arguments.len() + harness_arguments.len() + 2;
-        if argument_pointers.len() < required_argument_pointers {
-            return Err(UnixArgumentsError::ArgumentPointersTooSmall {
-                required: required_argument_pointers,
-                available: argument_pointers.len(),
-            });
-        }
-
-        let required_environment_pointers = required_environment_pointers(
-            inherited_environment,
-            child_overrides,
-            environment_pointers,
-        )?;
-
-        let mut byte_offset = 0;
-        let mut pointer_offset = 0;
-        for argument in [executable, arguments[0], arguments[1]]
-            .into_iter()
-            .chain(harness_arguments.iter().copied())
-        {
-            argument_pointers[pointer_offset] = argument_bytes[byte_offset..].as_ptr().cast();
-            argument_bytes[byte_offset..byte_offset + argument.len()].copy_from_slice(argument);
-            byte_offset += argument.len();
-            argument_bytes[byte_offset] = 0;
-            byte_offset += 1;
-            pointer_offset += 1;
-        }
-        argument_pointers[pointer_offset] = core::ptr::null();
-
-        write_environment_pointers(inherited_environment, child_overrides, environment_pointers)?;
-
-        Ok(UnixArguments {
-            argument_bytes: &argument_bytes[..byte_offset],
-            argv: &argument_pointers[..required_argument_pointers],
-            envp: &environment_pointers[..required_environment_pointers],
+        let kept = inherited.iter().filter(|entry| !overridden(entry, overrides));
+        let argument_strings = core::iter::once(program).chain(arguments.iter().copied());
+        let environment_strings = kept.copied().chain(overrides.iter().copied());
+        let mut bytes = Vec::new();
+        let argv_offsets = write_strings(argument_strings, &mut bytes)?;
+        let envp_offsets = write_strings(environment_strings, &mut bytes)?;
+        Ok(Arguments {
+            argv: pointers(&bytes, &argv_offsets),
+            envp: pointers(&bytes, &envp_offsets),
+            bytes,
         })
     }
 
-    /// Merges inherited entries with child-only overrides into caller pointer storage.
-    ///
-    /// An override replaces any inherited entry with the same key. The returned
-    /// count includes the trailing null sentinel.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnixArgumentsError`] for malformed entries or pointer storage that is too small.
-    pub fn merge_environment(
-        inherited_environment: &[&CStr],
-        child_overrides: &[&CStr],
-        environment_pointers: &mut [*const c_char],
-    ) -> Result<usize, UnixArgumentsError> {
-        let required = required_environment_pointers(
-            inherited_environment,
-            child_overrides,
-            environment_pointers,
-        )?;
-        write_environment_pointers(inherited_environment, child_overrides, environment_pointers)?;
-        Ok(required)
-    }
-
-    fn required_environment_pointers(
-        inherited_environment: &[&CStr],
-        child_overrides: &[&CStr],
-        environment_pointers: &[*const c_char],
-    ) -> Result<usize, UnixArgumentsError> {
-        for entry in inherited_environment.iter().chain(child_overrides) {
-            environment_key(entry)?;
-        }
-        let mut environment_count = 0;
-        for inherited in inherited_environment {
-            if !child_overrides.iter().any(|override_entry| {
-                environment_key(override_entry).ok() == environment_key(inherited).ok()
-            }) {
-                environment_count += 1;
+    fn write_strings<'text>(
+        strings: impl Iterator<Item = &'text [u8]>,
+        bytes: &mut Vec<u8>,
+    ) -> Result<Vec<usize>, ArgumentsError> {
+        let mut offsets = Vec::new();
+        for text in strings {
+            if text.contains(&0) {
+                return Err(ArgumentsError::InteriorNul);
             }
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(text);
+            bytes.push(0);
         }
-        environment_count += child_overrides.len();
-        let required = environment_count + 1;
-        if environment_pointers.len() < required {
-            return Err(UnixArgumentsError::EnvironmentPointersTooSmall {
-                required,
-                available: environment_pointers.len(),
-            });
-        }
-        Ok(required)
+        Ok(offsets)
     }
 
-    fn write_environment_pointers(
-        inherited_environment: &[&CStr],
-        child_overrides: &[&CStr],
-        environment_pointers: &mut [*const c_char],
-    ) -> Result<(), UnixArgumentsError> {
-        let mut environment_offset = 0;
-        for inherited in inherited_environment {
-            let inherited_key = environment_key(inherited)?;
-            let overridden = child_overrides.iter().any(|override_entry| {
-                environment_key(override_entry)
-                    .is_ok_and(|override_key| override_key == inherited_key)
-            });
-            if !overridden {
-                environment_pointers[environment_offset] = inherited.as_ptr();
-                environment_offset += 1;
-            }
-        }
-        for override_entry in child_overrides {
-            environment_pointers[environment_offset] = override_entry.as_ptr();
-            environment_offset += 1;
-        }
-        environment_pointers[environment_offset] = core::ptr::null();
-        Ok(())
+    fn pointers(bytes: &[u8], offsets: &[usize]) -> Vec<*const c_char> {
+        offsets
+            .iter()
+            .map(|offset| bytes[*offset..].as_ptr().cast::<c_char>())
+            .chain(core::iter::once(core::ptr::null()))
+            .collect()
     }
 
-    fn environment_key(entry: &CStr) -> Result<&[u8], UnixArgumentsError> {
-        let bytes = entry.to_bytes();
-        let Some(separator) = bytes.iter().position(|byte| *byte == b'=') else {
-            return Err(UnixArgumentsError::InvalidEnvironmentEntry);
+    fn overridden(entry: &[u8], overrides: &[&[u8]]) -> bool {
+        let key = environment_key(entry).ok();
+        overrides
+            .iter()
+            .any(|candidate| environment_key(candidate).ok() == key)
+    }
+
+    fn environment_key(entry: &[u8]) -> Result<&[u8], ArgumentsError> {
+        let Some(separator) = entry.iter().position(|byte| *byte == b'=') else {
+            return Err(ArgumentsError::InvalidEnvironmentEntry);
         };
         if separator == 0 {
-            return Err(UnixArgumentsError::InvalidEnvironmentEntry);
+            return Err(ArgumentsError::InvalidEnvironmentEntry);
         }
-        Ok(&bytes[..separator])
+        Ok(&entry[..separator])
     }
 
     #[cfg(test)]
     mod tests {
-        use std::ffi::CStr;
+        use core::ffi::{CStr, c_char};
+        use std::string::String;
+        use std::vec::Vec;
 
-        use super::{UnixArgumentsError, lower_unix_arguments};
-        use crate::ExecutablePath;
+        use super::{ArgumentsError, lower_arguments};
 
-        fn c_string(bytes: &'static [u8]) -> &'static CStr {
-            CStr::from_bytes_with_nul(bytes).expect("fixture is a nul-terminated C string")
-        }
-
-        fn exact_intent(
-            test_name: &str,
-        ) -> crate::test_intent::ExactTestIntent<'static, 'static, '_> {
-            crate::test_intent::ExactTestIntent {
-                executable: ExecutablePath::Borrowed("target/debug/deps/fixture"),
-                test_name,
-            }
+        fn strings(pointers: &[*const c_char]) -> Vec<String> {
+            pointers
+                .iter()
+                .take_while(|pointer| !pointer.is_null())
+                .map(|pointer| {
+                    unsafe { CStr::from_ptr(*pointer) }
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
         }
 
         #[test]
-        fn c37_lowers_exact_argv_and_child_environment_into_caller_storage() {
-            let inherited_environment = [c_string(b"PARENT=kept\0"), c_string(b"CHILD=old\0")];
-            let child_overrides = [c_string(b"CHILD=override\0")];
-            let intent = exact_intent("alpha");
-            let mut argument_bytes = [0; 64];
-            let mut argument_pointers = [std::ptr::null(); 4];
-            let mut environment_pointers = [std::ptr::null(); 3];
+        fn c37_lowers_exact_argv_and_child_environment() {
+            let lowered = lower_arguments(
+                b"target/debug/deps/fixture",
+                &[b"--exact", b"alpha"],
+                &[b"PARENT=kept", b"CHILD=old"],
+                &[b"CHILD=override"],
+            )
+            .expect("launch data holds no NUL");
 
-            let (lowered_result, observed_allocations) =
-                crate::test_alloc::measure_allocations(|| {
-                    lower_unix_arguments(
-                        &intent,
-                        &inherited_environment,
-                        &child_overrides,
-                        &[],
-                        &mut argument_bytes,
-                        &mut argument_pointers,
-                        &mut environment_pointers,
-                    )
-                });
-            let lowered = lowered_result.expect("caller storage fits the launch data");
-
-            assert_eq!(lowered.argv().len(), 4);
-            assert_eq!(lowered.envp().len(), 3);
-            let lowered_bytes = lowered.argument_bytes();
-            assert_eq!(&lowered_bytes[..26], b"target/debug/deps/fixture\0");
-            assert_eq!(&lowered_bytes[26..34], b"--exact\0");
-            assert_eq!(&lowered_bytes[34..40], b"alpha\0");
-            assert_eq!(lowered.argv()[0], lowered_bytes.as_ptr().cast());
-            assert_eq!(lowered.argv()[1], lowered_bytes[26..].as_ptr().cast());
-            assert_eq!(lowered.argv()[2], lowered_bytes[34..].as_ptr().cast());
-            assert_eq!(lowered.envp()[0], inherited_environment[0].as_ptr());
-            assert_eq!(lowered.envp()[1], child_overrides[0].as_ptr());
+            assert_eq!(
+                strings(lowered.argv()),
+                ["target/debug/deps/fixture", "--exact", "alpha"]
+            );
+            assert_eq!(strings(lowered.envp()), ["PARENT=kept", "CHILD=override"]);
             assert!(lowered.argv()[3].is_null());
             assert!(lowered.envp()[2].is_null());
-            assert_eq!(observed_allocations, 0);
+            assert_eq!(
+                &lowered.bytes()[..26],
+                b"target/debug/deps/fixture\0"
+            );
             std::println!(
-                "{{\"inherited_entries\":1,\"child_overrides\":1,\"argv_pairs\":1,\"allocations\":{observed_allocations}}}"
+                "{{\"inherited_entries\":1,\"child_overrides\":1,\"argv_pairs\":1}}"
             );
         }
 
         #[test]
-        fn c52_forwards_ignored_flag_after_the_exact_test_name_without_allocating() {
-            let inherited_environment: [&CStr; 0] = [];
-            let child_overrides: [&CStr; 0] = [];
-            let harness_arguments = [b"--ignored".as_slice()];
-            let intent = exact_intent("fixture::ignored");
-            let mut argument_bytes = [0; 128];
-            let mut argument_pointers = [std::ptr::null(); 5];
-            let mut environment_pointers = [std::ptr::null(); 1];
+        fn c52_forwards_ignored_flag_after_the_exact_test_name() {
+            let lowered = lower_arguments(
+                b"target/debug/deps/fixture",
+                &[b"--exact", b"fixture::ignored", b"--ignored"],
+                &[],
+                &[],
+            )
+            .expect("launch data holds no NUL");
 
-            let (result, allocations) = crate::test_alloc::measure_allocations(|| {
-                lower_unix_arguments(
-                    &intent,
-                    &inherited_environment,
-                    &child_overrides,
-                    &harness_arguments,
-                    &mut argument_bytes,
-                    &mut argument_pointers,
-                    &mut environment_pointers,
-                )
-            });
-            let lowered = result.expect("fixed storage fits the ignored flag");
-            let harness_offset = b"target/debug/deps/fixture\0".len()
-                + b"--exact\0".len()
-                + intent.test_name().len()
-                + 1;
-
-            assert_eq!(lowered.argv().len(), 5);
             assert_eq!(
-                lowered.argv()[3],
-                lowered.argument_bytes()[harness_offset..].as_ptr().cast()
-            );
-            assert_eq!(
-                &lowered.argument_bytes()[harness_offset..harness_offset + b"--ignored\0".len()],
-                b"--ignored\0"
+                strings(lowered.argv()),
+                [
+                    "target/debug/deps/fixture",
+                    "--exact",
+                    "fixture::ignored",
+                    "--ignored"
+                ]
             );
             assert!(lowered.argv()[4].is_null());
-            assert_eq!(allocations, 0);
-            std::println!(
-                "{{\"exact_name_before_harness_flag\":1,\"ignored_flag_bytes\":9,\"allocations\":{allocations}}}"
-            );
-        }
-
-        #[test]
-        fn c37_rejects_one_byte_short_argv_storage_before_writing() {
-            let intent = exact_intent("alpha");
-            let mut argument_bytes = [0xA5; 39];
-            let original_bytes = argument_bytes;
-            let mut argument_pointers = [std::ptr::null(); 4];
-            let original_argument_pointers = argument_pointers;
-            let mut environment_pointers = [std::ptr::null(); 1];
-            let original_environment_pointers = environment_pointers;
-
-            let result = lower_unix_arguments(
-                &intent,
-                &[],
-                &[],
-                &[],
-                &mut argument_bytes,
-                &mut argument_pointers,
-                &mut environment_pointers,
-            );
-
-            assert_eq!(
-                result,
-                Err(UnixArgumentsError::ArgumentStorageTooSmall {
-                    required: 40,
-                    available: 39,
-                })
-            );
-            assert_eq!(argument_bytes, original_bytes);
-            assert_eq!(argument_pointers, original_argument_pointers);
-            assert_eq!(environment_pointers, original_environment_pointers);
-            std::println!("{{\"truncated_argv_control_rejected\":1,\"storage_unchanged\":1}}");
+            assert!(lowered.envp()[0].is_null());
+            std::println!("{{\"exact_name_before_harness_flag\":1,\"ignored_flag_bytes\":9}}");
         }
 
         #[test]
         fn c37_rejects_an_interior_nul_in_the_test_name() {
-            let intent = exact_intent("al\0pha");
-            let mut argument_bytes = [0xA5; 64];
-            let original_bytes = argument_bytes;
-            let mut argument_pointers = [std::ptr::null(); 4];
-            let original_argument_pointers = argument_pointers;
-            let mut environment_pointers = [std::ptr::null(); 1];
-            let original_environment_pointers = environment_pointers;
+            let result = lower_arguments(b"fixture", &[b"--exact", b"al\0pha"], &[], &[]);
 
-            let result = lower_unix_arguments(
-                &intent,
-                &[],
-                &[],
-                &[],
-                &mut argument_bytes,
-                &mut argument_pointers,
-                &mut environment_pointers,
-            );
-
-            assert_eq!(result, Err(UnixArgumentsError::InteriorNul));
-            assert_eq!(argument_bytes, original_bytes);
-            assert_eq!(argument_pointers, original_argument_pointers);
-            assert_eq!(environment_pointers, original_environment_pointers);
-            std::println!("{{\"interior_nul_control_rejected\":1,\"storage_unchanged\":1}}");
+            assert_eq!(result.unwrap_err(), ArgumentsError::InteriorNul);
+            std::println!("{{\"interior_nul_control_rejected\":1}}");
         }
 
         #[test]
-        fn c37_rejects_one_byte_short_argv_pointer_storage_before_writing() {
-            let intent = exact_intent("alpha");
-            let mut argument_bytes = [0; 64];
-            let original_bytes = argument_bytes;
-            let mut argument_pointers = [std::ptr::null(); 3];
-            let original_argument_pointers = argument_pointers;
-            let mut environment_pointers = [std::ptr::null(); 2];
-            let original_environment_pointers = environment_pointers;
+        fn c37_rejects_an_interior_nul_in_the_program() {
+            let result = lower_arguments(b"fix\0ture", &[], &[], &[]);
 
-            let result = lower_unix_arguments(
-                &intent,
-                &[],
-                &[],
-                &[],
-                &mut argument_bytes,
-                &mut argument_pointers,
-                &mut environment_pointers,
-            );
+            assert_eq!(result.unwrap_err(), ArgumentsError::InteriorNul);
+        }
+
+        #[test]
+        fn c37_rejects_an_environment_entry_without_a_key() {
+            let missing_separator = lower_arguments(b"fixture", &[], &[b"NOEQUALS"], &[]);
+            let empty_key = lower_arguments(b"fixture", &[], &[], &[b"=value"]);
 
             assert_eq!(
-                result,
-                Err(UnixArgumentsError::ArgumentPointersTooSmall {
-                    required: 4,
-                    available: 3,
-                })
+                missing_separator.unwrap_err(),
+                ArgumentsError::InvalidEnvironmentEntry
             );
-            assert_eq!(argument_bytes, original_bytes);
-            assert_eq!(argument_pointers, original_argument_pointers);
-            assert_eq!(environment_pointers, original_environment_pointers);
-            std::println!("{{\"short_argv_pointer_control_rejected\":1,\"storage_unchanged\":1}}");
+            assert_eq!(
+                empty_key.unwrap_err(),
+                ArgumentsError::InvalidEnvironmentEntry
+            );
+        }
+
+        #[test]
+        fn c37_keeps_inherited_order_and_appends_overrides_last() {
+            let lowered = lower_arguments(
+                b"fixture",
+                &[],
+                &[b"A=1", b"B=2", b"C=3"],
+                &[b"B=9", b"D=4"],
+            )
+            .expect("launch data holds no NUL");
+
+            assert_eq!(strings(lowered.envp()), ["A=1", "C=3", "B=9", "D=4"]);
         }
     }
 }
-#[cfg(all(unix, feature = "proxima-codec", feature = "proxima-primitives"))]
+#[cfg(all(unix, feature = "edge-os"))]
 pub use lowering::*;
 
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
@@ -446,12 +251,12 @@ mod environment {
     use core::marker::PhantomData;
 
     /// A borrowed, null-terminated Unix environment pointer table.
-    pub struct UnixEnvironment<'environment> {
+    pub struct Environment<'environment> {
         entries: *const *const c_char,
         lifetime: PhantomData<&'environment CStr>,
     }
 
-    impl<'environment> UnixEnvironment<'environment> {
+    impl<'environment> Environment<'environment> {
         /// Binds a process environment whose pointer table and strings remain stable.
         ///
         /// # Safety
@@ -495,12 +300,12 @@ mod environment {
             unsafe { Self::from_raw(environ) }
         }
 
-        /// Copies C string references into fixed caller storage for child inheritance.
+        /// Lends each entry as `KEY=VALUE` bytes into fixed caller storage for child inheritance.
         ///
         /// # Errors
         ///
         /// Returns the entry count the environment holds, plus one, when `output` cannot hold every entry.
-        pub fn collect(&self, output: &mut [&'environment CStr]) -> Result<usize, usize> {
+        pub fn collect(&self, output: &mut [&'environment [u8]]) -> Result<usize, usize> {
             if self.entries.is_null() {
                 return Ok(0);
             }
@@ -513,15 +318,15 @@ mod environment {
                 if count == output.len() {
                     return Err(count + 1);
                 }
-                output[count] = unsafe { CStr::from_ptr(entry) };
+                output[count] = unsafe { CStr::from_ptr(entry) }.to_bytes();
                 count += 1;
             }
         }
 
         /// Lends the bytes after `KEY=`, preserving empty-present versus absent.
         #[must_use]
-        pub fn get(&self, key: &CStr) -> Option<&'environment [u8]> {
-            if self.entries.is_null() || key.to_bytes().is_empty() {
+        pub fn get(&self, key: &[u8]) -> Option<&'environment [u8]> {
+            if self.entries.is_null() || key.is_empty() {
                 return None;
             }
             let mut index = 0;
@@ -532,7 +337,7 @@ mod environment {
                 }
                 let bytes: &'environment [u8] = unsafe { CStr::from_ptr(entry) }.to_bytes();
                 if let Some(value) = bytes
-                    .strip_prefix(key.to_bytes())
+                    .strip_prefix(key)
                     .and_then(|suffix| suffix.strip_prefix(b"="))
                 {
                     return Some(value);
@@ -547,7 +352,7 @@ mod environment {
         use core::ffi::{CStr, c_char};
         use core::ptr;
 
-        use super::UnixEnvironment;
+        use super::Environment;
 
         fn same_presence(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
             left.is_some() == right.is_some()
@@ -562,25 +367,26 @@ mod environment {
                     ("NO_COLOR", Some("")),
                 ],
                 || {
-                    let environment = unsafe { UnixEnvironment::current() };
+                    let environment = unsafe { Environment::current() };
                     let expected = [
-                        (c"CARGO_VAL_JOBS", b"2".as_slice()),
-                        (c"CARGO_VAL_COLOR", b"true".as_slice()),
-                        (c"NO_COLOR", b"".as_slice()),
+                        (b"CARGO_VAL_JOBS".as_slice(), b"2".as_slice()),
+                        (b"CARGO_VAL_COLOR".as_slice(), b"true".as_slice()),
+                        (b"NO_COLOR".as_slice(), b"".as_slice()),
                     ];
                     let mut recognized_keys = 0;
                     let mut value_copies = 0;
                     for (key, bytes) in expected {
                         let value = environment.get(key).expect("fixture key is present");
                         assert_eq!(value, bytes);
-                        let direct = unsafe { libc::getenv(key.as_ptr()) };
+                        let key_c = std::ffi::CString::new(key).expect("fixture key holds no nul");
+                        let direct = unsafe { libc::getenv(key_c.as_ptr()) };
                         assert!(!direct.is_null(), "native getenv finds fixture key");
                         value_copies += usize::from(value.as_ptr() != direct.cast::<u8>());
                         recognized_keys += 1;
                     }
                     assert_eq!(recognized_keys, 3);
                     assert_eq!(value_copies, 0);
-                    assert!(same_presence(environment.get(c"NO_COLOR"), Some(b"")));
+                    assert!(same_presence(environment.get(b"NO_COLOR"), Some(b"")));
                     std::println!(
                         "{{\"recognized_keys\":{recognized_keys},\"empty_no_color_present\":1,\"value_copies\":{value_copies}}}"
                     );
@@ -592,10 +398,10 @@ mod environment {
         fn c52_unix_rejects_null_for_present_empty_no_color() {
             let present_entries: [*const c_char; 2] = [c"NO_COLOR=".as_ptr(), ptr::null()];
             let absent_entries: [*const c_char; 1] = [ptr::null()];
-            let present = unsafe { UnixEnvironment::from_raw(present_entries.as_ptr()) };
-            let absent = unsafe { UnixEnvironment::from_raw(absent_entries.as_ptr()) };
-            let present_value = present.get(c"NO_COLOR");
-            let missing_value = absent.get(c"NO_COLOR");
+            let present = unsafe { Environment::from_raw(present_entries.as_ptr()) };
+            let absent = unsafe { Environment::from_raw(absent_entries.as_ptr()) };
+            let present_value = present.get(b"NO_COLOR");
+            let missing_value = absent.get(b"NO_COLOR");
             assert_eq!(present_value, Some(b"".as_slice()));
             assert_eq!(missing_value, None);
             assert!(same_presence(present_value, Some(b"")));

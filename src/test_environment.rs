@@ -12,7 +12,7 @@ use crate::cargo_message::{BuildEnvironment, BuildScript, TestArtifact};
 
 /// Most `KEY=VALUE` entries one executable can receive.
 pub const MAX_ENTRIES: usize = 64;
-pub use crate::edge_args::{DYLIB_PATH_KEY, DYLIB_PATH_KEY_C};
+pub use crate::edge_args::DYLIB_PATH_KEY;
 use crate::edge_args::{DEPS_SUFFIX, LOADER_DEFAULT_FALLBACKS, MAIN_SEPARATOR, PATH_SEPARATOR};
 
 /// Bounded failures while building one executable's environment.
@@ -325,37 +325,16 @@ impl TestEnvironmentLayout {
         (index < self.count).then(|| text(storage, self.entries[index]))
     }
 
-    /// Returns one entry as a NUL-terminated C string for `posix_spawn`.
-    #[must_use]
-    pub fn c_entry<'storage>(
-        &self,
-        storage: &'storage [u8],
-        index: usize,
-    ) -> Option<&'storage CStr> {
-        (index < self.count).then(|| c_text(storage, self.entries[index]))
-    }
-
     /// Returns the package directory every test of this executable starts in.
     #[must_use]
     pub fn current_directory<'storage>(&self, storage: &'storage [u8]) -> &'storage str {
         text(storage, self.current_directory)
-    }
-
-    /// Returns the package directory as a NUL-terminated C string.
-    #[must_use]
-    pub fn c_current_directory<'storage>(&self, storage: &'storage [u8]) -> &'storage CStr {
-        c_text(storage, self.current_directory)
     }
 }
 
 fn text(storage: &[u8], span: Span) -> &str {
     // safety: `build` wrote only whole `&str` copies and ASCII separators into this span.
     unsafe { str::from_utf8_unchecked(&storage[span.start..span.end]) }
-}
-
-fn c_text(storage: &[u8], span: Span) -> &CStr {
-    // safety: `build` verified this span plus its terminator holds exactly one NUL.
-    unsafe { CStr::from_bytes_with_nul_unchecked(&storage[span.start..=span.end]) }
 }
 
 fn write_dylib_path(
@@ -649,7 +628,7 @@ mod tests {
 
         assert_eq!(layout.current_directory(&storage), MANIFEST_DIR);
         assert_eq!(
-            layout.c_current_directory(&storage).to_bytes(),
+            layout.current_directory(&storage).as_bytes(),
             MANIFEST_DIR.as_bytes()
         );
         let expected = [
@@ -812,12 +791,11 @@ mod tests {
             for _ in 0..1000 {
                 for index in 0..layout.len() {
                     checksum += layout
-                        .c_entry(&storage, index)
+                        .entry(&storage, index)
                         .expect("index is below len")
-                        .to_bytes()
                         .len();
                 }
-                checksum += layout.c_current_directory(&storage).to_bytes().len();
+                checksum += layout.current_directory(&storage).len();
             }
             checksum
         });

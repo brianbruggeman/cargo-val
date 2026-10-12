@@ -1,7 +1,7 @@
 #[cfg(not(test))]
 use cargo_val::cli::{CliAction, CliParser};
 #[cfg(not(test))]
-use std::ffi::{CString, OsString};
+use std::ffi::OsString;
 #[cfg(not(test))]
 use std::io::{self, Write};
 #[cfg(not(test))]
@@ -24,26 +24,25 @@ const NOT_IMPLEMENTED: &[u8] = b"cargo-val is not implemented yet; use --help fo
 
 #[cfg(not(test))]
 fn main() -> ExitCode {
-    let arguments: Result<Vec<CString>, _> = std::env::args_os()
+    let arguments: Vec<Vec<u8>> = std::env::args_os()
         .skip(1)
-        .map(|argument| CString::new(OsString::into_encoded_bytes(argument)))
+        .map(OsString::into_encoded_bytes)
         .collect();
-    let Ok(arguments) = arguments else {
+    if arguments.iter().any(|argument| argument.contains(&0)) {
         let _ = writeln!(io::stderr(), "cargo-val: an argument contains a nul byte");
         return ExitCode::from(2);
-    };
+    }
     match banner_exit(&arguments) {
         Some(code) => code,
         None => run_arguments(arguments),
     }
 }
 
-// cargo arguments are forwarded as C strings, so each one keeps its nul terminator in memory behind the slice
 #[cfg(not(test))]
-fn banner_exit(arguments: &[CString]) -> Option<ExitCode> {
+fn banner_exit(arguments: &[Vec<u8>]) -> Option<ExitCode> {
     let mut parser = CliParser::new();
     for argument in arguments {
-        parser.push(argument.to_bytes());
+        parser.push(argument);
         match parser.action() {
             CliAction::Run => {}
             CliAction::Help => return Some(banner_status(HELP_BANNER)),
@@ -65,7 +64,7 @@ fn banner_status(banner: &[u8]) -> ExitCode {
     feature = "proxima-codec",
     feature = "proxima-primitives"
 ))]
-fn run_arguments(arguments: Vec<CString>) -> ExitCode {
+fn run_arguments(arguments: Vec<Vec<u8>>) -> ExitCode {
     let root = prime::os::core_shard::run_on_this_thread(
         proxima_runtime::CoreId(0),
         cargo_val::run::drive(arguments),
@@ -103,7 +102,7 @@ fn exit_status(code: i32) -> ExitCode {
         feature = "proxima-primitives"
     ))
 ))]
-fn run_arguments(_arguments: Vec<CString>) -> ExitCode {
+fn run_arguments(_arguments: Vec<Vec<u8>>) -> ExitCode {
     let _ = io::stderr().write_all(NOT_IMPLEMENTED);
     ExitCode::from(2)
 }

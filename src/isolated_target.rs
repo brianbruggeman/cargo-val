@@ -2,8 +2,6 @@
 //! never the ones another cargo process holds, and the lock-wait detector for the one lock
 //! that cannot be isolated.
 
-use core::ffi::CStr;
-
 use crate::metadata_scan::PATH_CAPACITY;
 
 const OPTION: &[u8] = b"--target-dir=";
@@ -30,7 +28,7 @@ pub fn workspace_key(workspace_root: &[u8]) -> [u8; KEY_LENGTH] {
     key
 }
 
-/// One child's `--target-dir=<directory>` argument, NUL-terminated for `posix_spawn`.
+/// One child's `--target-dir=<directory>` argument.
 pub struct ChildDirectory {
     bytes: [u8; ARGUMENT_CAPACITY],
     length: usize,
@@ -55,8 +53,8 @@ impl ChildDirectory {
 
     /// The whole `--target-dir=<directory>` argument.
     #[must_use]
-    pub fn argument(&self) -> &CStr {
-        CStr::from_bytes_with_nul(&self.bytes[..=self.length]).unwrap_or(c"--target-dir=")
+    pub fn argument(&self) -> &[u8] {
+        &self.bytes[..self.length]
     }
 
     /// The directory alone, for messages.
@@ -237,7 +235,7 @@ mod tests {
         let key = core::str::from_utf8(&key).expect("hex is ascii");
 
         assert_eq!(
-            directories.test.argument().to_bytes(),
+            directories.test.argument(),
             std::format!("--target-dir=/tmp/cargo_target/cargo-val/{key}/test").as_bytes()
         );
         assert_eq!(

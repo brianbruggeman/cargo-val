@@ -1,20 +1,20 @@
 //! Single-owner exact child launch from one borrowed listing intent.
 
-use core::ffi::{CStr, c_char, c_int};
+use std::vec::Vec;
 
+use crate::ExecutablePath;
 use crate::child_completion::{ChildCompletion, ChildCompletionEvent, InvalidChildCompletionEvent};
-use crate::edge_spawn::{UnixChild, UnixSpawnError, spawn_unix};
+use crate::edge_spawn::{Child, SpawnError, spawn};
 use crate::host_event::{HostEvent, StaleHostEvent};
 use crate::outcomes::{OutcomeError, OutcomeLedger, StartError, TerminalOutcome};
 use crate::reporter::{ReportError, write_report};
 use crate::schedule::{SessionSlotId, SessionSlots};
 use crate::test_intent::ExactTestIntent;
-use crate::edge_args::{UnixArgumentsError, lower_unix_arguments};
 
 /// One owned child and its identity retained while the listing chunk is reused.
 #[derive(Debug)]
-pub struct RunningUnixChild<const NAME_CAPACITY: usize> {
-    child: UnixChild,
+pub struct RunningChild<const NAME_CAPACITY: usize> {
+    child: Child,
     name: [u8; NAME_CAPACITY],
     name_length: usize,
     target: usize,
@@ -22,7 +22,7 @@ pub struct RunningUnixChild<const NAME_CAPACITY: usize> {
     exit_status: Option<i32>,
 }
 
-impl<const NAME_CAPACITY: usize> RunningUnixChild<NAME_CAPACITY> {
+impl<const NAME_CAPACITY: usize> RunningChild<NAME_CAPACITY> {
     /// Ordinal of the test binary this child was listed from.
     #[must_use]
     pub const fn target(&self) -> usize {
@@ -31,7 +31,7 @@ impl<const NAME_CAPACITY: usize> RunningUnixChild<NAME_CAPACITY> {
 
     /// Returns the child watched by the platform event source.
     #[must_use]
-    pub const fn child(&self) -> &UnixChild {
+    pub const fn child(&self) -> &Child {
         &self.child
     }
 
@@ -43,28 +43,26 @@ impl<const NAME_CAPACITY: usize> RunningUnixChild<NAME_CAPACITY> {
 
     /// Takes ownership when the child is retired from its slot.
     #[must_use]
-    pub fn into_child(self) -> UnixChild {
+    pub fn into_child(self) -> Child {
         self.child
     }
 }
 
 /// Launch rejection, with a live child returned if insertion cannot complete.
 #[derive(Debug)]
-pub enum UnixLaunchError<const NAME_CAPACITY: usize> {
+pub enum LaunchError<const NAME_CAPACITY: usize> {
     /// No live-child slot is available before the OS launch.
     Full,
     /// The same test name is already live in this session table.
     Duplicate,
     /// Inline identity storage is too short for this test name.
     NameTooLong { required: usize, available: usize },
-    /// Caller-owned argv or env storage could not represent the intent.
-    Arguments(UnixArgumentsError),
     /// The OS rejected child creation.
-    Spawn(UnixSpawnError),
+    Spawn(SpawnError),
     /// An unexpected slot rejection returns the spawned child to the owner.
-    CapacityChanged(RunningUnixChild<NAME_CAPACITY>),
+    CapacityChanged(RunningChild<NAME_CAPACITY>),
     /// Ledger admission failed without losing ownership of the spawned child.
-    Accounting(StartError<RunningUnixChild<NAME_CAPACITY>>),
+    Accounting(StartError<RunningChild<NAME_CAPACITY>>),
 }
 
 /// The reason an exact launch was refused, without the child it may have returned.
@@ -76,48 +74,45 @@ pub enum LaunchCause {
     Duplicate,
     /// Inline identity storage was too short for the test name.
     NameTooLong { required: usize, available: usize },
-    /// Argument or environment lowering failed.
-    Arguments(UnixArgumentsError),
-    /// `posix_spawn` returned this error number.
-    Spawn { errno: c_int },
+    /// The OS refused the launch with this raw error code.
+    Spawn { os_code: i32 },
     /// The slot table rejected a child that the capacity check had admitted.
     CapacityChanged,
     /// Outcome accounting refused the spawned child.
     Accounting(OutcomeError),
 }
 
-impl<const NAME_CAPACITY: usize> From<&UnixLaunchError<NAME_CAPACITY>> for LaunchCause {
-    fn from(error: &UnixLaunchError<NAME_CAPACITY>) -> Self {
+impl<const NAME_CAPACITY: usize> From<&LaunchError<NAME_CAPACITY>> for LaunchCause {
+    fn from(error: &LaunchError<NAME_CAPACITY>) -> Self {
         match error {
-            UnixLaunchError::Full => Self::Full,
-            UnixLaunchError::Duplicate => Self::Duplicate,
-            UnixLaunchError::NameTooLong {
+            LaunchError::Full => Self::Full,
+            LaunchError::Duplicate => Self::Duplicate,
+            LaunchError::NameTooLong {
                 required,
                 available,
             } => Self::NameTooLong {
                 required: *required,
                 available: *available,
             },
-            UnixLaunchError::Arguments(error) => Self::Arguments(*error),
-            UnixLaunchError::Spawn(error) => Self::Spawn { errno: error.code },
-            UnixLaunchError::CapacityChanged(_) => Self::CapacityChanged,
-            UnixLaunchError::Accounting(error) => Self::Accounting(error.error),
+            LaunchError::Spawn(error) => Self::Spawn { os_code: error.os_code },
+            LaunchError::CapacityChanged(_) => Self::CapacityChanged,
+            LaunchError::Accounting(error) => Self::Accounting(error.error),
         }
     }
 }
 
 /// One owner of the same live child table during exact launch.
-pub enum UnixLaunchOwner<'call, 'ledger, const NAME_CAPACITY: usize, const CAPACITY: usize> {
+pub enum LaunchOwner<'call, 'ledger, const NAME_CAPACITY: usize, const CAPACITY: usize> {
     /// Direct session ownership before outcome accounting is attached.
-    Sessions(&'call mut SessionSlots<RunningUnixChild<NAME_CAPACITY>, CAPACITY>),
+    Sessions(&'call mut SessionSlots<RunningChild<NAME_CAPACITY>, CAPACITY>),
     /// Outcome accounting owns the same table and counts this child on admission.
-    Ledger(&'call mut OutcomeLedger<'ledger, RunningUnixChild<NAME_CAPACITY>, CAPACITY>),
+    Ledger(&'call mut OutcomeLedger<'ledger, RunningChild<NAME_CAPACITY>, CAPACITY>),
 }
 
 impl<const NAME_CAPACITY: usize, const CAPACITY: usize>
-    UnixLaunchOwner<'_, '_, NAME_CAPACITY, CAPACITY>
+    LaunchOwner<'_, '_, NAME_CAPACITY, CAPACITY>
 {
-    fn sessions(&self) -> &SessionSlots<RunningUnixChild<NAME_CAPACITY>, CAPACITY> {
+    fn sessions(&self) -> &SessionSlots<RunningChild<NAME_CAPACITY>, CAPACITY> {
         match self {
             Self::Sessions(sessions) => sessions,
             Self::Ledger(ledger) => ledger.sessions(),
@@ -126,19 +121,19 @@ impl<const NAME_CAPACITY: usize, const CAPACITY: usize>
 
     fn admit(
         &mut self,
-        child: RunningUnixChild<NAME_CAPACITY>,
-    ) -> Result<SessionSlotId, UnixLaunchError<NAME_CAPACITY>> {
+        child: RunningChild<NAME_CAPACITY>,
+    ) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
         match self {
             Self::Sessions(sessions) => sessions
                 .insert(child)
-                .map_err(UnixLaunchError::CapacityChanged),
-            Self::Ledger(ledger) => ledger.start(child).map_err(UnixLaunchError::Accounting),
+                .map_err(LaunchError::CapacityChanged),
+            Self::Ledger(ledger) => ledger.start(child).map_err(LaunchError::Accounting),
         }
     }
 }
 
 /// Borrowed launch input and caller-owned OS representation storage.
-pub struct UnixLaunchInput<
+pub struct LaunchInput<
     'call,
     'ledger,
     'executable,
@@ -150,36 +145,30 @@ pub struct UnixLaunchInput<
     /// Ordinal of the test binary this intent was listed from; a test name is live at most once per target.
     pub target: usize,
     /// Single-owner fixed table that receives the child immediately.
-    pub owner: UnixLaunchOwner<'call, 'ledger, NAME_CAPACITY, CAPACITY>,
+    pub owner: LaunchOwner<'call, 'ledger, NAME_CAPACITY, CAPACITY>,
     /// Borrowed test path and name from the listing source.
     pub intent: ExactTestIntent<'executable, 'scratch, 'name>,
     /// Borrowed inherited environment entries in `KEY=VALUE` form.
-    pub inherited_environment: &'call [&'call CStr],
+    pub inherited_environment: &'call [&'call [u8]],
     /// Borrowed child-only environment entries that override inherited keys.
-    pub child_overrides: &'call [&'call CStr],
+    pub child_overrides: &'call [&'call [u8]],
     /// Borrowed test-harness flags appended after the exact test name.
     pub harness_arguments: &'call [&'call [u8]],
-    /// Directory installed by the host spawn file actions.
-    pub current_directory: &'call CStr,
-    /// Bytes used once to lower argv to null-terminated OS strings.
-    pub argument_bytes: &'call mut [u8],
-    /// Pointers into `argument_bytes` including the null sentinel.
-    pub argument_pointers: &'call mut [*const c_char],
-    /// Pointers into borrowed environment entries including the null sentinel.
-    pub environment_pointers: &'call mut [*const c_char],
+    /// Directory the child starts in.
+    pub current_directory: &'call [u8],
 }
 
 impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
-    UnixLaunchInput<'call, 'ledger, '_, '_, '_, NAME_CAPACITY, CAPACITY>
+    LaunchInput<'call, 'ledger, '_, '_, '_, NAME_CAPACITY, CAPACITY>
 {
     /// Starts one exact child and places it directly in a slot.
     ///
     /// # Errors
     ///
-    /// Returns [`UnixLaunchError`] when the table is full, the name is live or too long, the argument storage is short, the spawn fails, or accounting refuses the child.
-    pub fn launch(mut self) -> Result<SessionSlotId, UnixLaunchError<NAME_CAPACITY>> {
+    /// Returns [`LaunchError`] when the table is full, the name is live or too long, the spawn fails, or accounting refuses the child.
+    pub fn launch(mut self) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
         if self.owner.sessions().is_full() {
-            return Err(UnixLaunchError::Full);
+            return Err(LaunchError::Full);
         }
         let name_bytes = self.intent.test_name().as_bytes();
         if self
@@ -187,10 +176,10 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
             .sessions()
             .any(|session| session.target == self.target && session.name_bytes() == name_bytes)
         {
-            return Err(UnixLaunchError::Duplicate);
+            return Err(LaunchError::Duplicate);
         }
         if name_bytes.len() > NAME_CAPACITY {
-            return Err(UnixLaunchError::NameTooLong {
+            return Err(LaunchError::NameTooLong {
                 required: name_bytes.len(),
                 available: NAME_CAPACITY,
             });
@@ -198,19 +187,19 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
 
         let mut name = [0; NAME_CAPACITY];
         name[..name_bytes.len()].copy_from_slice(name_bytes);
-        let arguments = lower_unix_arguments(
-            &self.intent,
+        let arguments: Vec<&[u8]> = [b"--exact".as_slice(), name_bytes]
+            .into_iter()
+            .chain(self.harness_arguments.iter().copied())
+            .collect();
+        let child = spawn(
+            executable_bytes(&self.intent),
+            &arguments,
             self.inherited_environment,
             self.child_overrides,
-            self.harness_arguments,
-            self.argument_bytes,
-            self.argument_pointers,
-            self.environment_pointers,
+            Some(self.current_directory),
         )
-        .map_err(UnixLaunchError::Arguments)?;
-        let child =
-            spawn_unix(&arguments, self.current_directory).map_err(UnixLaunchError::Spawn)?;
-        let session = RunningUnixChild {
+        .map_err(LaunchError::Spawn)?;
+        let session = RunningChild {
             child,
             name,
             name_length: name_bytes.len(),
@@ -222,9 +211,15 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
     }
 }
 
+fn executable_bytes<'intent>(intent: &ExactTestIntent<'intent, 'intent, '_>) -> &'intent [u8] {
+    match intent.executable() {
+        ExecutablePath::Borrowed(path) | ExecutablePath::Scratch(path) => path.as_bytes(),
+    }
+}
+
 /// One accepted child event or one terminal label written to caller storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnixOutcomeStep<'bytes> {
+pub enum OutcomeStep<'bytes> {
     /// Borrowed stdout bytes retain their host buffer address.
     Stdout(&'bytes [u8]),
     /// Borrowed stderr bytes retain their host buffer address.
@@ -242,7 +237,7 @@ pub enum UnixOutcomeStep<'bytes> {
 
 /// Invalid event, lifecycle transition, accounting, or report storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnixOutcomeError {
+pub enum ChildOutcomeError {
     Stale(StaleHostEvent),
     InvalidCompletion(InvalidChildCompletionEvent),
     Accounting(OutcomeError),
@@ -266,7 +261,7 @@ pub enum LibtestVerdict {
 }
 
 /// One borrowed host event and the sole mutable outcome owner.
-pub struct UnixOutcomeInput<
+pub struct OutcomeInput<
     'call,
     'ledger,
     'bytes,
@@ -274,7 +269,7 @@ pub struct UnixOutcomeInput<
     const CAPACITY: usize,
 > {
     /// Coordinator-owned accounting and live child sessions.
-    pub ledger: &'call mut OutcomeLedger<'ledger, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+    pub ledger: &'call mut OutcomeLedger<'ledger, RunningChild<NAME_CAPACITY>, CAPACITY>,
     /// Readiness payload with its generation-checked slot.
     pub event: HostEvent<'bytes>,
     /// Caller-owned output for at most one terminal label.
@@ -286,27 +281,27 @@ pub struct UnixOutcomeInput<
 }
 
 impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: usize>
-    UnixOutcomeInput<'call, 'ledger, 'bytes, NAME_CAPACITY, CAPACITY>
+    OutcomeInput<'call, 'ledger, 'bytes, NAME_CAPACITY, CAPACITY>
 {
     /// Joins host validation, child completion, accounting, and reporting.
     ///
     /// # Errors
     ///
-    /// Returns [`UnixOutcomeError`] when the event is stale or the ledger refuses the transition.
-    pub fn apply(self) -> Result<UnixOutcomeStep<'bytes>, UnixOutcomeError> {
+    /// Returns [`ChildOutcomeError`] when the event is stale or the ledger refuses the transition.
+    pub fn apply(self) -> Result<OutcomeStep<'bytes>, ChildOutcomeError> {
         let accepted = self
             .event
             .admit(self.ledger.sessions())
-            .map_err(UnixOutcomeError::Stale)?;
+            .map_err(ChildOutcomeError::Stale)?;
         let slot = accepted.slot();
         let (completion_event, exit_status) = match accepted {
             HostEvent::Stdout { bytes, .. } => {
                 Self::record_bytes(self.ledger, slot, ChildCompletionEvent::StdoutBytes)?;
-                return Ok(UnixOutcomeStep::Stdout(bytes));
+                return Ok(OutcomeStep::Stdout(bytes));
             }
             HostEvent::Stderr { bytes, .. } => {
                 Self::record_bytes(self.ledger, slot, ChildCompletionEvent::StderrBytes)?;
-                return Ok(UnixOutcomeStep::Stderr(bytes));
+                return Ok(OutcomeStep::Stderr(bytes));
             }
             HostEvent::StdoutEof { .. } => (ChildCompletionEvent::StdoutEof, None),
             HostEvent::StderrEof { .. } => (ChildCompletionEvent::StderrEof, None),
@@ -316,20 +311,20 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
             let session = self
                 .ledger
                 .session_mut(slot)
-                .ok_or(UnixOutcomeError::Accounting(OutcomeError::UnknownSession))?;
+                .ok_or(ChildOutcomeError::Accounting(OutcomeError::UnknownSession))?;
             let previous_completion = session.completion;
             let previous_status = session.exit_status;
             let complete = session
                 .completion
                 .apply(completion_event)
-                .map_err(UnixOutcomeError::InvalidCompletion)?;
+                .map_err(ChildOutcomeError::InvalidCompletion)?;
             if let Some(status) = exit_status {
                 session.exit_status = Some(status);
             }
             (previous_completion, previous_status, complete)
         };
         if !complete {
-            return Ok(UnixOutcomeStep::Pending);
+            return Ok(OutcomeStep::Pending);
         }
 
         let status = self
@@ -337,9 +332,9 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
             .sessions()
             .get(slot)
             .and_then(|session| session.exit_status)
-            .ok_or(UnixOutcomeError::MissingExitStatus)?;
+            .ok_or(ChildOutcomeError::MissingExitStatus)?;
         let outcome = match (status, self.verdict) {
-            (0, LibtestVerdict::NothingRan) => return Err(UnixOutcomeError::NothingRan),
+            (0, LibtestVerdict::NothingRan) => return Err(ChildOutcomeError::NothingRan),
             (0, LibtestVerdict::Skipped) => TerminalOutcome::Ignored,
             (0, _) => TerminalOutcome::Passed,
             _ => TerminalOutcome::Failed,
@@ -347,10 +342,10 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
         let report = self
             .ledger
             .can_finish(slot, outcome)
-            .map_err(UnixOutcomeError::Accounting)
+            .map_err(ChildOutcomeError::Accounting)
             .and_then(|()| {
                 write_report(&[outcome], self.color, self.report_output)
-                    .map_err(UnixOutcomeError::Report)
+                    .map_err(ChildOutcomeError::Report)
             });
         let report_bytes = match report {
             Ok(report_bytes) => report_bytes,
@@ -358,7 +353,7 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
                 let session = self
                     .ledger
                     .session_mut(slot)
-                    .ok_or(UnixOutcomeError::Accounting(OutcomeError::UnknownSession))?;
+                    .ok_or(ChildOutcomeError::Accounting(OutcomeError::UnknownSession))?;
                 session.completion = previous_completion;
                 session.exit_status = previous_status;
                 return Err(error);
@@ -366,26 +361,26 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
         };
         self.ledger
             .finish(slot, outcome)
-            .map_err(UnixOutcomeError::Accounting)?;
-        Ok(UnixOutcomeStep::Reported {
+            .map_err(ChildOutcomeError::Accounting)?;
+        Ok(OutcomeStep::Reported {
             outcome,
             report_bytes,
         })
     }
 
     fn record_bytes(
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, CAPACITY>,
         slot: SessionSlotId,
         event: ChildCompletionEvent,
-    ) -> Result<(), UnixOutcomeError> {
+    ) -> Result<(), ChildOutcomeError> {
         let session = ledger
             .session_mut(slot)
-            .ok_or(UnixOutcomeError::Accounting(OutcomeError::UnknownSession))?;
+            .ok_or(ChildOutcomeError::Accounting(OutcomeError::UnknownSession))?;
         session
             .completion
             .apply(event)
             .map(|_| ())
-            .map_err(UnixOutcomeError::InvalidCompletion)
+            .map_err(ChildOutcomeError::InvalidCompletion)
     }
 }
 
@@ -397,15 +392,14 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
 ))]
 mod tests {
     use core::convert::Infallible;
-    use core::ffi::{CStr, c_char};
     use core::pin::Pin;
     use core::task::{Context, Poll, Waker};
 
     use proxima_core::io::AsyncRead;
 
     use super::{
-        LibtestVerdict, RunningUnixChild, UnixLaunchError, UnixLaunchInput, UnixLaunchOwner,
-        UnixOutcomeError, UnixOutcomeInput, UnixOutcomeStep,
+        LibtestVerdict, RunningChild, LaunchError, LaunchInput, LaunchOwner,
+        ChildOutcomeError, OutcomeInput, OutcomeStep,
     };
     use crate::ExecutablePath;
     use crate::ExitSource;
@@ -457,33 +451,26 @@ mod tests {
     }
 
     fn launch<const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        sessions: &mut SessionSlots<RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        sessions: &mut SessionSlots<RunningChild<NAME_CAPACITY>, CAPACITY>,
         intent: ExactTestIntent<'_, '_, '_>,
-    ) -> Result<SessionSlotId, UnixLaunchError<NAME_CAPACITY>> {
+    ) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
         launch_target(sessions, intent, 0)
     }
 
     fn launch_target<const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        sessions: &mut SessionSlots<RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        sessions: &mut SessionSlots<RunningChild<NAME_CAPACITY>, CAPACITY>,
         intent: ExactTestIntent<'_, '_, '_>,
         target: usize,
-    ) -> Result<SessionSlotId, UnixLaunchError<NAME_CAPACITY>> {
-        let inherited: [&CStr; 0] = [];
-        let overrides = [c"CARGO_VAL_C51A_CHILD=1"];
-        let mut argument_bytes = [0; 512];
-        let mut argument_pointers: [*const c_char; 5] = [core::ptr::null(); 5];
-        let mut environment_pointers: [*const c_char; 2] = [core::ptr::null(); 2];
-        UnixLaunchInput {
+    ) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
+        let overrides = [b"CARGO_VAL_C51A_CHILD=1".as_slice()];
+        LaunchInput {
             target,
-            owner: UnixLaunchOwner::Sessions(sessions),
+            owner: LaunchOwner::Sessions(sessions),
             intent,
-            inherited_environment: &inherited,
+            inherited_environment: &[],
             child_overrides: &overrides,
             harness_arguments: &[],
-            current_directory: c"/",
-            argument_bytes: &mut argument_bytes,
-            argument_pointers: &mut argument_pointers,
-            environment_pointers: &mut environment_pointers,
+            current_directory: b"/",
         }
         .launch()
     }
@@ -499,35 +486,28 @@ mod tests {
     }
 
     fn launch_accounted<const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, CAPACITY>,
         intent: ExactTestIntent<'_, '_, '_>,
-        child_overrides: &[&CStr],
-    ) -> Result<SessionSlotId, UnixLaunchError<NAME_CAPACITY>> {
-        let inherited: [&CStr; 0] = [];
-        let mut argument_bytes = [0; 512];
-        let mut argument_pointers: [*const c_char; 5] = [core::ptr::null(); 5];
-        let mut environment_pointers: [*const c_char; 2] = [core::ptr::null(); 2];
-        UnixLaunchInput {
+        child_overrides: &[&[u8]],
+    ) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
+        LaunchInput {
             target: 0,
-            owner: UnixLaunchOwner::Ledger(ledger),
+            owner: LaunchOwner::Ledger(ledger),
             intent,
-            inherited_environment: &inherited,
+            inherited_environment: &[],
             child_overrides,
             harness_arguments: &[],
-            current_directory: c"/",
-            argument_bytes: &mut argument_bytes,
-            argument_pointers: &mut argument_pointers,
-            environment_pointers: &mut environment_pointers,
+            current_directory: b"/",
         }
         .launch()
     }
 
     fn deliver<'bytes, const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, CAPACITY>,
         event: HostEvent<'bytes>,
         report_output: &mut [u8],
-    ) -> Result<UnixOutcomeStep<'bytes>, UnixOutcomeError> {
-        UnixOutcomeInput {
+    ) -> Result<OutcomeStep<'bytes>, ChildOutcomeError> {
+        OutcomeInput {
             ledger,
             event,
             report_output,
@@ -538,7 +518,7 @@ mod tests {
     }
 
     fn consume_stream<const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, CAPACITY>,
         slot: SessionSlotId,
         descriptor: libc::c_int,
         stdout: bool,
@@ -559,7 +539,7 @@ mod tests {
                 let step =
                     deliver(ledger, event, report_output).expect("borrowed output is accepted");
                 match step {
-                    UnixOutcomeStep::Stdout(accepted) | UnixOutcomeStep::Stderr(accepted) => {
+                    OutcomeStep::Stdout(accepted) | OutcomeStep::Stderr(accepted) => {
                         assert_eq!(accepted.as_ptr(), bytes.as_ptr());
                         assert_eq!(accepted, bytes);
                     }
@@ -577,8 +557,8 @@ mod tests {
             };
             let step = deliver(ledger, event, report_output).expect("stream EOF is accepted");
             return match step {
-                UnixOutcomeStep::Pending => (total_bytes, borrowed_reads, None),
-                UnixOutcomeStep::Reported {
+                OutcomeStep::Pending => (total_bytes, borrowed_reads, None),
+                OutcomeStep::Reported {
                     outcome,
                     report_bytes,
                 } => {
@@ -598,9 +578,9 @@ mod tests {
     }
 
     fn launch_watched<const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, CAPACITY>,
         intent: ExactTestIntent<'_, '_, '_>,
-        child_overrides: &[&CStr],
+        child_overrides: &[&[u8]],
     ) -> (SessionSlotId, NonZeroI32) {
         let slot =
             launch_accounted(ledger, intent, child_overrides).expect("child starts through ledger");
@@ -614,7 +594,7 @@ mod tests {
     }
 
     fn account_passed<const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, CAPACITY>,
         passed: SessionSlotId,
         passed_watch: NonZeroI32,
     ) -> (usize, usize) {
@@ -631,7 +611,7 @@ mod tests {
                 &mut passed_report
             )
             .expect("pass exit accepted"),
-            UnixOutcomeStep::Pending,
+            OutcomeStep::Pending,
         );
         assert!(ledger.sessions().get(passed).is_some());
         assert_eq!(ledger.unaccounted(), 2);
@@ -649,7 +629,7 @@ mod tests {
     }
 
     fn stream_descriptors<const NAME_CAPACITY: usize, const CAPACITY: usize>(
-        ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, CAPACITY>,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, CAPACITY>,
         slot: SessionSlotId,
     ) -> (libc::c_int, libc::c_int) {
         let child = ledger.sessions().get(slot).expect("child live").child();
@@ -710,8 +690,8 @@ mod tests {
         }
     }
 
-    fn watch(process_id: libc::pid_t) -> NonZeroI32 {
-        NonZeroI32::new(process_id).expect("spawned child has a process id")
+    fn watch(process_id: u32) -> NonZeroI32 {
+        NonZeroI32::new(process_id.cast_signed()).expect("spawned child has a process id")
     }
 
     fn reap(watch: NonZeroI32) -> ExitStatus {
@@ -770,7 +750,7 @@ mod tests {
             read_calls: 0,
             eof_seen: false,
         };
-        let mut sessions = SessionSlots::<RunningUnixChild<64>, 1>::new();
+        let mut sessions = SessionSlots::<RunningChild<64>, 1>::new();
         let mut context = Context::from_waker(Waker::noop());
         let mut observed_names = [[0_u8; 64]; 2];
         let mut observed_name_lengths = [0; 2];
@@ -830,7 +810,7 @@ mod tests {
             if index == 0 {
                 assert!(matches!(
                     launch(&mut sessions, intent(executable, BETA_NAME)),
-                    Err(UnixLaunchError::Full)
+                    Err(LaunchError::Full)
                 ));
                 assert_eq!(sessions.len(), 1);
             }
@@ -861,7 +841,7 @@ mod tests {
     fn same_test_name_from_two_targets_is_live_twice() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
-        let mut sessions = SessionSlots::<RunningUnixChild<64>, 3>::new();
+        let mut sessions = SessionSlots::<RunningChild<64>, 3>::new();
         let first = launch_target(&mut sessions, intent(executable, ALPHA_NAME), 0)
             .expect("first target starts alpha");
         let second = launch_target(&mut sessions, intent(executable, ALPHA_NAME), 1)
@@ -869,11 +849,11 @@ mod tests {
         assert_ne!(first, second);
         assert!(matches!(
             launch_target(&mut sessions, intent(executable, ALPHA_NAME), 1),
-            Err(UnixLaunchError::Duplicate)
+            Err(LaunchError::Duplicate)
         ));
         assert!(matches!(
             launch_target(&mut sessions, intent(executable, ALPHA_NAME), 0),
-            Err(UnixLaunchError::Duplicate)
+            Err(LaunchError::Duplicate)
         ));
         assert_eq!(sessions.len(), 2);
     }
@@ -882,7 +862,7 @@ mod tests {
     fn c51a_duplicate_and_name_capacity_controls_reject_before_spawn() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
-        let mut sessions = SessionSlots::<RunningUnixChild<64>, 2>::new();
+        let mut sessions = SessionSlots::<RunningChild<64>, 2>::new();
         let alpha = launch(&mut sessions, intent(executable, ALPHA_NAME)).expect("alpha starts");
         let first_process_id = sessions
             .get(alpha)
@@ -892,7 +872,7 @@ mod tests {
         let first_watch = watch(first_process_id);
         assert!(matches!(
             launch(&mut sessions, intent(executable, ALPHA_NAME)),
-            Err(UnixLaunchError::Duplicate)
+            Err(LaunchError::Duplicate)
         ));
         assert_eq!(sessions.len(), 1);
         let beta =
@@ -915,10 +895,10 @@ mod tests {
             );
             sessions.remove(slot).expect("both streams reached EOF");
         }
-        let mut short_sessions = SessionSlots::<RunningUnixChild<8>, 1>::new();
+        let mut short_sessions = SessionSlots::<RunningChild<8>, 1>::new();
         assert!(matches!(
             launch(&mut short_sessions, intent(executable, ALPHA_NAME)),
-            Err(UnixLaunchError::NameTooLong { required, available: 8 }) if required == ALPHA_NAME.len()
+            Err(LaunchError::NameTooLong { required, available: 8 }) if required == ALPHA_NAME.len()
         ));
         assert_eq!(short_sessions.len(), 0);
         std::println!(
@@ -930,18 +910,18 @@ mod tests {
     fn c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
-        let mut sessions = SessionSlots::<RunningUnixChild<64>, 2>::new();
+        let mut sessions = SessionSlots::<RunningChild<64>, 2>::new();
         let mut ledger = OutcomeLedger::new(&mut sessions).expect("table starts empty");
 
         let (passed, passed_watch) = launch_watched(
             &mut ledger,
             intent(executable, ALPHA_NAME),
-            &[c"CARGO_VAL_C51A_CHILD=1"],
+            &[b"CARGO_VAL_C51A_CHILD=1"],
         );
         let (failed, failed_watch) = launch_watched(
             &mut ledger,
             intent(executable, FAIL_NAME),
-            &[c"CARGO_VAL_C51B_FAIL=1"],
+            &[b"CARGO_VAL_C51B_FAIL=1"],
         );
         assert_eq!(ledger.snapshot().discovered, 2);
         assert_eq!(ledger.unaccounted(), 2);
@@ -977,7 +957,7 @@ mod tests {
         .expect("failure exit is accepted after both streams");
         assert_eq!(
             final_step,
-            UnixOutcomeStep::Reported {
+            OutcomeStep::Reported {
                 outcome: TerminalOutcome::Failed,
                 report_bytes: 5
             }
@@ -999,12 +979,12 @@ mod tests {
     fn c51b_duplicate_exit_is_rejected_while_child_remains_live() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
-        let mut sessions = SessionSlots::<RunningUnixChild<64>, 1>::new();
+        let mut sessions = SessionSlots::<RunningChild<64>, 1>::new();
         let mut ledger = OutcomeLedger::new(&mut sessions).expect("table starts empty");
         let slot = launch_accounted(
             &mut ledger,
             intent(executable, ALPHA_NAME),
-            &[c"CARGO_VAL_C51A_CHILD=1"],
+            &[b"CARGO_VAL_C51A_CHILD=1"],
         )
         .expect("control child starts through ledger");
         let process_id = ledger
@@ -1020,11 +1000,11 @@ mod tests {
         let exit = HostEvent::Exit { slot, status };
         assert_eq!(
             deliver(&mut ledger, exit, &mut report),
-            Ok(UnixOutcomeStep::Pending)
+            Ok(OutcomeStep::Pending)
         );
         assert_eq!(
             deliver(&mut ledger, exit, &mut report),
-            Err(UnixOutcomeError::InvalidCompletion(
+            Err(ChildOutcomeError::InvalidCompletion(
                 crate::child_completion::InvalidChildCompletionEvent
             )),
         );
@@ -1057,7 +1037,7 @@ mod tests {
                 },
                 &mut report
             ),
-            Err(UnixOutcomeError::InvalidCompletion(
+            Err(ChildOutcomeError::InvalidCompletion(
                 crate::child_completion::InvalidChildCompletionEvent
             )),
         );
@@ -1069,7 +1049,7 @@ mod tests {
                 HostEvent::StderrEof { slot },
                 &mut short_report
             ),
-            Err(UnixOutcomeError::Report(
+            Err(ChildOutcomeError::Report(
                 crate::reporter::ReportError::OutputTooSmall
             )),
         );
@@ -1077,7 +1057,7 @@ mod tests {
         assert!(ledger.sessions().get(slot).is_some());
         assert_eq!(
             deliver(&mut ledger, HostEvent::StderrEof { slot }, &mut report),
-            Ok(UnixOutcomeStep::Reported {
+            Ok(OutcomeStep::Reported {
                 outcome: TerminalOutcome::Passed,
                 report_bytes: 5,
             }),
@@ -1087,7 +1067,7 @@ mod tests {
         assert_eq!(ledger.snapshot().failed, 0);
         assert!(matches!(
             deliver(&mut ledger, exit, &mut report),
-            Err(UnixOutcomeError::Stale(_))
+            Err(ChildOutcomeError::Stale(_))
         ));
         std::println!(
             "{{\"duplicate_live_exit_rejections\":1,\"output_after_eof_rejections\":1,\"short_report_retries\":1,\"stale_exit_rejections\":1,\"reported_records\":1,\"unaccounted\":0}}"
@@ -1125,40 +1105,30 @@ mod tests {
 
 #[cfg(all(test, feature = "proxima-core"))]
 mod cause_tests {
-    use core::ffi::{CStr, c_char};
-
     use super::{
-        LaunchCause, RunningUnixChild, UnixLaunchError, UnixLaunchInput, UnixLaunchOwner,
-        UnixSpawnError,
+        LaunchCause, RunningChild, LaunchError, LaunchInput, LaunchOwner,
+        SpawnError,
     };
     use crate::ExecutablePath;
     use crate::outcomes::{OutcomeError, StartError};
     use crate::schedule::SessionSlots;
     use crate::test_intent::ExactTestIntent;
-    use crate::edge_args::UnixArgumentsError;
 
-    fn live_child() -> RunningUnixChild<64> {
+    fn live_child() -> RunningChild<64> {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
-        let inherited: [&CStr; 0] = [];
-        let mut argument_bytes = [0; 512];
-        let mut argument_pointers: [*const c_char; 5] = [core::ptr::null(); 5];
-        let mut environment_pointers: [*const c_char; 2] = [core::ptr::null(); 2];
-        let mut sessions = SessionSlots::<RunningUnixChild<64>, 1>::new();
-        let slot = UnixLaunchInput {
+        let mut sessions = SessionSlots::<RunningChild<64>, 1>::new();
+        let slot = LaunchInput {
             target: 0,
-            owner: UnixLaunchOwner::Sessions(&mut sessions),
+            owner: LaunchOwner::Sessions(&mut sessions),
             intent: ExactTestIntent::new(
                 ExecutablePath::Borrowed(executable),
                 "runner::cause_tests::absent_name",
             ),
-            inherited_environment: &inherited,
+            inherited_environment: &[],
             child_overrides: &[],
             harness_arguments: &[],
-            current_directory: c"/",
-            argument_bytes: &mut argument_bytes,
-            argument_pointers: &mut argument_pointers,
-            environment_pointers: &mut environment_pointers,
+            current_directory: b"/",
         }
         .launch()
         .expect("the test executable starts");
@@ -1167,11 +1137,11 @@ mod cause_tests {
 
     #[test]
     fn every_launch_error_variant_maps_to_its_cause() {
-        let cases: [(UnixLaunchError<64>, LaunchCause); 7] = [
-            (UnixLaunchError::Full, LaunchCause::Full),
-            (UnixLaunchError::Duplicate, LaunchCause::Duplicate),
+        let cases: [(LaunchError<64>, LaunchCause); 6] = [
+            (LaunchError::Full, LaunchCause::Full),
+            (LaunchError::Duplicate, LaunchCause::Duplicate),
             (
-                UnixLaunchError::NameTooLong {
+                LaunchError::NameTooLong {
                     required: 70,
                     available: 64,
                 },
@@ -1181,21 +1151,15 @@ mod cause_tests {
                 },
             ),
             (
-                UnixLaunchError::Arguments(UnixArgumentsError::InteriorNul),
-                LaunchCause::Arguments(UnixArgumentsError::InteriorNul),
+                LaunchError::Spawn(SpawnError { os_code: 2 }),
+                LaunchCause::Spawn { os_code: 2 },
             ),
             (
-                UnixLaunchError::Spawn(UnixSpawnError { code: libc::ENOENT }),
-                LaunchCause::Spawn {
-                    errno: libc::ENOENT,
-                },
-            ),
-            (
-                UnixLaunchError::CapacityChanged(live_child()),
+                LaunchError::CapacityChanged(live_child()),
                 LaunchCause::CapacityChanged,
             ),
             (
-                UnixLaunchError::Accounting(StartError {
+                LaunchError::Accounting(StartError {
                     error: OutcomeError::CapacityExhausted,
                     child: live_child(),
                 }),
@@ -1207,6 +1171,6 @@ mod cause_tests {
             assert_eq!(LaunchCause::from(error), *expected);
             checked += 1;
         }
-        assert_eq!(checked, 7);
+        assert_eq!(checked, 6);
     }
 }
