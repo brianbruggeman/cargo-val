@@ -41,6 +41,7 @@ use crate::runner::{
 };
 use crate::schedule::{SessionSlotId, SessionSlots};
 use crate::selection::{NameFilter, Selection};
+use crate::stop::{DocAtTrip, Observation, StopPolicy, StopReport};
 use crate::test_environment::{
     BuildScriptOutput, BuildScriptOutputs, DYLIB_PATH_KEY_C, LinkedDirectories, MAX_ENTRIES,
     TestEnvironmentInput, TestEnvironmentLayout,
@@ -326,17 +327,6 @@ pub struct RunSummary {
     pub no_tests: Option<NoTestsPolicy>,
     /// Present when a doc-test child was part of the selection; its counts are already in the totals.
     pub doc_tests: Option<DocTotals>,
-}
-
-/// What the stop policy observed once failures reached `--max-fail`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StopReport {
-    pub max_fail: usize,
-    pub in_flight_at_trip: usize,
-    pub launched_after_trip: usize,
-    pub listed_not_run: usize,
-    pub targets_not_listed: usize,
-    pub doc_at_trip: DocAtTrip,
 }
 
 /// Exit status when the selection ran no tests and the policy is `fail`.
@@ -1077,8 +1067,7 @@ fn spawn_listing(
     linked_directories: &str,
     build_script: Option<BuildScriptOutput<'_>>,
 ) -> Result<PendingListing, RunError> {
-    let target = run.stop.targets_listed.get();
-    run.stop.targets_listed.set(target + 1);
+    let target = run.policy.borrow_mut().target_listed();
     let binary_id = (!artifact.is_unit_test_target()).then_some(artifact.target_name);
     if !run
         .targets
@@ -1147,9 +1136,7 @@ fn launch_listed(
     let mut environment_pointers = [core::ptr::null(); ENV_CAPACITY + MAX_ENTRIES + 1];
     let (overrides, override_count) = override_entries(layout, environment)?;
     if run.tripped(ledger) {
-        run.stop
-            .launched_after_trip
-            .set(run.stop.launched_after_trip.get() + 1);
+        run.policy.borrow_mut().launched();
     }
     let slot = UnixLaunchInput {
         target,
@@ -1189,23 +1176,18 @@ struct ListingRun<'run> {
     home: Option<&'run str>,
     settings: &'run Settings,
     prepared: Option<&'run Prepared<'run>>,
-    stop: RunObservation,
+    docs: DocObservation,
+    policy: RefCell<StopPolicy>,
     doc: RefCell<Option<DocRun<'run>>>,
 }
 
 #[derive(Default)]
-struct RunObservation {
-    doc_passed: Cell<usize>,
-    doc_failed: Cell<usize>,
-    doc_ignored: Cell<usize>,
-    doc_blocks: Cell<usize>,
-    doc_empty_blocks: Cell<usize>,
-    doc_at_trip: Cell<Option<DocAtTrip>>,
-    in_flight_at_trip: Cell<Option<usize>>,
-    launched_after_trip: Cell<usize>,
-    listed_not_run: Cell<usize>,
-    targets_not_listed: Cell<usize>,
-    targets_listed: Cell<usize>,
+struct DocObservation {
+    passed: Cell<usize>,
+    failed: Cell<usize>,
+    ignored: Cell<usize>,
+    blocks: Cell<usize>,
+    empty_blocks: Cell<usize>,
 }
 
 impl ListingRun<'_> {
@@ -1224,16 +1206,15 @@ impl ListingRun<'_> {
         &self,
         ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     ) -> bool {
-        let reached = self.settings.max_fail.is_some_and(|max_fail| {
-            ledger.snapshot().failed + self.stop.doc_failed.get() >= max_fail
-        });
-        if reached && self.stop.in_flight_at_trip.get().is_none() {
-            self.stop
-                .in_flight_at_trip
-                .set(Some(ledger.sessions().len()));
-            self.stop.doc_at_trip.set(Some(self.interrupt_doc_tests()));
+        let failures = ledger.snapshot().failed + self.docs.failed.get();
+        let observation = self.policy.borrow().observe_failures(failures);
+        if observation == Observation::FirstTrip {
+            let doc = self.interrupt_doc_tests();
+            self.policy
+                .borrow_mut()
+                .record_trip(ledger.sessions().len(), doc);
         }
-        reached
+        observation != Observation::Clear
     }
 
     fn interrupt_doc_tests(&self) -> DocAtTrip {
@@ -1246,7 +1227,7 @@ impl ListingRun<'_> {
 
     fn pump_doc_tests(&self) -> Result<(), RunError> {
         match self.doc.borrow_mut().as_mut() {
-            Some(doc) => doc.pump(self.settings.color, &self.stop),
+            Some(doc) => doc.pump(self.settings.color, &self.docs),
             None => Ok(()),
         }
     }
@@ -1322,9 +1303,7 @@ impl ListingScan<'_, '_> {
         match step.map_err(|_| RunError::ListingStream)? {
             ListingSourceStep::Launch(_) if run.interrupted() => {}
             ListingSourceStep::Launch(_) if stopped => {
-                run.stop
-                    .listed_not_run
-                    .set(run.stop.listed_not_run.get() + 1);
+                run.policy.borrow_mut().listed_test_skipped();
             }
             ListingSourceStep::Launch(intent) => {
                 launch_listed(run, ledger, watches, intent, self.target, self.environment, self.layout)?;
@@ -1870,9 +1849,7 @@ fn start_listing(
         return Ok(None);
     }
     if run.tripped(ledger) {
-        run.stop
-            .targets_not_listed
-            .set(run.stop.targets_not_listed.get() + 1);
+        run.policy.borrow_mut().target_skipped();
         return Ok(None);
     }
     let build_script = build_scripts.find(artifact.package_id);
@@ -2232,7 +2209,8 @@ pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
         home,
         settings: &settings,
         prepared: prepared.as_ref(),
-        stop: RunObservation::default(),
+        docs: DocObservation::default(),
+        policy: RefCell::new(StopPolicy::new(settings.max_fail)),
         doc: RefCell::new(doc_tests),
     };
     driver.drive(&run, &mut ledger, &mut watches)?;
@@ -2390,7 +2368,7 @@ fn finish_run(
         return Err(RunError::CargoFailed);
     }
     let doc_tests = run.finish_doc_tests(parser.doc_selection() == DocSelection::Included)?;
-    let stop = run.stop_report(run.settings.max_fail);
+    let stop = run.policy.borrow().report();
     conclude(
         parser,
         run.settings,
@@ -2453,19 +2431,6 @@ fn wait_for_events(
         }
     }
     Ok(kept)
-}
-
-impl ListingRun<'_> {
-    fn stop_report(&self, max_fail: Option<usize>) -> Option<StopReport> {
-        Some(StopReport {
-            max_fail: max_fail?,
-            in_flight_at_trip: self.stop.in_flight_at_trip.get()?,
-            launched_after_trip: self.stop.launched_after_trip.get(),
-            listed_not_run: self.stop.listed_not_run.get(),
-            targets_not_listed: self.stop.targets_not_listed.get(),
-            doc_at_trip: self.stop.doc_at_trip.get()?,
-        })
-    }
 }
 
 /// Fixed-capacity text assembled without allocation; text past the capacity is cut.
@@ -2594,26 +2559,6 @@ pub struct DocTotals {
     pub finish: DocFinish,
 }
 
-/// Whether the doc-test child had started executing when fail-fast tripped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocAtTrip {
-    NotSpawned,
-    InterruptedBeforeExecuting,
-    ExecutingLeftToFinish,
-    AlreadyFinished,
-}
-
-impl DocAtTrip {
-    const fn text(self) -> &'static [u8] {
-        match self {
-            Self::NotSpawned => b"not spawned",
-            Self::InterruptedBeforeExecuting => b"interrupted before executing",
-            Self::ExecutingLeftToFinish => b"executing, left to finish",
-            Self::AlreadyFinished => b"already finished",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DocPhase {
     Starting,
@@ -2721,7 +2666,7 @@ impl DocRun<'_> {
         self.stdout_eof && self.stderr_eof && self.exit_code.is_some()
     }
 
-    fn pump(&mut self, color: bool, observation: &RunObservation) -> Result<(), RunError> {
+    fn pump(&mut self, color: bool, observation: &DocObservation) -> Result<(), RunError> {
         let mut context = Context::from_waker(Waker::noop());
         let mut bytes = [0; SOURCE_CAPACITY];
         while !self.stdout_eof {
@@ -2808,18 +2753,18 @@ fn record_doc_event(
     event: DocEvent<'_>,
     phase: &mut DocPhase,
     color: bool,
-    observation: &RunObservation,
+    observation: &DocObservation,
 ) -> Result<(), RunError> {
     match event {
         DocEvent::Running { count } => {
             if *phase == DocPhase::Starting {
                 *phase = DocPhase::Executing;
             }
-            observation.doc_blocks.set(observation.doc_blocks.get() + 1);
+            observation.blocks.set(observation.blocks.get() + 1);
             if count == 0 {
                 observation
-                    .doc_empty_blocks
-                    .set(observation.doc_empty_blocks.get() + 1);
+                    .empty_blocks
+                    .set(observation.empty_blocks.get() + 1);
             }
             Ok(())
         }
@@ -2836,12 +2781,12 @@ fn report_doc_result(
     name: &[u8],
     outcome: DocOutcome,
     color: bool,
-    observation: &RunObservation,
+    observation: &DocObservation,
 ) -> Result<(), RunError> {
     let (terminal, counter) = match outcome {
-        DocOutcome::Passed => (TerminalOutcome::Passed, &observation.doc_passed),
-        DocOutcome::Failed => (TerminalOutcome::Failed, &observation.doc_failed),
-        DocOutcome::Ignored => (TerminalOutcome::Ignored, &observation.doc_ignored),
+        DocOutcome::Passed => (TerminalOutcome::Passed, &observation.passed),
+        DocOutcome::Failed => (TerminalOutcome::Failed, &observation.failed),
+        DocOutcome::Ignored => (TerminalOutcome::Ignored, &observation.ignored),
     };
     counter.set(counter.get() + 1);
     let mut report = [0; NAME_CAPACITY + 34];
@@ -2877,26 +2822,26 @@ impl ListingRun<'_> {
         let Some(doc) = self.doc.borrow_mut().take() else {
             return Ok(None);
         };
-        Ok(Some(close_doc_tests(&doc, implicit, &self.stop)?))
+        Ok(Some(close_doc_tests(&doc, implicit, &self.docs)?))
     }
 }
 
 fn close_doc_tests(
     doc: &DocRun<'_>,
     implicit: bool,
-    observation: &RunObservation,
+    observation: &DocObservation,
 ) -> Result<DocTotals, RunError> {
     let finish = doc.conclude(implicit)?;
-    let failed = observation.doc_failed.get();
+    let failed = observation.failed.get();
     if finish == DocFinish::Ran && doc.exit_code != Some(0) && failed == 0 {
         return Err(RunError::DocTests);
     }
     Ok(DocTotals {
-        passed: observation.doc_passed.get(),
+        passed: observation.passed.get(),
         failed,
-        ignored: observation.doc_ignored.get(),
-        blocks: observation.doc_blocks.get(),
-        empty_blocks: observation.doc_empty_blocks.get(),
+        ignored: observation.ignored.get(),
+        blocks: observation.blocks.get(),
+        empty_blocks: observation.empty_blocks.get(),
         finish,
     })
 }
@@ -2994,7 +2939,7 @@ fn run_doc_only(
     {
         doc.lock_watch.set_directory(shared);
     }
-    let observation = RunObservation::default();
+    let observation = DocObservation::default();
     let mut events = [NativeEvent::default(); 64];
     loop {
         doc.pump(settings.color, &observation)?;
