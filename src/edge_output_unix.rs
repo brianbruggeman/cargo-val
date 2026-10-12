@@ -11,7 +11,7 @@ use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
 use proxima_primitives::pipe::{Pipe, UnpinPipe};
 
-use crate::host::unix_driver::Line;
+use crate::line::Line;
 
 const LINE_CAPACITY: usize = 512;
 const TTY_NAME_BYTES: usize = 256;
@@ -258,7 +258,7 @@ mod tests {
 
     use super::{LINE_CAPACITY, OutputSink};
     use crate::edge_exit::fixture::in_single_threaded_process;
-    use crate::host::unix_driver::Line;
+    use crate::line::Line;
     use crate::test_dir::tempdir;
 
     const REPORT_LINE: &[u8] = b"cargo-val: 12 passed; 0 failed; 3 ignored; finished in 4.21s\n";
@@ -331,6 +331,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn flags(descriptor: &OwnedFd) -> libc::c_int {
         unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFL) }
     }

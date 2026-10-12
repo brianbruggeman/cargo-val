@@ -204,6 +204,12 @@ impl MacosExitPort {
         self.collect(events, &raw const timeout)
     }
 
+    /// The kqueue descriptor, readable while records are pending, for a gate on another reactor.
+    #[must_use]
+    pub const fn raw_fd(&self) -> c_int {
+        self.descriptor
+    }
+
     /// Drains currently ready kqueue records without waiting.
     ///
     /// # Errors

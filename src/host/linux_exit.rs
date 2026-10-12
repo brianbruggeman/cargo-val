@@ -193,6 +193,12 @@ impl LinuxExitPort {
         self.collect(events, 0)
     }
 
+    /// The epoll descriptor, readable while records are pending, for a gate on another reactor.
+    #[must_use]
+    pub const fn raw_fd(&self) -> c_int {
+        self.epoll.0
+    }
+
     fn collect(&self, events: &mut [LinuxExitEvent], timeout: c_int) -> Result<usize, c_int> {
         if events.is_empty() || events.len() > i32::MAX as usize {
             return Err(libc::EINVAL);

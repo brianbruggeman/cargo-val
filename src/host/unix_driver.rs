@@ -26,6 +26,9 @@ use crate::discover_cargo::{BinGate, DiscoveryFsm};
 use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
+use crate::line::Line;
+#[cfg(feature = "edge-os")]
+use crate::run::observe_cargo;
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
@@ -65,12 +68,11 @@ use crate::host::macos_exit::{
 #[cfg(target_os = "macos")]
 use crate::host::macos_pipe::MacosPipeReader as NativeReader;
 
-const LIVE_CAPACITY: usize = 64;
-const DECIMAL_DIGITS: [u8; 10] = *b"0123456789";
+pub(crate) const LIVE_CAPACITY: usize = 64;
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
 const INCLUDE_ARGUMENTS: [&[u8]; 1] = [b"--include-ignored"];
 const IDENTITY_CAPACITY: usize = 128;
-const NAME_CAPACITY: usize = 1024;
+pub(crate) const NAME_CAPACITY: usize = 1024;
 const ENV_CAPACITY: usize = 1024;
 const PATH_CAPACITY: usize = 4096;
 const SCRATCH_CAPACITY: usize = 16384;
@@ -347,7 +349,7 @@ impl RunSummary {
     }
 }
 
-struct TestWatch {
+pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: libc::pid_t,
     stdout_token: u64,
@@ -1163,7 +1165,7 @@ fn launch_listed(
     register_test(run.port, ledger, watches, slot, run.reporting())
 }
 
-struct ListingRun<'run> {
+pub(crate) struct ListingRun<'run> {
     port: &'run NativePort,
     signals: &'run SignalPipe,
     filter: &'run str,
@@ -1192,6 +1194,11 @@ struct DocObservation {
 }
 
 impl ListingRun<'_> {
+    #[cfg(feature = "edge-os")]
+    pub(crate) fn port_fd(&self) -> c_int {
+        self.port.raw_fd()
+    }
+
     fn interrupted(&self) -> bool {
         self.signals.received().is_some()
     }
@@ -1226,7 +1233,7 @@ impl ListingRun<'_> {
             .unwrap_or(DocAtTrip::NotSpawned)
     }
 
-    fn pump_doc_tests(&self) -> Result<(), RunError> {
+    pub(crate) fn pump_doc_tests(&self) -> Result<(), RunError> {
         match self.doc.borrow_mut().as_mut() {
             Some(doc) => doc.pump(self.settings.color, &self.docs),
             None => Ok(()),
@@ -1681,6 +1688,7 @@ fn read_metadata(child: UnixChild) -> Option<MetadataFacts> {
     (usable && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0).then(|| scan.finish())
 }
 
+#[cfg(not(feature = "edge-os"))]
 fn pause_cargo(
     stdout: &mut NativeReader<'_>,
     stderr: &mut NativeReader<'_>,
@@ -1696,6 +1704,7 @@ fn pause_cargo(
     Ok(())
 }
 
+#[cfg(not(feature = "edge-os"))]
 fn resume_cargo(
     stdout: &mut NativeReader<'_>,
     stderr: &mut NativeReader<'_>,
@@ -1711,12 +1720,16 @@ fn resume_cargo(
     Ok(())
 }
 
-struct CargoDriver<'run, 'buffer> {
+pub(crate) struct CargoDriver<'run, 'buffer> {
+    #[cfg(not(feature = "edge-os"))]
     stdout: NativeReader<'run>,
+    #[cfg(not(feature = "edge-os"))]
     stderr: NativeReader<'run>,
+    #[cfg(not(feature = "edge-os"))]
     process: NativeWatch,
+    #[cfg(feature = "edge-os")]
+    marker: core::marker::PhantomData<&'run ()>,
     process_id: libc::pid_t,
-    source: CargoSource<'buffer>,
     framer: ArtifactFramer<'buffer>,
     scratch: &'buffer mut [u8],
     linked: LinkedDirectories<'buffer>,
@@ -1831,6 +1844,7 @@ fn start_listing(
 }
 
 impl CargoDriver<'_, '_> {
+    #[cfg(not(feature = "edge-os"))]
     fn reap(&mut self) -> Result<(), RunError> {
         let reaped = released(
             self.process.reap().map_err(|_| RunError::Reactor)?,
@@ -1846,6 +1860,7 @@ impl CargoDriver<'_, '_> {
         self.discovery.drained(unaccounted, self.parked.is_empty())
     }
 
+    #[cfg(not(feature = "edge-os"))]
     fn run_listing_paused(
         &mut self,
         run: &ListingRun<'_>,
@@ -1870,6 +1885,10 @@ impl CargoDriver<'_, '_> {
         if let Some(next_listing) = started
             && let Some(previous_listing) = self.pending_listing.replace(next_listing)
         {
+            // cargo's descriptors live on prime's reactor under edge-os, so nothing on this port needs pausing
+            #[cfg(feature = "edge-os")]
+            run_listing(run, previous_listing, ledger, watches)?;
+            #[cfg(not(feature = "edge-os"))]
             self.run_listing_paused(run, previous_listing, ledger, watches)?;
         }
         Ok(())
@@ -1909,6 +1928,7 @@ impl CargoDriver<'_, '_> {
         Ok(())
     }
 
+    #[cfg(not(feature = "edge-os"))]
     fn poll_artifacts(
         &mut self,
         context: &mut Context<'_>,
@@ -1916,41 +1936,79 @@ impl CargoDriver<'_, '_> {
         ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
     ) -> Result<(), RunError> {
+        let mut bytes = [0; SOURCE_CAPACITY];
         loop {
-            let step = self.source.poll_next(
-                Pin::new(&mut self.stdout),
-                &mut self.framer,
-                &mut *self.scratch,
-                16,
-                context,
-            );
+            match Pin::new(&mut self.stdout).poll_read(context, &mut bytes) {
+                Poll::Pending => return Ok(()),
+                Poll::Ready(Err(_)) => return Err(RunError::CargoStream),
+                Poll::Ready(Ok(0)) => return self.advance(&[], true, run, ledger, watches),
+                Poll::Ready(Ok(length)) => {
+                    self.advance(&bytes[..length], false, run, ledger, watches)?;
+                }
+            }
+        }
+    }
+
+    /// Parses one lent chunk of Cargo stdout, or the end-of-stream drain when `eof`, and acts on every record it completes.
+    pub(crate) fn advance(
+        &mut self,
+        chunk: &[u8],
+        eof: bool,
+        run: &ListingRun<'_>,
+        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+    ) -> Result<(), RunError> {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut offset = 0;
+        loop {
+            let ready_before = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
+            let (step, consumed) = if eof {
+                match CargoSource::poll_lent_eof(&mut self.framer, &mut *self.scratch, 16, &mut context) {
+                    Poll::Ready(result) => result.map(|step| (step, 0)),
+                    Poll::Pending => return Err(RunError::CargoStream),
+                }
+            } else {
+                match CargoSource::poll_lent(
+                    &mut self.framer,
+                    &chunk[offset..],
+                    &mut *self.scratch,
+                    16,
+                    &mut context,
+                ) {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => return Err(RunError::CargoStream),
+                }
+            }
+            .map_err(|_| RunError::CargoStream)?;
+            offset += consumed;
+            let progressed = consumed > 0 || ready_before;
             match step {
-                Poll::Ready(Ok(CargoSourceStep::Artifact(artifact))) => {
+                CargoSourceStep::Artifact(artifact) => {
                     let gated = matches!(artifact.target_kind, "test" | "bench")
                         && self.discovery.waits(artifact.package_id);
                     debug_artifact(run.settings.debug, gated, self.discovery.gate(), &artifact);
                     if gated {
                         self.parked.park(&artifact).map_err(RunError::Parked)?;
-                        continue;
+                    } else {
+                        let started = start_listing(
+                            run,
+                            ledger,
+                            &artifact,
+                            &self.linked,
+                            &self.build_scripts,
+                        )?;
+                        self.queue_listing(run, started, ledger, watches)?;
                     }
-                    let started = start_listing(
-                        run,
-                        ledger,
-                        &artifact,
-                        &self.linked,
-                        &self.build_scripts,
-                    )?;
-                    self.queue_listing(run, started, ledger, watches)?;
                 }
-                Poll::Ready(Ok(CargoSourceStep::BinBuilt {
+                CargoSourceStep::BinBuilt {
                     package_id,
                     executable,
-                })) => {
+                } => {
                     debug_bin_built(run.settings.debug, executable, package_id);
                     self.discovery.bin_built(package_id);
                     self.release_parked(run, ledger, watches, b"bin-built")?;
                 }
-                Poll::Ready(Ok(CargoSourceStep::BuildFinished { success })) => {
+                CargoSourceStep::BuildFinished { success } => {
                     let (event, reason): (&[u8], &[u8]) = if success {
                         (b" build-finished success=true", b"build-succeeded")
                     } else {
@@ -1960,7 +2018,7 @@ impl CargoDriver<'_, '_> {
                     self.discovery.build_finished(success);
                     self.finish_build(run, ledger, watches, reason)?;
                 }
-                Poll::Ready(Ok(CargoSourceStep::BuildScript(script))) => {
+                CargoSourceStep::BuildScript(script) => {
                     for reported in script.linked_paths.iter() {
                         self.linked
                             .add(reported)
@@ -1970,22 +2028,79 @@ impl CargoDriver<'_, '_> {
                         .add(&script)
                         .map_err(|_| RunError::TestEnvironment)?;
                 }
-                Poll::Ready(Ok(
-                    CargoSourceStep::Read { .. }
-                    | CargoSourceStep::NeedMore
-                    | CargoSourceStep::Ignored,
-                )) => {}
-                Poll::Ready(Ok(CargoSourceStep::Eof)) => {
+                CargoSourceStep::Read { .. }
+                | CargoSourceStep::NeedMore
+                | CargoSourceStep::Ignored => {}
+                CargoSourceStep::Eof => {
                     self.discovery.stdout_eof();
                     debug_build_end(run.settings.debug, b" stdout-eof", self.parked.len());
                     return self.finish_build(run, ledger, watches, b"stdout-eof");
                 }
-                Poll::Ready(Err(_)) => return Err(RunError::CargoStream),
-                Poll::Pending => return Ok(()),
+            }
+            let ready = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
+            if !eof && offset == chunk.len() && !ready {
+                return Ok(());
+            }
+            if !progressed {
+                return Err(RunError::CargoStream);
             }
         }
     }
 
+    pub(crate) fn run_pending(
+        &mut self,
+        run: &ListingRun<'_>,
+        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+    ) -> Result<(), RunError> {
+        let Some(listing) = self.pending_listing.take() else {
+            return Ok(());
+        };
+        #[cfg(feature = "edge-os")]
+        run_listing(run, listing, ledger, watches)?;
+        #[cfg(not(feature = "edge-os"))]
+        self.run_listing_paused(run, listing, ledger, watches)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "edge-os")]
+    pub(crate) fn forward_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+        write_fd(2, bytes)?;
+        announce_lock_wait(&mut self.lock_watch, bytes)
+    }
+
+    #[cfg(feature = "edge-os")]
+    pub(crate) fn cargo_exited(&mut self, code: i32) {
+        release_child(self.process_id);
+        self.discovery.exited(code);
+    }
+
+    #[cfg(feature = "edge-os")]
+    pub(crate) fn stdout_ended(
+        &mut self,
+        run: &ListingRun<'_>,
+        ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+    ) -> Result<(), RunError> {
+        self.advance(&[], true, run, ledger, watches)?;
+        self.run_pending(run, ledger, watches)
+    }
+
+    #[cfg(feature = "edge-os")]
+    pub(crate) fn stderr_ended(&mut self) {
+        self.discovery.stderr_eof();
+    }
+
+    #[cfg(feature = "edge-os")]
+    pub(crate) fn finished(
+        &self,
+        run: &ListingRun<'_>,
+        ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ) -> bool {
+        self.drained(ledger.unaccounted()) && run.doc_tests_finished()
+    }
+
+    #[cfg(not(feature = "edge-os"))]
     fn drive(
         &mut self,
         run: &ListingRun<'_>,
@@ -2000,9 +2115,7 @@ impl CargoDriver<'_, '_> {
             if !self.discovery.stdout_closed() {
                 self.poll_artifacts(&mut context, run, ledger, watches)?;
             }
-            if let Some(listing) = self.pending_listing.take() {
-                self.run_listing_paused(run, listing, ledger, watches)?;
-            }
+            self.run_pending(run, ledger, watches)?;
             if !self.discovery.stderr_closed()
                 && drain_reader(&mut self.stderr, 2, Some(&mut self.lock_watch))?
             {
@@ -2023,6 +2136,7 @@ impl CargoDriver<'_, '_> {
         Ok(())
     }
 
+    #[cfg(not(feature = "edge-os"))]
     fn dispatch_event(
         &mut self,
         event: NativeEvent,
@@ -2067,18 +2181,43 @@ fn collect_libdirs(
 /// # Errors
 ///
 /// Returns [`RunError`] naming the stage that failed: arguments, environment, spawn, reactor, stream parsing, launch, or outcome accounting.
+#[cfg(not(feature = "edge-os"))]
 pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
+    let mut run = core::pin::pin!(run_body(parser));
+    match run.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(summary) => summary,
+        Poll::Pending => Err(RunError::Reactor),
+    }
+}
+
+/// Runs everything but the observation of the cargo build child, which is native-reactor blocking or a prime await by feature.
+///
+/// # Errors
+///
+/// Returns [`RunError`] naming the stage that failed.
+pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
     let started_millis = monotonic_millis();
     let harness = validated_harness(parser)?;
     let environment = unsafe { UnixEnvironment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
-    let mut inherited = [c""; ENV_CAPACITY];
+    let mut storage = run_storage();
+    let storage: &mut RunStorage<'_> = &mut storage;
+    let (
+        frame_bytes,
+        scratch,
+        linked_bytes,
+        build_script_bytes,
+        libdir_bytes,
+        inherited,
+        envp,
+        sessions,
+        watches,
+    ) = storage;
     let inherited_count = environment
-        .collect(&mut inherited)
+        .collect(inherited)
         .map_err(|_| RunError::Environment)?;
     let inherited = &inherited[..inherited_count];
-    let mut envp = [core::ptr::null(); ENV_CAPACITY + 1];
-    let envp_count = environment_pointers(inherited, &mut envp)?;
+    let envp_count = environment_pointers(inherited, envp)?;
     let envp = &envp[..envp_count];
     let configured_target = utf8_variable(&environment, c"CARGO_VAL_TARGET_DIR")?;
     let target_pairs = [("CARGO_VAL_TARGET_DIR", configured_target.unwrap_or(""))];
@@ -2090,63 +2229,56 @@ pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
     let queries = start_libdir_queries(&environment, parser, envp)?;
     let inherited_dylib_path = utf8_variable(&environment, DYLIB_PATH_KEY_C)?;
     let home = utf8_variable(&environment, c"HOME")?;
-    let filter = parser
-        .filter()
-        .map(core::str::from_utf8)
-        .transpose()
-        .map_err(|_| RunError::Arguments)?
-        .unwrap_or("");
+    let filter = filter_text(parser)?;
     let port = NativePort::new().map_err(|_| RunError::Reactor)?;
     let signals = install_signals(&port)?;
-    let started = start_children(parser, &settings, target_mode, &port, envp)?;
-    let cargo_child = started.cargo;
+    let StartedChildren {
+        cargo: cargo_child,
+        doc_tests,
+        bins,
+        gate,
+        lock_watch,
+    } = start_children(parser, &settings, target_mode, &port, envp)?;
     let cargo_process_id = cargo_child.process_id();
-    let doc_tests = started.doc_tests;
-    let (bins, gate, lock_watch) = (started.bins, started.gate, started.lock_watch);
+    #[cfg(not(feature = "edge-os"))]
     let (stdout, stderr, process) = reader_pair(&port, cargo_child)?;
-    let mut source_bytes = [0; SOURCE_CAPACITY];
-    let mut frame_bytes = [0; FRAME_CAPACITY];
-    let mut scratch = [0; SCRATCH_CAPACITY];
-    let mut linked_bytes = [0; LINKED_CAPACITY];
-    let mut build_script_bytes = [0; BUILD_SCRIPT_CAPACITY];
-    let mut driver = CargoDriver {
+    #[cfg(not(feature = "edge-os"))]
+    let cargo_child = ();
+    let mut driver = held(CargoDriver {
+        #[cfg(not(feature = "edge-os"))]
         stdout,
+        #[cfg(not(feature = "edge-os"))]
         stderr,
+        #[cfg(not(feature = "edge-os"))]
         process,
+        #[cfg(feature = "edge-os")]
+        marker: core::marker::PhantomData,
         process_id: cargo_process_id,
-        source: CargoSource::new(&mut source_bytes).map_err(|_| RunError::CargoStream)?,
-        framer: ArtifactFramer::new(&mut frame_bytes, FRAME_CAPACITY - 1)
+        framer: ArtifactFramer::new(frame_bytes, FRAME_CAPACITY - 1)
             .map_err(|_| RunError::CargoStream)?,
-        scratch: &mut scratch,
-        linked: LinkedDirectories::new(&mut linked_bytes),
-        build_scripts: BuildScriptOutputs::new(&mut build_script_bytes),
+        scratch,
+        linked: LinkedDirectories::new(linked_bytes),
+        build_scripts: BuildScriptOutputs::new(build_script_bytes),
         pending_listing: None,
         discovery: DiscoveryFsm::new(bins, gate),
         parked: ParkedArtifacts::new(),
         dropped: 0,
         lock_watch,
-    };
-    let mut sessions = SessionSlots::<RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>::new();
-    let mut ledger = OutcomeLedger::new(&mut sessions).map_err(|_| RunError::Outcome)?;
-    let mut watches: [Option<TestWatch>; LIVE_CAPACITY] = [const { None }; LIVE_CAPACITY];
-    let mut libdir_bytes = [0; LIBDIR_CAPACITY * 2];
-    let (library_directories, directory_count) = resolve_libdirs(queries, &mut libdir_bytes)
+    });
+    let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
+    let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .inspect_err(|_| unsafe {
             libc::kill(cargo_process_id, libc::SIGKILL);
         })?;
     let prepared = settings.filterset.as_ref().map(Filterset::prepare);
-    let run = ListingRun {
+    let run = held(ListingRun {
         port: &port,
         signals: &signals,
         filter,
         exact: parser.exact(),
         targets: RefCell::new(TargetTable::new()),
         started_millis,
-        harness_arguments: match settings.ignore {
-            IgnoreMode::Skip => &[],
-            IgnoreMode::Only => &IGNORED_ARGUMENTS,
-            IgnoreMode::Include => &INCLUDE_ARGUMENTS,
-        },
+        harness_arguments: ignore_arguments(settings.ignore),
         environment: inherited,
         library_directories: &library_directories[..directory_count],
         inherited_dylib_path,
@@ -2156,12 +2288,88 @@ pub fn run_unix(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
         docs: DocObservation::default(),
         policy: RefCell::new(StopPolicy::new(settings.max_fail)),
         doc: RefCell::new(doc_tests),
-    };
-    driver.drive(&run, &mut ledger, &mut watches)?;
+    });
+    observe_cargo(cargo_child, &mut driver, &run, &mut ledger, watches).await?;
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
         return Err(RunError::CargoStream);
     }
     finish_run(parser, &run, driver.discovery.exit_code())
+}
+
+type RunStorage<'environment> = (
+    [u8; FRAME_CAPACITY],
+    [u8; SCRATCH_CAPACITY],
+    [u8; LINKED_CAPACITY],
+    [u8; BUILD_SCRIPT_CAPACITY],
+    [u8; LIBDIR_CAPACITY * 2],
+    [&'environment CStr; ENV_CAPACITY],
+    [*const c_char; ENV_CAPACITY + 1],
+    SessionSlots<RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    [Option<TestWatch>; LIVE_CAPACITY],
+);
+
+#[cfg(not(feature = "edge-os"))]
+fn run_storage<'environment>() -> RunStorage<'environment> {
+    new_storage()
+}
+
+fn new_storage<'environment>() -> RunStorage<'environment> {
+    (
+        [0; FRAME_CAPACITY],
+        [0; SCRATCH_CAPACITY],
+        [0; LINKED_CAPACITY],
+        [0; BUILD_SCRIPT_CAPACITY],
+        [0; LIBDIR_CAPACITY * 2],
+        [c""; ENV_CAPACITY],
+        [core::ptr::null(); ENV_CAPACITY + 1],
+        SessionSlots::new(),
+        [const { None }; LIVE_CAPACITY],
+    )
+}
+
+// the driver and the run own tens of KiB each of fixed parking and target tables, too large to sit in the root future
+#[cfg(feature = "edge-os")]
+fn held<Value>(value: Value) -> std::boxed::Box<Value> {
+    std::boxed::Box::new(value)
+}
+
+#[cfg(not(feature = "edge-os"))]
+const fn held<Value>(value: Value) -> Value {
+    value
+}
+
+// run-sized fixed storage too large for any stack frame or future, allocated once
+#[cfg(feature = "edge-os")]
+fn run_storage<'environment>() -> std::boxed::Box<RunStorage<'environment>> {
+    std::boxed::Box::new(new_storage())
+}
+
+#[cfg(not(feature = "edge-os"))]
+fn observe_cargo(
+    (): (),
+    driver: &mut CargoDriver<'_, '_>,
+    run: &ListingRun<'_>,
+    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+) -> core::future::Ready<Result<(), RunError>> {
+    core::future::ready(driver.drive(run, ledger, watches))
+}
+
+fn filter_text<'argument>(parser: &CliParser<'argument>) -> Result<&'argument str, RunError> {
+    Ok(parser
+        .filter()
+        .map(core::str::from_utf8)
+        .transpose()
+        .map_err(|_| RunError::Arguments)?
+        .unwrap_or(""))
+}
+
+const fn ignore_arguments(mode: IgnoreMode) -> &'static [&'static [u8]] {
+    match mode {
+        IgnoreMode::Skip => &[],
+        IgnoreMode::Only => &IGNORED_ARGUMENTS,
+        IgnoreMode::Include => &INCLUDE_ARGUMENTS,
+    }
 }
 
 struct StartedChildren<'port> {
@@ -2365,6 +2573,14 @@ fn wait_for_events(
         Err(libc::EINTR) => 0,
         Err(_) => return Err(RunError::Reactor),
     };
+    forward_signals(signals, events, ready)
+}
+
+fn forward_signals(
+    signals: &SignalPipe,
+    events: &mut [NativeEvent],
+    ready: usize,
+) -> Result<usize, RunError> {
     let mut kept = 0;
     for index in 0..ready {
         if events[index].token == signals.token() {
@@ -2377,52 +2593,37 @@ fn wait_for_events(
     Ok(kept)
 }
 
-/// Fixed-capacity text assembled without allocation; text past the capacity is cut.
-pub struct Line<const CAPACITY: usize> {
-    bytes: [u8; CAPACITY],
-    length: usize,
+/// Dispatches everything the old port holds right now, without waiting, so a prime gate on the port can park again.
+#[cfg(feature = "edge-os")]
+pub(crate) fn service_port(
+    run: &ListingRun<'_>,
+    ledger: &mut OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+) -> Result<(), RunError> {
+    let mut events = [NativeEvent::default(); 64];
+    loop {
+        let ready = match run.port.poll(&mut events) {
+            Ok(0) => break,
+            Ok(ready) => ready,
+            Err(libc::EINTR) => continue,
+            Err(_) => return Err(RunError::Reactor),
+        };
+        let kept = forward_signals(run.signals, &mut events, ready)?;
+        for event in events.iter().copied().take(kept) {
+            run.observe_doc_event(event);
+            test_event(run.port, event, ledger, watches, run.reporting())?;
+        }
+        run.pump_doc_tests()?;
+    }
+    reap_unreported_children(run.port, ledger, watches, run.reporting())?;
+    run.pump_doc_tests()
 }
 
 type LineBuffer = Line<512>;
 
 impl<const CAPACITY: usize> Line<CAPACITY> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            bytes: [0; CAPACITY],
-            length: 0,
-        }
-    }
-
-    pub(crate) fn text(&mut self, text: &[u8]) {
-        let room = self.bytes.len() - self.length;
-        let taken = text.len().min(room);
-        self.bytes[self.length..self.length + taken].copy_from_slice(&text[..taken]);
-        self.length += taken;
-    }
-
-    fn number(&mut self, value: usize) {
-        let mut digits = [0; 20];
-        let mut start = digits.len();
-        let mut remaining = value;
-        loop {
-            start -= 1;
-            digits[start] = DECIMAL_DIGITS[remaining % 10];
-            remaining /= 10;
-            if remaining == 0 {
-                break;
-            }
-        }
-        self.text(&digits[start..]);
-    }
-
-    /// The assembled bytes.
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.length]
-    }
-
     fn write(&self, descriptor: c_int) -> Result<(), RunError> {
-        write_fd(descriptor, &self.bytes[..self.length])
+        write_fd(descriptor, self.bytes())
     }
 }
 

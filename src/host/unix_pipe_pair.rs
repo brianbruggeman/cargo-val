@@ -1,6 +1,8 @@
 //! Owned, nonblocking Unix pipe ends for one child process.
 
 use core::ffi::c_int;
+#[cfg(all(feature = "edge-os", unix))]
+use std::os::fd::{FromRawFd, OwnedFd};
 
 /// The four descriptors used to capture one child's stdout and stderr.
 #[derive(Debug)]
@@ -86,6 +88,15 @@ impl OwnedDescriptor {
     #[must_use]
     pub fn raw(&self) -> c_int {
         self.0
+    }
+
+    /// Hands the descriptor to a std owner, which closes it instead of this type.
+    #[cfg(all(feature = "edge-os", unix))]
+    #[must_use]
+    pub fn into_fd(self) -> OwnedFd {
+        let released = core::mem::ManuallyDrop::new(self);
+        // safety: the descriptor is open and `released` never closes it, so exactly one owner remains.
+        unsafe { OwnedFd::from_raw_fd(released.0) }
     }
 }
 
