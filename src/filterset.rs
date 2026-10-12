@@ -772,10 +772,11 @@ mod tests {
 
     fn selected(expression: &str, rows: &[Row]) -> Vec<usize> {
         let filterset = Filterset::parse(expression.as_bytes()).expect(expression);
+        let prepared = filterset.prepare();
         rows.iter()
             .enumerate()
             .filter(|(_, row)| {
-                filterset.matches(&Candidate {
+                prepared.matches(&Candidate {
                     package: &row.package,
                     binary: &row.binary,
                     test: &row.test,
@@ -889,17 +890,29 @@ mod tests {
         expressions
     }
 
+    fn match_set(expression: &str, rows: &[Row]) -> Vec<bool> {
+        let filterset = Filterset::parse(expression.as_bytes()).expect(expression);
+        let prepared = filterset.prepare();
+        rows.iter()
+            .map(|row| {
+                prepared.matches(&Candidate {
+                    package: &row.package,
+                    binary: &row.binary,
+                    test: &row.test,
+                })
+            })
+            .collect()
+    }
+
     #[test]
     fn not_partitions_the_set_with_the_expression() {
         let rows = corpus();
         let mut checked = 0;
         for expression in expression_corpus() {
-            let inside = selected(&expression, &rows);
-            let outside = selected(&format!("not ({expression})"), &rows);
-            let mut together: Vec<usize> = inside.iter().chain(outside.iter()).copied().collect();
-            together.sort_unstable();
-            assert!(inside.iter().all(|index| !outside.contains(index)), "{expression}");
-            assert_eq!(together, reference(&rows, |_| true), "{expression}");
+            let inside = match_set(&expression, &rows);
+            let outside = match_set(&format!("not ({expression})"), &rows);
+            let disjoint_and_covering = inside.iter().zip(&outside).all(|(is_inside, is_outside)| is_inside != is_outside);
+            assert!(disjoint_and_covering, "{expression}");
             checked += 1;
         }
         assert_eq!(checked, 8 + 8 * 8 * 3);
@@ -909,14 +922,14 @@ mod tests {
     fn a_and_b_is_a_subset_of_a_and_of_b() {
         let rows = corpus();
         let atoms = expression_corpus();
+        let lefts: Vec<(&String, Vec<bool>)> = atoms.iter().step_by(7).map(|left| (left, match_set(left, &rows))).collect();
+        let rights: Vec<(&String, Vec<bool>)> = atoms.iter().step_by(11).map(|right| (right, match_set(right, &rows))).collect();
         let mut checked = 0;
-        for left in atoms.iter().step_by(7) {
-            for right in atoms.iter().step_by(11) {
-                let both = selected(&format!("({left}) and ({right})"), &rows);
-                let only_left = selected(left, &rows);
-                let only_right = selected(right, &rows);
-                assert!(both.iter().all(|index| only_left.contains(index)), "{left} and {right}");
-                assert!(both.iter().all(|index| only_right.contains(index)), "{left} and {right}");
+        for (left, only_left) in &lefts {
+            for (right, only_right) in &rights {
+                let both = match_set(&format!("({left}) and ({right})"), &rows);
+                let intersection: Vec<bool> = only_left.iter().zip(only_right).map(|(in_left, in_right)| *in_left && *in_right).collect();
+                assert_eq!(both, intersection, "{left} and {right}");
                 checked += 1;
             }
         }
