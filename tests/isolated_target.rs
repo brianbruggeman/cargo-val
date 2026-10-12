@@ -125,7 +125,9 @@ fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
     let shared = scratch.join("shared-target");
     let mut holder = hold_build_lock(&scratch, &shared);
 
-    let output = cargo_val(&scratch, &shared, &[]).output().expect("cargo-val is spawnable");
+    let output = cargo_val(&scratch, &shared, &["--target-dir", "isolated"])
+        .output()
+        .expect("cargo-val is spawnable");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 

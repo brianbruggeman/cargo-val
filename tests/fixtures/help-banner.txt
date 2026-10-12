@@ -17,7 +17,7 @@ Options:
   -E, --filterset <EXPR>
                    Select tests with a nextest filterset subset (see below)
       --target-dir <isolated|shared|PATH>
-                   Where the build directories live (see below; default: isolated)
+                   Where the build directories live (see below; default: shared)
 
 Cargo options such as -p, --package, --test, --lib, -F, --features, -m,
 --manifest-path, --target, --profile, and -j/--jobs are forwarded to Cargo.
@@ -67,7 +67,7 @@ for build-finished. A failed build launches none of the waiting executables.
 CARGO_VAL_BIN_GATE=off disables the wait; CARGO_VAL_LOG=debug prints one stderr line
 per gate decision.
 
-Build directories (--target-dir, or CARGO_VAL_TARGET_DIR; the flag wins; default isolated):
+Build directories (--target-dir, or CARGO_VAL_TARGET_DIR; the flag wins; default shared):
   isolated  <cargo's target dir>/cargo-val/<workspace key>/test for the test build and
             .../doc for the doc build, so no other cargo process, rust-analyzer, or
             cargo val shares their build lock, and the two builds never wait on each other
@@ -76,7 +76,7 @@ Build directories (--target-dir, or CARGO_VAL_TARGET_DIR; the flag wins; default
   PATH      <PATH>/test and <PATH>/doc
 cargo's target dir comes from `cargo metadata`. A child that blocks on a lock prints one
 line: cargo-val: waiting for <lock> held by another cargo process (<dir>). The package
-cache lock lives in CARGO_HOME and cannot be isolated. Isolation compiles dependencies
+cache lock lives in CARGO_HOME and cannot be isolated. Isolated compiles dependencies
 once more per workspace than plain `cargo test`, and the doc build compiles the library
 a second time.
 

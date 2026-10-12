@@ -1239,6 +1239,16 @@ mod target_dir_tests {
     }
 
     #[test]
+    fn the_built_in_default_resolves_to_shared_from_the_build_default_source() {
+        let defaults = crate::build_defaults::TARGET_DIR;
+
+        assert_eq!(
+            TargetDirSources::builder(defaults).resolve(),
+            Ok((TargetDirMode::Shared, TargetDirSource::BuildDefault))
+        );
+    }
+
+    #[test]
     fn settings_and_builder_construct_the_same_target_dir_sources() {
         let pairs = [("CARGO_VAL_TARGET_DIR", "shared")];
         let settings = BorrowedSettings::new(&pairs);
