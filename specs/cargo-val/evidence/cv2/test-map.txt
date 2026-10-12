@@ -7,3 +7,6 @@ host::macos_exit::tests::c54_unregistered_exit_uses_bounded_wait_then_reap -> ed
 host::linux_exit::tests::c39_wakes_for_exit_and_control_without_semaphore_mode -> edge_exit_linux::tests::c39_wakes_for_exit_and_control_without_semaphore_mode
 host::linux_exit::tests::c41_registration_race_control_observes_already_exited_child -> edge_exit_linux::tests::c41_registration_race_control_observes_already_exited_child
 host::linux_exit::tests::c59_exit_event_wakes_for_signal_and_reap_reports_signal_and_releases_zombie -> edge_exit_linux::tests::c59_exit_event_wakes_for_signal_and_reap_reports_signal_and_releases_zombie
+host::macos_pipe::tests::c42_reads_both_child_streams_from_the_shared_kqueue -> edge_stream_unix::tests::c42_reads_both_child_streams_from_the_shared_kqueue
+host::linux_pipe::tests::c40_reads_both_child_streams_without_intermediate_buffers -> edge_stream_unix::tests::c40_reads_both_child_streams_without_intermediate_buffers
+host::linux_pipe::tests::c49_native_child_stdout_yields_before_the_child_closes_it -> edge_stream_unix::tests::c49_native_child_stdout_yields_before_the_child_closes_it

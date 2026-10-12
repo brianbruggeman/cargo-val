@@ -46,6 +46,8 @@ pub(crate) mod edge_exit;
 pub mod edge_exit_linux;
 #[cfg(all(feature = "edge-os", target_os = "macos"))]
 pub mod edge_exit_macos;
+#[cfg(all(feature = "edge-os", unix))]
+pub mod edge_stream_unix;
 pub mod cli;
 pub mod host;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
