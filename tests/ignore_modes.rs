@@ -224,31 +224,115 @@ fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test() {
     );
 }
 
-fn cold_bin_gate_run(label: &str, environment: &[(&str, &str)]) -> Run {
-    let target = target_directory().join(format!("bin-gate-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&target);
-    let mut command = Command::new(CARGO_VAL);
-    command
-        .arg("--manifest-path")
-        .arg(manifest("bin_gate"))
-        .env_remove("CARGO_VAL_BIN_GATE")
-        .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", &target);
-    for (key, value) in environment {
-        command.env(key, value);
+#[cfg(unix)]
+mod bin_gate_hold {
+    use std::ffi::CString;
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::thread;
+
+    use super::{CARGO_VAL, Run, manifest, target_directory};
+
+    const TEST_FAILED_LINE: &str = "the_bin_target_exists_when_the_test_starts FAIL";
+
+    /// What proves the bin-less window was observed, so the bin build may be released.
+    #[derive(Clone, Copy)]
+    pub enum Release {
+        /// gate off: the test ran with no bin and said so.
+        AfterTestFails,
+        /// gate on: the test executable is linked and cargo-val is holding it for the bin.
+        AfterTestArtifactLinks,
     }
-    let output = command.output().expect("cargo-val binary is spawnable");
-    let _ = std::fs::remove_dir_all(&target);
-    Run {
-        status: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+
+    fn make_fifo(path: &Path) {
+        let c_path = CString::new(path.as_os_str().as_bytes()).expect("fifo path has no nul");
+        let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
+    }
+
+    fn test_artifact_linked(deps: &Path) -> bool {
+        std::fs::read_dir(deps).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with("uses_bin-") && !name.contains('.')
+            })
+        })
+    }
+
+    fn observed(release: Release, deps: &Path, stdout: &Path) -> bool {
+        match release {
+            Release::AfterTestFails => std::fs::read_to_string(stdout)
+                .is_ok_and(|text| text.contains(TEST_FAILED_LINE)),
+            Release::AfterTestArtifactLinks => test_artifact_linked(deps),
+        }
+    }
+
+    // rustc may open the fifo more than once (sccache runs a dep-info pass first), so one write-open would strand a later reader; the loop ends when the target directory is removed
+    fn release_bin_build(fifo: &Path) {
+        let fifo = fifo.to_path_buf();
+        thread::spawn(move || {
+            while fifo.exists() {
+                drop(OpenOptions::new().write(true).open(&fifo));
+            }
+        });
+    }
+
+    fn output_file(directory: &Path, name: &str) -> (PathBuf, File) {
+        let path = directory.join(name);
+        let file = File::create(&path).expect("output file is creatable");
+        (path, file)
+    }
+
+    pub fn cold_run(label: &str, environment: &[(&str, &str)], release: Release) -> Run {
+        let target = target_directory().join(format!("bin-gate-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target);
+        let outputs = target.join("outputs");
+        std::fs::create_dir_all(&outputs).expect("target directory is creatable");
+        let fifo = target.join("bin-hold");
+        make_fifo(&fifo);
+        let (stdout_path, stdout_file) = output_file(&outputs, "stdout");
+        let (stderr_path, stderr_file) = output_file(&outputs, "stderr");
+        let mut command = Command::new(CARGO_VAL);
+        command
+            .arg("--manifest-path")
+            .arg(manifest("bin_gate"))
+            .env_remove("CARGO_VAL_BIN_GATE")
+            .env("NO_COLOR", "1")
+            .env("CARGO_TARGET_DIR", &target)
+            .env("CARGO_VAL_BIN_GATE_HOLD", &fifo)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+        for (key, value) in environment {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("cargo-val binary is spawnable");
+        let deps = target.join("debug/deps");
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("cargo-val is pollable") {
+                break status;
+            }
+            if observed(release, &deps, &stdout_path) {
+                release_bin_build(&fifo);
+                break child.wait().expect("cargo-val is waitable");
+            }
+            thread::yield_now();
+        };
+        let run = Run {
+            status: status.code(),
+            stdout: std::fs::read_to_string(&stdout_path).expect("stdout is readable"),
+            stderr: std::fs::read_to_string(&stderr_path).expect("stderr is readable"),
+        };
+        let _ = std::fs::remove_dir_all(&target);
+        run
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
-    let result = cold_bin_gate_run("on", &[]);
+    let result = bin_gate_hold::cold_run("on", &[], bin_gate_hold::Release::AfterTestArtifactLinks);
     let context = format!("{}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(0), "{context}");
@@ -260,9 +344,10 @@ fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_same_fixture_fails_with_the_bin_gate_off() {
-    let result = cold_bin_gate_run("off", &[("CARGO_VAL_BIN_GATE", "off")]);
+    let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails);
     let failed = result
         .stdout
         .contains("the_bin_target_exists_when_the_test_starts FAIL");
