@@ -14,7 +14,7 @@ use std::vec::Vec;
 
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
-use proxima_primitives::pipe::{Exhausted, FanIn, Select, UnpinPipe};
+use proxima_primitives::pipe::{Exhausted, FanIn, Select, SignalSource, UnpinPipe};
 
 #[cfg(target_os = "linux")]
 use crate::edge_exit_linux::LinuxExit as ExitSource;
@@ -22,18 +22,20 @@ use crate::edge_exit_linux::LinuxExit as ExitSource;
 use crate::edge_exit_macos::MacosExit as ExitSource;
 
 use crate::cli::CliParser;
+use crate::edge_signal_unix::SignalPipe;
 use crate::edge_stream_unix::ChildStream;
 use crate::host::unix_driver::{
-    CargoDriver, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary, Watches, run_body,
-    service_port, session_ended, session_exited, session_output, write_fd,
+    CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
+    Watches, run_body, session_ended, session_exited, session_output, write_fd,
 };
 use crate::host::unix_spawn::UnixChild;
 
 pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
-pub(crate) const JOB_BASE: usize = 2;
+pub(crate) const DOC_LANE: usize = 2;
+pub(crate) const JOB_BASE: usize = 3;
 const LANES: usize = JOB_BASE + LIVE_CAPACITY;
-const ARMS: usize = LANES * 3 + 1;
+const ARMS: usize = LANES * 3 + 2;
 
 /// One child's stdout and stderr streams, its exit source, and whether its stdout may be read now.
 pub(crate) type Lane = (
@@ -99,7 +101,8 @@ pub(crate) enum Edge<'edge> {
     Out(usize, &'edge Lane),
     Err(usize, &'edge Lane),
     Exit(usize, &'edge Lane),
-    Port(Option<&'edge RefCell<Readiness>>),
+    Signal(Option<&'edge RefCell<Readiness>>),
+    Interrupt(Option<&'edge SignalSource>),
 }
 
 pub(crate) enum Item {
@@ -108,7 +111,8 @@ pub(crate) enum Item {
     Err(usize, io::Result<Range<u32>>),
     ErrEnd(usize),
     Exit(usize, io::Result<ExitStatus>),
-    Port(io::Result<()>),
+    Signal(io::Result<()>),
+    Interrupt,
 }
 
 impl DropSafe for Edge<'_> {}
@@ -125,9 +129,11 @@ impl UnpinPipe for Edge<'_> {
             }
             Edge::Err(id, lane) => stream_step(&lane.1, true, context, (*id, Item::Err, Item::ErrEnd)),
             Edge::Exit(id, lane) => exit_step(&lane.2, *id, context),
-            Edge::Port(gate) => {
-                gate.map_or(Poll::Ready(Err(Exhausted)), |gate| port_step(gate, context))
+            Edge::Signal(gate) => {
+                gate.map_or(Poll::Ready(Err(Exhausted)), |gate| signal_step(gate, context))
             }
+            Edge::Interrupt(source) => source
+                .map_or(Poll::Ready(Err(Exhausted)), |source| interrupt_step(source, context)),
         })
     }
 }
@@ -189,24 +195,34 @@ fn exit_step(
     }
 }
 
-fn port_step(gate: &RefCell<Readiness>, context: &Context<'_>) -> Poll<Result<Item, Exhausted>> {
+fn interrupt_step(source: &SignalSource, context: &mut Context<'_>) -> Poll<Result<Item, Exhausted>> {
+    match step(source, context) {
+        Poll::Ready(Ok(())) => Poll::Ready(Ok(Item::Interrupt)),
+        Poll::Ready(Err(Exhausted)) | Poll::Pending => Poll::Pending,
+    }
+}
+
+fn signal_step(gate: &RefCell<Readiness>, context: &Context<'_>) -> Poll<Result<Item, Exhausted>> {
     match gate.borrow_mut().poll(context) {
         Ok(ReadyState::Parked) => Poll::Pending,
-        Ok(ReadyState::Retry) => Poll::Ready(Ok(Item::Port(Ok(())))),
-        Ok(ReadyState::OffWorker) => Poll::Ready(Ok(Item::Port(Err(io::Error::other(
-            "port gate polled off a prime worker",
+        Ok(ReadyState::Retry) => Poll::Ready(Ok(Item::Signal(Ok(())))),
+        Ok(ReadyState::OffWorker) => Poll::Ready(Ok(Item::Signal(Err(io::Error::other(
+            "signal gate polled off a prime worker",
         ))))),
-        Err(error) => Poll::Ready(Ok(Item::Port(Err(error)))),
+        Err(error) => Poll::Ready(Ok(Item::Signal(Err(error)))),
     }
 }
 
 fn edge<'edge>(
     lanes: &'edge Lanes,
-    port: Option<&'edge RefCell<Readiness>>,
+    port: Option<(&'edge RefCell<Readiness>, &'edge SignalSource)>,
     index: usize,
 ) -> Edge<'edge> {
     if index == ARMS - 1 {
-        return Edge::Port(port);
+        return Edge::Signal(port.map(|(gate, _)| gate));
+    }
+    if index == ARMS - 2 {
+        return Edge::Interrupt(port.map(|(_, source)| source));
     }
     let lane = &lanes[index / 3];
     match index % 3 {
@@ -224,7 +240,7 @@ fn edge<'edge>(
 /// Returns the first error `on_item` reports.
 pub(crate) async fn pump(
     lanes: &Lanes,
-    port: Option<&RefCell<Readiness>>,
+    port: Option<(&RefCell<Readiness>, &SignalSource)>,
     mut on_item: impl FnMut(Item) -> Result<ControlFlow<()>, RunError>,
 ) -> Result<usize, RunError> {
     let merged = FanIn::new(
@@ -264,6 +280,18 @@ fn handle(
     ledger: &mut Ledger<'_>,
     watches: &mut Watches,
 ) -> Result<(), RunError> {
+    if matches!(
+        item,
+        Item::Out(DOC_LANE, _)
+            | Item::OutEnd(DOC_LANE)
+            | Item::Err(DOC_LANE, _)
+            | Item::ErrEnd(DOC_LANE)
+            | Item::Exit(DOC_LANE, _)
+    ) {
+        return run.with_doc(|doc, color, observation| {
+            handle_doc(item, lanes, doc, color, observation)
+        });
+    }
     match item {
         Item::Out(CARGO_LANE, range) => {
             let range = range.map_err(|_| RunError::CargoStream)?;
@@ -317,11 +345,148 @@ fn handle(
         Item::Exit(lane, status) => {
             session_exited(run, ledger, watches, lane - JOB_BASE, exit_code(status)?)
         }
-        Item::Port(ready) => {
+        Item::Signal(ready) => {
             ready.map_err(|_| RunError::Reactor)?;
-            service_port(run)
+            run.drain_signals()
         }
+        Item::Interrupt => Ok(()),
     }
+}
+
+fn handle_doc(
+    item: Item,
+    lanes: &Lanes,
+    doc: &mut DocRun,
+    color: bool,
+    observation: &DocObservation,
+) -> Result<(), RunError> {
+    match item {
+        Item::Out(_, range) => {
+            let range = range.map_err(|_| RunError::Reactor)?;
+            let slot = lanes[DOC_LANE].0.borrow();
+            let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+            let bytes = stream.window(range).ok_or(RunError::Reactor)?;
+            doc.stdout_chunk(&bytes, color, observation)
+        }
+        Item::Err(_, range) => {
+            let range = range.map_err(|_| RunError::Reactor)?;
+            let slot = lanes[DOC_LANE].1.borrow();
+            let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+            let bytes = stream.window(range).ok_or(RunError::Reactor)?;
+            doc.stderr_chunk(&bytes)
+        }
+        Item::OutEnd(_) => {
+            doc.stdout_ended();
+            Ok(())
+        }
+        Item::ErrEnd(_) => {
+            doc.stderr_ended();
+            Ok(())
+        }
+        Item::Exit(_, status) => {
+            doc.exited(exit_code(status)?);
+            Ok(())
+        }
+        Item::Signal(_) | Item::Interrupt => Ok(()),
+    }
+}
+
+/// Awaits one doc-test child and the signal pipe alone, for a run that selects only doc tests.
+///
+/// # Errors
+///
+/// Returns [`RunError`] when a stream faults or the doc child cannot be attached.
+pub(crate) async fn observe_doc(
+    doc: &mut DocRun,
+    signals: &SignalPipe,
+    color: bool,
+    observation: &DocObservation,
+) -> Result<(), RunError> {
+    let lanes = Box::new(empty_lanes());
+    if let Some(child) = doc.take_child() {
+        attach(&lanes[DOC_LANE], child)?;
+    }
+    let gate = RefCell::new(Readiness::new(signals.read_fd()));
+    let interrupt = SignalSource::new(signals.interrupt());
+    pump(&lanes, Some((&gate, &interrupt)), |item| {
+        match item {
+            Item::Interrupt => {}
+            Item::Signal(ready) => {
+                ready.map_err(|_| RunError::Reactor)?;
+                signals.drain().map_err(|_| RunError::Reactor)?;
+            }
+            other => handle_doc(other, &lanes, doc, color, observation)?,
+        }
+        Ok(if doc.finished() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        })
+    })
+    .await?;
+    Ok(())
+}
+
+/// Runs a short-lived child to its exit through prime sources, handing its stdout to `on_stdout`; returns its exit code.
+///
+/// # Errors
+///
+/// Returns [`RunError`] when the child cannot be attached or a stream faults.
+pub(crate) async fn collect_child(
+    child: UnixChild,
+    mut on_stdout: impl FnMut(&[u8]),
+) -> Result<i32, RunError> {
+    let lanes = Box::new(empty_lanes());
+    attach(&lanes[CARGO_LANE], child)?;
+    let (mut code, mut out_ended, mut err_ended) = (None, false, false);
+    pump(&lanes, None, |item| {
+        match item {
+            Item::Out(_, range) => {
+                let range = range.map_err(|_| RunError::Reactor)?;
+                let slot = lanes[CARGO_LANE].0.borrow();
+                let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+                on_stdout(&stream.window(range).ok_or(RunError::Reactor)?);
+            }
+            Item::OutEnd(_) => out_ended = true,
+            Item::ErrEnd(_) => err_ended = true,
+            Item::Exit(_, status) => code = Some(exit_code(status)?),
+            Item::Err(..) | Item::Signal(_) | Item::Interrupt => {}
+        }
+        Ok(if code.is_some() && out_ended && err_ended {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        })
+    })
+    .await?;
+    code.ok_or(RunError::Reactor)
+}
+
+/// Reads the directory a `rustc --print target-libdir` child prints into `output`, trimmed of its newline.
+///
+/// # Errors
+///
+/// Returns [`RunError::RustcLibdir`] when rustc fails, prints nothing, or prints more than `output` holds.
+pub(crate) async fn collect_libdir(child: UnixChild, output: &mut [u8]) -> Result<usize, RunError> {
+    let mut length = 0;
+    let mut overflow = false;
+    let code = collect_child(child, |bytes| {
+        let room = output.len() - length;
+        overflow |= bytes.len() > room;
+        let taken = bytes.len().min(room);
+        output[length..length + taken].copy_from_slice(&bytes[..taken]);
+        length += taken;
+    })
+    .await
+    .map_err(|_| RunError::RustcLibdir)?;
+    let mut end = length;
+    while end > 0 && matches!(output[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    if code != 0 || overflow || end == 0 {
+        return Err(RunError::RustcLibdir);
+    }
+    Ok(end)
 }
 
 fn session_chunk(
@@ -354,11 +519,14 @@ pub(crate) async fn observe_cargo(
 ) -> Result<(), RunError> {
     let lanes = Box::new(empty_lanes());
     attach(&lanes[CARGO_LANE], child)?;
-    let port = RefCell::new(Readiness::new(run.port_fd()));
-    pump(&lanes, Some(&port), |item| {
+    if let Some(doc_child) = run.take_doc_child() {
+        attach(&lanes[DOC_LANE], doc_child)?;
+    }
+    let signal = RefCell::new(Readiness::new(run.signal_fd()));
+    let interrupt = run.interrupt_source();
+    pump(&lanes, Some((&signal, &interrupt)), |item| {
         handle(item, &lanes, driver, run, ledger, watches)?;
         driver.resume(&lanes, run, ledger, watches)?;
-        run.pump_doc_tests()?;
         lanes[CARGO_LANE].3.set(driver.cargo_open());
         lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
         Ok(if driver.finished(run, ledger) {
@@ -397,10 +565,14 @@ mod tests {
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
 
-    use super::{CARGO_LANE, CString, Item, RunError, attach, empty_lanes, pump};
+    use super::{
+        CARGO_LANE, CString, Item, NonZeroI32, RunError, UnixChild, attach, collect_libdir, empty_lanes,
+        pump,
+    };
     use crate::artifact_stream::ArtifactFramer;
     use crate::cargo_source::{CargoSource, CargoSourceStep};
     use crate::edge_exit::fixture::in_single_threaded_process;
+    use crate::host::unix_rustc::spawn_libdir_query;
     use crate::host::unix_spawn::spawn_raw_unix;
     use crate::test_dir::tempdir;
 
@@ -532,7 +704,7 @@ mod tests {
                     }
                     Item::OutEnd(_) => out_ended = true,
                     Item::ErrEnd(_) => err_ended = true,
-                    Item::Port(_) => {}
+                    Item::Signal(_) | Item::Interrupt => {}
                 }
                 Ok(if exited && out_ended && err_ended {
                     ControlFlow::Break(())
@@ -546,6 +718,99 @@ mod tests {
             (found, raw, parks)
         })
         .expect("root completes")
+    }
+
+    fn inherited_environment() -> (Vec<CString>, Vec<*const c_char>) {
+        let entries = environment();
+        let mut pointers: Vec<*const c_char> = entries.iter().map(|entry| entry.as_ptr()).collect();
+        pointers.push(core::ptr::null());
+        (entries, pointers)
+    }
+
+    fn libdir_through_prime(child: UnixChild) -> Result<std::string::String, RunError> {
+        run_on_this_thread(CoreId(0), async move {
+            let mut output = [0_u8; 1024];
+            let length = collect_libdir(child, &mut output).await?;
+            Ok(std::string::String::from_utf8(output[..length].to_vec()).expect("libdir is utf-8"))
+        })
+        .expect("root completes")
+    }
+
+    #[test]
+    fn host_libdir_is_the_directory_that_holds_libstd() {
+        let (_entries, pointers) = inherited_environment();
+        let child = spawn_libdir_query(None, None, &pointers).expect("rustc spawns");
+
+        let libdir = libdir_through_prime(child).expect("rustc prints its target libdir");
+
+        let has_libstd = std::fs::read_dir(std::path::Path::new(&libdir))
+            .expect("printed libdir exists")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("libstd-"));
+        assert!(has_libstd, "no libstd-* in {libdir}");
+    }
+
+    #[test]
+    fn spawn_returns_while_rustc_is_still_running_and_prime_collects_its_output() {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempdir().expect("scratch directory");
+        let gate = directory.path().join("gate");
+        let gate_c = CString::new(gate.as_os_str().as_bytes()).expect("gate path");
+        assert_eq!(unsafe { libc::mkfifo(gate_c.as_ptr(), 0o600) }, 0, "mkfifo");
+        let (_entries, pointers) = inherited_environment();
+        // exec of a freshly written file is held by the OS for 16-67 s under load, so the
+        // fake rustc is the installed /bin/sh, which never pays that first-exec assessment.
+        let argv = [
+            c"sh".as_ptr(),
+            c"-c".as_ptr(),
+            c"read release < \"$1\"; echo /opt/fake-toolchain/lib".as_ptr(),
+            c"sh".as_ptr(),
+            gate_c.as_ptr(),
+            core::ptr::null(),
+        ];
+        let child = spawn_raw_unix(c"/bin/sh", &argv, &pointers, None, false).expect("fake rustc spawns");
+        let process_id = NonZeroI32::new(child.process_id()).expect("positive pid");
+        assert!(
+            prime::os::child::try_reap(process_id).expect("probe succeeds").is_none(),
+            "rustc was still running when spawn returned"
+        );
+        let mut release = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&gate)
+            .expect("open gate for release");
+        release.write_all(b"go\n").expect("release fake rustc");
+        drop(release);
+
+        let libdir = libdir_through_prime(child).expect("prime collects output");
+
+        assert_eq!(libdir, "/opt/fake-toolchain/lib");
+    }
+
+    #[test]
+    fn unknown_target_is_reported_as_an_output_failure() {
+        let (_entries, pointers) = inherited_environment();
+        let child = spawn_libdir_query(None, Some(b"not-a-real-triple"), &pointers).expect("rustc spawns");
+
+        let result = libdir_through_prime(child);
+
+        assert_eq!(result, Err(RunError::RustcLibdir));
+    }
+
+    #[test]
+    fn interrupt_arm_yields_once_on_the_scan_after_the_signal_fires() {
+        let signal = proxima_core::signal::Signal::new();
+        let source = proxima_primitives::pipe::SignalSource::new(&signal);
+        let mut context = Context::from_waker(Waker::noop());
+        let arms = [super::Edge::Interrupt(Some(&source))];
+        let alone = proxima_primitives::pipe::FanIn::new(arms, proxima_primitives::pipe::Select::RoundRobin);
+
+        assert!(matches!(super::step(&alone, &mut context), Poll::Pending), "unfired signal parks");
+        signal.fire();
+
+        assert!(matches!(super::step(&alone, &mut context), Poll::Ready(Ok(Item::Interrupt))));
+        assert!(matches!(super::step(&alone, &mut context), Poll::Pending), "an exhausted source parks the merge");
     }
 
     #[test]
@@ -567,4 +832,3 @@ mod tests {
         });
     }
 }
-
