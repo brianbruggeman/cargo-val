@@ -35,10 +35,10 @@ use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
-use crate::edge_signal_unix::{SignalPipe, conventional_status, release_child, track_child};
-use crate::unix_env::UnixEnvironment;
-use crate::unix_spawn::spawn_libdir_query;
-use crate::unix_spawn::{UnixChild, spawn_raw_unix, spawn_raw_unix_in_new_group};
+use crate::edge_signal::{SignalPipe, conventional_status, release_child, track_child};
+use crate::edge_args::UnixEnvironment;
+use crate::edge_spawn::spawn_libdir_query;
+use crate::edge_spawn::{UnixChild, spawn_raw_unix, spawn_raw_unix_in_new_group};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
 use crate::reporter::write_report;
@@ -54,7 +54,7 @@ use crate::test_environment::{
     TestEnvironmentInput, TestEnvironmentLayout,
 };
 use crate::test_intent::ExactTestIntent;
-use crate::unix_arguments::{UnixArgumentsError, merge_environment};
+use crate::edge_args::{UnixArgumentsError, merge_environment};
 
 pub(crate) const LIVE_CAPACITY: usize = 64;
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
@@ -2724,7 +2724,7 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError};
-    use crate::unix_arguments::UnixArgumentsError;
+    use crate::edge_args::UnixArgumentsError;
 
     fn rendered(cause: LaunchCause) -> std::string::String {
         let line: ErrorLine = RunError::Launch(cause).render();

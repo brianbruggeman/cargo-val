@@ -189,7 +189,7 @@ mod tests {
 
     use super::ChildStream;
     use crate::edge_exit::fixture::in_single_threaded_process;
-    use crate::unix_pipe_pair::{OwnedDescriptor, UnixPipePair};
+    use crate::edge_spawn_unix::pipe_pair::{OwnedDescriptor, UnixPipePair};
 
     #[cfg(target_os = "linux")]
     use crate::edge_exit_linux::LinuxExit as ExitSource;

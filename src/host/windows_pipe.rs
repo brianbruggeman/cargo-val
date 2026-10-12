@@ -302,8 +302,8 @@ mod tests {
     };
 
     use super::{WindowsPipeReadSlot, WindowsPipeReadState};
-    use crate::host::windows_handles::WindowsOwnedHandle;
-    use crate::host::windows_pipe_pair::WindowsPipePair;
+    use crate::edge_spawn_windows::handles::WindowsOwnedHandle;
+    use crate::edge_spawn_windows::pipe_pair::WindowsPipePair;
 
     #[test]
     fn c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix() {
