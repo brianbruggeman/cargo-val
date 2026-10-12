@@ -1,0 +1,214 @@
+//! Times one test-binary launch per spawn path on the fixture that the `scale` example generated.
+//!
+//! Run `cargo run --release --example scale` first. `LAUNCH_COUNT` (default 500) sets the launches per arm.
+//! Each arm launches, waits for exit, and closes, sequentially, interleaved arm by arm so drift hits all arms alike.
+
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
+use std::time::Instant;
+
+#[cfg(windows)]
+use cargo_val::edge_spawn_windows::{HeldLaunchStorage, held_launch_storage, spawn_exact};
+#[cfg(not(windows))]
+use cargo_val::edge_spawn_unix::{HeldLaunchStorage, held_launch_storage, spawn_exact};
+
+const FIRST_BINARY: &str = "scale_00";
+const PASSING_TEST: &str = "cases::b0_i00000";
+const ABSENT_TEST: &str = "cases::__no_such_test__";
+const WARMUP: usize = 3;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpawnPath {
+    CargoValExact,
+    StdExact,
+    StdAbsent,
+    CargoValAbsent,
+}
+
+const PATHS: [SpawnPath; 4] = [SpawnPath::CargoValExact, SpawnPath::StdExact, SpawnPath::StdAbsent, SpawnPath::CargoValAbsent];
+
+impl SpawnPath {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CargoValExact => "(a) cargo-val spawn_exact, passing test",
+            Self::StdExact => "(b) std Command output, passing test",
+            Self::StdAbsent => "(c) std Command output, absent test",
+            Self::CargoValAbsent => "(d) cargo-val spawn_exact, absent test",
+        }
+    }
+}
+
+struct Launcher {
+    executable: PathBuf,
+    directory: PathBuf,
+    environment: Vec<Vec<u8>>,
+    storage: RefCell<HeldLaunchStorage>,
+}
+
+fn main() -> ExitCode {
+    match measure() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("launch_cost: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn fixture_directory() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|error| format!("current exe: {error}"))?;
+    let fixture = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("example executable has no profile directory")?
+        .join("scale-fixture");
+    if fixture.join("Cargo.toml").is_file() {
+        return Ok(fixture);
+    }
+    Err(format!("{} is missing; run `cargo run --release --example scale` first", fixture.display()))
+}
+
+fn first_test_binary(fixture: &Path) -> Result<PathBuf, String> {
+    let output = Command::new("cargo")
+        .args(["test", "--lib", "--no-run", "--message-format=json", "--target-dir"])
+        .arg(fixture.join("target"))
+        .current_dir(fixture)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .map_err(|error| format!("spawn cargo test --no-run: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| message["target"]["name"] == FIRST_BINARY)
+        .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+        .ok_or_else(|| format!("no executable for {FIRST_BINARY} in cargo output"))
+}
+
+fn inherited_environment() -> Vec<Vec<u8>> {
+    std::env::vars_os()
+        .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()).into_bytes())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn wait_for_exit(process_id: u32) -> Result<(), String> {
+    let pid = libc::pid_t::try_from(process_id).map_err(|error| format!("pid {process_id}: {error}"))?;
+    let mut status = 0;
+    // safety: waitpid takes a pid we own and a valid status pointer, and reports failure through its return value.
+    let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+    if reaped == pid {
+        return Ok(());
+    }
+    Err(format!("waitpid {pid}: {}", std::io::Error::last_os_error()))
+}
+
+#[cfg(windows)]
+fn wait_for_exit(process_id: u32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+
+    // safety: OpenProcess takes plain integers; a null return is checked before the handle is used.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) };
+    if handle.is_null() {
+        return Err(format!("OpenProcess {process_id}: {}", std::io::Error::last_os_error()));
+    }
+    // safety: the handle is the valid process handle opened above and is closed exactly once.
+    let waited = unsafe { WaitForSingleObject(handle, INFINITE) };
+    unsafe { CloseHandle(handle) };
+    if waited == 0 {
+        return Ok(());
+    }
+    Err(format!("WaitForSingleObject {process_id}: {waited}"))
+}
+
+impl Launcher {
+    fn cargo_val_launch(&self, test: &str) -> Result<(), String> {
+        let environment = self.environment.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let directory = self.directory.to_string_lossy().into_owned().into_bytes();
+        let executable = self.executable.to_string_lossy().into_owned().into_bytes();
+        let child = spawn_exact(
+            &mut self.storage.borrow_mut(),
+            &executable,
+            test.as_bytes(),
+            &[],
+            &environment,
+            &[],
+            &directory,
+        )
+        .map_err(|error| format!("spawn_exact: {error:?}"))?;
+        wait_for_exit(child.process_id())?;
+        drop(child);
+        Ok(())
+    }
+
+    fn std_launch(&self, test: &str) -> Result<(), String> {
+        let output = Command::new(&self.executable)
+            .args(["--exact", test])
+            .current_dir(&self.directory)
+            .output()
+            .map_err(|error| format!("spawn {}: {error}", self.executable.display()))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(format!("{test} exited {:?}", output.status.code()))
+    }
+
+    fn launch(&self, path: SpawnPath) -> Result<(), String> {
+        match path {
+            SpawnPath::CargoValExact => self.cargo_val_launch(PASSING_TEST),
+            SpawnPath::StdExact => self.std_launch(PASSING_TEST),
+            SpawnPath::StdAbsent => self.std_launch(ABSENT_TEST),
+            SpawnPath::CargoValAbsent => self.cargo_val_launch(ABSENT_TEST),
+        }
+    }
+}
+
+fn percentile(sorted: &[f64], percent: usize) -> f64 {
+    let rank = (sorted.len() * percent).div_ceil(100);
+    sorted[rank.clamp(1, sorted.len()) - 1]
+}
+
+fn median(sorted: &[f64]) -> f64 {
+    percentile(sorted, 50)
+}
+
+fn measure() -> Result<(), String> {
+    let count = match std::env::var("LAUNCH_COUNT") {
+        Ok(text) => text.parse::<usize>().ok().filter(|count| *count > 0).ok_or_else(|| format!("LAUNCH_COUNT={text} is not a positive integer"))?,
+        Err(_) => 500,
+    };
+    let fixture = fixture_directory()?;
+    let launcher = Launcher {
+        executable: first_test_binary(&fixture)?,
+        directory: fixture,
+        environment: inherited_environment(),
+        storage: RefCell::new(held_launch_storage()),
+    };
+    println!("launch_cost: {} launches per arm of {}", count, launcher.executable.display());
+    for _ in 0..WARMUP {
+        PATHS.iter().try_for_each(|path| launcher.launch(*path))?;
+    }
+    let mut samples = vec![Vec::with_capacity(count); PATHS.len()];
+    for _ in 0..count {
+        for (slot, path) in PATHS.iter().enumerate() {
+            let start = Instant::now();
+            launcher.launch(*path)?;
+            samples[slot].push(start.elapsed().as_secs_f64() * 1e6);
+        }
+    }
+    report(&mut samples);
+    Ok(())
+}
+
+fn report(samples: &mut [Vec<f64>]) {
+    println!("{:<44} {:>12} {:>12}", "arm", "median us", "p99 us");
+    for (path, arm) in PATHS.iter().zip(samples.iter_mut()) {
+        arm.sort_by(f64::total_cmp);
+        println!("{:<44} {:>12.1} {:>12.1}", path.label(), median(arm), percentile(arm, 99));
+    }
+    println!("cargo-val construction overhead, passing test (a) - (b): {:.1} us median", median(&samples[0]) - median(&samples[1]));
+    println!("cargo-val construction overhead, absent test (d) - (c): {:.1} us median", median(&samples[3]) - median(&samples[2]));
+    println!("image-load plus libtest startup floor (c): {:.1} us median", median(&samples[2]));
+    println!("arm (a) and (d) include a pid-based wait (waitpid, or OpenProcess + WaitForSingleObject + CloseHandle on Windows)");
+}
