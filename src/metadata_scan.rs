@@ -1,5 +1,8 @@
 //! Which packages have `bin` targets, plus the workspace root and target directory, read from `cargo metadata --no-deps --format-version 1`
-//! one byte at a time over fixed storage, so the scan needs no heap and no whole-document buffer.
+//! one byte at a time over fixed storage, so the scan allocates only its package table once and keeps no whole-document buffer.
+
+use std::boxed::Box;
+use std::vec;
 
 const MAX_PACKAGES: usize = 256;
 const ID_CAPACITY: usize = 192;
@@ -45,20 +48,20 @@ struct Entry {
 
 /// Per package with at least one `bin` target: how many it has and how many were built so far.
 pub struct BinCounts {
-    entries: [Entry; MAX_PACKAGES],
+    entries: Box<[Entry]>,
     count: usize,
 }
 
 impl BinCounts {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            entries: [Entry {
+            entries: vec![Entry {
                 id: [0; ID_CAPACITY],
                 id_length: 0,
                 bins: 0,
                 built: 0,
-            }; MAX_PACKAGES],
+            }; MAX_PACKAGES].into_boxed_slice(),
             count: 0,
         }
     }
@@ -192,7 +195,7 @@ const FRAME: Frame = Frame {
 
 impl MetadataScan {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             stack: [FRAME; MAX_DEPTH],
             depth: 0,

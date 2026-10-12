@@ -1,5 +1,8 @@
 //! Test executables whose package still has a `bin` target to build, held in arrival order.
 
+use std::boxed::Box;
+use std::vec;
+
 use crate::cargo_message::TestArtifact;
 
 const CAPACITY: usize = 64;
@@ -92,15 +95,15 @@ impl OwnedArtifact {
 
 /// A fixed first-in first-out of parked artifacts.
 pub struct ParkedArtifacts {
-    slots: [OwnedArtifact; CAPACITY],
+    slots: Box<[OwnedArtifact]>,
     count: usize,
 }
 
 impl ParkedArtifacts {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            slots: [OwnedArtifact::EMPTY; CAPACITY],
+            slots: vec![OwnedArtifact::EMPTY; CAPACITY].into_boxed_slice(),
             count: 0,
         }
     }

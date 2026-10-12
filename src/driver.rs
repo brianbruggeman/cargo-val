@@ -124,7 +124,7 @@ struct PendingListing {
     identity: Identity,
     path: [u8; PATH_CAPACITY],
     path_length: usize,
-    environment: [u8; ENVIRONMENT_CAPACITY],
+    environment: Box<[u8]>,
     layout: TestEnvironmentLayout,
     ignoring: bool,
     lane_pid: u32,
@@ -869,7 +869,7 @@ fn spawn_listing(
     if executable.len() + 1 > PATH_CAPACITY || executable.as_bytes().contains(&0) {
         return Err(RunError::Arguments);
     }
-    let mut environment = [0; ENVIRONMENT_CAPACITY];
+    let mut environment = zeroed(ENVIRONMENT_CAPACITY);
     let layout = TestEnvironmentLayout::build(
         &TestEnvironmentInput {
             artifact: *artifact,
@@ -914,7 +914,7 @@ fn spawn_listing(
 fn launch_listed(
     scan: &ListingScan<'_, '_>,
     ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+    watches: &mut Watches,
     intent: ExactTestIntent<'_, '_, '_>,
 ) -> Result<(), RunError> {
     let (run, target, environment, layout) = (scan.run, scan.target, scan.environment, scan.layout);
@@ -1066,7 +1066,7 @@ impl ListingScan<'_, '_> {
         step: ListingSourceStep<'_, '_, '_>,
         stopped: bool,
         ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        watches: &mut [Option<TestWatch>; LIVE_CAPACITY],
+        watches: &mut Watches,
     ) -> Result<Flow, RunError> {
         let run = self.run;
         match step {
@@ -1357,7 +1357,7 @@ fn start_listing(
 
 pub(crate) type Ledger<'ledger> =
     OutcomeLedger<'ledger, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>;
-pub(crate) type Watches = [Option<TestWatch>; LIVE_CAPACITY];
+pub(crate) type Watches = [Option<TestWatch>];
 
 impl CargoDriver<'_> {
     fn drained(&self, unaccounted: usize) -> bool {
@@ -1858,7 +1858,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
     let mut storage = run_storage();
-    let storage: &mut RunStorage<'_> = &mut storage;
+    let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches)) = storage;
     let inherited_count = environment
         .collect(inherited)
@@ -1884,7 +1884,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         lock_watch,
     } = start_children(parser, &settings, target_mode, inherited).await?;
     let cargo_process_id = cargo_child.process_id();
-    let mut driver = held(new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?);
+    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .await
@@ -1916,45 +1916,46 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
 }
 
 type CargoStorage = (
-    [u8; FRAME_CAPACITY],
-    [u8; SCRATCH_CAPACITY],
-    [u8; LINKED_CAPACITY],
-    [u8; BUILD_SCRIPT_CAPACITY],
-    [u8; SOURCE_CAPACITY + 1],
-    [u8; RESULT_LINE_CAPACITY + 1],
+    Box<[u8]>,
+    Box<[u8]>,
+    Box<[u8]>,
+    Box<[u8]>,
+    Box<[u8]>,
+    Box<[u8]>,
     IgnoredSet,
 );
 
 type RunStorage<'environment> = (
     CargoStorage,
     (
-        [u8; LIBDIR_CAPACITY * 2],
-        [&'environment [u8]; ENV_CAPACITY],
+        Box<[u8]>,
+        Box<[&'environment [u8]]>,
     ),
     (
-        SessionSlots<RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-        [Option<TestWatch>; LIVE_CAPACITY],
+        Box<SessionSlots<RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>>,
+        Box<Watches>,
     ),
 );
 
-// run-sized fixed storage too large for any stack frame or future, allocated once
-fn run_storage<'environment>() -> std::boxed::Box<RunStorage<'environment>> {
-    std::boxed::Box::new((
+// run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup
+fn run_storage<'environment>() -> RunStorage<'environment> {
+    (
         (
-            [0; FRAME_CAPACITY],
-            [0; SCRATCH_CAPACITY],
-            [0; LINKED_CAPACITY],
-            [0; BUILD_SCRIPT_CAPACITY],
-            [0; SOURCE_CAPACITY + 1],
-            [0; RESULT_LINE_CAPACITY + 1],
+            zeroed(FRAME_CAPACITY),
+            zeroed(SCRATCH_CAPACITY),
+            zeroed(LINKED_CAPACITY),
+            zeroed(BUILD_SCRIPT_CAPACITY),
+            zeroed(SOURCE_CAPACITY + 1),
+            zeroed(RESULT_LINE_CAPACITY + 1),
             IgnoredSet::new(),
         ),
-        (
-            [0; LIBDIR_CAPACITY * 2],
-            [b""; ENV_CAPACITY],
-        ),
-        (SessionSlots::new(), [const { None }; LIVE_CAPACITY]),
-    ))
+        (zeroed(LIBDIR_CAPACITY * 2), std::vec![b"".as_slice(); ENV_CAPACITY].into_boxed_slice()),
+        (Box::new(SessionSlots::new()), (0..LIVE_CAPACITY).map(|_| None).collect()),
+    )
+}
+
+fn zeroed(length: usize) -> Box<[u8]> {
+    std::vec![0; length].into_boxed_slice()
 }
 
 #[inline(never)]
@@ -1973,8 +1974,8 @@ fn new_driver(
     bins: BinCounts,
     gate: BinGate,
     lock_watch: LockWatch,
-) -> Result<CargoDriver<'_>, RunError> {
-    Ok(CargoDriver {
+) -> Result<Box<CargoDriver<'_>>, RunError> {
+    Ok(Box::new(CargoDriver {
         process_id,
         framer: ArtifactFramer::new(frame, FRAME_CAPACITY - 1).map_err(|_| RunError::CargoStream)?,
         scratch,
@@ -1995,7 +1996,7 @@ fn new_driver(
         parked: ParkedArtifacts::new(),
         dropped: 0,
         lock_watch,
-    })
+    }))
 }
 
 fn filter_text<'argument>(parser: &CliParser<'argument>) -> Result<&'argument str, RunError> {
@@ -2159,7 +2160,7 @@ pub(crate) fn spawn_libdir_query(
 
 async fn resolve_libdirs(
     queries: LibdirQueries,
-    buffer: &mut [u8; LIBDIR_CAPACITY * 2],
+    buffer: &mut [u8],
 ) -> Result<([&str; 2], usize), RunError> {
     let (host_buffer, target_buffer) = buffer.split_at_mut(LIBDIR_CAPACITY);
     let host_length = collect_libdir(queries.0, host_buffer).await?;

@@ -1,5 +1,8 @@
 //! The `#[ignore]`d test names of one test binary, from `--list --ignored`, in caller-free fixed storage.
 
+use std::boxed::Box;
+use std::vec;
+
 const BYTES_CAPACITY: usize = 262_144;
 const SLOT_COUNT: usize = 4096;
 const MAX_ENTRIES: usize = SLOT_COUNT / 4 * 3;
@@ -17,9 +20,9 @@ pub enum IgnoredSetFull {
 
 /// Open-addressing set of test names; membership is O(1) and never allocates.
 pub struct IgnoredSet {
-    bytes: [u8; BYTES_CAPACITY],
+    bytes: Box<[u8]>,
     used: usize,
-    slots: [u32; SLOT_COUNT],
+    slots: Box<[u32]>,
     entries: usize,
 }
 
@@ -30,11 +33,11 @@ fn hash(name: &[u8]) -> u64 {
 
 impl IgnoredSet {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            bytes: [0; BYTES_CAPACITY],
+            bytes: vec![0; BYTES_CAPACITY].into_boxed_slice(),
             used: 0,
-            slots: [0; SLOT_COUNT],
+            slots: vec![0; SLOT_COUNT].into_boxed_slice(),
             entries: 0,
         }
     }
