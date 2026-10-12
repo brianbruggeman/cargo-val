@@ -492,7 +492,15 @@ mod tests {
                     bytes.len() - offset,
                 )
             };
-            assert!(count >= 0, "nonblocking child output read must succeed");
+            if count < 0 && last_error_code() == libc::EAGAIN {
+                wait_readable(descriptor);
+                continue;
+            }
+            assert!(
+                count >= 0,
+                "nonblocking child output read must succeed, errno {}",
+                last_error_code()
+            );
             if count == 0 {
                 break;
             }
@@ -503,6 +511,20 @@ mod tests {
             );
         }
         offset
+    }
+
+    fn wait_readable(descriptor: i32) {
+        let mut poll_descriptor = libc::pollfd {
+            fd: descriptor,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&raw mut poll_descriptor, 1, -1) };
+        assert!(
+            ready == 1 || last_error_code() == libc::EINTR,
+            "poll on the capture descriptor must report readiness or hangup, errno {}",
+            last_error_code()
+        );
     }
 
     fn assert_payload(bytes: &[u8], expected_payload: &[u8]) {
