@@ -25,6 +25,7 @@ pub mod isolated_target;
 pub mod metadata_scan;
 pub mod parked_artifacts;
 pub mod schedule;
+pub mod stop;
 pub mod summary;
 pub mod test_environment;
 
