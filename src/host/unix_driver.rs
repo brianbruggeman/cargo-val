@@ -9,7 +9,7 @@ use conflaguration::{BorrowedSettings, SettingsSource, resolve_color};
 use proxima_core::io::AsyncRead;
 
 use crate::ExecutablePath;
-use crate::artifact_stream::ArtifactFramer;
+use crate::artifact_stream::{ArtifactFramer, RecordStep};
 use crate::cargo_message::TestArtifact;
 use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
@@ -42,7 +42,7 @@ use crate::runner::{
 };
 use crate::schedule::{SessionSlotId, SessionSlots};
 use crate::selection::{NameFilter, Selection};
-use crate::stop::{DocAtTrip, Observation, StopPolicy, StopReport};
+use crate::stop::{self, DocAtTrip, Observation, StopPolicy, StopReport};
 use crate::test_environment::{
     BuildScriptOutput, BuildScriptOutputs, DYLIB_PATH_KEY_C, LinkedDirectories, MAX_ENTRIES,
     TestEnvironmentInput, TestEnvironmentLayout,
@@ -1279,7 +1279,7 @@ fn listing_wanted(
     run: &ListingRun<'_>,
     ledger: &OutcomeLedger<'_, RunningUnixChild<NAME_CAPACITY>, LIVE_CAPACITY>,
 ) -> bool {
-    run.tripped(ledger) || ledger.sessions().len() < run.settings.jobs
+    stop::listing_wanted(run.tripped(ledger), ledger.sessions().len(), run.settings.jobs)
 }
 
 struct ListingScan<'scan, 'run> {
@@ -1302,11 +1302,10 @@ impl ListingScan<'_, '_> {
             return Ok(Flow::Pause);
         };
         match step.map_err(|_| RunError::ListingStream)? {
-            ListingSourceStep::Launch(_) if run.interrupted() => {}
-            ListingSourceStep::Launch(_) if stopped => {
-                run.policy.borrow_mut().listed_test_skipped();
-            }
             ListingSourceStep::Launch(intent) => {
+                if !run.policy.borrow_mut().admit_listed(run.interrupted(), stopped) {
+                    return Ok(Flow::Next);
+                }
                 launch_listed(run, ledger, watches, intent, self.target, self.environment, self.layout)?;
                 if ledger.sessions().len() >= run.settings.jobs {
                     return Ok(Flow::Pause);
@@ -1341,21 +1340,22 @@ fn report_skipped(name: &str, color: bool) -> Result<(), RunError> {
 
 fn feed_ignored_lines(
     bytes: &[u8],
-    line: &mut [u8; RESULT_LINE_CAPACITY],
-    length: &mut usize,
+    framer: &mut ArtifactFramer<'_>,
     set: &mut IgnoredSet,
 ) -> Result<(), RunError> {
-    for byte in bytes {
-        if *byte != b'\n' {
-            *line.get_mut(*length).ok_or(RunError::ListingStream)? = *byte;
-            *length += 1;
-            continue;
-        }
-        let parsed = parse_listing_line(&line[..*length]).map_err(|_| RunError::ListingStream)?;
-        *length = 0;
-        if let ListingLine::Test(name) = parsed {
+    let mut remaining = bytes;
+    while !remaining.is_empty() || framer.frame_ready().map_err(|_| RunError::ListingStream)? {
+        let (parsed, consumed_bytes) = match framer
+            .next_record(remaining, parse_listing_line)
+            .map_err(|_| RunError::ListingStream)?
+        {
+            RecordStep::Parsed { parsed, consumed_bytes } => (Some(parsed), consumed_bytes),
+            RecordStep::NeedMore { consumed_bytes } => (None, consumed_bytes),
+        };
+        if let Some(ListingLine::Test(name)) = parsed {
             set.insert(name.as_bytes()).map_err(RunError::IgnoredSet)?;
         }
+        remaining = &remaining[consumed_bytes..];
     }
     Ok(())
 }
@@ -1370,8 +1370,9 @@ fn collect_ignored(
 ) -> Result<(), RunError> {
     let process_id = child.process_id();
     let (mut stdout, mut stderr, mut process) = reader_pair(run.port, child)?;
-    let mut line = [0; RESULT_LINE_CAPACITY];
-    let mut line_length = 0;
+    let mut frame_bytes = [0; RESULT_LINE_CAPACITY + 1];
+    let mut framer = ArtifactFramer::new(&mut frame_bytes, RESULT_LINE_CAPACITY)
+        .map_err(|_| RunError::ListingStream)?;
     let mut bytes = [0; SOURCE_CAPACITY];
     let (mut stdout_eof, mut stderr_eof, mut exit_status) = (false, false, None);
     let mut events = [NativeEvent::default(); 64];
@@ -1383,7 +1384,7 @@ fn collect_ignored(
             match Pin::new(&mut stdout).poll_read(&mut context, &mut bytes) {
                 Poll::Ready(Ok(0)) => stdout_eof = true,
                 Poll::Ready(Ok(count)) => {
-                    feed_ignored_lines(&bytes[..count], &mut line, &mut line_length, set)?;
+                    feed_ignored_lines(&bytes[..count], &mut framer, set)?;
                 }
                 Poll::Ready(Err(_)) => return Err(RunError::Reactor),
                 Poll::Pending => break,
@@ -3012,6 +3013,53 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, cases.len());
+    }
+
+    fn collected(chunk_size: usize, listing: &[u8]) -> Result<crate::ignored_set::IgnoredSet, RunError> {
+        let mut frame_bytes = [0; super::RESULT_LINE_CAPACITY + 1];
+        let mut framer = crate::artifact_stream::ArtifactFramer::new(&mut frame_bytes, super::RESULT_LINE_CAPACITY)
+            .expect("framer fits its record limit");
+        let mut set = crate::ignored_set::IgnoredSet::new();
+        for chunk in listing.chunks(chunk_size) {
+            super::feed_ignored_lines(chunk, &mut framer, &mut set)?;
+        }
+        Ok(set)
+    }
+
+    #[test]
+    fn real_ignored_listing_fills_the_set_at_every_chunk_size() {
+        const IGNORED: &[u8] = include_bytes!("../../tests/fixtures/listing/ignore_modes_list_ignored.txt");
+        for chunk_size in [1, 2, 7, 16, IGNORED.len()] {
+            let set = collected(chunk_size, IGNORED).expect("real listing frames");
+
+            assert_eq!(set.len(), 1, "chunk size {chunk_size}");
+            assert!(set.contains(b"fixture::ignored_with_reason"), "chunk size {chunk_size}");
+        }
+    }
+
+    #[test]
+    fn full_listing_names_every_test_and_skips_the_summary() {
+        const LISTING: &[u8] = include_bytes!("../../tests/fixtures/listing/ignore_modes_list.txt");
+        let set = collected(5, LISTING).expect("real listing frames");
+
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(b"fixture::passes"));
+        assert!(set.contains(b"fixture::fails"));
+    }
+
+    #[test]
+    fn invalid_utf8_listing_line_is_refused() {
+        let outcome = collected(4, b"fixture::\xff: test\n");
+
+        assert!(matches!(outcome, Err(RunError::ListingStream)));
+    }
+
+    #[test]
+    fn listing_line_past_the_record_limit_is_refused() {
+        let mut listing = std::vec![b'a'; super::RESULT_LINE_CAPACITY + 1];
+        listing.extend_from_slice(b"\n");
+
+        assert!(matches!(collected(64, &listing), Err(RunError::ListingStream)));
     }
 
     #[test]

@@ -95,6 +95,19 @@ impl StopPolicy {
         self.listed_not_run += 1;
     }
 
+    /// Whether a listed test launches; a stopped run counts it as listed-not-run instead.
+    #[must_use]
+    pub const fn admit_listed(&mut self, interrupted: bool, stopped: bool) -> bool {
+        if interrupted {
+            return false;
+        }
+        if stopped {
+            self.listed_test_skipped();
+            return false;
+        }
+        true
+    }
+
     pub const fn target_skipped(&mut self) {
         self.targets_not_listed += 1;
     }
@@ -119,6 +132,12 @@ impl StopPolicy {
             doc_at_trip: trip.doc,
         })
     }
+}
+
+/// Whether the listing stream is read: always once stopped (drain), else only while a job slot is free.
+#[must_use]
+pub const fn listing_wanted(stopped: bool, live_sessions: usize, jobs: usize) -> bool {
+    stopped || live_sessions < jobs
 }
 
 #[cfg(test)]
@@ -190,5 +209,29 @@ mod tests {
                 doc_at_trip: DocAtTrip::ExecutingLeftToFinish,
             })
         );
+    }
+
+    #[test]
+    fn real_ignore_modes_listing_admits_all_when_running_and_counts_when_stopped() {
+        const LISTING: &str = include_str!("../tests/fixtures/listing/ignore_modes_list.txt");
+        let tests = LISTING.lines().filter(|line| line.ends_with(": test")).count();
+        let mut running = StopPolicy::new(Some(1));
+        let mut stopped = StopPolicy::new(Some(1));
+        let mut interrupted = StopPolicy::new(Some(1));
+        stopped.record_trip(0, DocAtTrip::NotSpawned);
+
+        let admitted = (0..tests).filter(|_| running.admit_listed(false, false)).count();
+        let skipped = (0..tests).filter(|_| !stopped.admit_listed(false, true)).count();
+        let dropped = (0..tests).filter(|_| !interrupted.admit_listed(true, true)).count();
+
+        assert_eq!((tests, admitted, skipped, dropped), (3, 3, 3, 3));
+        assert_eq!(stopped.report().expect("tripped").listed_not_run, 3);
+    }
+
+    #[test]
+    fn listing_is_wanted_while_a_slot_is_free_or_once_stopped() {
+        assert!(listing_wanted(false, 3, 4));
+        assert!(!listing_wanted(false, 4, 4));
+        assert!(listing_wanted(true, 4, 4));
     }
 }
