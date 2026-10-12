@@ -43,7 +43,7 @@ use crate::edge_signal::{
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
 use crate::edge_output;
-use crate::edge_spawn::{ArgumentsError, Child, LaunchStorage, SpawnError, spawn, spawn_in_group};
+use crate::edge_spawn::{ArgumentsError, Child, HeldLaunchStorage, SpawnError, held_launch_storage, spawn, spawn_in_group};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
 use crate::reporter::write_report;
@@ -71,6 +71,7 @@ const SCRATCH_CAPACITY: usize = 16384;
 const LINKED_CAPACITY: usize = 32768;
 const BUILD_SCRIPT_CAPACITY: usize = 65536;
 const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
+const LISTING_SLOTS: usize = 2;
 const LIBDIR_CAPACITY: usize = 1024;
 const SOURCE_CAPACITY: usize = 8192;
 const FRAME_CAPACITY: usize = 131_072;
@@ -124,7 +125,7 @@ struct PendingListing {
     identity: Identity,
     path: [u8; PATH_CAPACITY],
     path_length: usize,
-    environment: Box<[u8]>,
+    slot: usize,
     layout: TestEnvironmentLayout,
     ignoring: bool,
     lane_pid: u32,
@@ -848,11 +849,21 @@ fn spawn_list(
     Ok(child)
 }
 
+fn slot_range(slot: usize) -> Range<usize> {
+    slot * ENVIRONMENT_CAPACITY..(slot + 1) * ENVIRONMENT_CAPACITY
+}
+
+fn free_slot(active: Option<&PendingListing>) -> usize {
+    usize::from(active.is_some_and(|listing| listing.slot == 0))
+}
+
 fn spawn_listing(
     artifact: &TestArtifact<'_>,
     run: &ListingRun<'_>,
     linked_directories: &str,
     build_script: Option<BuildScriptOutput<'_>>,
+    slot: usize,
+    environments: &mut [u8],
 ) -> Result<PendingListing, RunError> {
     let target = run.policy.borrow_mut().target_listed();
     let binary_id = (!artifact.is_unit_test_target()).then_some(artifact.target_name);
@@ -869,7 +880,7 @@ fn spawn_listing(
     if executable.len() + 1 > PATH_CAPACITY || executable.as_bytes().contains(&0) {
         return Err(RunError::Arguments);
     }
-    let mut environment = zeroed(ENVIRONMENT_CAPACITY);
+    let environment = &mut environments[slot_range(slot)];
     let layout = TestEnvironmentLayout::build(
         &TestEnvironmentInput {
             artifact: *artifact,
@@ -879,14 +890,14 @@ fn spawn_listing(
             home: run.home,
             build_script,
         },
-        &mut environment,
+        environment,
     )
     .map_err(|_| RunError::TestEnvironment)?;
     let mut path = [0; PATH_CAPACITY];
     path[..executable.len()].copy_from_slice(executable.as_bytes());
-    let (overrides, override_count) = override_entries(&layout, &environment)?;
+    let (overrides, override_count) = override_entries(&layout, environment)?;
     let overrides = &overrides[..override_count];
-    let directory = layout.current_directory(&environment);
+    let directory = layout.current_directory(environment);
     let child = spawn_list(executable, false, run.environment, overrides, directory)?;
     let ignored_child = if run.settings.ignore == IgnoreMode::Include {
         None
@@ -900,7 +911,7 @@ fn spawn_listing(
         identity,
         path,
         path_length: executable.len(),
-        environment,
+        slot,
         layout,
         ignoring: false,
         lane_pid: 0,
@@ -961,7 +972,7 @@ pub(crate) struct ListingRun<'run> {
     docs: DocObservation,
     policy: RefCell<StopPolicy>,
     doc: RefCell<Option<Box<DocRun>>>,
-    launch_storage: RefCell<Box<LaunchStorage>>,
+    launch_storage: RefCell<HeldLaunchStorage>,
 }
 
 #[derive(Default)]
@@ -1247,6 +1258,7 @@ pub(crate) struct CargoDriver<'buffer> {
     listing_framer: ArtifactFramer<'buffer>,
     ignored_framer: ArtifactFramer<'buffer>,
     ignored: &'buffer mut IgnoredSet,
+    environments: &'buffer mut [u8],
     active: Option<PendingListing>,
     pending_listing: Option<PendingListing>,
     cargo_backlog: Option<(Range<u32>, usize)>,
@@ -1343,6 +1355,8 @@ fn start_listing(
     artifact: &TestArtifact<'_>,
     linked: &LinkedDirectories<'_>,
     build_scripts: &BuildScriptOutputs<'_>,
+    slot: usize,
+    environments: &mut [u8],
 ) -> Result<Option<PendingListing>, RunError> {
     if run.interrupted() {
         return Ok(None);
@@ -1352,7 +1366,7 @@ fn start_listing(
         return Ok(None);
     }
     let build_script = build_scripts.find(artifact.package_id);
-    spawn_listing(artifact, run, linked.as_str(), build_script).map(Some)
+    spawn_listing(artifact, run, linked.as_str(), build_script, slot, environments).map(Some)
 }
 
 pub(crate) type Ledger<'ledger> =
@@ -1431,7 +1445,15 @@ impl CargoDriver<'_> {
             let artifact = owned.as_artifact();
             debug_gate_action(run.settings.debug, b" release", self.reason, &artifact);
             let started =
-                start_listing(run, ledger, &artifact, &self.linked, &self.build_scripts)?;
+                start_listing(
+                run,
+                ledger,
+                &artifact,
+                &self.linked,
+                &self.build_scripts,
+                free_slot(self.active.as_ref()),
+                &mut *self.environments,
+            )?;
             self.queue_listing(started, lanes)?;
         }
         Ok(())
@@ -1497,6 +1519,8 @@ impl CargoDriver<'_> {
                             &artifact,
                             &self.linked,
                             &self.build_scripts,
+                            free_slot(self.active.as_ref()),
+                            &mut *self.environments,
                         )?;
                         self.queue_listing(started, lanes)?;
                     }
@@ -1640,7 +1664,7 @@ impl CargoDriver<'_> {
             lanes,
             run,
             target: active.target,
-            environment: &active.environment,
+            environment: &self.environments[slot_range(active.slot)],
             layout: &active.layout,
         };
         let mut context = Context::from_waker(Waker::noop());
@@ -1695,7 +1719,7 @@ impl CargoDriver<'_> {
             lanes,
             run,
             target: active.target,
-            environment: &active.environment,
+            environment: &self.environments[slot_range(active.slot)],
             layout: &active.layout,
         };
         let mut context = Context::from_waker(Waker::noop());
@@ -1922,6 +1946,7 @@ type CargoStorage = (
     Box<[u8]>,
     Box<[u8]>,
     Box<[u8]>,
+    Box<[u8]>,
     IgnoredSet,
 );
 
@@ -1947,6 +1972,7 @@ fn run_storage<'environment>() -> RunStorage<'environment> {
             zeroed(BUILD_SCRIPT_CAPACITY),
             zeroed(SOURCE_CAPACITY + 1),
             zeroed(RESULT_LINE_CAPACITY + 1),
+            zeroed(ENVIRONMENT_CAPACITY * LISTING_SLOTS),
             IgnoredSet::new(),
         ),
         (zeroed(LIBDIR_CAPACITY * 2), std::vec![b"".as_slice(); ENV_CAPACITY].into_boxed_slice()),
@@ -1958,18 +1984,13 @@ fn zeroed(length: usize) -> Box<[u8]> {
     std::vec![0; length].into_boxed_slice()
 }
 
-#[inline(never)]
-fn held_launch_storage() -> Box<LaunchStorage> {
-    Box::new(LaunchStorage::default())
-}
-
 // the driver and the run own tens of KiB each of fixed parking and target tables, too large to sit in the root future
 fn held<Value>(value: Value) -> std::boxed::Box<Value> {
     std::boxed::Box::new(value)
 }
 
 fn new_driver(
-    (frame, scratch, linked, scripts, listing_frame, ignored_frame, ignored): &mut CargoStorage,
+    (frame, scratch, linked, scripts, listing_frame, ignored_frame, environments, ignored): &mut CargoStorage,
     process_id: u32,
     bins: BinCounts,
     gate: BinGate,
@@ -1986,6 +2007,7 @@ fn new_driver(
         ignored_framer: ArtifactFramer::new(ignored_frame, RESULT_LINE_CAPACITY)
             .map_err(|_| RunError::ListingStream)?,
         ignored,
+        environments,
         active: None,
         pending_listing: None,
         cargo_backlog: None,
@@ -2784,5 +2806,84 @@ mod tests {
     fn refusal_without_detail_renders_its_static_message() {
         let line = RunError::Reactor.render();
         assert_eq!(line.bytes(), RunError::Reactor.message());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod listing_allocation_tests {
+    use core::cell::RefCell;
+
+    use super::{DocObservation, ENVIRONMENT_CAPACITY, LISTING_SLOTS, ListingRun, PendingListing, Settings, TargetTable, spawn_listing};
+    use crate::edge_spawn::held_launch_storage;
+    use crate::cargo_message::TestArtifact;
+    use crate::config::{IgnoreMode, NoTestsPolicy};
+    use crate::edge_signal::SignalPipe;
+    use crate::stop::StopPolicy;
+
+    const SETUP_SPAWN_ALLOCATIONS: usize = 3;
+
+    fn reap(listing: &mut PendingListing) {
+        for child in [listing.child.take(), listing.ignored_child.take()].into_iter().flatten() {
+            let mut status = 0;
+            let process = child.process_id().cast_signed();
+            assert_eq!(unsafe { libc::waitpid(process, &raw mut status, 0) }, process);
+        }
+    }
+
+    #[test]
+    fn spawning_a_listing_child_allocates_only_the_setup_launch() {
+        let executable = std::env::current_exe().expect("test executable path is available");
+        let executable = executable.to_str().expect("test executable path is UTF-8");
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let inherited_storage = std::env::vars()
+            .map(|(key, value)| std::format!("{key}={value}"))
+            .collect::<std::vec::Vec<_>>();
+        let inherited = inherited_storage.iter().map(std::string::String::as_bytes).collect::<std::vec::Vec<_>>();
+        let settings = Settings {
+            bin_gate: false,
+            debug: false,
+            ignore: IgnoreMode::Include,
+            filterset: None,
+            jobs: 2,
+            max_fail: None,
+            no_tests: NoTestsPolicy::Pass,
+            color: false,
+        };
+        let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
+        let run = ListingRun {
+            signals: &signals,
+            filter: "",
+            exact: false,
+            targets: RefCell::new(TargetTable::new()),
+            started_millis: 0,
+            harness_arguments: &[],
+            environment: &inherited,
+            library_directories: &[],
+            inherited_dylib_path: None,
+            home: None,
+            settings: &settings,
+            prepared: None,
+            docs: DocObservation::default(),
+            policy: RefCell::new(StopPolicy::new(None)),
+            doc: RefCell::new(None),
+            launch_storage: RefCell::new(held_launch_storage()),
+        };
+        let artifact = TestArtifact {
+            executable,
+            package_id: "path+file:///repo/parser#0.3.1",
+            manifest_path: manifest,
+            target_name: "cargo_val",
+            target_kind: "lib",
+        };
+
+        let mut environments = super::zeroed(ENVIRONMENT_CAPACITY * LISTING_SLOTS);
+
+        let (listing, allocations) =
+            crate::test_alloc::measure_allocations(|| spawn_listing(&artifact, &run, "", None, 1, &mut environments));
+
+        let mut listing = listing.expect("the listing child starts");
+        reap(&mut listing);
+        std::println!("{{\"listing_spawn_allocations\":{allocations}}}");
+        assert_eq!(allocations, SETUP_SPAWN_ALLOCATIONS);
     }
 }

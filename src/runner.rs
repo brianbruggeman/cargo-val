@@ -410,7 +410,7 @@ mod tests {
         ChildOutcomeError, OutcomeInput, OutcomeStep,
     };
     use crate::ExecutablePath;
-    use crate::edge_spawn::LaunchStorage;
+    use crate::edge_spawn::held_launch_storage;
     use crate::ExitSource;
     use crate::artifact_stream::ArtifactFramer;
     use crate::discover_listing::{ListingSource, ListingSourceStep};
@@ -478,7 +478,7 @@ mod tests {
             intent,
             inherited_environment: &[],
             child_overrides: &overrides,
-            storage: &mut LaunchStorage::default(),
+            storage: &mut held_launch_storage(),
             harness_arguments: &[],
             current_directory: b"/",
         }
@@ -506,7 +506,7 @@ mod tests {
             intent,
             inherited_environment: &[],
             child_overrides,
-            storage: &mut LaunchStorage::default(),
+            storage: &mut held_launch_storage(),
             harness_arguments: &[],
             current_directory: b"/",
         }
@@ -1121,7 +1121,7 @@ mod cause_tests {
         SpawnError,
     };
     use crate::ExecutablePath;
-    use crate::edge_spawn::LaunchStorage;
+    use crate::edge_spawn::held_launch_storage;
     use crate::outcomes::{OutcomeError, StartError};
     use crate::schedule::SessionSlots;
     use crate::test_intent::ExactTestIntent;
@@ -1139,7 +1139,7 @@ mod cause_tests {
             ),
             inherited_environment: &[],
             child_overrides: &[],
-            storage: &mut LaunchStorage::default(),
+            storage: &mut held_launch_storage(),
             harness_arguments: &[],
             current_directory: b"/",
         }
@@ -1214,7 +1214,7 @@ mod arguments_cause_tests {
 mod launch_allocation_tests {
     use super::{LaunchInput, LaunchOwner, RunningChild};
     use crate::ExecutablePath;
-    use crate::edge_spawn::LaunchStorage;
+    use crate::edge_spawn::held_launch_storage;
     use crate::schedule::SessionSlots;
     use crate::test_intent::ExactTestIntent;
 
@@ -1230,7 +1230,7 @@ mod launch_allocation_tests {
             .map(std::string::String::as_bytes)
             .collect::<std::vec::Vec<_>>();
         let mut sessions = SessionSlots::<RunningChild<64>, 1>::new();
-        let mut storage = LaunchStorage::default();
+        let mut storage = held_launch_storage();
 
         let (slot, allocations) = crate::test_alloc::measure_allocations(|| {
             LaunchInput {
