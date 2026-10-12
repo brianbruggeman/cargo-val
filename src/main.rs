@@ -11,16 +11,6 @@ use std::process::ExitCode;
 const HELP_BANNER: &[u8] = include_bytes!("../tests/fixtures/help-banner.txt");
 #[cfg(not(test))]
 const VERSION_BANNER: &[u8] = concat!("cargo-val ", env!("CARGO_PKG_VERSION"), "\n").as_bytes();
-#[cfg(all(
-    not(test),
-    not(all(
-        any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
-        feature = "proxima-core",
-        feature = "proxima-codec",
-        feature = "proxima-primitives"
-    ))
-))]
-const NOT_IMPLEMENTED: &[u8] = b"cargo-val is not implemented yet; use --help for usage\n";
 
 #[cfg(not(test))]
 fn main() -> ExitCode {
@@ -57,13 +47,7 @@ fn banner_status(banner: &[u8]) -> ExitCode {
     ExitCode::from(u8::from(io::stdout().write_all(banner).is_err()))
 }
 
-#[cfg(all(
-    not(test),
-    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
-    feature = "proxima-core",
-    feature = "proxima-codec",
-    feature = "proxima-primitives"
-))]
+#[cfg(not(test))]
 fn run_arguments(arguments: Vec<Vec<u8>>) -> ExitCode {
     let root = prime::os::core_shard::run_on_this_thread(
         proxima_runtime::CoreId(0),
@@ -82,27 +66,7 @@ fn run_arguments(arguments: Vec<Vec<u8>>) -> ExitCode {
     }
 }
 
-#[cfg(all(
-    not(test),
-    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
-    feature = "proxima-core",
-    feature = "proxima-codec",
-    feature = "proxima-primitives"
-))]
+#[cfg(not(test))]
 fn exit_status(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
-}
-
-#[cfg(all(
-    not(test),
-    not(all(
-        any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
-        feature = "proxima-core",
-        feature = "proxima-codec",
-        feature = "proxima-primitives"
-    ))
-))]
-fn run_arguments(_arguments: Vec<Vec<u8>>) -> ExitCode {
-    let _ = io::stderr().write_all(NOT_IMPLEMENTED);
-    ExitCode::from(2)
 }

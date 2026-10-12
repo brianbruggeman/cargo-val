@@ -6,7 +6,7 @@ edition = "2024"
 [[bin]]
 name = "cargo-val"
 path = "src/main.rs"
-required-features = ["edge-os"]
+required-features = ["edge-os", "proxima-core", "proxima-codec", "proxima-primitives"]
 
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
