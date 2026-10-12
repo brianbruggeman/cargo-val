@@ -239,6 +239,144 @@ mod lowering {
             .collect()
     }
 
+    /// Lowers `parts` into one NUL-terminated command line inside caller storage, quoting each part as `CreateProcessW` expects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsArgumentsError`] for an interior NUL, text that is not Unicode, or storage that is too small.
+    pub fn lower_command_line<'bytes, 'storage>(
+        parts: impl Iterator<Item = &'bytes [u8]> + Clone,
+        storage: &'storage mut [u16],
+    ) -> Result<&'storage mut [u16], WindowsArgumentsError> {
+        let mut required = 1;
+        for (index, part) in parts.clone().enumerate() {
+            let text = core::str::from_utf8(part).map_err(|_| WindowsArgumentsError::NotUnicode)?;
+            if text.contains('\0') {
+                return Err(WindowsArgumentsError::InteriorNul);
+            }
+            required += usize::from(index > 0) + quoted_argument_len(text);
+        }
+        if storage.len() < required {
+            return Err(WindowsArgumentsError::CommandLineStorageTooSmall {
+                required,
+                available: storage.len(),
+            });
+        }
+        let mut offset = 0;
+        for (index, part) in parts.enumerate() {
+            if index > 0 {
+                storage[offset] = u16::from(b' ');
+                offset += 1;
+            }
+            let text = core::str::from_utf8(part).map_err(|_| WindowsArgumentsError::NotUnicode)?;
+            offset += write_quoted_argument(text, &mut storage[offset..]);
+        }
+        storage[offset] = 0;
+        Ok(&mut storage[..=offset])
+    }
+
+    /// Merges `overrides` into an already sorted `base` environment block, writing the sorted result into `storage`.
+    ///
+    /// The result equals lowering the base entries and the overrides together: an override replaces the base entry with the same
+    /// key under Windows case folding, and the entries stay sorted by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsArgumentsError`] for malformed, non-Unicode or duplicate overrides, or storage that is too small.
+    pub fn merge_environment<'storage>(
+        base: &[u16],
+        overrides: &[&[u8]],
+        storage: &'storage mut [u16],
+    ) -> Result<&'storage [u16], WindowsArgumentsError> {
+        for (index, entry) in overrides.iter().enumerate() {
+            let text = core::str::from_utf8(entry).map_err(|_| WindowsArgumentsError::NotUnicode)?;
+            environment_key(text)?;
+            let duplicated = overrides[..index].iter().any(|prior| {
+                core::str::from_utf8(prior).is_ok_and(|prior| same_environment_key(prior, text))
+            });
+            if duplicated {
+                return Err(WindowsArgumentsError::DuplicateEnvironmentOverride);
+            }
+        }
+        let kept = |entry: &[u16]| !overrides.iter().any(|candidate| overrides_key(candidate, entry));
+        let mut required = 1;
+        for entry in block_entries(base).filter(|entry| kept(entry)) {
+            required += entry.len() + 1;
+        }
+        for entry in overrides {
+            required += core::str::from_utf8(entry).map_or(0, |text| text.encode_utf16().count()) + 1;
+        }
+        required = required.max(2);
+        if storage.len() < required {
+            return Err(WindowsArgumentsError::EnvironmentStorageTooSmall {
+                required,
+                available: storage.len(),
+            });
+        }
+        let mut length = 0;
+        for entry in block_entries(base).filter(|entry| kept(entry)) {
+            storage[length..length + entry.len()].copy_from_slice(entry);
+            storage[length + entry.len()] = 0;
+            length += entry.len() + 1;
+        }
+        for entry in overrides {
+            let text = core::str::from_utf8(entry).map_err(|_| WindowsArgumentsError::NotUnicode)?;
+            length = insert_sorted(storage, length, text);
+        }
+        storage[length] = 0;
+        storage[length + 1..required].fill(0);
+        Ok(&storage[..required])
+    }
+
+    fn overrides_key(candidate: &[u8], entry: &[u16]) -> bool {
+        let Ok(text) = core::str::from_utf8(candidate) else {
+            return false;
+        };
+        let Ok(key) = environment_key(text) else {
+            return false;
+        };
+        compare_folded(key.chars(), decoded(unit_key(entry))) == Ordering::Equal
+    }
+
+    fn insert_sorted(storage: &mut [u16], length: usize, entry: &str) -> usize {
+        let Ok(key) = environment_key(entry) else {
+            return length;
+        };
+        let width = entry.encode_utf16().count() + 1;
+        let mut position = 0;
+        while position < length {
+            let existing = &storage[position..length];
+            let size = existing.iter().position(|unit| *unit == 0).unwrap_or(existing.len());
+            if compare_folded(key.chars(), decoded(unit_key(&existing[..size]))) == Ordering::Less {
+                break;
+            }
+            position += size + 1;
+        }
+        storage.copy_within(position..length, position + width);
+        for (cell, unit) in storage[position..position + width].iter_mut().zip(entry.encode_utf16()) {
+            *cell = unit;
+        }
+        storage[position + width - 1] = 0;
+        length + width
+    }
+
+    fn decoded(units: &[u16]) -> impl Iterator<Item = char> + '_ {
+        char::decode_utf16(units.iter().copied()).map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
+    }
+
+    fn unit_key(entry: &[u16]) -> &[u16] {
+        let skip = usize::from(entry.first() == Some(&u16::from(b'=')));
+        let end = entry[skip..]
+            .iter()
+            .position(|unit| *unit == u16::from(b'='))
+            .map_or(entry.len(), |offset| skip + offset);
+        &entry[..end]
+    }
+
+    fn block_entries(block: &[u16]) -> impl Iterator<Item = &[u16]> {
+        block.split(|unit| *unit == 0).take_while(|entry| !entry.is_empty())
+    }
+
     /// Encodes one test binary's working directory as the NUL-terminated UTF-16 `CreateProcessW` expects.
     ///
     /// The directory is encoded once per binary and borrowed by every test launched from it.
@@ -277,7 +415,8 @@ mod lowering {
     pub const WINDOWS_BELOW_NORMAL_PRIORITY: u32 = 0x0000_4000;
 
     const WINDOWS_EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
-    const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// `CREATE_NO_WINDOW`: a console child gets a fresh hidden console host instead of inheriting this process's console.
+    pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const WINDOWS_CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
 
     /// Limit flags of the one job every child of a run is created in.
@@ -291,9 +430,7 @@ mod lowering {
     /// `CreateProcessW` creation flags shared by every child launch.
     #[must_use]
     pub const fn windows_creation_flags() -> u32 {
-        WINDOWS_EXTENDED_STARTUPINFO_PRESENT
-            | WINDOWS_CREATE_NO_WINDOW
-            | WINDOWS_CREATE_UNICODE_ENVIRONMENT
+        WINDOWS_EXTENDED_STARTUPINFO_PRESENT | WINDOWS_CREATE_UNICODE_ENVIRONMENT
     }
 
     /// Attributes in the child's list: the stdio handle list, plus the job list when a job owns the run.
@@ -470,8 +607,12 @@ mod lowering {
     }
 
     fn compare_environment_keys(first: &str, second: &str) -> Ordering {
-        let mut first_folded = first.chars().flat_map(char::to_lowercase);
-        let mut second_folded = second.chars().flat_map(char::to_lowercase);
+        compare_folded(first.chars(), second.chars())
+    }
+
+    fn compare_folded(first: impl Iterator<Item = char>, second: impl Iterator<Item = char>) -> Ordering {
+        let mut first_folded = first.flat_map(char::to_lowercase);
+        let mut second_folded = second.flat_map(char::to_lowercase);
         loop {
             match (first_folded.next(), second_folded.next()) {
                 (Some(first_character), Some(second_character)) => {
@@ -533,7 +674,10 @@ mod lowering {
     #[cfg(test)]
     mod tests {
 
-        use super::{WindowsArgumentsError, lower_windows_arguments, write_working_directory};
+        use super::{
+            WindowsArgumentsError, lower_command_line, lower_windows_arguments, merge_environment,
+            write_working_directory,
+        };
         use crate::cargo_message::TestArtifact;
         use crate::test_environment::{
             DYLIB_PATH_KEY, MAX_ENTRIES, TestEnvironmentInput, TestEnvironmentLayout,
@@ -728,6 +872,94 @@ mod lowering {
             assert!(block.contains("PARENT=kept\0"));
         }
 
+        fn process_environment() -> std::vec::Vec<std::string::String> {
+            let mut entries: std::vec::Vec<std::string::String> = std::env::vars()
+                .map(|(key, value)| std::format!("{key}={value}"))
+                .collect();
+            entries.push(std::string::String::from("=C:=C:\\work"));
+            entries.push(std::string::String::from("Zeta_Last=1"));
+            entries
+        }
+
+        #[test]
+        fn arena_merge_matches_full_lowering_for_the_process_environment_and_overrides() {
+            let inherited = process_environment();
+            let inherited_texts: std::vec::Vec<&str> = inherited.iter().map(std::string::String::as_str).collect();
+            let mut command = std::vec![0_u16; 8];
+            let mut block = std::vec![0_u16; 1 << 20];
+            let mut order = std::vec![0_usize; 4096];
+            let base = lower_windows_arguments(&["x"], &inherited_texts, &[], &mut command, &mut block, &mut order)
+                .expect("base environment lowers")
+                .environment_block()
+                .to_vec();
+            let cases: [&[&str]; 4] = [
+                &[],
+                &["RUST_BACKTRACE=1"],
+                &["path=C:\\override", "ALPHA=\u{e9}t\u{e9}", "zzz_new=2"],
+                &["Zeta_Last=replaced", "=D:=D:\\x"],
+            ];
+            for overrides in cases {
+                let byte_overrides: std::vec::Vec<&[u8]> = overrides.iter().map(|text| text.as_bytes()).collect();
+                let mut expected_block = std::vec![0_u16; 1 << 20];
+                let expected = lower_windows_arguments(
+                    &["x"],
+                    &inherited_texts,
+                    overrides,
+                    &mut command,
+                    &mut expected_block,
+                    &mut order,
+                )
+                .expect("full lowering succeeds")
+                .environment_block()
+                .to_vec();
+                let mut storage = std::vec![0_u16; base.len() + 1024];
+                let merged = merge_environment(&base, &byte_overrides, &mut storage).expect("merge succeeds");
+                assert_eq!(merged, expected.as_slice(), "overrides {overrides:?}");
+            }
+        }
+
+        #[test]
+        fn arena_merge_rejects_duplicate_overrides_and_short_storage() {
+            let base = [u16::from(b'A'), u16::from(b'='), u16::from(b'1'), 0, 0];
+            let mut storage = [0_u16; 64];
+            assert_eq!(
+                merge_environment(&base, &[b"K=1", b"k=2"], &mut storage),
+                Err(WindowsArgumentsError::DuplicateEnvironmentOverride)
+            );
+            let mut small = [0_u16; 3];
+            assert!(matches!(
+                merge_environment(&base, &[b"K=1"], &mut small),
+                Err(WindowsArgumentsError::EnvironmentStorageTooSmall { available: 3, .. })
+            ));
+        }
+
+        #[test]
+        fn arena_command_line_matches_full_lowering_for_quoted_parts() {
+            let parts: [&[u8]; 5] = [
+                b"C:\\Program Files\\t\\deps\\app-1a2b.exe",
+                b"--exact",
+                b"module::case with \"quote\"",
+                b"--nocapture",
+                b"",
+            ];
+            let mut expected_line = std::vec![0_u16; 512];
+            let mut block = std::vec![0_u16; 8];
+            let mut order = std::vec![0_usize; 4];
+            let texts: std::vec::Vec<&str> = parts.iter().map(|part| core::str::from_utf8(part).expect("utf8")).collect();
+            let expected = lower_windows_arguments(&texts, &[], &[], &mut expected_line, &mut block, &mut order)
+                .expect("full lowering succeeds")
+                .command_line()
+                .to_vec();
+            let mut storage = [0_u16; 512];
+            let lowered = lower_command_line(parts.iter().copied(), &mut storage).expect("command line lowers");
+            assert_eq!(&*lowered, expected.as_slice());
+            let mut short = [0_u16; 4];
+            assert!(matches!(
+                lower_command_line(parts.iter().copied(), &mut short),
+                Err(WindowsArgumentsError::CommandLineStorageTooSmall { available: 4, .. })
+            ));
+        }
+
         #[test]
         fn c67_job_limit_flags_kill_on_close_die_on_exception_and_priority() {
             let flags = super::windows_job_limit_flags();
@@ -740,10 +972,11 @@ mod lowering {
         }
 
         #[test]
-        fn c67_creation_flags_hide_window_and_declare_unicode_environment() {
+        fn c67_creation_flags_inherit_the_console_and_declare_unicode_environment() {
             let flags = super::windows_creation_flags();
 
-            assert_eq!(flags, 0x0008_0000 | 0x0800_0000 | 0x0000_0400);
+            assert_eq!(flags, 0x0008_0000 | 0x0000_0400);
+            assert_eq!(flags & super::WINDOWS_CREATE_NO_WINDOW, 0);
         }
 
         #[test]

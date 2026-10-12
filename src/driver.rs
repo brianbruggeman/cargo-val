@@ -43,7 +43,10 @@ use crate::edge_signal::{
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
 use crate::edge_output;
-use crate::edge_spawn::{ArgumentsError, Child, HeldLaunchStorage, LaunchStorage, SpawnError, held_launch_storage, spawn, spawn_in_group, spawn_listed};
+use crate::edge_spawn::{
+    ArgumentsError, Child, HeldLaunchStorage, LaunchStorage, READY_AHEAD, SpawnError, held_launch_storage, resume_ready, spawn,
+    spawn_in_group, spawn_listed,
+};
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
 use crate::reporter::write_report;
@@ -723,6 +726,28 @@ fn announce_lock_wait(watch: &mut LockWatch, bytes: &[u8]) -> Result<(), RunErro
 struct Reporting<'run> {
     color: bool,
     targets: &'run RefCell<TargetTable>,
+    ready: &'run Cell<Option<SessionSlotId>>,
+    jobs: usize,
+}
+
+impl Reporting<'_> {
+    // a frozen child counts as a live session but not as running, so it starts the moment a job slot frees
+    fn resume_if_room(
+        &self,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ) {
+        let Some(slot) = self.ready.get() else {
+            return;
+        };
+        let Some(session) = ledger.sessions().get(slot) else {
+            self.ready.set(None);
+            return;
+        };
+        if ledger.sessions().len().saturating_sub(1) < self.jobs {
+            resume_ready(session.child());
+            self.ready.set(None);
+        }
+    }
 }
 
 const fn event_slot(event: &HostEvent<'_>) -> SessionSlotId {
@@ -774,7 +799,7 @@ fn deliver(
     let slot = event_slot(&event);
     let target = ledger.sessions().get(slot).map(RunningChild::target);
     let step = OutcomeInput {
-        ledger,
+        ledger: &mut *ledger,
         event,
         report_output: &mut report[name_length..],
         color: reporting.color,
@@ -792,6 +817,7 @@ fn deliver(
             outcome,
             report_bytes,
         } => {
+            reporting.resume_if_room(ledger);
             write_fd(1, &report[..name_length + report_bytes])?;
             if let Some(target) = target {
                 reporting.targets.borrow_mut().tally(
@@ -933,6 +959,7 @@ fn launch_listed(
         run.policy.borrow_mut().launched();
     }
     let mut storage = run.launch_storage.borrow_mut();
+    let park = run.parks_next(ledger);
     let slot = LaunchInput {
         target,
         owner: LaunchOwner::Ledger(ledger),
@@ -943,7 +970,7 @@ fn launch_listed(
         harness_arguments: run.harness_arguments,
         current_directory: layout.current_directory(environment).as_bytes(),
     }
-    .launch()
+    .launch_as(park)
     .map_err(|error| {
         report_launch_failure(
             LaunchCause::from(&error),
@@ -951,6 +978,9 @@ fn launch_listed(
             executable_text(intent.executable()),
         )
     })?;
+    if park {
+        run.ready.set(Some(slot));
+    }
     run.targets.borrow_mut().tally(target, Tally::Launched);
     start_session(ledger, watches, scan.lanes, slot)
 }
@@ -972,6 +1002,7 @@ pub(crate) struct ListingRun<'run> {
     policy: RefCell<StopPolicy>,
     doc: RefCell<Option<Box<DocRun>>>,
     launch_storage: RefCell<HeldLaunchStorage>,
+    ready: Cell<Option<SessionSlotId>>,
 }
 
 #[derive(Default)]
@@ -1004,7 +1035,20 @@ impl ListingRun<'_> {
         Reporting {
             color: self.settings.color,
             targets: &self.targets,
+            ready: &self.ready,
+            jobs: self.settings.jobs,
         }
+    }
+
+    // sessions admitted at once: the jobs that run plus the frozen children this platform creates ahead of a free slot
+    fn admit_limit(&self) -> usize {
+        (self.settings.jobs + READY_AHEAD).min(LIVE_CAPACITY)
+    }
+
+    fn parks_next(&self, ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>) -> bool {
+        self.admit_limit() > self.settings.jobs
+            && self.ready.get().is_none()
+            && ledger.sessions().len() >= self.settings.jobs
     }
 
     fn tripped(
@@ -1059,7 +1103,7 @@ fn listing_wanted(
     run: &ListingRun<'_>,
     ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
 ) -> bool {
-    stop::listing_wanted(run.tripped(ledger), ledger.sessions().len(), run.settings.jobs)
+    stop::listing_wanted(run.tripped(ledger), ledger.sessions().len(), run.admit_limit())
 }
 
 struct ListingScan<'scan, 'run> {
@@ -1085,7 +1129,7 @@ impl ListingScan<'_, '_> {
                     return Ok(Flow::Next);
                 }
                 launch_listed(self, ledger, watches, intent)?;
-                if ledger.sessions().len() >= run.settings.jobs {
+                if ledger.sessions().len() >= run.admit_limit() {
                     return Ok(Flow::Pause);
                 }
             }
@@ -1930,6 +1974,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         policy: RefCell::new(StopPolicy::new(settings.max_fail)),
         doc: RefCell::new(doc_tests),
         launch_storage: RefCell::new(held_launch_storage()),
+        ready: Cell::new(None),
     });
     observe_cargo(cargo_child, &mut driver, &run, &mut ledger, watches).await?;
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
@@ -2864,6 +2909,7 @@ mod listing_allocation_tests {
             policy: RefCell::new(StopPolicy::new(None)),
             doc: RefCell::new(None),
             launch_storage: RefCell::new(held_launch_storage()),
+            ready: core::cell::Cell::new(None),
         };
         let artifact = TestArtifact {
             executable,

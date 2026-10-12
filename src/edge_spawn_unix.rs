@@ -543,6 +543,29 @@ mod spawn {
         spawn_stored(storage, program, &exact_test, harness_arguments, environment, overrides, directory)
     }
 
+    /// Children beyond the job limit that may wait created and frozen; Unix creation is cheap enough that none do.
+    pub const READY_AHEAD: usize = 0;
+
+    /// Spawns like [`spawn_exact`]; a Unix child has no frozen state, so it runs at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExactError`] like [`spawn_exact`].
+    pub fn spawn_exact_ready(
+        storage: &mut LaunchStorage,
+        program: &[u8],
+        test_name: &[u8],
+        harness_arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: &[u8],
+    ) -> Result<Child, ExactError> {
+        spawn_exact(storage, program, test_name, harness_arguments, environment, overrides, directory)
+    }
+
+    /// Starts a child created by [`spawn_exact_ready`]; a Unix child already runs.
+    pub fn resume_ready(_child: &Child) {}
+
     /// Spawns one listing child as `program --list`, or `program --list --ignored`, lowering its launch into `storage`
     /// so the call makes no heap allocation.
     ///

@@ -86,7 +86,7 @@ pub fn release_group(target: u32) {
     }
 }
 
-/// Ends the whole group `target` leads; Windows has no console for the children to receive a Ctrl+C on.
+/// Ends the whole group `target` leads through its job, so the end reaches every child whether or not a console Ctrl+C did.
 pub fn interrupt_group(target: u32) {
     for (process, slot) in GROUP_PROCESSES.iter().zip(&GROUP_JOBS) {
         if process.load(Ordering::SeqCst) == target {

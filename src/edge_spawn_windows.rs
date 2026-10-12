@@ -5,8 +5,7 @@ pub mod handles {
 
     use core::ffi::c_void;
     use core::mem::{MaybeUninit, size_of};
-    use std::io;
-    use std::os::windows::io::{BorrowedHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::io::BorrowedHandle;
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
@@ -40,22 +39,9 @@ pub mod handles {
             self.0
         }
 
-        /// Gives the handle to a std owner, which closes it instead of this type.
-        pub(crate) fn into_owned(self) -> OwnedHandle {
-            let released = core::mem::ManuallyDrop::new(self);
-            // safety: the handle is open and `released` never closes it, so exactly one owner remains.
-            unsafe { OwnedHandle::from_raw_handle(released.0) }
-        }
-
         /// Releases the raw handle without closing it; the caller closes it.
         pub(crate) fn into_raw(self) -> HANDLE {
             core::mem::ManuallyDrop::new(self).0
-        }
-
-        /// Duplicates the handle for a second owner.
-        pub(crate) fn try_clone(&self) -> io::Result<OwnedHandle> {
-            // safety: the handle is open for as long as `self` lives, which outlives this borrow.
-            unsafe { BorrowedHandle::borrow_raw(self.0) }.try_clone_to_owned()
         }
 
         /// Lends the handle to a prime gate.
@@ -349,6 +335,7 @@ pub mod handles {
         use windows_sys::Win32::System::Console::{
             GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
         };
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
         use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
         use windows_sys::Win32::System::Threading::{
             CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
@@ -511,6 +498,7 @@ pub mod handles {
                 handle_list.startup_info().StartupInfo.dwFlags,
                 STARTF_USESTDHANDLES
             );
+            write_sentinel_bytes(&sentinel_write);
             let sentinel_id = sentinel_read.0 as usize;
             let sentinel_environment = std::format!("CARGO_VAL_SENTINEL_HANDLE={sentinel_id}");
             let expected_environment = "CARGO_VAL_EXPECT_SENTINEL=0";
@@ -617,6 +605,42 @@ pub mod handles {
             std::println!("{{\"attribute_storage_too_small\":1,\"handle_count_delta\":0}}");
         }
 
+        const SENTINEL_BYTES: &[u8] = b"cargo-val-c44a-sentinel";
+
+        fn write_sentinel_bytes(write: &TestHandle) {
+            let mut written = 0;
+            assert_eq!(
+                unsafe {
+                    WriteFile(
+                        write.0,
+                        SENTINEL_BYTES.as_ptr(),
+                        u32::try_from(SENTINEL_BYTES.len()).expect("sentinel length fits u32"),
+                        &raw mut written,
+                        core::ptr::null_mut(),
+                    )
+                },
+                1,
+                "sentinel pipe accepts its identity bytes"
+            );
+        }
+
+        // a numeric handle value can name a different open object in the child, so identity is the bytes waiting in the sentinel pipe
+        fn holds_sentinel_bytes(handle: HANDLE) -> bool {
+            let mut buffer = [0_u8; SENTINEL_BYTES.len()];
+            let mut available = 0;
+            let peeked = unsafe {
+                PeekNamedPipe(
+                    handle,
+                    buffer.as_mut_ptr().cast(),
+                    u32::try_from(buffer.len()).expect("buffer length fits u32"),
+                    &raw mut available,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+            peeked != 0 && buffer == *SENTINEL_BYTES
+        }
+
         #[test]
         fn child_handle_probe() {
             let Ok(sentinel_value) = std::env::var("CARGO_VAL_SENTINEL_HANDLE") else {
@@ -627,7 +651,7 @@ pub mod handles {
                 .expect("sentinel handle value is decimal");
             let sentinel = sentinel as HANDLE;
             let mut flags = 0;
-            let sentinel_inherited = unsafe { GetHandleInformation(sentinel, &raw mut flags) } != 0;
+            let sentinel_inherited = holds_sentinel_bytes(sentinel);
             let expected = std::env::var("CARGO_VAL_EXPECT_SENTINEL")
                 .expect("expected sentinel state is supplied by parent");
             assert_eq!(sentinel_inherited, expected == "1");
@@ -699,58 +723,11 @@ pub mod pipe_pair {
         ///
         /// Returns [`WindowsPipePairError`] for an invalid name, a size that overflows `u32`, or when Windows rejects either endpoint.
         pub fn new(pipe_name: &[u16]) -> Result<Self, WindowsPipePairError> {
-            if pipe_name.len() < 2
-                || pipe_name.last() != Some(&0)
-                || pipe_name[..pipe_name.len() - 1].contains(&0)
-            {
-                return Err(WindowsPipePairError::InvalidName);
-            }
-
-            let parent_reader = unsafe {
-                CreateNamedPipeW(
-                    pipe_name.as_ptr(),
-                    PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    1,
-                    0,
-                    PIPE_KERNEL_BUFFER_BYTES,
-                    0,
-                    core::ptr::null(),
-                )
-            };
-            if parent_reader == INVALID_HANDLE_VALUE || parent_reader.is_null() {
-                return Err(WindowsPipePairError::CreateServerFailed {
-                    code: unsafe { GetLastError() },
-                });
-            }
-            let parent_reader = WindowsOwnedHandle::new(parent_reader);
-
-            let child_security = SECURITY_ATTRIBUTES {
-                nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
-                    .map_err(|_| WindowsPipePairError::SizeOverflow)?,
-                lpSecurityDescriptor: core::ptr::null_mut(),
-                bInheritHandle: 1,
-            };
-            let child_writer = unsafe {
-                CreateFileW(
-                    pipe_name.as_ptr(),
-                    GENERIC_WRITE,
-                    0,
-                    &raw const child_security,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
-                    core::ptr::null_mut(),
-                )
-            };
-            if child_writer == INVALID_HANDLE_VALUE || child_writer.is_null() {
-                return Err(WindowsPipePairError::OpenChildWriterFailed {
-                    code: unsafe { GetLastError() },
-                });
-            }
-
+            let parent_reader = create_server(pipe_name)?;
+            let child_writer = open_client(pipe_name)?;
             Ok(Self {
                 parent_reader,
-                child_writer: Some(WindowsOwnedHandle::new(child_writer)),
+                child_writer: Some(child_writer),
             })
         }
 
@@ -778,6 +755,69 @@ pub mod pipe_pair {
         pub(crate) fn into_parent_reader(self) -> WindowsOwnedHandle {
             self.parent_reader
         }
+    }
+
+    /// Creates the overlapped parent-side instance of a unique named pipe; it listens for one client at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsPipePairError`] for an invalid name or when Windows rejects creation.
+    pub(crate) fn create_server(pipe_name: &[u16]) -> Result<WindowsOwnedHandle, WindowsPipePairError> {
+        if pipe_name.len() < 2
+            || pipe_name.last() != Some(&0)
+            || pipe_name[..pipe_name.len() - 1].contains(&0)
+        {
+            return Err(WindowsPipePairError::InvalidName);
+        }
+        let parent_reader = unsafe {
+            CreateNamedPipeW(
+                pipe_name.as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                0,
+                PIPE_KERNEL_BUFFER_BYTES,
+                0,
+                core::ptr::null(),
+            )
+        };
+        if parent_reader == INVALID_HANDLE_VALUE || parent_reader.is_null() {
+            return Err(WindowsPipePairError::CreateServerFailed {
+                code: unsafe { GetLastError() },
+            });
+        }
+        Ok(WindowsOwnedHandle::new(parent_reader))
+    }
+
+    /// Opens the inheritable child-side writer of a listening pipe instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsPipePairError`] when Windows rejects the open.
+    pub(crate) fn open_client(pipe_name: &[u16]) -> Result<WindowsOwnedHandle, WindowsPipePairError> {
+        let child_security = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
+                .map_err(|_| WindowsPipePairError::SizeOverflow)?,
+            lpSecurityDescriptor: core::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let child_writer = unsafe {
+            CreateFileW(
+                pipe_name.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                &raw const child_security,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                core::ptr::null_mut(),
+            )
+        };
+        if child_writer == INVALID_HANDLE_VALUE || child_writer.is_null() {
+            return Err(WindowsPipePairError::OpenChildWriterFailed {
+                code: unsafe { GetLastError() },
+            });
+        }
+        Ok(WindowsOwnedHandle::new(child_writer))
     }
 
     #[cfg(test)]
@@ -960,6 +1000,696 @@ pub mod pipe_pair {
     }
 }
 
+pub mod pool {
+    //! Run arena and slot pool: launch data lowered once per run and named-pipe server ends reused across children.
+
+    use core::cell::{Cell, RefCell};
+    use core::fmt;
+    use core::mem::MaybeUninit;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    use std::boxed::Box;
+    use std::os::windows::io::{IntoRawHandle, OwnedHandle};
+    use std::rc::Rc;
+    use std::string::String;
+    use std::vec::Vec;
+
+    use prime::os::readiness::Readiness;
+    use windows_sys::Win32::Foundation::{
+        ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::IO::{CancelIoEx, OVERLAPPED};
+    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
+    use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+
+    use crate::edge_args_windows::{WINDOWS_CREATE_NO_WINDOW, WindowsArgumentsError, lower_arguments, windows_creation_flags, lower_command_line, merge_environment, write_executable_path, write_working_directory};
+    use crate::edge_spawn_windows::handles::{WindowsHandleList, WindowsJob, WindowsOwnedHandle};
+    use crate::edge_spawn_windows::pipe_pair::{create_server, open_client};
+    use crate::edge_spawn_windows::spawn::{
+        ArgumentsError, Child, ChildEnvironment, ChildWorkingDirectory, ExactError, SpawnError, open_null_input,
+        resolve_program, spawn_windows_child_suspended, spawn_windows_child_grouped,
+    };
+
+    pub const POOL_SLOTS: usize = 64;
+    const PATH_UNITS: usize = 32_768;
+    const COMMAND_UNITS: usize = 32_768;
+    const OVERRIDE_UNITS: usize = 16_384;
+    const ATTRIBUTE_WORDS: usize = 64;
+    const CONNECT_WAIT_MILLIS: u32 = 10_000;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    const ERROR_TOO_MANY_OPEN_FILES: i32 = 4;
+
+    static PIPE_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
+    /// Where a pooled pipe server end is in its connect cycle.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Phase {
+        /// A fresh instance waiting for its first client.
+        Listening,
+        /// A client is or was connected and EOF has not been read to the end.
+        Connected,
+        /// EOF was read: the instance can disconnect and listen again with its reactor registration intact.
+        Drained,
+    }
+
+    /// One overlapped pipe server end plus the reactor gate registered on it, shared by the launching slot, the child and its stream.
+    pub struct PooledEnd {
+        name: Box<[u16]>,
+        handle: WindowsOwnedHandle,
+        gate: RefCell<Option<Readiness>>,
+        phase: Cell<Phase>,
+    }
+
+    /// A shared pipe server end; the slot pool holds one reference and each user of the child holds another.
+    pub type PipeEnd = Rc<PooledEnd>;
+
+    impl fmt::Debug for PooledEnd {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("PooledEnd")
+                .field("handle", &self.handle)
+                .field("phase", &self.phase.get())
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl PooledEnd {
+        /// Wraps an already connected server end that no pool will reuse.
+        #[must_use]
+        pub fn unpooled(handle: OwnedHandle) -> PipeEnd {
+            Rc::new(Self {
+                name: Box::default(),
+                handle: WindowsOwnedHandle::new(handle.into_raw_handle()),
+                gate: RefCell::new(None),
+                phase: Cell::new(Phase::Connected),
+            })
+        }
+
+        pub(crate) fn wrap(handle: WindowsOwnedHandle) -> PipeEnd {
+            Rc::new(Self {
+                name: Box::default(),
+                handle,
+                gate: RefCell::new(None),
+                phase: Cell::new(Phase::Connected),
+            })
+        }
+
+        fn create() -> Result<PipeEnd, SpawnError> {
+            let name = pipe_name();
+            let handle = create_server(&name).map_err(|_| SpawnError::last())?;
+            Ok(Rc::new(Self {
+                name,
+                handle,
+                gate: RefCell::new(None),
+                phase: Cell::new(Phase::Listening),
+            }))
+        }
+
+        /// The raw overlapped server handle reads are issued on.
+        #[must_use]
+        pub fn raw(&self) -> HANDLE {
+            self.handle.raw()
+        }
+
+        pub(crate) fn borrowed(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+            self.handle.as_borrowed()
+        }
+
+        pub(crate) const fn gate(&self) -> &RefCell<Option<Readiness>> {
+            &self.gate
+        }
+
+        /// Records that the stream read this end to EOF, so the next child may reuse the instance and its registration.
+        pub fn drained(&self) {
+            if self.phase.get() == Phase::Connected && !self.name.is_empty() {
+                self.phase.set(Phase::Drained);
+            }
+        }
+
+        /// Where this end is in its connect cycle.
+        #[must_use]
+        pub fn phase(&self) -> Phase {
+            self.phase.get()
+        }
+
+        fn connect_client(&self, event: HANDLE) -> Result<WindowsOwnedHandle, SpawnError> {
+            let client = match self.phase.get() {
+                Phase::Listening => open_client(&self.name).map_err(|_| SpawnError::last())?,
+                Phase::Drained => self.relisten_and_open(event)?,
+                Phase::Connected => return Err(SpawnError { os_code: ERROR_PIPE_BUSY }),
+            };
+            self.phase.set(Phase::Connected);
+            Ok(client)
+        }
+
+        // the low bit of hEvent keeps the connect completion off the completion port the stream gate owns
+        fn relisten_and_open(&self, event: HANDLE) -> Result<WindowsOwnedHandle, SpawnError> {
+            if unsafe { DisconnectNamedPipe(self.raw()) } == 0 {
+                return Err(SpawnError::last());
+            }
+            unsafe { ResetEvent(event) };
+            let mut overlapped = OVERLAPPED {
+                hEvent: (event as usize | 1) as HANDLE,
+                ..OVERLAPPED::default()
+            };
+            let connected = unsafe { ConnectNamedPipe(self.raw(), &raw mut overlapped) } != 0;
+            let code = unsafe { GetLastError() };
+            let waiting = !connected && code == ERROR_IO_PENDING;
+            if !connected && !waiting && code != ERROR_PIPE_CONNECTED {
+                return Err(SpawnError::from_code(code));
+            }
+            let opened = open_client(&self.name).map_err(|_| SpawnError::last());
+            if waiting {
+                if opened.is_err() {
+                    unsafe { CancelIoEx(self.raw(), &raw const overlapped) };
+                }
+                unsafe { WaitForSingleObject(event, CONNECT_WAIT_MILLIS) };
+            }
+            opened
+        }
+    }
+
+    fn pipe_name() -> Box<[u16]> {
+        let sequence = PIPE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = std::format!("\\\\.\\pipe\\cargo-val-{}-{sequence}-pool", std::process::id());
+        name.encode_utf16().chain([0]).collect()
+    }
+
+    #[derive(Debug)]
+    struct PathCache {
+        key: Box<[u8]>,
+        key_length: usize,
+        units: Box<[u16]>,
+        units_length: usize,
+    }
+
+    impl PathCache {
+        fn new() -> Self {
+            Self {
+                key: std::vec![0; PATH_UNITS].into_boxed_slice(),
+                key_length: 0,
+                units: std::vec![0; PATH_UNITS].into_boxed_slice(),
+                units_length: 0,
+            }
+        }
+
+        fn resolve(
+            &mut self,
+            text: &[u8],
+            lower: for<'units> fn(&str, &'units mut [u16]) -> Result<&'units [u16], WindowsArgumentsError>,
+        ) -> Result<&[u16], ExactError> {
+            if self.key_length > 0 && self.key[..self.key_length] == *text {
+                return Ok(&self.units[..self.units_length]);
+            }
+            let path = core::str::from_utf8(text).map_err(|_| WindowsArgumentsError::NotUnicode)?;
+            self.key_length = 0;
+            self.units_length = lower(path, &mut self.units)?.len();
+            let room = self.key.get_mut(..text.len()).ok_or(ExactError::Arguments(ArgumentsError::StorageTooSmall {
+                required: text.len(),
+                available: PATH_UNITS,
+            }))?;
+            room.copy_from_slice(text);
+            self.key_length = text.len();
+            Ok(&self.units[..self.units_length])
+        }
+    }
+
+    #[derive(Debug)]
+    struct Arena {
+        source: Box<[u8]>,
+        environment: Box<[u16]>,
+        stdin: WindowsOwnedHandle,
+        connect_event: WindowsOwnedHandle,
+        executable: PathCache,
+        directory: PathCache,
+    }
+
+    impl Arena {
+        fn build(environment: &[&[u8]]) -> Result<Self, ExactError> {
+            let mut command = Vec::new();
+            let mut block = Vec::new();
+            let mut order = Vec::new();
+            let lowered = lower_arguments(b"x", &[], environment, &[], &mut command, &mut block, &mut order)?;
+            let environment_block = lowered.environment_block().to_vec().into_boxed_slice();
+            let event = unsafe { CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()) };
+            if event.is_null() || event == INVALID_HANDLE_VALUE {
+                return Err(SpawnError::last().into());
+            }
+            Ok(Self {
+                source: join(environment),
+                environment: environment_block,
+                stdin: open_null_input()?,
+                connect_event: WindowsOwnedHandle::new(event),
+                executable: PathCache::new(),
+                directory: PathCache::new(),
+            })
+        }
+
+        fn lowered_from(&self, environment: &[&[u8]]) -> bool {
+            let mut rest = &self.source[..];
+            for entry in environment {
+                let Some(tail) = rest.strip_prefix(*entry).and_then(|tail| tail.strip_prefix(&[0])) else {
+                    return false;
+                };
+                rest = tail;
+            }
+            rest.is_empty()
+        }
+    }
+
+    fn join(environment: &[&[u8]]) -> Box<[u8]> {
+        environment.iter().flat_map(|entry| entry.iter().copied().chain([0])).collect()
+    }
+
+    #[derive(Debug)]
+    struct Slot {
+        stdout: PipeEnd,
+        stderr: PipeEnd,
+        command_line: Box<[u16]>,
+        environment: Box<[u16]>,
+        attributes: Box<[MaybeUninit<usize>]>,
+    }
+
+    impl Slot {
+        fn new(base_units: usize) -> Result<Self, SpawnError> {
+            Ok(Self {
+                stdout: PooledEnd::create()?,
+                stderr: PooledEnd::create()?,
+                command_line: std::vec![0; COMMAND_UNITS].into_boxed_slice(),
+                environment: std::vec![0; base_units + OVERRIDE_UNITS].into_boxed_slice(),
+                attributes: std::vec![MaybeUninit::uninit(); ATTRIBUTE_WORDS].into_boxed_slice(),
+            })
+        }
+
+        fn free(&self) -> bool {
+            Rc::strong_count(&self.stdout) == 1 && Rc::strong_count(&self.stderr) == 1
+        }
+
+        fn refresh(&mut self) -> Result<(), SpawnError> {
+            for end in [&mut self.stdout, &mut self.stderr] {
+                if end.phase() == Phase::Connected {
+                    *end = PooledEnd::create()?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// The run's launch arena and slot pool: nothing here is rebuilt for a launch once its slot has run a child.
+    #[derive(Debug)]
+    pub struct LaunchStorage {
+        arena: Option<Arena>,
+        slots: Vec<Slot>,
+        creation_flags: u32,
+    }
+
+    impl Default for LaunchStorage {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// How a launched child is started.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Start {
+        /// The child runs as soon as it exists.
+        Now,
+        /// The child exists in the run job but does not run until [`Child::resume`].
+        Ready,
+    }
+
+    impl LaunchStorage {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                arena: None,
+                slots: Vec::with_capacity(POOL_SLOTS),
+                creation_flags: windows_creation_flags(),
+            }
+        }
+
+        /// Creates every child with `CREATE_NO_WINDOW`, which gives each console child its own hidden console host; only the launch-cost measurement wants this.
+        #[must_use]
+        pub const fn with_hidden_console(mut self) -> Self {
+            self.creation_flags |= WINDOWS_CREATE_NO_WINDOW;
+            self
+        }
+
+        /// Launches a child from this storage inside `job`, reusing the arena and a free slot.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ExactError`] when launch data does not fit a slot or Windows refuses a step.
+        pub fn launch<'bytes>(
+            &mut self,
+            program: &'bytes [u8],
+            arguments: impl Iterator<Item = &'bytes [u8]> + Clone,
+            (environment, overrides, directory): (&[&[u8]], &[&[u8]], &[u8]),
+            (job, start): (&WindowsJob, Start),
+        ) -> Result<Child, ExactError> {
+            let Self { arena, slots, creation_flags } = self;
+            if !arena.as_ref().is_some_and(|arena| arena.lowered_from(environment)) {
+                *arena = Some(Arena::build(environment)?);
+            }
+            let arena = arena.as_mut().ok_or(SpawnError { os_code: ERROR_TOO_MANY_OPEN_FILES })?;
+            let slot = acquire(slots, arena.environment.len())?;
+            slot.refresh()?;
+            if slot.environment.len() < arena.environment.len() + OVERRIDE_UNITS {
+                slot.environment = std::vec![0; arena.environment.len() + OVERRIDE_UNITS].into_boxed_slice();
+            }
+            let resolved: String;
+            let executable_text = if program.iter().any(|byte| matches!(byte, b'\\' | b'/' | b':')) {
+                program
+            } else {
+                resolved = resolve_program(program, environment)?;
+                resolved.as_bytes()
+            };
+            let executable = arena.executable.resolve(executable_text, write_executable_path)?;
+            let directory = arena.directory.resolve(directory, write_working_directory)?;
+            let command_line = lower_command_line(core::iter::once(program).chain(arguments), &mut slot.command_line)?;
+            let environment_block: &[u16] = if overrides.is_empty() {
+                &arena.environment
+            } else {
+                merge_environment(&arena.environment, overrides, &mut slot.environment)?
+            };
+            let event = arena.connect_event.raw();
+            let stdout_client = slot.stdout.connect_client(event)?;
+            let stderr_client = slot.stderr.connect_client(event)?;
+            let handles = [arena.stdin.raw(), stdout_client.raw(), stderr_client.raw()];
+            let handle_list = WindowsHandleList::new_in_job(&handles, job, &mut slot.attributes)
+                .map_err(|_| SpawnError { os_code: ERROR_INVALID_PARAMETER })?;
+            let environment_block = ChildEnvironment::Block(environment_block);
+            let directory = ChildWorkingDirectory::Borrowed(directory);
+            let process = match start {
+                Start::Now => spawn_windows_child_grouped(
+                    executable,
+                    command_line,
+                    &handle_list,
+                    &environment_block,
+                    &directory,
+                    (None, *creation_flags),
+                ),
+                Start::Ready => spawn_windows_child_suspended(
+                    executable,
+                    command_line,
+                    &handle_list,
+                    &environment_block,
+                    &directory,
+                    *creation_flags,
+                ),
+            }?;
+            drop(handle_list);
+            Ok(Child::from_pooled(process, Rc::clone(&slot.stdout), Rc::clone(&slot.stderr)))
+        }
+    }
+
+    fn acquire(slots: &mut Vec<Slot>, base_units: usize) -> Result<&mut Slot, SpawnError> {
+        let index = match slots.iter().position(Slot::free) {
+            Some(index) => index,
+            None if slots.len() < POOL_SLOTS => {
+                slots.push(Slot::new(base_units)?);
+                slots.len() - 1
+            }
+            None => return Err(SpawnError { os_code: ERROR_TOO_MANY_OPEN_FILES }),
+        };
+        Ok(&mut slots[index])
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::env;
+        use std::string::String;
+        use std::sync::Mutex;
+        use std::vec::Vec;
+
+        use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_IO_PENDING, GetLastError, HANDLE, WAIT_OBJECT_0};
+        use windows_sys::Win32::Storage::FileSystem::ReadFile;
+        use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        use windows_sys::Win32::System::Threading::{
+            CreateEventW, GetCurrentProcess, GetExitCodeProcess, GetProcessHandleCount, WaitForSingleObject,
+        };
+
+        use super::{LaunchStorage, PipeEnd, Start};
+        use crate::edge_spawn_windows::handles::{WindowsJob, WindowsOwnedHandle};
+        use crate::edge_spawn_windows::{Child, spawn_exact};
+        use crate::test_alloc::measure_allocations;
+
+        static HANDLE_COUNT_GUARD: Mutex<()> = Mutex::new(());
+
+        const ALPHA_MARKER: &str = "edge-pool-marker-alpha";
+        const BETA_MARKER: &str = "edge-pool-marker-beta";
+        const TERMINATED: u32 = 0x0000_1234;
+
+        fn edge_pool_probe_alpha() {
+            if env::args().any(|argument| argument == "--exact") {
+                std::println!("{ALPHA_MARKER}");
+            }
+        }
+
+        fn edge_pool_probe_beta() {
+            if env::args().any(|argument| argument == "--exact") {
+                std::println!("{BETA_MARKER}");
+            }
+        }
+
+        #[test]
+        fn edge_pool_probe_alpha_child_entry() {
+            edge_pool_probe_alpha();
+        }
+
+        #[test]
+        fn edge_pool_probe_beta_child_entry() {
+            edge_pool_probe_beta();
+        }
+
+        struct Fixture {
+            executable: String,
+            environment: Vec<Vec<u8>>,
+            directory: Vec<u8>,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let executable = env::current_exe().expect("test executable path exists");
+                let directory = env::current_dir().expect("working directory exists");
+                Self {
+                    executable: executable.to_str().expect("executable path is UTF-8").into(),
+                    environment: env::vars().map(|(key, value)| std::format!("{key}={value}").into_bytes()).collect(),
+                    directory: directory.to_str().expect("directory is UTF-8").as_bytes().to_vec(),
+                }
+            }
+
+            fn references(&self) -> Vec<&[u8]> {
+                self.environment.iter().map(Vec::as_slice).collect()
+            }
+        }
+
+        fn alpha_name() -> String {
+            let _: fn() = edge_pool_probe_alpha_child_entry;
+            crate::test_probe::probe_path(module_path!(), "edge_pool_probe_alpha_child_entry")
+        }
+
+        fn beta_name() -> String {
+            let _: fn() = edge_pool_probe_beta_child_entry;
+            crate::test_probe::probe_path(module_path!(), "edge_pool_probe_beta_child_entry")
+        }
+
+        fn launch(fixture: &Fixture, storage: &mut LaunchStorage, probe: &str) -> Child {
+            let references = fixture.references();
+            spawn_exact(
+                storage,
+                fixture.executable.as_bytes(),
+                probe.as_bytes(),
+                &[b"--nocapture"],
+                &references,
+                &[],
+                &fixture.directory,
+            )
+            .expect("the pooled launch starts the exact probe child")
+        }
+
+        fn drain(end: &PipeEnd) -> Vec<u8> {
+            let event = unsafe { CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()) };
+            let event = WindowsOwnedHandle::new(event);
+            let mut collected = Vec::new();
+            loop {
+                let mut buffer = [0_u8; 4096];
+                let mut overlapped = OVERLAPPED { hEvent: event.raw(), ..OVERLAPPED::default() };
+                let mut transferred = 0;
+                let immediate = unsafe {
+                    ReadFile(end.raw(), buffer.as_mut_ptr(), 4096, &raw mut transferred, &raw mut overlapped)
+                };
+                let finished = if immediate != 0 {
+                    true
+                } else {
+                    match unsafe { GetLastError() } {
+                        ERROR_BROKEN_PIPE => false,
+                        ERROR_IO_PENDING => {
+                            let waited = unsafe {
+                                GetOverlappedResult(end.raw(), &raw const overlapped, &raw mut transferred, 1)
+                            };
+                            if waited == 0 {
+                                assert_eq!(unsafe { GetLastError() }, ERROR_BROKEN_PIPE, "the only read failure is the child closing");
+                            }
+                            waited != 0
+                        }
+                        other => panic!("read failed with {other}, expected pending or broken pipe"),
+                    }
+                };
+                if !finished {
+                    break;
+                }
+                collected.extend_from_slice(&buffer[..transferred as usize]);
+            }
+            end.drained();
+            collected
+        }
+
+        fn wait_for_exit(child: &Child) -> u32 {
+            assert_eq!(unsafe { WaitForSingleObject(child.raw_process_handle(), 30_000) }, WAIT_OBJECT_0);
+            let mut code = 0;
+            assert_ne!(unsafe { GetExitCodeProcess(child.raw_process_handle(), &raw mut code) }, 0);
+            code
+        }
+
+        fn run_to_completion(child: Child) -> (Vec<u8>, HANDLE) {
+            let (_, stdout, stderr) = child.into_parts();
+            let output = drain(&stdout);
+            drain(&stderr);
+            (output, stdout.raw())
+        }
+
+        fn process_handle_count() -> u32 {
+            let mut count = 0;
+            assert_ne!(unsafe { GetProcessHandleCount(GetCurrentProcess(), &raw mut count) }, 0);
+            count
+        }
+
+        #[test]
+        fn edge_exact_launch_after_setup_performs_zero_heap_allocations() {
+            let fixture = Fixture::new();
+            let references = fixture.references();
+            let mut storage = LaunchStorage::new();
+            let alpha = alpha_name();
+            let warm = launch(&fixture, &mut storage, &alpha);
+            assert_eq!(wait_for_exit(&warm), 0);
+            run_to_completion(warm);
+
+            let (child, allocations) = measure_allocations(|| {
+                spawn_exact(
+                    &mut storage,
+                    fixture.executable.as_bytes(),
+                    alpha.as_bytes(),
+                    &[b"--nocapture"],
+                    &references,
+                    &[],
+                    &fixture.directory,
+                )
+            });
+            let child = child.expect("the measured launch starts");
+
+            assert_eq!(allocations, 0, "a launch through a warmed slot allocates nothing");
+            assert_eq!(wait_for_exit(&child), 0);
+            let (output, _) = run_to_completion(child);
+            assert!(String::from_utf8_lossy(&output).contains(ALPHA_MARKER));
+        }
+
+        #[test]
+        fn edge_process_handle_count_is_stable_across_200_sequential_slot_launches() {
+            let _serial = HANDLE_COUNT_GUARD.lock().expect("handle count guard is not poisoned");
+            let fixture = Fixture::new();
+            let mut storage = LaunchStorage::new();
+            let alpha = alpha_name();
+            let warm = launch(&fixture, &mut storage, &alpha);
+            wait_for_exit(&warm);
+            run_to_completion(warm);
+            let baseline = process_handle_count();
+
+            let mut launches = 0;
+            for _ in 0..200 {
+                let child = launch(&fixture, &mut storage, &alpha);
+                assert_eq!(wait_for_exit(&child), 0);
+                let (output, _) = run_to_completion(child);
+                assert!(String::from_utf8_lossy(&output).contains(ALPHA_MARKER));
+                launches += 1;
+            }
+
+            assert_eq!(launches, 200);
+            assert_eq!(process_handle_count(), baseline);
+            assert_eq!(storage.slots.len(), 1, "sequential launches share one slot");
+        }
+
+        #[test]
+        fn edge_reused_slot_delivers_only_the_second_childs_stdout() {
+            let fixture = Fixture::new();
+            let mut storage = LaunchStorage::new();
+            let first = launch(&fixture, &mut storage, &alpha_name());
+            assert_eq!(wait_for_exit(&first), 0);
+            let (first_output, first_handle) = run_to_completion(first);
+
+            let second = launch(&fixture, &mut storage, &beta_name());
+            assert_eq!(wait_for_exit(&second), 0);
+            let (second_output, second_handle) = run_to_completion(second);
+
+            assert_eq!(first_handle, second_handle, "the second child reuses the first child's server end");
+            assert!(String::from_utf8_lossy(&first_output).contains(ALPHA_MARKER));
+            let second_text = String::from_utf8_lossy(&second_output);
+            assert!(second_text.contains(BETA_MARKER));
+            assert!(!second_text.contains(ALPHA_MARKER), "no byte of the first child reaches the second: {second_text}");
+        }
+
+        #[test]
+        fn edge_ready_child_runs_only_after_resume() {
+            let fixture = Fixture::new();
+            let references = fixture.references();
+            let mut storage = LaunchStorage::new();
+            let job = WindowsJob::new().expect("a job object is created");
+            let beta = beta_name();
+            let child = storage
+                .launch(
+                    fixture.executable.as_bytes(),
+                    [b"--exact".as_slice(), beta.as_bytes(), b"--nocapture"].into_iter(),
+                    (&references, &[], &fixture.directory),
+                    (&job, Start::Ready),
+                )
+                .expect("the ready child is created suspended");
+
+            child.resume();
+
+            assert_eq!(wait_for_exit(&child), 0);
+            let (output, _) = run_to_completion(child);
+            assert!(String::from_utf8_lossy(&output).contains(BETA_MARKER));
+        }
+
+        #[test]
+        fn edge_ready_child_is_terminated_with_the_run_job_and_never_ran() {
+            let fixture = Fixture::new();
+            let references = fixture.references();
+            let mut storage = LaunchStorage::new();
+            let job = WindowsJob::new().expect("a job object is created");
+            let alpha = alpha_name();
+            let child = storage
+                .launch(
+                    fixture.executable.as_bytes(),
+                    [b"--exact".as_slice(), alpha.as_bytes(), b"--nocapture"].into_iter(),
+                    (&references, &[], &fixture.directory),
+                    (&job, Start::Ready),
+                )
+                .expect("the ready child is created suspended");
+            let mut code = 0;
+            assert_ne!(unsafe { GetExitCodeProcess(child.raw_process_handle(), &raw mut code) }, 0);
+            assert_eq!(code, 259, "a ready child is alive but frozen");
+
+            assert_ne!(unsafe { TerminateJobObject(job.raw(), TERMINATED) }, 0);
+
+            assert_eq!(wait_for_exit(&child), TERMINATED, "the job ended the frozen child before it could exit on its own");
+            let (output, _) = run_to_completion(child);
+            assert!(output.is_empty(), "a frozen child wrote nothing");
+        }
+    }
+}
+
 mod spawn {
     //! Nonblocking ownership of Windows child process handles.
 
@@ -967,8 +1697,8 @@ mod spawn {
     use core::mem::MaybeUninit;
     use core::sync::atomic::{AtomicU32, Ordering};
     use std::io;
-    use std::os::windows::io::OwnedHandle;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::string::String;
     use std::sync::OnceLock;
     use std::vec::Vec;
@@ -997,6 +1727,7 @@ mod spawn {
         WindowsHandleList, WindowsJob, WindowsJobError, WindowsOwnedHandle,
     };
     use crate::edge_spawn_windows::pipe_pair::WindowsPipePair;
+    pub use crate::edge_spawn_windows::pool::{LaunchStorage, PipeEnd, PooledEnd, Start};
 
     const ERROR_FILE_NOT_FOUND: i32 = 2;
     const ERROR_INVALID_PARAMETER: i32 = 87;
@@ -1020,15 +1751,16 @@ mod spawn {
     #[derive(Debug)]
     pub struct WindowsChild {
         process: WindowsOwnedHandle,
+        thread: Option<WindowsOwnedHandle>,
         process_id: u32,
     }
 
-    enum ChildEnvironment<'environment> {
+    pub(super) enum ChildEnvironment<'environment> {
         Inherit,
         Block(&'environment [u16]),
     }
 
-    enum ChildWorkingDirectory<'directory> {
+    pub(super) enum ChildWorkingDirectory<'directory> {
         Inherit,
         Borrowed(&'directory [u16]),
     }
@@ -1121,18 +1853,50 @@ mod spawn {
             handle_list,
             environment,
             working_directory,
-            None,
+            (None, windows_creation_flags()),
         )
     }
 
     /// Creates the child suspended when `group` is given, joins it to that nested job, then resumes it, so no grandchild escapes the group.
-    fn spawn_windows_child_grouped(
+    pub(super) fn spawn_windows_child_grouped(
         executable: &[u16],
         command_line: &mut [u16],
         handle_list: &WindowsHandleList<'_>,
         environment: &ChildEnvironment<'_>,
         working_directory: &ChildWorkingDirectory<'_>,
-        group: Option<&WindowsJob>,
+        (group, creation_flags): (Option<&WindowsJob>, u32),
+    ) -> Result<WindowsChild, WindowsSpawnError> {
+        let child = create_process(
+            executable,
+            command_line,
+            handle_list,
+            (environment, working_directory),
+            (creation_flags, group.is_some()),
+        )?;
+        if let (Some(group), Some(thread)) = (group, child.thread.as_ref()) {
+            join_group_and_resume(&child.process, thread, group)?;
+        }
+        Ok(WindowsChild { thread: None, ..child })
+    }
+
+    /// Creates the child suspended inside the job its attribute list names; it stays frozen until [`Child::resume`].
+    pub(super) fn spawn_windows_child_suspended(
+        executable: &[u16],
+        command_line: &mut [u16],
+        handle_list: &WindowsHandleList<'_>,
+        environment: &ChildEnvironment<'_>,
+        working_directory: &ChildWorkingDirectory<'_>,
+        creation_flags: u32,
+    ) -> Result<WindowsChild, WindowsSpawnError> {
+        create_process(executable, command_line, handle_list, (environment, working_directory), (creation_flags, true))
+    }
+
+    fn create_process(
+        executable: &[u16],
+        command_line: &mut [u16],
+        handle_list: &WindowsHandleList<'_>,
+        (environment, working_directory): (&ChildEnvironment<'_>, &ChildWorkingDirectory<'_>),
+        (creation_flags, suspended): (u32, bool),
     ) -> Result<WindowsChild, WindowsSpawnError> {
         let startup_info = core::ptr::from_ref(handle_list.startup_info()).cast();
         let mut process_information = PROCESS_INFORMATION::default();
@@ -1161,7 +1925,7 @@ mod spawn {
                 core::ptr::null(),
                 core::ptr::null(),
                 1,
-                windows_creation_flags() | if group.is_some() { CREATE_SUSPENDED } else { 0 },
+                creation_flags | if suspended { CREATE_SUSPENDED } else { 0 },
                 environment_pointer,
                 working_directory_pointer,
                 startup_info,
@@ -1179,14 +1943,9 @@ mod spawn {
             close_if_valid(process_information.hProcess);
             return Err(WindowsSpawnError::InvalidProcessInformation);
         }
-
-        let process = WindowsOwnedHandle::new(process_information.hProcess);
-        let thread = WindowsOwnedHandle::new(process_information.hThread);
-        if let Some(group) = group {
-            join_group_and_resume(&process, &thread, group)?;
-        }
         Ok(WindowsChild {
-            process,
+            process: WindowsOwnedHandle::new(process_information.hProcess),
+            thread: Some(WindowsOwnedHandle::new(process_information.hThread)),
             process_id: process_information.dwProcessId,
         })
     }
@@ -1223,8 +1982,8 @@ mod spawn {
     #[derive(Debug)]
     pub struct Child {
         process: WindowsChild,
-        stdout: WindowsOwnedHandle,
-        stderr: WindowsOwnedHandle,
+        stdout: PipeEnd,
+        stderr: PipeEnd,
     }
 
     /// A spawn failure: the raw Win32 error code of the operation that refused.
@@ -1254,13 +2013,13 @@ mod spawn {
     }
 
     impl SpawnError {
-        fn from_code(code: u32) -> Self {
+        pub(super) fn from_code(code: u32) -> Self {
             Self {
                 os_code: code.cast_signed(),
             }
         }
 
-        fn last() -> Self {
+        pub(super) fn last() -> Self {
             Self::from_code(unsafe { GetLastError() })
         }
     }
@@ -1274,21 +2033,34 @@ mod spawn {
 
         /// Transfers the two overlapped capture handles to completion-driven host readers.
         #[must_use]
-        pub fn into_parts(self) -> (u32, OwnedHandle, OwnedHandle) {
-            (
-                self.process.process_id(),
-                self.stdout.into_owned(),
-                self.stderr.into_owned(),
-            )
+        pub fn into_parts(self) -> (u32, PipeEnd, PipeEnd) {
+            (self.process.process_id(), self.stdout, self.stderr)
         }
 
-        /// Duplicates both capture handles for a reader while this child keeps the originals.
+        /// Shares both capture ends with a reader while this child keeps its own references.
         ///
         /// # Errors
         ///
-        /// Returns the `DuplicateHandle` error when a handle cannot be duplicated.
-        pub fn duplicate_streams(&self) -> io::Result<(OwnedHandle, OwnedHandle)> {
-            Ok((self.stdout.try_clone()?, self.stderr.try_clone()?))
+        /// Never fails on Windows; the signature matches the platforms that duplicate descriptors.
+        pub fn duplicate_streams(&self) -> io::Result<(PipeEnd, PipeEnd)> {
+            Ok((Rc::clone(&self.stdout), Rc::clone(&self.stderr)))
+        }
+
+        /// The borrowed process handle, for waiting on exit.
+        #[must_use]
+        pub fn raw_process_handle(&self) -> HANDLE {
+            self.process.raw_process_handle()
+        }
+
+        pub(super) const fn from_pooled(process: WindowsChild, stdout: PipeEnd, stderr: PipeEnd) -> Self {
+            Self { process, stdout, stderr }
+        }
+
+        /// Lets a child created ready start running; a child already running is unaffected.
+        pub fn resume(&self) {
+            if let Some(thread) = &self.process.thread {
+                unsafe { ResumeThread(thread.raw()) };
+            }
         }
 
         /// The source that reports this child's exit.
@@ -1351,27 +2123,55 @@ mod spawn {
         launch(program, arguments, environment, overrides, directory, true)
     }
 
-    /// Launch data Windows lowering cannot refuse for size: it allocates per launch, so no variant exists.
+    /// Launch data that does not fit the pooled slot storage.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum ArgumentsError {}
+    pub enum ArgumentsError {
+        /// A path, command line or environment block outgrew its fixed buffer.
+        StorageTooSmall { required: usize, available: usize },
+    }
 
     impl ArgumentsError {
         /// The refusal as terse text plus, for storage refusals, the required and available sizes.
         #[must_use]
         pub const fn describe(self) -> (&'static [u8], Option<(usize, usize)>) {
-            match self {}
+            match self {
+                Self::StorageTooSmall { required, available } => {
+                    (b"pooled launch storage units need", Some((required, available)))
+                }
+            }
         }
     }
 
-    /// Stands in for the Unix fixed launch storage; Windows lowers each launch into allocated buffers.
-    #[derive(Debug, Default)]
-    pub struct LaunchStorage;
+    impl From<WindowsArgumentsError> for ExactError {
+        fn from(error: WindowsArgumentsError) -> Self {
+            match error {
+                WindowsArgumentsError::CommandLineStorageTooSmall { required, available }
+                | WindowsArgumentsError::EnvironmentStorageTooSmall { required, available }
+                | WindowsArgumentsError::EnvironmentOrderStorageTooSmall { required, available } => {
+                    Self::Arguments(ArgumentsError::StorageTooSmall { required, available })
+                }
+                other => Self::Spawn(other.into()),
+            }
+        }
+    }
+
+    impl From<SpawnError> for ExactError {
+        fn from(error: SpawnError) -> Self {
+            Self::Spawn(error)
+        }
+    }
+
+    impl From<WindowsSpawnError> for ExactError {
+        fn from(error: WindowsSpawnError) -> Self {
+            Self::Spawn(error.into())
+        }
+    }
 
     pub type HeldLaunchStorage = LaunchStorage;
 
     #[must_use]
-    pub const fn held_launch_storage() -> HeldLaunchStorage {
-        LaunchStorage
+    pub fn held_launch_storage() -> HeldLaunchStorage {
+        LaunchStorage::new()
     }
 
     /// Why an exact test launch was refused.
@@ -1389,7 +2189,7 @@ mod spawn {
     ///
     /// Returns [`ExactError::Spawn`] with the Win32 code of the failing step.
     pub fn spawn_exact(
-        _storage: &mut LaunchStorage,
+        storage: &mut LaunchStorage,
         program: &[u8],
         test_name: &[u8],
         harness_arguments: &[&[u8]],
@@ -1397,11 +2197,44 @@ mod spawn {
         overrides: &[&[u8]],
         directory: &[u8],
     ) -> Result<Child, ExactError> {
+        exact(storage, (program, test_name, harness_arguments), (environment, overrides, directory), Start::Now)
+    }
+
+    /// Creates one exact test child frozen inside the run job; [`Child::resume`] starts it, and an interrupt ends it with the job.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExactError`] like [`spawn_exact`].
+    pub fn spawn_exact_ready(
+        storage: &mut LaunchStorage,
+        program: &[u8],
+        test_name: &[u8],
+        harness_arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: &[u8],
+    ) -> Result<Child, ExactError> {
+        exact(storage, (program, test_name, harness_arguments), (environment, overrides, directory), Start::Ready)
+    }
+
+    /// How many children beyond the job limit may wait created and frozen, so process creation overlaps a running child.
+    pub const READY_AHEAD: usize = 1;
+
+    /// Starts a child created by [`spawn_exact_ready`].
+    pub fn resume_ready(child: &Child) {
+        child.resume();
+    }
+
+    fn exact(
+        storage: &mut LaunchStorage,
+        (program, test_name, harness_arguments): (&[u8], &[u8], &[&[u8]]),
+        context: (&[&[u8]], &[&[u8]], &[u8]),
+        start: Start,
+    ) -> Result<Child, ExactError> {
         let arguments = [b"--exact".as_slice(), test_name]
             .into_iter()
-            .chain(harness_arguments.iter().copied())
-            .collect::<Vec<_>>();
-        spawn(program, &arguments, environment, overrides, Some(directory)).map_err(ExactError::Spawn)
+            .chain(harness_arguments.iter().copied());
+        storage.launch(program, arguments, context, (run_job()?, start))
     }
 
     /// Spawns one listing child as `program --list`, or `program --list --ignored`.
@@ -1421,7 +2254,7 @@ mod spawn {
         spawn(program, arguments, environment, overrides, Some(directory)).map_err(ExactError::Spawn)
     }
 
-    /// Ends every child of this run, as an interrupt does; children have no console to receive Ctrl+C.
+    /// Ends every child of this run, as an interrupt does; children share the console, so the job is what guarantees each one ends.
     pub(crate) fn terminate_children() {
         if let Some(Ok(job)) = RUN_JOB.get() {
             unsafe { TerminateJobObject(job.raw(), STATUS_CONTROL_C_EXIT) };
@@ -1492,7 +2325,7 @@ mod spawn {
             &handle_list,
             &ChildEnvironment::Block(environment_block),
             &working_directory.map_or(ChildWorkingDirectory::Inherit, ChildWorkingDirectory::Borrowed),
-            group.as_ref(),
+            (group.as_ref(), windows_creation_flags()),
         )?;
         if let Some(group) = group {
             register_group(process.process_id(), group.into_raw());
@@ -1503,8 +2336,8 @@ mod spawn {
         stderr_pipe.close_child_write_handle();
         Ok(Child {
             process,
-            stdout: stdout_pipe.into_parent_reader(),
-            stderr: stderr_pipe.into_parent_reader(),
+            stdout: PooledEnd::wrap(stdout_pipe.into_parent_reader()),
+            stderr: PooledEnd::wrap(stderr_pipe.into_parent_reader()),
         })
     }
 
@@ -1536,7 +2369,7 @@ mod spawn {
         Ok((stdout, stderr, open_null_input()?))
     }
 
-    fn open_null_input() -> Result<WindowsOwnedHandle, SpawnError> {
+    pub(super) fn open_null_input() -> Result<WindowsOwnedHandle, SpawnError> {
         let security = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(core::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
             lpSecurityDescriptor: core::ptr::null_mut(),
@@ -1561,7 +2394,7 @@ mod spawn {
     }
 
     /// An absolute path for `program`: itself when it names a path, else the first `PATH` match, which `CreateProcessW` would not search for an application name.
-    fn resolve_program(program: &[u8], environment: &[&[u8]]) -> Result<String, SpawnError> {
+    pub(super) fn resolve_program(program: &[u8], environment: &[&[u8]]) -> Result<String, SpawnError> {
         let name = core::str::from_utf8(program).map_err(|_| SpawnError {
             os_code: ERROR_INVALID_PARAMETER,
         })?;
@@ -1617,7 +2450,7 @@ mod spawn {
             QueryInformationJobObject,
         };
         use windows_sys::Win32::System::Threading::{
-            BELOW_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
+            BELOW_NORMAL_PRIORITY_CLASS, CREATE_UNICODE_ENVIRONMENT,
             EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
             GetProcessHandleCount, WaitForSingleObject,
         };
@@ -2125,7 +2958,7 @@ mod spawn {
             assert_eq!(WINDOWS_BELOW_NORMAL_PRIORITY, BELOW_NORMAL_PRIORITY_CLASS);
             assert_eq!(
                 windows_creation_flags(),
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
             );
         }
 
