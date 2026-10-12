@@ -1,5 +1,6 @@
 #[cfg(all(
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
+    feature = "edge-os",
     feature = "proxima-core",
     feature = "proxima-codec",
     feature = "proxima-primitives"

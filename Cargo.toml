@@ -3,12 +3,17 @@ name = "cargo-val"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "cargo-val"
+path = "src/main.rs"
+required-features = ["edge-os"]
+
 [dev-dependencies]
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 temp-env = "0.3.6"
 
 [features]
-default = ["proxima-core", "proxima-codec", "proxima-primitives"]
+default = ["edge-os", "proxima-core", "proxima-codec", "proxima-primitives"]
 proxima-codec = ["dep:proxima-codec"]
 proxima-primitives = ["dep:proxima-primitives"]
 proxima-core = ["dep:proxima-core"]

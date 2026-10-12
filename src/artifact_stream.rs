@@ -381,6 +381,14 @@ impl<'buffer> ArtifactFramer<'buffer> {
         Ok(())
     }
 
+    /// Forgets every buffered byte and state so the same storage frames the next stream.
+    pub fn reset(&mut self) {
+        self.buffered = 0;
+        self.consumed.set(0);
+        self.source_state.set(SourceState::Open);
+        self.scan_state.set(ScanState::Scanning { scanned: 0 });
+    }
+
     fn compact(&mut self) {
         let consumed = self.consumed.get();
         if consumed == 0 {
