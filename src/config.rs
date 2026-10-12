@@ -9,6 +9,7 @@ const IGNORED_KEY: &str = "CARGO_VAL_IGNORED";
 const FILTERSET_KEY: &str = "CARGO_VAL_FILTERSET";
 const RUST_TEST_THREADS_KEY: &str = "RUST_TEST_THREADS";
 const CONFIGURED_JOBS_KEY: &str = "CARGO_VAL_JOBS";
+const TARGET_DIR_KEY: &str = "CARGO_VAL_TARGET_DIR";
 
 /// Where a concurrency value came from, highest precedence first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +231,118 @@ impl<'value> FiltersetSources<'value> {
     pub fn resolve(self) -> Option<&'value [u8]> {
         self.command_line
             .or_else(|| self.configured.map(str::as_bytes))
+    }
+}
+
+/// Where cargo val's own cargo children build, a value on the environment axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetDirMode<'value> {
+    /// A subtree of cargo's resolved target directory keyed by workspace, so no other cargo process shares its lock.
+    Isolated,
+    /// Cargo's resolved target directory unchanged: every cargo process on it shares one build lock.
+    Shared,
+    /// A directory the caller chose; cargo val builds in its `test` and `doc` subdirectories.
+    Path(&'value [u8]),
+}
+
+impl<'value> TargetDirMode<'value> {
+    fn parse(text: &'value [u8]) -> Option<Self> {
+        match text {
+            b"" => None,
+            b"isolated" => Some(Self::Isolated),
+            b"shared" => Some(Self::Shared),
+            path => Some(Self::Path(path)),
+        }
+    }
+}
+
+/// Where the target-dir mode came from, highest precedence first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetDirSource {
+    CommandLine,
+    Configured,
+    BuildDefault,
+}
+
+/// A refused target-dir value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetDirError {
+    pub source: TargetDirSource,
+}
+
+impl TargetDirError {
+    #[must_use]
+    pub const fn message(self) -> &'static [u8] {
+        match self.source {
+            TargetDirSource::CommandLine => {
+                b"cargo-val: --target-dir must be isolated, shared, or a non-empty path\n"
+            }
+            TargetDirSource::Configured => {
+                b"cargo-val: CARGO_VAL_TARGET_DIR must be isolated, shared, or a non-empty path\n"
+            }
+            TargetDirSource::BuildDefault => {
+                b"cargo-val: the build-time target dir default must be isolated, shared, or a non-empty path\n"
+            }
+        }
+    }
+}
+
+/// Every layer that can supply the target-dir mode, built from settings or in code with the same result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetDirSources<'value> {
+    command_line: Option<&'value [u8]>,
+    configured: Option<&'value str>,
+    default_mode: &'value str,
+}
+
+impl<'value> TargetDirSources<'value> {
+    #[must_use]
+    pub const fn builder(default_mode: &'value str) -> Self {
+        Self {
+            command_line: None,
+            configured: None,
+            default_mode,
+        }
+    }
+
+    #[must_use]
+    pub const fn command_line(mut self, value: Option<&'value [u8]>) -> Self {
+        self.command_line = value;
+        self
+    }
+
+    #[must_use]
+    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
+        self.configured = value;
+        self
+    }
+
+    /// Reads `CARGO_VAL_TARGET_DIR` from a conflaguration source.
+    #[must_use]
+    pub fn from_settings(
+        settings: &'value impl SettingsSource,
+        command_line: Option<&'value [u8]>,
+        default_mode: &'value str,
+    ) -> Self {
+        Self::builder(default_mode)
+            .command_line(command_line)
+            .configured(settings.get(TARGET_DIR_KEY))
+    }
+
+    /// Picks the highest-precedence supplied source and validates only that value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TargetDirError`] naming the source when its value is empty.
+    pub fn resolve(self) -> Result<(TargetDirMode<'value>, TargetDirSource), TargetDirError> {
+        let (text, source) = match (self.command_line, self.configured) {
+            (Some(text), _) => (text, TargetDirSource::CommandLine),
+            (None, Some(text)) => (text.as_bytes(), TargetDirSource::Configured),
+            (None, None) => (self.default_mode.as_bytes(), TargetDirSource::BuildDefault),
+        };
+        TargetDirMode::parse(text)
+            .map(|mode| (mode, source))
+            .ok_or(TargetDirError { source })
     }
 }
 
@@ -1070,5 +1183,78 @@ mod ignore_and_filterset_tests {
             Some(&b"all()"[..])
         );
         assert_eq!(FiltersetSources::builder().resolve(), None);
+    }
+}
+
+#[cfg(test)]
+mod target_dir_tests {
+    use super::*;
+    use conflaguration::BorrowedSettings;
+
+    type Resolved<'value> = Result<(TargetDirMode<'value>, TargetDirSource), TargetDirError>;
+
+    #[test]
+    fn command_line_beats_setting_beats_build_default_and_each_variant_parses() {
+        let table: [(TargetDirSources<'_>, Resolved<'_>); 8] = [
+            (
+                TargetDirSources::builder("isolated"),
+                Ok((TargetDirMode::Isolated, TargetDirSource::BuildDefault)),
+            ),
+            (
+                TargetDirSources::builder("shared"),
+                Ok((TargetDirMode::Shared, TargetDirSource::BuildDefault)),
+            ),
+            (
+                TargetDirSources::builder("isolated").configured(Some("shared")),
+                Ok((TargetDirMode::Shared, TargetDirSource::Configured)),
+            ),
+            (
+                TargetDirSources::builder("isolated").configured(Some("/var/cache/val")),
+                Ok((TargetDirMode::Path(b"/var/cache/val"), TargetDirSource::Configured)),
+            ),
+            (
+                TargetDirSources::builder("isolated")
+                    .configured(Some("shared"))
+                    .command_line(Some(b"target/own")),
+                Ok((TargetDirMode::Path(b"target/own"), TargetDirSource::CommandLine)),
+            ),
+            (
+                TargetDirSources::builder("isolated")
+                    .configured(Some("/var/cache/val"))
+                    .command_line(Some(b"isolated")),
+                Ok((TargetDirMode::Isolated, TargetDirSource::CommandLine)),
+            ),
+            (
+                TargetDirSources::builder("isolated").configured(Some("")),
+                Err(TargetDirError { source: TargetDirSource::Configured }),
+            ),
+            (
+                TargetDirSources::builder("").command_line(None),
+                Err(TargetDirError { source: TargetDirSource::BuildDefault }),
+            ),
+        ];
+        for (sources, expected) in table {
+            assert_eq!(sources.resolve(), expected, "{sources:?}");
+        }
+    }
+
+    #[test]
+    fn settings_and_builder_construct_the_same_target_dir_sources() {
+        let pairs = [("CARGO_VAL_TARGET_DIR", "shared")];
+        let settings = BorrowedSettings::new(&pairs);
+        let empty = BorrowedSettings::new(&[]);
+
+        assert_eq!(
+            TargetDirSources::from_settings(&settings, None, "isolated"),
+            TargetDirSources::builder("isolated").configured(Some("shared"))
+        );
+        assert_eq!(
+            TargetDirSources::from_settings(&empty, Some(b"out"), "isolated"),
+            TargetDirSources::builder("isolated").command_line(Some(b"out"))
+        );
+        assert_eq!(
+            TargetDirSources::from_settings(&settings, None, "isolated").resolve(),
+            Ok((TargetDirMode::Shared, TargetDirSource::Configured))
+        );
     }
 }

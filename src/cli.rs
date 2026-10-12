@@ -33,6 +33,7 @@ enum Expectation {
     MaxFailValue,
     NoTestsValue,
     FiltersetValue,
+    TargetDirValue,
 }
 
 /// Which doc-test run the selection asks for, following Cargo's target rules.
@@ -83,6 +84,7 @@ pub struct CliParser<'argument> {
     fail_fast: Option<FailFastArgument<'argument>>,
     no_tests: Option<&'argument [u8]>,
     filterset: Option<&'argument [u8]>,
+    target_dir: Option<&'argument [u8]>,
     doc: bool,
     target_selected: bool,
     expectation: Expectation,
@@ -106,6 +108,7 @@ impl<'argument> CliParser<'argument> {
             fail_fast: None,
             no_tests: None,
             filterset: None,
+            target_dir: None,
             doc: false,
             target_selected: false,
             expectation: Expectation::Nothing,
@@ -152,12 +155,13 @@ impl<'argument> CliParser<'argument> {
             b"--max-fail" => self.expectation = Expectation::MaxFailValue,
             b"--no-tests" => self.expectation = Expectation::NoTestsValue,
             b"--filterset" | b"-E" => self.begin_filterset(),
+            b"--target-dir" => self.expectation = Expectation::TargetDirValue,
             b"--manifest-path" | b"-m" => {
                 self.expectation = Expectation::ManifestPath;
                 self.push_cargo_argument(argument);
             }
             b"--package" | b"-p" | b"--exclude" | b"--test" | b"--bin" | b"--example"
-            | b"--bench" | b"--target" | b"--target-dir" | b"--profile" | b"--features" | b"-F"
+            | b"--bench" | b"--target" | b"--profile" | b"--features" | b"-F"
             | b"-Z" | b"--config" | b"--color" | b"--message-format" | b"--filter-platform"
             | b"--jobs" | b"-j" => {
                 self.expectation = Expectation::CargoOptionValue;
@@ -169,6 +173,9 @@ impl<'argument> CliParser<'argument> {
             value if value.starts_with(b"-E") && !value.starts_with(b"--") => {
                 let text = value[2..].strip_prefix(b"=").unwrap_or(&value[2..]);
                 self.set_filterset(text);
+            }
+            value if value.starts_with(b"--target-dir=") => {
+                self.set_target_dir(&value[b"--target-dir=".len()..]);
             }
             value if value.starts_with(b"--no-tests=") => {
                 self.no_tests = Some(&value[b"--no-tests=".len()..]);
@@ -230,6 +237,20 @@ impl<'argument> CliParser<'argument> {
                 self.set_filterset(argument);
                 true
             }
+            Expectation::TargetDirValue => {
+                let looks_like_option = argument.first().is_some_and(|byte| *byte == b'-');
+                self.set_target_dir(argument);
+                !looks_like_option
+            }
+        }
+    }
+
+    // the value is cargo val's own setting and is never forwarded: it passes `--target-dir` to each child itself
+    fn set_target_dir(&mut self, value: &'argument [u8]) {
+        if value.is_empty() || value.first().is_some_and(|byte| *byte == b'-') {
+            self.faults |= FAULT_CARGO_OPTION_VALUE;
+        } else {
+            self.target_dir = Some(value);
         }
     }
 
@@ -343,6 +364,12 @@ impl<'argument> CliParser<'argument> {
         }
     }
 
+    /// The `--target-dir` value (`isolated`, `shared`, or a path), borrowed from argv.
+    #[must_use]
+    pub const fn target_dir(&self) -> Option<&'argument [u8]> {
+        self.target_dir
+    }
+
     /// The `-E` / `--filterset` expression text, borrowed from argv.
     #[must_use]
     pub const fn filterset(&self) -> Option<&'argument [u8]> {
@@ -372,7 +399,10 @@ impl<'argument> CliParser<'argument> {
     #[must_use]
     pub const fn has_invalid_cargo_option_value(&self) -> bool {
         self.faults & FAULT_CARGO_OPTION_VALUE != 0
-            || matches!(self.expectation, Expectation::CargoOptionValue)
+            || matches!(
+                self.expectation,
+                Expectation::CargoOptionValue | Expectation::TargetDirValue
+            )
     }
 
     /// Whether more than one positional test filter was supplied.
@@ -410,7 +440,7 @@ mod tests {
             && !parser.has_argument_storage_overflow()
     }
 
-    const VALUE_OPTIONS: [(&str, &str); 19] = [
+    const VALUE_OPTIONS: [(&str, &str); 18] = [
         ("--message-format", "json"),
         ("--color", "never"),
         ("--config", "build.jobs=2"),
@@ -423,7 +453,6 @@ mod tests {
         ("--test", "integration_fixture"),
         ("--bench", "throughput"),
         ("--target", "aarch64-apple-darwin"),
-        ("--target-dir", "target/c68"),
         ("--profile", "release"),
         ("-F", "extra"),
         ("--features", "extra,other"),
@@ -468,7 +497,6 @@ mod tests {
             "--test=integration_fixture",
             "--bench=throughput",
             "--target=aarch64-apple-darwin",
-            "--target-dir=target/c68",
             "--profile=release",
             "--features=extra,other",
             "--jobs=2",
@@ -489,6 +517,47 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, joined.len());
+    }
+
+    #[test]
+    fn target_dir_is_cargo_vals_own_setting_and_is_never_forwarded() {
+        type Case<'case> = (&'case [&'case [u8]], Option<&'case [u8]>);
+        let cases: [Case<'_>; 4] = [
+            (&[b"--target-dir", b"target/own", b"fixture::passes"], Some(b"target/own")),
+            (&[b"--target-dir=target/own", b"fixture::passes"], Some(b"target/own")),
+            (&[b"--target-dir", b"shared", b"fixture::passes"], Some(b"shared")),
+            (&[b"fixture::passes"], None),
+        ];
+        for (arguments, expected) in cases {
+            let mut parser = CliParser::new();
+            for argument in arguments {
+                parser.push(argument);
+            }
+
+            assert_eq!(parser.target_dir(), expected, "{arguments:?}");
+            assert!(parser.cargo_arguments().is_empty(), "{arguments:?}");
+            assert_eq!(parser.filter(), Some(&b"fixture::passes"[..]), "{arguments:?}");
+            assert!(!parser.has_invalid_cargo_option_value(), "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn target_dir_without_a_usable_value_is_a_cargo_option_fault() {
+        let cases: [&[&[u8]]; 4] = [
+            &[b"--target-dir"],
+            &[b"--target-dir="],
+            &[b"--target-dir", b""],
+            &[b"--target-dir", b"--locked"],
+        ];
+        for arguments in cases {
+            let mut parser = CliParser::new();
+            for argument in arguments {
+                parser.push(argument);
+            }
+
+            assert!(parser.has_invalid_cargo_option_value(), "{arguments:?}");
+            assert_eq!(parser.target_dir(), None, "{arguments:?}");
+        }
     }
 
     #[test]

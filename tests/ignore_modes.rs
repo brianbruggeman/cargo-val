@@ -301,6 +301,7 @@ mod bin_gate_hold {
             .env_remove("CARGO_VAL_BIN_GATE")
             .env("NO_COLOR", "1")
             .env("CARGO_TARGET_DIR", &target)
+            .env("CARGO_VAL_TARGET_DIR", "shared")
             .env("CARGO_VAL_BIN_GATE_HOLD", &fifo)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
