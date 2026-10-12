@@ -329,15 +329,15 @@ pub mod pipe_pair {
 mod spawn {
     //! Unix child creation using lowered launch data and owned capture descriptors.
 
-    use core::ffi::{CStr, c_char, c_int};
+    use core::ffi::{c_char, c_int};
     use core::num::NonZeroI32;
-    use std::ffi::CString;
     use std::io;
     use std::os::fd::{FromRawFd, OwnedFd};
 
     use super::pipe_pair::{OwnedDescriptor, UnixPipeError, UnixPipePair};
     use crate::ExitSource;
-    use crate::edge_args_unix::{ArgumentsError, lower_arguments};
+    pub use crate::edge_args_unix::{ArgumentsError, LaunchStorage};
+    use crate::edge_args_unix::{Arguments, Launch, Lowered};
 
     const DOC_NICE: c_int = 10;
 
@@ -360,6 +360,15 @@ mod spawn {
         fn from(_: ArgumentsError) -> Self {
             Self { os_code: libc::EINVAL }
         }
+    }
+
+    /// Why an exact test launch was refused: its arguments did not fit the fixed storage, or the OS refused the spawn.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ExactError {
+        /// The launch data holds a NUL, a malformed environment entry, or more than the storage holds.
+        Arguments(ArgumentsError),
+        /// A pipe, file-action, or `posix_spawn` operation returned this code.
+        Spawn(SpawnError),
     }
 
     impl Child {
@@ -493,30 +502,59 @@ mod spawn {
         pipes: UnixPipePair,
         new_group: bool,
     ) -> Result<Child, SpawnError> {
-        let lowered = lower_arguments(program, arguments, environment, overrides)?;
-        let executable = CString::new(program).map_err(|_| SpawnError { os_code: libc::EINVAL })?;
-        let directory = directory
-            .map(CString::new)
-            .transpose()
-            .map_err(|_| SpawnError { os_code: libc::EINVAL })?;
-        spawn_lowered(
-            &executable,
-            lowered.argv(),
-            lowered.envp(),
-            directory.as_deref(),
-            pipes,
-            new_group,
-        )
+        let arguments = Arguments::lower(Launch {
+            program,
+            arguments,
+            trailing: &[],
+            inherited: environment,
+            overrides,
+            directory,
+        })?;
+        spawn_lowered(&arguments.lowered(), pipes, new_group)
+    }
+
+    /// Spawns one exact test child, lowering its launch into `storage` so the call makes no heap allocation.
+    ///
+    /// The child runs `program --exact test_name` followed by `harness_arguments`, in `directory`, with the
+    /// inherited `environment` overlaid by `overrides`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExactError::Arguments`] with required and available sizes when the launch does not fit `storage`,
+    /// and [`ExactError::Spawn`] with the pipe, file-action, or `posix_spawn` code otherwise.
+    pub fn spawn_exact(
+        storage: &mut LaunchStorage,
+        program: &[u8],
+        test_name: &[u8],
+        harness_arguments: &[&[u8]],
+        environment: &[&[u8]],
+        overrides: &[&[u8]],
+        directory: &[u8],
+    ) -> Result<Child, ExactError> {
+        let exact_test = [b"--exact".as_slice(), test_name];
+        let lowered = storage
+            .lower(Launch {
+                program,
+                arguments: &exact_test,
+                trailing: harness_arguments,
+                inherited: environment,
+                overrides,
+                directory: Some(directory),
+            })
+            .map_err(ExactError::Arguments)?;
+        let pipes = UnixPipePair::new()
+            .map_err(|error: UnixPipeError| ExactError::Spawn(SpawnError { os_code: error.code }))?;
+        spawn_lowered(&lowered, pipes, false).map_err(ExactError::Spawn)
     }
 
     fn spawn_lowered(
-        executable: &CStr,
-        argv: &[*const c_char],
-        envp: &[*const c_char],
-        current_directory: Option<&CStr>,
+        lowered: &Lowered<'_>,
         pipes: UnixPipePair,
         new_group: bool,
     ) -> Result<Child, SpawnError> {
+        let executable = lowered.program()?;
+        let current_directory = lowered.directory()?;
+        let (argv, envp) = (lowered.argv(), lowered.envp());
         let mut actions = FileActions::new()?;
         let mut attributes = SpawnAttributes::new(new_group)?;
         #[cfg(target_os = "macos")]
@@ -661,7 +699,7 @@ mod spawn {
         use std::string::String;
         use std::vec::Vec;
 
-        use super::{SpawnError, spawn_with_pipes};
+        use super::{LaunchStorage, SpawnError, spawn, spawn_exact, spawn_with_pipes};
         use crate::edge_spawn_unix::pipe_pair::UnixPipePair;
         use crate::test_probe::probe_name;
 
@@ -745,6 +783,74 @@ mod spawn {
                 "{{\"children\":1,\"captured_descriptors\":2,\"stdout_payloads\":1,\"stderr_payloads\":1,\"cwd_matches\":1,\"exit_status\":0,\"parent_child_writes_closed\":2,\"captured_reads_closed\":2,\"child_id_nonzero\":{}}}",
                 usize::from(child_id > 0)
             );
+        }
+
+        #[test]
+        fn c38c_exact_test_launch_makes_zero_heap_allocations() {
+            let executable = std::env::current_exe().expect("test executable path exists");
+            let executable_text = executable
+                .to_str()
+                .expect("test executable path is valid UTF-8");
+            let inherited_storage = inherited_environment();
+            let inherited = inherited_storage.iter().map(String::as_bytes).collect::<Vec<_>>();
+            let overrides = [b"CARGO_VAL_CHILD_MODE=1".as_slice()];
+            let mut storage = LaunchStorage::default();
+            let mut observed = Vec::new();
+
+            for _ in 0..2 {
+                let (result, allocations) = crate::test_alloc::measure_allocations(|| {
+                    spawn_exact(
+                        &mut storage,
+                        executable_text.as_bytes(),
+                        b"edge_spawn_unix::spawn::tests::fixture_alpha",
+                        &[],
+                        &inherited,
+                        &overrides,
+                        b"/",
+                    )
+                });
+                let child = result.expect("exact test child should launch");
+                let mut status = 0;
+                assert_eq!(
+                    unsafe { libc::waitpid(child.process_id().cast_signed(), &raw mut status, 0) },
+                    child.process_id().cast_signed()
+                );
+                assert_eq!(status, 0);
+                observed.push(allocations);
+            }
+
+            std::println!(
+                "{{\"exact_launch_allocations\":{observed:?},\"inherited_entries\":{}}}",
+                inherited.len()
+            );
+            assert_eq!(observed, [0, 0], "an exact test launch must not touch the heap");
+        }
+
+        #[test]
+        fn c38c_setup_spawn_allocates_its_launch_once() {
+            let executable = std::env::current_exe().expect("test executable path exists");
+            let executable_text = executable
+                .to_str()
+                .expect("test executable path is valid UTF-8");
+            let inherited_storage = inherited_environment();
+            let inherited = inherited_storage.iter().map(String::as_bytes).collect::<Vec<_>>();
+            let arguments = [
+                b"--exact".as_slice(),
+                b"edge_spawn_unix::spawn::tests::fixture_alpha".as_slice(),
+            ];
+
+            let (result, allocations) = crate::test_alloc::measure_allocations(|| {
+                spawn(executable_text.as_bytes(), &arguments, &inherited, &[], Some(b"/"))
+            });
+
+            let child = result.expect("setup child should launch");
+            let mut status = 0;
+            assert_eq!(
+                unsafe { libc::waitpid(child.process_id().cast_signed(), &raw mut status, 0) },
+                child.process_id().cast_signed()
+            );
+            std::println!("{{\"setup_launch_allocations\":{allocations}}}");
+            assert_eq!(allocations, 3, "string bytes, argv, and envp are the setup launch's only allocations");
         }
 
         #[test]
