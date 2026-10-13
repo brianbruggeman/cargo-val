@@ -6,8 +6,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+#[path = "common/fifo.rs"]
+mod fifo;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
-const READY_TIMEOUT_MILLISECONDS: i32 = 300_000;
 const EOF_TIMEOUT_SECONDS: libc::time_t = 60;
 const SIGINT_STATUS: i32 = 130;
 const SIGTERM_STATUS: i32 = 143;
@@ -64,28 +66,6 @@ fn open_nonblocking_reader(path: &Path) -> libc::c_int {
     descriptor
 }
 
-fn read_line(descriptor: libc::c_int) -> String {
-    let mut collected = Vec::new();
-    while !collected.contains(&b'\n') {
-        let mut watched = libc::pollfd {
-            fd: descriptor,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&raw mut watched, 1, READY_TIMEOUT_MILLISECONDS) };
-        assert_eq!(ready, 1, "the doctest never reached the rendezvous");
-        let mut bytes = [0_u8; 64];
-        let count = unsafe { libc::read(descriptor, bytes.as_mut_ptr().cast(), bytes.len()) };
-        let count = usize::try_from(count).expect("read from the ready fifo succeeds");
-        assert!(
-            count > 0,
-            "the ready fifo closed before a full line arrived"
-        );
-        collected.extend_from_slice(&bytes[..count]);
-    }
-    String::from_utf8(collected).expect("the pid line is text")
-}
-
 fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -> Fixture {
     let directory = target_directory()
         .join("c74-rendezvous")
@@ -125,7 +105,7 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
         holder: 0,
         held,
     };
-    let line = read_line(ready);
+    let line = fifo::read_line(ready, "the doctest never reached the rendezvous");
     unsafe { libc::close(ready) };
     fixture.holder = line
         .trim()

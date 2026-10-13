@@ -58,29 +58,38 @@ where
         signal_failures.extend(kill_group(leader).err());
         graceful.or_else(|_| receiver.recv())
     });
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
+    let (stdout, stdout_fault) = joined(stdout, "stdout");
+    let (stderr, stderr_fault) = joined(stderr, "stderr");
+    let read_faults: Vec<String> = stdout_fault.into_iter().chain(stderr_fault).collect();
     let status = waited
         .map_err(|error| format!("{command:?}: the wait thread vanished: {error}"))?
         .map_err(|error| format!("{command:?}: wait failed: {error}"))?;
     if timed_out {
         return Err(format!(
-            "{command:?} (pid {leader}) outlived its deadline and its process group was killed\nsignal failures: {signal_failures:?}\nstdout:\n{}\nstderr:\n{}",
+            "{command:?} (pid {leader}) outlived its deadline and its process group was killed\nsignal failures: {signal_failures:?}\nread faults: {read_faults:?}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr),
         ));
     }
+    if !read_faults.is_empty() {
+        return Err(format!("{command:?}: the child exited but its output could not be read: {read_faults:?}"));
+    }
     Ok(Output { status, stdout, stderr })
 }
 
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<(Vec<u8>, Option<io::Error>)> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut bytes);
-        }
-        bytes
+        let fault = pipe.and_then(|mut pipe| pipe.read_to_end(&mut bytes).err());
+        (bytes, fault)
     })
+}
+
+fn joined(handle: JoinHandle<(Vec<u8>, Option<io::Error>)>, stream: &str) -> (Vec<u8>, Option<String>) {
+    match handle.join() {
+        Ok((bytes, fault)) => (bytes, fault.map(|error| format!("{stream} read failed: {error}"))),
+        Err(_) => (Vec::new(), Some(format!("{stream} reader thread panicked"))),
+    }
 }
 
 #[cfg(unix)]
