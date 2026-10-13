@@ -761,7 +761,9 @@ pub(crate) fn session_exited(
         return Ok(());
     };
     release_child(watch.process_id);
-    if run.settings.process == ProcessMode::Test && run.stop_sent.get() && code == shard::STOP_STATUS {
+    let stopped = run.stop_sent.get() && code == shard::STOP_STATUS;
+    let never_started = run.withdrawn_ready.get() == Some(watch.slot);
+    if run.settings.process == ProcessMode::Test && (stopped || never_started) {
         return withdraw_terminated(run, ledger, watches, index);
     }
     let event = HostEvent::Exit {
@@ -847,12 +849,16 @@ struct Reporting<'run> {
     color: bool,
     targets: &'run RefCell<TargetTable>,
     ready: &'run Cell<Option<SessionSlotId>>,
+    withdrawn_ready: &'run Cell<Option<SessionSlotId>>,
+    policy: &'run RefCell<StopPolicy>,
+    doc_failures: &'run Cell<usize>,
     jobs: usize,
 }
 
 impl Reporting<'_> {
     // a frozen child counts as a live session but not as running, so it starts the moment a job slot frees
-    fn resume_if_room(
+    // once the stop policy has tripped it is terminated instead: resuming it would launch a test after the trip
+    fn settle_ready(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     ) {
@@ -863,6 +869,13 @@ impl Reporting<'_> {
             self.ready.set(None);
             return;
         };
+        let failures = ledger.snapshot().failed + self.doc_failures.get();
+        if self.policy.borrow().observe_failures(failures) != Observation::Clear {
+            session.child().terminate();
+            self.withdrawn_ready.set(Some(slot));
+            self.ready.set(None);
+            return;
+        }
         if ledger.sessions().len().saturating_sub(1) < self.jobs {
             resume_ready(session.child());
             self.ready.set(None);
@@ -937,7 +950,7 @@ fn deliver<'bytes>(
             outcome,
             report_bytes,
         } => {
-            reporting.resume_if_room(ledger);
+            reporting.settle_ready(ledger);
             write_fd(1, &report[..name_length + report_bytes])?;
             if let Some(target) = target {
                 reporting.targets.borrow_mut().tally(
@@ -1126,6 +1139,7 @@ pub(crate) struct ListingRun<'run> {
     doc: RefCell<Option<Box<DocRun>>>,
     launch_storage: RefCell<HeldLaunchStorage>,
     ready: Cell<Option<SessionSlotId>>,
+    withdrawn_ready: Cell<Option<SessionSlotId>>,
     shards: RefCell<ShardArena<'run>>,
     sched: RefCell<SchedTable<'run>>,
     specials: RefCell<SpecialPlan<'run>>,
@@ -1171,6 +1185,9 @@ impl ListingRun<'_> {
             color: self.settings.color,
             targets: &self.targets,
             ready: &self.ready,
+            withdrawn_ready: &self.withdrawn_ready,
+            policy: &self.policy,
+            doc_failures: &self.docs.failed,
             jobs: self.settings.jobs,
         }
     }
@@ -1196,9 +1213,21 @@ impl ListingRun<'_> {
             let doc = self.interrupt_doc_tests();
             self.policy
                 .borrow_mut()
-                .record_trip(ledger.sessions().len(), doc);
+                .record_trip(self.started_sessions(ledger), doc);
         }
         observation != Observation::Clear
+    }
+
+    // a child terminated while still frozen never ran, so it is not in flight even while its exit is pending
+    fn started_sessions(
+        &self,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ) -> usize {
+        let frozen = self
+            .withdrawn_ready
+            .get()
+            .is_some_and(|slot| ledger.sessions().get(slot).is_some());
+        ledger.sessions().len() - usize::from(frozen)
     }
 
     fn interrupt_doc_tests(&self) -> DocAtTrip {
@@ -2145,6 +2174,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         doc: RefCell::new(doc_tests),
         launch_storage: RefCell::new(held_launch_storage()),
         ready: Cell::new(None),
+        withdrawn_ready: Cell::new(None),
         shards: RefCell::new(ShardArena::with_declared(shard_names, DECLARED_BYTES)),
         sched: RefCell::new(SchedTable::new(sched_bytes)),
         specials: RefCell::new(SpecialPlan::new(picked)),
@@ -3131,6 +3161,7 @@ mod listing_allocation_tests {
             doc: RefCell::new(None),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: core::cell::Cell::new(None),
+            withdrawn_ready: Cell::new(None),
             shards: RefCell::new(crate::shard_arena::ShardArena::new(&mut [])),
             sched: RefCell::new(SchedTable::new(&mut [])),
             specials: RefCell::new(SpecialPlan::new(&mut [])),
