@@ -11,7 +11,7 @@ use std::os::unix::process::CommandExt;
 pub const FIXTURE_DEADLINE: Duration = Duration::from_secs(240);
 
 // cargo-val forwards SIGINT to its children's groups and exits 130; interrupt_signals waits up to 60 s for the same exit
-const INTERRUPT_GRACE: Duration = Duration::from_secs(60);
+pub(crate) const INTERRUPT_GRACE: Duration = Duration::from_secs(60);
 
 /// Runs a fixture command to completion, failing the test with the captured output if it outlives [`FIXTURE_DEADLINE`].
 pub fn fixture_output(command: &mut Command) -> Output {
@@ -84,12 +84,12 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn interrupt(leader: u32) -> Result<(), String> {
+pub(crate) fn interrupt(leader: u32) -> Result<(), String> {
     signal_group(leader, libc::SIGINT)
 }
 
 #[cfg(unix)]
-fn kill_group(leader: u32) -> Result<(), String> {
+pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
     signal_group(leader, libc::SIGKILL)
 }
 
@@ -108,13 +108,13 @@ fn signal_group(leader: u32, signal: libc::c_int) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn interrupt(leader: u32) -> Result<(), String> {
+pub(crate) fn interrupt(leader: u32) -> Result<(), String> {
     kill_group(leader)
 }
 
 // taskkill /T walks the parent chain, the closest std-only reach to a job object
 #[cfg(windows)]
-fn kill_group(leader: u32) -> Result<(), String> {
+pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
     let output = Command::new("taskkill")
         .args(["/PID", &leader.to_string(), "/T", "/F"])
         .output()

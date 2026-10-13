@@ -8,13 +8,18 @@ use std::process::Command;
 #[cfg(unix)]
 use std::process::{Child, Stdio};
 #[cfg(unix)]
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 #[cfg(unix)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod common;
 
 use common::fixture_output;
+#[cfg(unix)]
+#[path = "common/supervise.rs"]
+mod supervise;
+#[cfg(unix)]
+use supervise::supervised;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 #[cfg(unix)]
@@ -163,44 +168,58 @@ async fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lo
 }
 
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
     let scratch = scratch("shared-lock");
     let shared = scratch.join("shared-target");
     let holder = hold_build_lock(&scratch, &shared);
 
-    let mut child = cargo_val(&scratch, &shared, &["--target-dir", "shared"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("cargo-val is spawnable");
-    let stderr = child.stderr.take().expect("stderr is piped");
-    let (sender, receiver) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            if sender.send(line.expect("stderr is utf-8")).is_err() {
-                break;
+    let mut command = cargo_val(&scratch, &shared, &["--target-dir", "shared"]);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let (status, stdout, lines) = supervised(&mut command, |_, stdout, stderr, exit| {
+        let deadline = Instant::now() + WAIT_LINE_DEADLINE;
+        let remaining = || deadline.saturating_duration_since(Instant::now());
+        let stderr = stderr.expect("stderr is piped");
+        let mut stdout_pipe = stdout.expect("stdout is piped");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if sender.send(line.expect("stderr is utf-8")).is_err() {
+                    break;
+                }
+            }
+        });
+        let (stdout_sender, stdout_receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let read = stdout_pipe.read_to_string(&mut text);
+            let _ = stdout_sender.send(read.map(|_| text));
+        });
+        let mut lines = Vec::new();
+        while !lines.iter().any(|seen: &String| directory_wait(seen)) {
+            let line = receiver
+                .recv_timeout(remaining())
+                .unwrap_or_else(|fault| panic!("no wait line arrived ({fault}); stderr so far: {lines:?}"));
+            lines.push(line);
+        }
+        holder.release();
+        loop {
+            match receiver.recv_timeout(remaining()) {
+                Ok(line) => lines.push(line),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => panic!("stderr did not reach EOF in time; stderr so far: {lines:?}"),
             }
         }
+        let stdout = stdout_receiver
+            .recv_timeout(remaining())
+            .unwrap_or_else(|fault| panic!("stdout did not drain in time ({fault}); stderr: {lines:?}"))
+            .expect("stdout drains");
+        let status = exit
+            .recv_timeout(remaining())
+            .unwrap_or_else(|fault| panic!("cargo-val did not exit in time ({fault}); stderr: {lines:?}"))
+            .expect("cargo-val is waitable");
+        (status, stdout, lines)
     });
-    let mut lines = Vec::new();
-    while !lines.iter().any(|seen: &String| directory_wait(seen)) {
-        let line = receiver
-            .recv_timeout(WAIT_LINE_DEADLINE)
-            .unwrap_or_else(|fault| panic!("no wait line arrived ({fault}); stderr so far: {lines:?}"));
-        lines.push(line);
-    }
-    holder.release();
-    lines.extend(receiver.iter());
-    reader.join().expect("the stderr reader finishes at EOF");
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .expect("stdout is piped")
-        .read_to_string(&mut stdout)
-        .expect("stdout drains");
-    let status = child.wait().expect("cargo-val is waitable");
 
     let waits: Vec<&str> = lines
         .iter()
