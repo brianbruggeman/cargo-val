@@ -14,14 +14,14 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            lib_test_floor: 202
+            lib_test_floor: 246
             lib_test_args: ""
           - os: macos-latest
-            lib_test_floor: 206
+            lib_test_floor: 250
             lib_test_args: ""
           # windows edge tests assert process-wide handle counts, which parallel tests perturb
           - os: windows-latest
-            lib_test_floor: 191
+            lib_test_floor: 233
             lib_test_args: "-- --test-threads=1"
     runs-on: ${{ matrix.os }}
     steps:
