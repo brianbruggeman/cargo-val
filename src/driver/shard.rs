@@ -917,6 +917,7 @@ mod pause_tests {
             doc: RefCell::new(None),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: Cell::new(None),
+            withdrawn_ready: Cell::new(None),
             shards: RefCell::new(arena),
             sched: RefCell::new(SchedTable::new(&mut [])),
             specials: RefCell::new(SpecialPlan::new(&mut [])),
