@@ -1,6 +1,10 @@
 #[cfg(not(test))]
 use cargo_val::cli::{CliAction, CliParser};
 #[cfg(not(test))]
+use prime::os::core_shard::run_on_this_thread_as;
+#[cfg(not(test))]
+use prime::os::reactor::Hangup;
+#[cfg(not(test))]
 use std::ffi::OsString;
 #[cfg(not(test))]
 use std::io::{self, Write};
@@ -49,7 +53,7 @@ fn banner_status(banner: &[u8]) -> ExitCode {
 
 #[cfg(not(test))]
 fn run_arguments(arguments: Vec<Vec<u8>>) -> ExitCode {
-    let root = prime::os::core_shard::run_on_this_thread(
+    let root = run_on_this_thread_as::<Hangup, _>(
         proxima_runtime::CoreId(0),
         cargo_val::run::drive(arguments),
     );
