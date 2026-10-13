@@ -80,7 +80,7 @@ fn group_gone(group: libc::pid_t) -> bool {
     signalled == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn a_fixture_run_that_misses_its_deadline_fails_and_leaves_no_process_behind() {
     let warm = fixture_output(&mut blocked_test_command(None));
     assert_eq!(warm.status.code(), Some(0), "the fixture builds and its unblocked test passes");

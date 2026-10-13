@@ -36,7 +36,7 @@ fn rendezvous_directory() -> PathBuf {
     directory
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
     let directory = rendezvous_directory();
     let manifest =
