@@ -3,7 +3,7 @@
 use super::{
     CargoDriver, ChildOutput, ExactTestIntent, ExecutablePath, LaunchCause, LaunchInput, LaunchOwner, Ledger,
     Line, ListingRun, NAME_CAPACITY, ProcessMode, RunError, RunningChild, Tally, TerminalOutcome, TestWatch,
-    Watches, executable_text, override_entries, report_launch_failure, slot_range, start_session, write_fd,
+    Watches, executable_text, override_entries, report_launch_failure, report_nothing_ran, slot_range, start_session, write_fd,
     write_report,
 };
 use core::ops::Range;
@@ -16,6 +16,7 @@ use crate::edge_spawn::STOP_SIGNAL;
 #[cfg(not(unix))]
 use crate::edge_spawn::STATUS_CONTROL_C_EXIT;
 use crate::run::Lanes;
+use crate::runner::LibtestVerdict;
 use crate::sched_file::{Loaded, load};
 use crate::shard_arena::{Located, PushError, Rerun, Reported, Shard, ShardArena};
 use crate::shard_sched::{Class, group_key};
@@ -698,7 +699,12 @@ fn finish_rerun(
                 write_fd(2, name)?;
                 write_fd(2, b" failed in a shared process, passed alone\n")?;
             }
-            count_reported(run, ledger, target, name, (TerminalOutcome::Passed, Tally::Passed))
+            let counted = match output.verdict() {
+                LibtestVerdict::NothingRan => return Err(report_nothing_ran(&run.targets, target, name)),
+                LibtestVerdict::Skipped => (TerminalOutcome::Ignored, Tally::Skipped),
+                _ => (TerminalOutcome::Passed, Tally::Passed),
+            };
+            count_reported(run, ledger, target, name, counted)
         }
         (Some(Rerun::Decides { .. }), false) => {
             output.write_failure()?;

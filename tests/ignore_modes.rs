@@ -54,6 +54,9 @@ fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str
         .env_remove("CARGO_VAL_IGNORED")
         .env_remove("CARGO_VAL_FILTERSET")
         .env_remove("CARGO_VAL_NO_TESTS")
+        .env_remove("CARGO_VAL_PROCESS")
+        .env_remove("CARGO_VAL_FAIL_FAST")
+        .env_remove("CARGO_VAL_MAX_FAIL")
         .env("NO_COLOR", "1")
         .env("CARGO_TARGET_DIR", target_directory().join("ignore-modes-fixture"));
     for (key, value) in environment {
@@ -67,22 +70,32 @@ fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str
     }
 }
 
-fn fixture(arguments: &[&str]) -> Run {
-    with_environment(arguments, &[])
+const MODES: [&str; 2] = ["test", "shard"];
+
+fn fixture(mode: &str, arguments: &[&str]) -> Run {
+    with_environment(mode, arguments, &[])
 }
 
-fn with_environment(arguments: &[&str], environment: &[(&str, &str)]) -> Run {
-    let mut full = vec!["--lib"];
+fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
+    let mut full = vec!["--lib", "--no-fail-fast"];
     full.extend_from_slice(arguments);
-    run(&manifest("ignore_modes"), &full, environment)
+    let mut with_mode = vec![("CARGO_VAL_PROCESS", mode)];
+    with_mode.extend_from_slice(environment);
+    run(&manifest("ignore_modes"), &full, &with_mode)
 }
 
 const BINARY: &str = "ignore_modes: discovered";
 
 #[test]
 fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
-    let result = fixture(&[]);
-    let context = format!("{}{}", result.stdout, result.stderr);
+    for mode in MODES {
+        default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode);
+    }
+}
+
+fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode: &str) {
+    let result = fixture(mode, &[]);
+    let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(1), "{context}");
     assert!(result.stdout.contains("fixture::passes PASS"), "{context}");
@@ -106,8 +119,14 @@ fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
 
 #[test]
 fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest() {
-    let result = fixture(&["--", "--ignored"]);
-    let context = format!("{}{}", result.stdout, result.stderr);
+    for mode in MODES {
+        ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode);
+    }
+}
+
+fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &str) {
+    let result = fixture(mode, &["--", "--ignored"]);
+    let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(0), "{context}");
     assert!(
@@ -127,8 +146,14 @@ fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest() {
 
 #[test]
 fn include_ignored_flag_runs_every_test() {
-    let result = fixture(&["--", "--include-ignored"]);
-    let context = format!("{}{}", result.stdout, result.stderr);
+    for mode in MODES {
+        include_ignored_flag_runs_every_test_in(mode);
+    }
+}
+
+fn include_ignored_flag_runs_every_test_in(mode: &str) {
+    let result = fixture(mode, &["--", "--include-ignored"]);
+    let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(1), "{context}");
     assert_eq!(
@@ -144,8 +169,14 @@ fn include_ignored_flag_runs_every_test() {
 
 #[test]
 fn ignore_mode_setting_equals_the_libtest_flag() {
-    let flag = fixture(&["--", "--include-ignored"]);
-    let setting = with_environment(&[], &[("CARGO_VAL_IGNORED", "include")]);
+    for mode in MODES {
+        ignore_mode_setting_equals_the_libtest_flag_in(mode);
+    }
+}
+
+fn ignore_mode_setting_equals_the_libtest_flag_in(mode: &str) {
+    let flag = fixture(mode, &["--", "--include-ignored"]);
+    let setting = with_environment(mode, &[], &[("CARGO_VAL_IGNORED", "include")]);
 
     assert_eq!(setting.total_without_wall(), flag.total_without_wall());
     assert_eq!(setting.status, flag.status);
@@ -153,7 +184,13 @@ fn ignore_mode_setting_equals_the_libtest_flag() {
 
 #[test]
 fn both_ignore_flags_together_are_refused_as_in_libtest() {
-    let result = fixture(&["--", "--ignored", "--include-ignored"]);
+    for mode in MODES {
+        both_ignore_flags_together_are_refused_as_in_libtest_in(mode);
+    }
+}
+
+fn both_ignore_flags_together_are_refused_as_in_libtest_in(mode: &str) {
+    let result = fixture(mode, &["--", "--ignored", "--include-ignored"]);
 
     assert_eq!(result.status, Some(2), "{}{}", result.stdout, result.stderr);
     assert!(result.stderr.contains("invalid arguments"), "{}", result.stderr);
@@ -161,8 +198,14 @@ fn both_ignore_flags_together_are_refused_as_in_libtest() {
 
 #[test]
 fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy() {
-    let result = fixture(&["-E", "test(ignored_with_reason)"]);
-    let context = format!("{}{}", result.stdout, result.stderr);
+    for mode in MODES {
+        only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode);
+    }
+}
+
+fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode: &str) {
+    let result = fixture(mode, &["-E", "test(ignored_with_reason)"]);
+    let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(4), "{context}");
     assert_eq!(
@@ -174,6 +217,12 @@ fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy() {
 
 #[test]
 fn filterset_excludes_before_launch_and_counts_filtered() {
+    for mode in MODES {
+        filterset_excludes_before_launch_and_counts_filtered_in(mode);
+    }
+}
+
+fn filterset_excludes_before_launch_and_counts_filtered_in(mode: &str) {
     let cases: [(&str, i32, &str); 5] = [
         ("test(=fixture::passes)", 0, "total: discovered 3, passed 1, failed 0, ignored 0, filtered 2"),
         ("not test(fails)", 0, "total: discovered 3, passed 1, failed 0, ignored 1, filtered 1"),
@@ -182,8 +231,8 @@ fn filterset_excludes_before_launch_and_counts_filtered() {
         ("package(other) | none()", 4, "total: discovered 3, passed 0, failed 0, ignored 0, filtered 3"),
     ];
     for (expression, status, total) in cases {
-        let result = fixture(&["-E", expression]);
-        let context = format!("{expression}: {}{}", result.stdout, result.stderr);
+        let result = fixture(mode, &["-E", expression]);
+        let context = format!("{mode} {expression}: {}{}", result.stdout, result.stderr);
         assert_eq!(result.status, Some(status), "{context}");
         assert_eq!(result.total_without_wall(), total, "{context}");
     }
@@ -191,9 +240,15 @@ fn filterset_excludes_before_launch_and_counts_filtered() {
 
 #[test]
 fn filterset_setting_equals_the_flag_and_the_flag_wins() {
-    let flag = fixture(&["--filterset", "test(passes)"]);
-    let setting = with_environment(&[], &[("CARGO_VAL_FILTERSET", "test(passes)")]);
-    let overridden = with_environment(&["-E", "test(passes)"], &[("CARGO_VAL_FILTERSET", "none()")]);
+    for mode in MODES {
+        filterset_setting_equals_the_flag_and_the_flag_wins_in(mode);
+    }
+}
+
+fn filterset_setting_equals_the_flag_and_the_flag_wins_in(mode: &str) {
+    let flag = fixture(mode, &["--filterset", "test(passes)"]);
+    let setting = with_environment(mode, &[], &[("CARGO_VAL_FILTERSET", "test(passes)")]);
+    let overridden = with_environment(mode, &["-E", "test(passes)"], &[("CARGO_VAL_FILTERSET", "none()")]);
 
     assert_eq!(setting.total_without_wall(), flag.total_without_wall());
     assert_eq!(overridden.total_without_wall(), flag.total_without_wall());
@@ -214,7 +269,13 @@ fn malformed_filterset_fails_with_a_caret_before_any_build() {
 
 #[test]
 fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test() {
-    let result = run(&manifest("ghost_harness"), &["--test", "ghost"], &[]);
+    for mode in MODES {
+        an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode);
+    }
+}
+
+fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode: &str) {
+    let result = run(&manifest("ghost_harness"), &["--test", "ghost"], &[("CARGO_VAL_PROCESS", mode)]);
 
     assert_eq!(result.status, Some(2), "{}{}", result.stdout, result.stderr);
     assert!(
