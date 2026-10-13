@@ -70,6 +70,8 @@ mod lowering {
         pub program: &'launch [u8],
         /// Arguments following the program name.
         pub arguments: &'launch [&'launch [u8]],
+        /// Test names joined by NUL, each lowered as its own argument between `arguments` and `trailing`; empty for none.
+        pub names: &'launch [u8],
         /// Arguments following `arguments`, such as forwarded harness flags.
         pub trailing: &'launch [&'launch [u8]],
         /// Inherited environment entries in `KEY=VALUE` form.
@@ -84,6 +86,7 @@ mod lowering {
         fn argument_strings(self) -> impl Iterator<Item = &'launch [u8]> + Clone {
             core::iter::once(self.program)
                 .chain(self.arguments.iter().copied())
+                .chain(self.names.split(|byte| *byte == 0).filter(|name| !name.is_empty()))
                 .chain(self.trailing.iter().copied())
         }
 
@@ -383,6 +386,7 @@ mod lowering {
             Launch {
                 program,
                 arguments,
+                names: &[],
                 trailing: &[],
                 inherited,
                 overrides,

@@ -7,6 +7,8 @@ use core::task::{Context, Poll};
 use std::boxed::Box;
 use std::io;
 use std::process::ExitStatus;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::vec::Vec;
 
 use prime::os::readiness::{Readiness, ReadyState};
@@ -257,6 +259,23 @@ fn exit_code(status: io::Result<ExitStatus>) -> Result<i32, RunError> {
         .map_err(|_| RunError::Reactor)
 }
 
+// a signal ends a session as its negated number, so the shard names the signal and a per-test child still fails
+fn session_exit_code(status: io::Result<ExitStatus>) -> Result<i32, RunError> {
+    status
+        .map(|status| status.code().unwrap_or_else(|| terminating_signal(status).map_or(1, |signal| -signal)))
+        .map_err(|_| RunError::Reactor)
+}
+
+#[cfg(unix)]
+fn terminating_signal(status: ExitStatus) -> Option<i32> {
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn terminating_signal(_status: ExitStatus) -> Option<i32> {
+    None
+}
+
 fn handle(
     item: Item,
     lanes: &Lanes,
@@ -328,11 +347,13 @@ fn handle(
             Ok(())
         }
         Item::Exit(lane, status) => {
-            session_exited(run, ledger, watches, lane - JOB_BASE, exit_code(status)?)
+            session_exited(run, ledger, watches, lane - JOB_BASE, session_exit_code(status)?)
         }
         Item::Signal(ready) => {
             ready.map_err(|_| RunError::Reactor)?;
-            run.drain_signals()
+            run.drain_signals()?;
+            run.interrupt_sessions(ledger, watches);
+            Ok(())
         }
         Item::Interrupt => Ok(()),
     }

@@ -736,6 +736,251 @@ impl<'value> NoTestsSources<'value> {
     }
 }
 
+/// Resolves a shard child count written as a count (`8`) or a multiple of the core count (`0.5x`, `1x`, `2x`), at least 1.
+///
+/// The multiple takes up to three decimals; anything else is refused.
+#[must_use]
+pub fn shard_jobs(expression: &str, cores: usize) -> Option<usize> {
+    let (number, multiplier) = match expression.strip_suffix('x') {
+        Some(number) => (number, true),
+        None => (expression, false),
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if whole.is_empty() && fraction.is_empty() || fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let whole: usize = if whole.is_empty() { 0 } else { whole.parse().ok()? };
+    if !multiplier {
+        return (fraction.is_empty() && whole > 0).then_some(whole);
+    }
+    let milli: usize = format_milli(fraction)?;
+    Some((cores.checked_mul(whole.checked_mul(1000)?.checked_add(milli)?)? / 1000).max(1))
+}
+
+fn format_milli(fraction: &str) -> Option<usize> {
+    let digits: usize = if fraction.is_empty() { 0 } else { fraction.parse().ok()? };
+    Some(digits * 10_usize.pow(3 - u32::try_from(fraction.len()).ok()?))
+}
+
+#[cfg(test)]
+mod shard_jobs_tests {
+    use super::shard_jobs;
+
+    #[test]
+    fn counts_and_multiples_of_the_core_count_resolve_to_children() {
+        let table = [
+            ("2x", 8, Some(16)),
+            ("1x", 8, Some(8)),
+            ("0.5x", 8, Some(4)),
+            ("0.5x", 1, Some(1)),
+            ("1.5x", 6, Some(9)),
+            ("6", 64, Some(6)),
+            ("0", 8, None),
+            ("x", 8, None),
+            ("2.5", 8, None),
+            ("0.0001x", 8, None),
+            ("two", 8, None),
+        ];
+        for (expression, cores, expected) in table {
+            assert_eq!(shard_jobs(expression, cores), expected, "{expression} on {cores} cores");
+        }
+    }
+}
+
+const PROCESS_KEY: &str = "CARGO_VAL_PROCESS";
+
+/// How a test binary's selected tests are given to OS processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessMode {
+    /// Contiguous groups of tests share one libtest child, so a binary launches about `jobs` children.
+    Shard,
+    /// One exact test per child.
+    Test,
+}
+
+/// What the user asked for: a forced mode, or `auto`, which lets the target OS decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessSetting {
+    /// Shard on a Windows target, where process creation dominates; one test per child elsewhere.
+    Auto,
+    Shard,
+    Test,
+}
+
+impl ProcessSetting {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "shard" => Some(Self::Shard),
+            "test" => Some(Self::Test),
+            _ => None,
+        }
+    }
+
+    /// The mode this setting runs as for a target; a forced setting ignores the target.
+    #[must_use]
+    pub const fn mode(self, windows_target: bool) -> ProcessMode {
+        match self {
+            Self::Shard => ProcessMode::Shard,
+            Self::Auto if windows_target => ProcessMode::Shard,
+            Self::Auto | Self::Test => ProcessMode::Test,
+        }
+    }
+}
+
+/// Where the winning process setting came from, highest precedence first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessSource {
+    CommandLine,
+    Configured,
+    BuildDefault,
+}
+
+/// A refused process setting together with the source that supplied it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessError {
+    pub source: ProcessSource,
+}
+
+impl ProcessError {
+    #[must_use]
+    pub const fn message(self) -> &'static [u8] {
+        match self.source {
+            ProcessSource::CommandLine => b"cargo-val: --process must be auto, shard, or test\n",
+            ProcessSource::Configured => b"cargo-val: CARGO_VAL_PROCESS must be auto, shard, or test\n",
+            ProcessSource::BuildDefault => b"cargo-val: the build default process setting is invalid\n",
+        }
+    }
+}
+
+/// The accepted setting and the source that won.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessChoice {
+    pub setting: ProcessSetting,
+    pub source: ProcessSource,
+}
+
+/// Every layer that can supply the process setting, built from settings or in code with the same result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessSources<'value> {
+    command_line: Option<&'value [u8]>,
+    configured: Option<&'value str>,
+    build_default: &'value str,
+}
+
+impl<'value> ProcessSources<'value> {
+    #[must_use]
+    pub const fn builder(build_default: &'value str) -> Self {
+        Self {
+            command_line: None,
+            configured: None,
+            build_default,
+        }
+    }
+
+    #[must_use]
+    pub const fn command_line(mut self, value: Option<&'value [u8]>) -> Self {
+        self.command_line = value;
+        self
+    }
+
+    #[must_use]
+    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
+        self.configured = value;
+        self
+    }
+
+    /// Reads `CARGO_VAL_PROCESS` from a conflaguration source.
+    #[must_use]
+    pub fn from_settings(
+        settings: &'value impl SettingsSource,
+        command_line: Option<&'value [u8]>,
+        build_default: &'value str,
+    ) -> Self {
+        Self::builder(build_default)
+            .command_line(command_line)
+            .configured(settings.get(PROCESS_KEY))
+    }
+
+    /// Picks the highest-precedence supplied source and validates only that value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError`] naming the winning source when its value is not `auto`, `shard`, or `test`.
+    pub fn resolve(self) -> Result<ProcessChoice, ProcessError> {
+        let (source, text) = match (self.command_line, self.configured) {
+            (Some(bytes), _) => (ProcessSource::CommandLine, core::str::from_utf8(bytes).ok()),
+            (None, Some(text)) => (ProcessSource::Configured, Some(text)),
+            (None, None) => (ProcessSource::BuildDefault, Some(self.build_default)),
+        };
+        text.and_then(ProcessSetting::parse)
+            .map(|setting| ProcessChoice { setting, source })
+            .ok_or(ProcessError { source })
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use conflaguration::BorrowedSettings;
+
+    const WINDOWS: bool = true;
+    const UNIX: bool = false;
+
+    #[test]
+    fn precedence_is_command_line_then_environment_then_build_default() {
+        let table: [(ProcessSources<'_>, Result<ProcessChoice, ProcessError>); 6] = [
+            (ProcessSources::builder("auto"), Ok(ProcessChoice { setting: ProcessSetting::Auto, source: ProcessSource::BuildDefault })),
+            (ProcessSources::builder("test"), Ok(ProcessChoice { setting: ProcessSetting::Test, source: ProcessSource::BuildDefault })),
+            (
+                ProcessSources::builder("auto").configured(Some("shard")),
+                Ok(ProcessChoice { setting: ProcessSetting::Shard, source: ProcessSource::Configured }),
+            ),
+            (
+                ProcessSources::builder("auto").configured(Some("shard")).command_line(Some(b"test")),
+                Ok(ProcessChoice { setting: ProcessSetting::Test, source: ProcessSource::CommandLine }),
+            ),
+            (
+                ProcessSources::builder("auto").configured(Some("batch")),
+                Err(ProcessError { source: ProcessSource::Configured }),
+            ),
+            (
+                ProcessSources::builder("auto").command_line(Some(&[0xff, 0xfe])),
+                Err(ProcessError { source: ProcessSource::CommandLine }),
+            ),
+        ];
+        for (sources, expected) in table {
+            assert_eq!(sources.resolve(), expected);
+        }
+    }
+
+    #[test]
+    fn auto_shards_on_a_windows_target_and_runs_one_test_per_child_on_unix() {
+        assert_eq!(ProcessSetting::Auto.mode(WINDOWS), ProcessMode::Shard);
+        assert_eq!(ProcessSetting::Auto.mode(UNIX), ProcessMode::Test);
+    }
+
+    #[test]
+    fn a_forced_setting_overrides_auto_on_every_target() {
+        for windows_target in [WINDOWS, UNIX] {
+            assert_eq!(ProcessSetting::Shard.mode(windows_target), ProcessMode::Shard);
+            assert_eq!(ProcessSetting::Test.mode(windows_target), ProcessMode::Test);
+        }
+    }
+
+    #[test]
+    fn settings_source_and_builder_resolve_the_same_choice() {
+        let pairs = [("CARGO_VAL_PROCESS", "shard")];
+        let source = BorrowedSettings::new(&pairs);
+
+        let from_settings = ProcessSources::from_settings(&source, None, "auto").resolve();
+        let from_builder = ProcessSources::builder("auto").configured(Some("shard")).resolve();
+
+        assert_eq!(from_settings, from_builder);
+        assert_eq!(from_settings.map(|choice| choice.setting.mode(UNIX)), Ok(ProcessMode::Shard));
+    }
+}
+
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;

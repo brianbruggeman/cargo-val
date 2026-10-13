@@ -5,6 +5,13 @@ Status: **built** (in tree, uncommitted) · **designed** · **queued** · **late
 ## Running
 - **built** — stream tests as cargo reports each test binary; first result before discovery ends
 - **built** — one process per test; child gets cargo's env, cwd, dylib path (cargo test / nextest parity)
+- **built** — shard mode: tests run in shared processes per binary
+- **built** — settle-or-solo: a shard settles a test only from a clean same-line libtest result; every other name is re-run alone and that solo run decides
+- **built** — `--process auto|shard|test`: auto = shard on Windows, per-test elsewhere
+- **built** — serial / group / process records honored in both modes
+- **built** — interrupt (Ctrl-C / SIGTERM) kills children in both modes
+- **queued** — shard binaries in parallel
+- **queued** — zero-allocation test for a shard launch
 - **built** — `-- --test-threads N` / `RUST_TEST_THREADS`; `-j` stays cargo build jobs
 - **built** — fail fast by default; `--no-fail-fast`, `--max-fail N`
 - **built** — `--no-tests=fail|warn|pass`, zero tests run is never green (default fail, exit 4)
@@ -32,7 +39,7 @@ Status: **built** (in tree, uncommitted) · **designed** · **queued** · **late
 - **built** — `#[proxima::test(group = "x")]` — at most N of x at once (nextest test-group meaning)
 - **built** — `#[proxima::test(process)]` — share one process (with a group, or per binary)
 - **built** — scheduling records v2 (flags + group) in a linker section of each test binary (v2 verified macOS + Linux debug/release; Windows unverified)
-- **queued** — cargo val reads the records and schedules by them
+- **built** — cargo val reads the records and schedules by them, in both process modes
 - **queued** — read `.config/nextest.toml` test-groups, threads-required, overrides
 - **designed** — tests below normal OS priority while cargo builds; rustc keeps its cores
 - **later** — slowest-first order from stored history

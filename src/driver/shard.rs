@@ -1,0 +1,744 @@
+//! Shard children: many tests in one libtest process, each counted as its result line streams in.
+
+use super::{
+    CargoDriver, ChildOutput, ExactTestIntent, ExecutablePath, LaunchCause, LaunchInput, LaunchOwner, Ledger,
+    Line, ListingRun, NAME_CAPACITY, ProcessMode, RunError, RunningChild, Tally, TerminalOutcome, TestWatch,
+    Watches, executable_text, override_entries, report_launch_failure, slot_range, start_session, write_fd,
+    write_report,
+};
+use crate::build_defaults::SHARD_COMMAND_UNITS;
+use crate::discover_listing::{DocEvent, DocOutcome, DocParser};
+use crate::edge_signal::release_child;
+#[cfg(unix)]
+use crate::edge_spawn::STOP_SIGNAL;
+#[cfg(not(unix))]
+use crate::edge_spawn::STATUS_CONTROL_C_EXIT;
+use crate::run::Lanes;
+use crate::sched_file::{Loaded, load};
+use crate::shard_arena::{Located, PushError, Rerun, Reported, Shard, ShardArena};
+use crate::shard_sched::{Class, group_key};
+use crate::stop::Observation;
+
+pub(super) const FAILURE_CAPACITY: usize = 16384;
+const FIXED_UNITS: usize = 3 + "--exact ".len();
+const GROUP_CAPACITY: usize = crate::sched_binary::GROUP_CAPACITY;
+// the status a child ends with when cargo-val terminated it: SIGKILL on unix, the exit code TerminateProcess sets elsewhere
+#[cfg(unix)]
+pub(super) const STOP_STATUS: i32 = -STOP_SIGNAL;
+#[cfg(not(unix))]
+pub(super) const STOP_STATUS: i32 = STATUS_CONTROL_C_EXIT.cast_signed();
+
+/// Per-child state for a shard: which of its names reported, the libtest report parser, and the failure blocks it has streamed.
+pub(super) struct ShardWatch {
+    shard: Shard,
+    parser: DocParser,
+    reported: Reported,
+    ambiguous: Reported,
+    failed: Reported,
+    blocked: Reported,
+    expected: (usize, usize),
+    failures: [u8; FAILURE_CAPACITY],
+    failure_length: usize,
+    keeping: bool,
+    streamed: (usize, usize, usize),
+    deferred: (usize, usize, usize),
+    group: [u8; GROUP_CAPACITY],
+    group_length: usize,
+}
+
+impl ShardWatch {
+    fn new(shard: Shard, group: &[u8]) -> Self {
+        let mut watch = Self {
+            shard,
+            parser: DocParser::new(),
+            reported: Reported::new(),
+            ambiguous: Reported::new(),
+            failed: Reported::new(),
+            blocked: Reported::new(),
+            expected: (shard.start, 0),
+            failures: [0; FAILURE_CAPACITY],
+            failure_length: 0,
+            keeping: false,
+            streamed: (0, 0, 0),
+            deferred: (0, 0, 0),
+            group: [0; GROUP_CAPACITY],
+            group_length: group.len().min(GROUP_CAPACITY),
+        };
+        watch.group[..watch.group_length].copy_from_slice(&group[..watch.group_length]);
+        watch
+    }
+
+    fn class(&self) -> Class {
+        Class::from_rank(self.shard.class)
+    }
+
+    fn counts_against(&self, group: &[u8]) -> bool {
+        matches!(self.class(), Class::Shared | Class::Grouped) && &self.group[..self.group_length] == group
+    }
+
+    fn flush_failures(&mut self) -> Result<(), RunError> {
+        flush(&self.failures, &mut self.failure_length)
+    }
+}
+
+fn flush(failures: &[u8; FAILURE_CAPACITY], length: &mut usize) -> Result<(), RunError> {
+    if *length != 0 {
+        write_fd(2, &failures[..*length])?;
+        *length = 0;
+    }
+    Ok(())
+}
+
+// blocks are written whole when they fit, so two shards failing at once do not interleave inside one block
+fn keep_failure_line(failures: &mut [u8; FAILURE_CAPACITY], length: &mut usize, line: &[u8]) -> Result<(), RunError> {
+    if *length + line.len() + 1 > FAILURE_CAPACITY {
+        flush(failures, length)?;
+    }
+    let taken = line.len().min(FAILURE_CAPACITY - 1);
+    failures[*length..*length + taken].copy_from_slice(&line[..taken]);
+    failures[*length + taken] = b'\n';
+    *length += taken + 1;
+    Ok(())
+}
+
+// libtest prints `---- <name> stdout ----` above the captured output of each failed test
+fn failure_block_name(line: &[u8]) -> Option<&[u8]> {
+    line.strip_prefix(b"---- ")?.strip_suffix(b" stdout ----")
+}
+
+fn tally_streamed(streamed: &mut (usize, usize, usize), outcome: TerminalOutcome) {
+    match outcome {
+        TerminalOutcome::Passed => streamed.0 += 1,
+        TerminalOutcome::Failed => streamed.1 += 1,
+        TerminalOutcome::Ignored => streamed.2 += 1,
+    }
+}
+
+fn terminal(outcome: DocOutcome) -> (TerminalOutcome, Tally) {
+    match outcome {
+        DocOutcome::Passed => (TerminalOutcome::Passed, Tally::Passed),
+        DocOutcome::Failed => (TerminalOutcome::Failed, Tally::Failed),
+        DocOutcome::Ignored => (TerminalOutcome::Ignored, Tally::Skipped),
+    }
+}
+
+fn report_line(name: &[u8], outcome: TerminalOutcome, color: bool) -> Result<(), RunError> {
+    let mut report = [0; NAME_CAPACITY + 34];
+    let name_length = name.len().min(NAME_CAPACITY);
+    report[..name_length].copy_from_slice(&name[..name_length]);
+    report[name_length] = b' ';
+    let label = write_report(&[outcome], color, &mut report[name_length + 1..]).map_err(|_| RunError::Outcome)?;
+    write_fd(1, &report[..name_length + 1 + label])
+}
+
+fn count_reported(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    target: Option<usize>,
+    name: &[u8],
+    (outcome, tally): (TerminalOutcome, Tally),
+) -> Result<(), RunError> {
+    ledger.count(outcome).map_err(|_| RunError::Outcome)?;
+    if let Some(target) = target {
+        run.targets.borrow_mut().tally(target, tally);
+    }
+    report_line(name, outcome, run.settings.color)
+}
+
+// a shard's failure is only counted when it would trip the stop policy; otherwise a solo run decides it
+fn would_trip(run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
+    let failures = ledger.snapshot().failed + run.docs.failed.get() + 1;
+    run.policy.borrow().observe_failures(failures) != Observation::Clear
+}
+
+// a solo run cargo-val terminated is withdrawn: its exit says nothing about the test
+pub(super) fn withdraw_solo(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, target: Option<usize>) -> Result<(), RunError> {
+    ledger.withdraw(1).map_err(|_| RunError::Outcome)?;
+    if let Some(target) = target {
+        run.targets.borrow_mut().tally(target, Tally::Withdrawn);
+    }
+    if !run.interrupted() {
+        run.policy.borrow_mut().listed_test_skipped();
+    }
+    Ok(())
+}
+
+// a failed test past --max-fail ends every shard, but an output-only rerun is spared: it is the only place a tripping test's block is printed
+// an interrupt ends everything, since nothing else will be read
+pub(super) fn stop_all(run: &ListingRun<'_>, ledger: &Ledger<'_>, watches: &Watches) {
+    run.stop_sent.set(true);
+    let interrupted = run.interrupted();
+    watches
+        .iter()
+        .flatten()
+        .filter(|watch| !spared_by_stop(interrupted, watch_rerun(watch)))
+        .filter_map(|watch| ledger.sessions().get(watch.slot))
+        .for_each(|session| session.child().terminate());
+}
+
+fn watch_rerun(watch: &TestWatch) -> Option<Rerun> {
+    watch.shard.as_ref().and_then(|shard_watch| shard_watch.shard.rerun)
+}
+
+fn spared_by_stop(interrupted: bool, rerun: Option<Rerun>) -> bool {
+    !interrupted && matches!(rerun, Some(Rerun::OutputOnly))
+}
+
+/// Feeds one chunk of a shard child's stdout to its libtest parser, counting each test as its result line completes.
+/// Returns whether the run tripped its stop policy, so the caller ends the other sessions once this watch is released.
+pub(super) fn observe(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watch: &mut TestWatch,
+    bytes: &[u8],
+) -> Result<bool, RunError> {
+    let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
+    let Some(shard_watch) = watch.shard.as_mut() else {
+        return Ok(false);
+    };
+    if shard_watch.shard.rerun.is_some() {
+        return Ok(false);
+    }
+    let ShardWatch {
+        shard,
+        parser,
+        reported,
+        ambiguous,
+        failed,
+        blocked,
+        expected,
+        failures,
+        failure_length,
+        keeping,
+        streamed,
+        deferred,
+        ..
+    } = shard_watch;
+    let shard = *shard;
+    let mut stop = false;
+    parser.feed(bytes, |event| {
+        match event {
+            DocEvent::Result { name, outcome, stray } => {
+                let located = run.shards.borrow().locate(shard, *expected, name);
+                let Some(Located { ordinal, next }) = located else {
+                    return write_fd(2, b"cargo-val: a shard child reported a test that was not in its shard\n");
+                };
+                if reported.has(ordinal) || ambiguous.has(ordinal) {
+                    return Ok(());
+                }
+                *expected = (next, ordinal + 1);
+                if stray {
+                    ambiguous.mark(ordinal);
+                    tally_streamed(deferred, terminal(outcome).0);
+                    return Ok(());
+                }
+                if outcome == DocOutcome::Failed && !would_trip(run, ledger) {
+                    failed.mark(ordinal);
+                    tally_streamed(deferred, TerminalOutcome::Failed);
+                    return Ok(());
+                }
+                reported.mark(ordinal);
+                if outcome == DocOutcome::Failed {
+                    failed.mark(ordinal);
+                }
+                let counted = terminal(outcome);
+                count_reported(run, ledger, target, name, counted)?;
+                tally_streamed(streamed, counted.0);
+                stop |= counted.0 == TerminalOutcome::Failed && run.tripped(ledger);
+            }
+            DocEvent::FailureLine(line) => {
+                if let Some(name) = failure_block_name(line) {
+                    *keeping = false;
+                    if let Some(Located { ordinal, .. }) = run.shards.borrow().locate(shard, *expected, name)
+                        && reported.has(ordinal)
+                        && failed.has(ordinal)
+                    {
+                        blocked.mark(ordinal);
+                        *keeping = true;
+                    }
+                }
+                if *keeping {
+                    keep_failure_line(failures, failure_length, line)?;
+                }
+            }
+            DocEvent::Finished { passed, failed: failed_count, ignored } => {
+                let expected_counts = (streamed.0 + deferred.0, streamed.1 + deferred.1, streamed.2 + deferred.2);
+                if (passed, failed_count, ignored) != expected_counts {
+                    write_fd(2, b"cargo-val: a shard child's test result line disagrees with the results it streamed\n")?;
+                }
+            }
+            DocEvent::Running { .. } => {}
+        }
+        Ok(())
+    })?;
+    Ok(stop)
+}
+
+fn debug_launch(run: &ListingRun<'_>, watches: &Watches, (class, shard): (Class, Shard), in_flight: usize) {
+    if !run.settings.debug {
+        return;
+    }
+    let (group, group_length) = group_of(run, shard);
+    let same_group = watches
+        .iter()
+        .flatten()
+        .filter(|watch| watch.shard.as_ref().is_some_and(|live| live.counts_against(&group[..group_length])))
+        .count();
+    let mut line = Line::<192>::new();
+    line.text(b"cargo-val: debug: shard launch class=");
+    line.text(class.text());
+    line.text(b" names=");
+    line.number(shard.count);
+    line.text(b" in_flight=");
+    line.number(in_flight);
+    line.text(b" group_in_flight=");
+    line.number(same_group);
+    line.text(if shard.rerun.is_some() { b" relaunch=true\n" } else { b" relaunch=false\n" });
+    let _ = write_fd(2, line.bytes());
+}
+
+/// Whether the shard machinery still has names to launch, shards running, or declared tests waiting.
+pub(super) fn busy(run: &ListingRun<'_>) -> bool {
+    !run.shards.borrow().idle() || run.specials.borrow().has_work()
+}
+
+fn announce_refusal(what: &[u8], path: &str, detail: &[u8]) {
+    let mut line = Line::<1024>::new();
+    line.text(b"cargo-val: ");
+    line.text(what);
+    line.text(b" in ");
+    line.text(path.as_bytes());
+    line.text(b": ");
+    line.text(detail);
+    line.text(b"\n");
+    let _ = write_fd(2, line.bytes());
+}
+
+// the records are read once per binary, from its file, before any name of it is classified
+pub(super) fn load_records(run: &ListingRun<'_>, executable: &str, target: usize) -> Result<(), RunError> {
+    if run.sched_target.get() == Some(target) {
+        return Ok(());
+    }
+    run.sched_target.set(Some(target));
+    let mut table = run.sched.borrow_mut();
+    table.clear();
+    match load(executable, table.storage()) {
+        Ok(Loaded::Records { count, little_endian }) => table.adopt(count, little_endian),
+        Ok(Loaded::Absent(_)) => {}
+        Ok(Loaded::Refused(crate::sched_binary::Fault::Capacity)) => return Err(RunError::DeclaredCapacity),
+        Ok(Loaded::Refused(fault)) => {
+            let detail = match fault {
+                crate::sched_binary::Fault::Version(_) => &b"scheduling records of an unknown version; scheduling by default"[..],
+                crate::sched_binary::Fault::Partial => b"scheduling section is not whole records; scheduling by default",
+                crate::sched_binary::Fault::Length => b"a scheduling record length is out of range; scheduling by default",
+                crate::sched_binary::Fault::Capacity => b"more scheduling records than the table holds; scheduling by default",
+            };
+            announce_refusal(b"scheduling records refused", executable, detail);
+        }
+        Err(_) => announce_refusal(b"scheduling records unreadable", executable, b"the binary could not be read; scheduling by default"),
+    }
+    Ok(())
+}
+
+/// Whether the next per-test name waits unconsumed: a serial name while anything runs, a grouped name while its group runs.
+/// A name with nothing in flight never waits, so the listing always drains.
+pub(super) fn holds(run: &ListingRun<'_>, watches: &Watches, in_flight: usize, name: &str) -> bool {
+    if run.settings.process != ProcessMode::Test || in_flight == 0 {
+        return false;
+    }
+    let table = run.sched.borrow();
+    let Some(entry) = table.find(name.as_bytes()).and_then(|index| table.entry(index)) else {
+        return false;
+    };
+    entry.serial() || (!entry.group.is_empty() && watches.iter().flatten().any(|watch| watch.in_group(entry.group)))
+}
+
+/// Records the group a per-test child launched under so a later name of that group waits for it.
+pub(super) fn note_group(run: &ListingRun<'_>, watches: &mut Watches, slot: usize, name: &str) {
+    let table = run.sched.borrow();
+    let Some(entry) = table.find(name.as_bytes()).and_then(|index| table.entry(index)) else {
+        return;
+    };
+    if let Some(watch) = watches[slot].as_mut() {
+        let length = entry.group.len().min(GROUP_CAPACITY);
+        watch.group[..length].copy_from_slice(&entry.group[..length]);
+        watch.group_length = length;
+    }
+}
+
+/// Seals the arena once the active binary's listing has ended so its names carve into about `jobs` shards.
+pub(super) fn seal(run: &ListingRun<'_>) {
+    if run.settings.process != ProcessMode::Shard {
+        return;
+    }
+    let mut arena = run.shards.borrow_mut();
+    if !arena.sealed() {
+        arena.seal(run.settings.jobs);
+        run.specials.borrow_mut().seal(&run.sched.borrow());
+    }
+}
+
+/// Takes one listed name: a declared test joins the scheduling plan, any other joins the arena.
+/// Returns whether the listing must pause because the arena is full, after parking the name.
+pub(super) fn collect(run: &ListingRun<'_>, (executable, target): (&str, usize), name: &str) -> Result<bool, RunError> {
+    load_records(run, executable, target)?;
+    if let Some(index) = run.sched.borrow().find(name.as_bytes()) {
+        let declared = run.sched.borrow().entry(index).map(|entry| Class::of(&entry));
+        if declared.is_some_and(|class| class != Class::Plain) && run.specials.borrow_mut().push(index) {
+            return Ok(false);
+        }
+    }
+    let mut arena = run.shards.borrow_mut();
+    match arena.push(name) {
+        Ok(()) => Ok(false),
+        Err(PushError::Full) => {
+            arena.seal(run.settings.jobs);
+            run.specials.borrow_mut().seal(&run.sched.borrow());
+            Ok(true)
+        }
+        Err(PushError::InteriorNul) => Err(RunError::Arguments),
+        Err(PushError::TooLong) => Err(RunError::Launch(LaunchCause::NameTooLong {
+            required: name.len(),
+            available: NAME_CAPACITY,
+        })),
+    }
+}
+
+// a relaunch comes first, then plain names, then declared tests whose group is free; a serial class waits for nothing else in flight
+// once the run has tripped, only queued reruns launch: every name not yet started has been dropped
+fn next_shard(run: &ListingRun<'_>, watches: &Watches, fixed: usize, in_flight: usize, stopped: bool) -> Option<(Shard, Class)> {
+    if watches.iter().flatten().any(|watch| watch.shard.as_ref().is_some_and(|shard| shard.class().serial())) {
+        return None;
+    }
+    let mut arena = run.shards.borrow_mut();
+    if stopped {
+        let rerun = arena.carve_rerun()?;
+        return Some((rerun, Class::from_rank(rerun.class)));
+    }
+    if !arena.sealed() {
+        return None;
+    }
+    if let Some(shard) = arena.carve(fixed) {
+        return Some((shard, Class::from_rank(shard.class)));
+    }
+    let table = run.sched.borrow();
+    let mut plan = run.specials.borrow_mut();
+    let busy = |group: &[u8]| {
+        watches
+            .iter()
+            .flatten()
+            .any(|watch| watch.shard.as_ref().is_some_and(|shard| shard.counts_against(group)))
+    };
+    let alone = in_flight == 0 && !arena.has_work();
+    let budget = SHARD_COMMAND_UNITS.saturating_sub(fixed);
+    let special = plan.take(&table, busy, alone, budget)?;
+    let names = (special.first..special.last)
+        .filter_map(|position| plan.at(position))
+        .filter_map(|index| table.entry(index))
+        .map(|entry| entry.path);
+    let mut shard = arena.adopt(names)?;
+    plan.commit(&special);
+    shard.class = special.class.rank();
+    shard.anchor = u32::try_from(special.first).unwrap_or(0);
+    Some((shard, special.class))
+}
+
+// a name dropped before it launched leaves the discovered count too, or the run never drains
+fn withdraw_unlaunched(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, target: usize, dropped: usize) -> Result<(), RunError> {
+    ledger.withdraw(dropped).map_err(|_| RunError::Outcome)?;
+    (0..dropped).for_each(|_| run.targets.borrow_mut().tally(target, Tally::Withdrawn));
+    Ok(())
+}
+
+fn group_of(run: &ListingRun<'_>, shard: Shard) -> ([u8; GROUP_CAPACITY], usize) {
+    let mut group = [0; GROUP_CAPACITY];
+    let class = Class::from_rank(shard.class);
+    let table = run.sched.borrow();
+    let entry = run
+        .specials
+        .borrow()
+        .at(shard.anchor as usize)
+        .and_then(|index| table.entry(index));
+    let key = entry.map_or(&[][..], |entry| group_key(class, entry.group));
+    let length = key.len().min(GROUP_CAPACITY);
+    group[..length].copy_from_slice(&key[..length]);
+    (group, length)
+}
+
+
+impl CargoDriver<'_> {
+    /// Launches the next shards while a job slot is free; returns whether anything moved.
+    pub(super) fn dispatch_shards(
+        &mut self,
+        lanes: &Lanes,
+        run: &ListingRun<'_>,
+        ledger: &mut Ledger<'_>,
+        watches: &mut Watches,
+    ) -> Result<bool, RunError> {
+        if run.settings.process != ProcessMode::Shard {
+            return Ok(false);
+        }
+        let Some(active) = self.active.as_ref() else {
+            return Ok(false);
+        };
+        {
+            let mut arena = run.shards.borrow_mut();
+            if arena.sealed() && arena.idle() && !run.specials.borrow().has_work() {
+                arena.reset();
+                run.specials.borrow_mut().reset();
+                return Ok(true);
+            }
+        }
+        if run.interrupted() {
+            stop_all(run, ledger, watches);
+            let dropped = run.shards.borrow_mut().discard_everything() + run.specials.borrow_mut().discard();
+            withdraw_unlaunched(run, ledger, active.target, dropped)?;
+            return Ok(dropped > 0);
+        }
+        let stopped = run.tripped(ledger);
+        let mut moved = false;
+        if stopped {
+            let dropped = run.shards.borrow_mut().discard_unlaunched() + run.specials.borrow_mut().discard();
+            withdraw_unlaunched(run, ledger, active.target, dropped)?;
+            (0..dropped).for_each(|_| run.policy.borrow_mut().listed_test_skipped());
+            moved = dropped > 0;
+        }
+        let executable = core::str::from_utf8(&active.path[..active.path_length]).map_err(|_| RunError::Arguments)?;
+        let environment = &self.environments[slot_range(active.slot)];
+        let (overrides, override_count) = override_entries(&active.layout, environment)?;
+        let fixed = executable.len() + FIXED_UNITS + run.harness_arguments.iter().map(|argument| argument.len() + 1).sum::<usize>();
+        while ledger.sessions().len() < run.settings.jobs {
+            let in_flight = ledger.sessions().len();
+            let Some((shard, class)) = next_shard(run, watches, fixed, in_flight, stopped) else {
+                break;
+            };
+            debug_launch(run, watches, (class, shard), in_flight);
+            let arena = run.shards.borrow();
+            let names = core::str::from_utf8(arena.names(shard)).map_err(|_| RunError::Arguments)?;
+            let first = names.split('\0').next().unwrap_or("");
+            let mut storage = run.launch_storage.borrow_mut();
+            let intent = ExactTestIntent::new(ExecutablePath::Borrowed(executable), names);
+            let slot = LaunchInput {
+                target: active.target,
+                owner: LaunchOwner::Ledger(&mut *ledger),
+                intent,
+                inherited_environment: run.environment,
+                child_overrides: &overrides[..override_count],
+                storage: &mut storage,
+                harness_arguments: run.harness_arguments,
+                current_directory: active.layout.current_directory(environment).as_bytes(),
+            }
+            .launch_shard(if shard.rerun.is_some() { 0 } else { shard.count })
+            .map_err(|error| {
+                report_launch_failure(LaunchCause::from(&error), first, executable_text(intent.executable()))
+            })?;
+            drop(storage);
+            drop(arena);
+            if shard.rerun.is_none() {
+                (0..shard.count).for_each(|_| run.targets.borrow_mut().tally(active.target, Tally::Launched));
+            }
+            let (group, group_length) = group_of(run, shard);
+            let watch = ShardWatch::new(shard, &group[..group_length]);
+            start_session(ledger, watches, lanes, slot, Some(watch))?;
+            moved = true;
+        }
+        Ok(moved)
+    }
+}
+
+/// Settles a shard child that exited: names that never reported are failed, a crash is pinned on the test that was running
+/// and the names behind it run again, and a stopped run drops them. A rerun child settles only its own single name.
+pub(super) fn finish(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+    index: usize,
+    status: i32,
+) -> Result<(), RunError> {
+    let Some(mut watch) = watches[index].take() else {
+        return Ok(());
+    };
+    release_child(watch.process_id);
+    let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
+    let Some(mut shard_watch) = watch.shard.take() else {
+        return Ok(());
+    };
+    shard_watch.flush_failures()?;
+    if shard_watch.shard.rerun.is_some() {
+        finish_rerun(run, ledger, watches, target, &shard_watch, &watch.output, status)?;
+        ledger.retire(watch.slot);
+        run.shards.borrow_mut().finished(shard_watch.shard);
+        return Ok(());
+    }
+    let interrupted = run.interrupted();
+    let stopped = run.tripped(ledger) || interrupted;
+    if stopped {
+        if !interrupted {
+            queue_output_reruns(&mut run.shards.borrow_mut(), &shard_watch)?;
+        }
+        settle_stopped(run, ledger, target, &shard_watch)?;
+    } else {
+        queue_solo_reruns(run, ledger, watches, &mut run.shards.borrow_mut(), &shard_watch)?;
+    }
+    ledger.retire(watch.slot);
+    run.shards.borrow_mut().finished(shard_watch.shard);
+    Ok(())
+}
+
+// a stopped run withdraws every name that did not report; no name is blamed for a crash
+fn settle_stopped(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, target: Option<usize>, shard_watch: &ShardWatch) -> Result<(), RunError> {
+    let withdrawn = shard_watch.shard.count - shard_watch.reported.total();
+    if withdrawn != 0 {
+        ledger.withdraw(withdrawn).map_err(|_| RunError::Outcome)?;
+        if let Some(target) = target {
+            (0..withdrawn).for_each(|_| run.targets.borrow_mut().tally(target, Tally::Withdrawn));
+        }
+        if !run.interrupted() {
+            (0..withdrawn).for_each(|_| run.policy.borrow_mut().listed_test_skipped());
+        }
+    }
+    Ok(())
+}
+
+// a deciding solo that cargo-val itself ended, by interrupt or by a fail-fast stop, reports nothing about its test
+fn withdrawn_solo(interrupted: bool, stop_sent: bool, rerun: Option<Rerun>, status: i32) -> bool {
+    matches!(rerun, Some(Rerun::Decides { .. })) && (interrupted || (stop_sent && status == STOP_STATUS))
+}
+
+// a rerun child's exit is its verdict when the rerun decides; otherwise it only shows the output of a failure
+fn finish_rerun(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &Watches,
+    target: Option<usize>,
+    shard_watch: &ShardWatch,
+    output: &ChildOutput,
+    status: i32,
+) -> Result<(), RunError> {
+    let shard = shard_watch.shard;
+    let arena = run.shards.borrow();
+    let name = arena.nth(shard, 0).unwrap_or(b"");
+    if withdrawn_solo(run.interrupted(), run.stop_sent.get(), shard.rerun, status) {
+        return withdraw_solo(run, ledger, target);
+    }
+    match (shard.rerun, status == 0) {
+        (Some(Rerun::Decides { after_shard_failure }), true) => {
+            if after_shard_failure {
+                write_fd(2, b"cargo-val: ")?;
+                write_fd(2, name)?;
+                write_fd(2, b" failed in a shared process, passed alone\n")?;
+            }
+            count_reported(run, ledger, target, name, (TerminalOutcome::Passed, Tally::Passed))
+        }
+        (Some(Rerun::Decides { .. }), false) => {
+            output.write_failure()?;
+            count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed))?;
+            if run.tripped(ledger) {
+                stop_all(run, ledger, watches);
+            }
+            Ok(())
+        }
+        (_, true) => {
+            write_fd(2, b"cargo-val: ")?;
+            write_fd(2, name)?;
+            write_fd(2, b" passed when re-run alone\n")
+        }
+        (_, false) => {
+            write_fd(2, b"cargo-val: ")?;
+            write_fd(2, name)?;
+            write_fd(2, b" failed when re-run alone\n")?;
+            output.write_failure()
+        }
+    }
+}
+
+// every name that did not settle on its clean shard line owes a solo run, and that solo run's exit decides it
+fn queue_solo_reruns(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &Watches,
+    arena: &mut ShardArena<'_>,
+    shard_watch: &ShardWatch,
+) -> Result<(), RunError> {
+    let shard = shard_watch.shard;
+    let mut owed = Reported::new();
+    (0..shard.count)
+        .filter(|ordinal| !shard_watch.reported.has(*ordinal) || shard_watch.failed.has(*ordinal))
+        .for_each(|ordinal| _ = owed.mark(ordinal));
+    arena.owe_reruns(shard, (owed, shard_watch.failed), true).map_err(|_| RunError::Outcome)?;
+    if run.tripped(ledger) {
+        stop_all(run, ledger, watches);
+    }
+    Ok(())
+}
+
+// a stopped run keeps only the output of a failure it counted, and that rerun never counts
+fn queue_output_reruns(arena: &mut ShardArena<'_>, shard_watch: &ShardWatch) -> Result<(), RunError> {
+    let shard = shard_watch.shard;
+    let mut owed = Reported::new();
+    (0..shard.count)
+        .filter(|ordinal| shard_watch.reported.has(*ordinal) && shard_watch.failed.has(*ordinal) && !shard_watch.blocked.has(*ordinal))
+        .for_each(|ordinal| _ = owed.mark(ordinal));
+    arena.owe_reruns(shard, (owed, shard_watch.failed), false).map_err(|_| RunError::Outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DECIDING: Option<Rerun> = Some(Rerun::Decides { after_shard_failure: false });
+    const OUTPUT: Option<Rerun> = Some(Rerun::OutputOnly);
+
+    mod cases {
+        use super::*;
+
+        #[test]
+        fn fail_fast_spares_output_reruns() {
+            assert!(spared_by_stop(false, OUTPUT));
+        }
+
+        #[test]
+        fn fail_fast_kills_deciding_and_plain_sessions() {
+            assert!(!spared_by_stop(false, DECIDING));
+            assert!(!spared_by_stop(false, None));
+        }
+
+        #[test]
+        fn interrupt_kills_everything() {
+            assert!(!spared_by_stop(true, OUTPUT));
+            assert!(!spared_by_stop(true, DECIDING));
+            assert!(!spared_by_stop(true, None));
+        }
+
+        #[test]
+        fn deciding_solos_are_killed_on_fail_fast() {
+            assert!(!spared_by_stop(false, DECIDING));
+            assert!(!withdrawn_solo(false, true, DECIDING, 0));
+        }
+
+        #[test]
+        fn interrupted_deciding_solo_is_withdrawn_for_any_status() {
+            assert!(withdrawn_solo(true, false, DECIDING, 0));
+            assert!(withdrawn_solo(true, false, DECIDING, 1));
+            assert!(withdrawn_solo(true, false, DECIDING, STOP_STATUS));
+        }
+
+        #[test]
+        fn fail_fast_stop_status_withdraws_deciding_solo() {
+            assert!(withdrawn_solo(false, true, DECIDING, STOP_STATUS));
+        }
+
+        #[test]
+        fn natural_exit_of_deciding_solo_is_not_withdrawn() {
+            assert!(!withdrawn_solo(false, false, DECIDING, 0));
+            assert!(!withdrawn_solo(false, false, DECIDING, 1));
+            assert!(!withdrawn_solo(false, true, DECIDING, 1));
+        }
+
+        #[test]
+        fn output_solo_is_never_withdrawn_by_the_decision() {
+            assert!(!withdrawn_solo(true, true, OUTPUT, STOP_STATUS));
+            assert!(!withdrawn_solo(false, true, OUTPUT, STOP_STATUS));
+        }
+    }
+}

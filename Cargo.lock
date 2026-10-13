@@ -131,7 +131,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 name = "cargo-val"
 version = "0.1.0"
 dependencies = [
- "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e)",
+ "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=bfafc3c5d175acc4805f842865a667be076b702e)",
  "libc",
  "memchr",
  "prime",
@@ -195,10 +195,10 @@ dependencies = [
 [[package]]
 name = "conflaguration"
 version = "2.0.0"
-source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cddbc91d356d50f49264a1510dffffc2b7e"
+source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=bfafc3c5d175acc4805f842865a667be076b702e#bfafc3c5d175acc4805f842865a667be076b702e"
 dependencies = [
  "conflaguration-core",
- "conflaguration-derive 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e)",
+ "conflaguration-derive 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=bfafc3c5d175acc4805f842865a667be076b702e)",
  "environs",
  "thiserror",
 ]
@@ -206,7 +206,7 @@ dependencies = [
 [[package]]
 name = "conflaguration-core"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cddbc91d356d50f49264a1510dffffc2b7e"
+source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=bfafc3c5d175acc4805f842865a667be076b702e#bfafc3c5d175acc4805f842865a667be076b702e"
 
 [[package]]
 name = "conflaguration-derive"
@@ -221,7 +221,7 @@ dependencies = [
 [[package]]
 name = "conflaguration-derive"
 version = "2.0.0"
-source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=56e25cddbc91d356d50f49264a1510dffffc2b7e#56e25cddbc91d356d50f49264a1510dffffc2b7e"
+source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=bfafc3c5d175acc4805f842865a667be076b702e#bfafc3c5d175acc4805f842865a667be076b702e"
 dependencies = [
  "proc-macro2",
  "quote",

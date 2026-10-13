@@ -1,5 +1,6 @@
 //! Reads of libtest output: the doctest report, and the `--list` names behind capacity-gated I/O.
 
+use core::cell::Cell;
 use core::pin::Pin;
 use core::str;
 use core::task::{Context, Poll};
@@ -8,12 +9,15 @@ use proxima_core::io::AsyncRead;
 
 use crate::ExecutablePath;
 use crate::artifact_stream::{ArtifactFramer, ArtifactStreamError, RecordFault, RecordStep};
+use crate::line::Line;
 use crate::schedule::SessionSlots;
 use crate::selection::{Disposition, NameFilter};
 use crate::test_intent::ExactTestIntent;
 
 const LINE_CAPACITY: usize = 1100;
 const RESULT_MARKER: &[u8] = b" ... ";
+// libtest appends one of these to a name only when it prints `test <name> - <mode> ... `
+const TEST_MODES: [&[u8]; 3] = [b" - should panic", b" - compile fail", b" - compile"];
 
 /// Outcome of one doctest line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,15 +32,22 @@ pub enum DocOutcome {
 pub enum DocEvent<'line> {
     /// A `running N tests` header; `count` is 0 for a crate with no doctests.
     Running { count: usize },
-    /// A `test <name> ... ok|FAILED|ignored` line.
+    /// A `test <name> ... ok|FAILED|ignored` line; a stray write before the verdict is not part of the name.
+    /// `stray` marks a verdict that did not share its line with the `test <name> ... ` start, or that shared it
+    /// with other text: such a result cannot be trusted on its own, so the caller decides it by running the test alone.
     Result {
         name: &'line [u8],
         outcome: DocOutcome,
+        stray: bool,
     },
     /// One line of a failing doctest's captured output, without its newline.
     FailureLine(&'line [u8]),
-    /// A `test result:` summary closing one `running` block.
-    Finished,
+    /// A `test result:` summary closing one `running` block, with the counts libtest printed.
+    Finished {
+        passed: usize,
+        failed: usize,
+        ignored: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +64,10 @@ pub struct DocParser {
     line: [u8; LINE_CAPACITY],
     length: usize,
     phase: Phase,
+    /// The name of a test whose `test <name> ...` line has no result yet; empty when none is pending.
+    pending: Line<LINE_CAPACITY>,
+    /// Nested `running N tests` headers seen inside the pending test's output and not yet closed by their summary.
+    nested_runs: usize,
 }
 
 impl DocParser {
@@ -62,6 +77,8 @@ impl DocParser {
             line: [0; LINE_CAPACITY],
             length: 0,
             phase: Phase::Results,
+            pending: Line::new(),
+            nested_runs: 0,
         }
     }
 
@@ -79,7 +96,11 @@ impl DocParser {
             if *byte == b'\n' {
                 let length = strip_carriage_return(&self.line[..self.length]).len();
                 self.length = 0;
-                self.phase = Self::step(self.phase, &self.line[..length], &mut emit)?;
+                let state = Step {
+                    pending: &mut self.pending,
+                    nested_runs: &mut self.nested_runs,
+                };
+                self.phase = Self::step(self.phase, &self.line[..length], state, &mut emit)?;
             } else if self.length < LINE_CAPACITY {
                 self.line[self.length] = *byte;
                 self.length += 1;
@@ -91,14 +112,27 @@ impl DocParser {
     fn step<Error>(
         phase: Phase,
         line: &[u8],
+        state: Step<'_>,
         emit: &mut impl FnMut(DocEvent<'_>) -> Result<(), Error>,
     ) -> Result<Phase, Error> {
         if line.starts_with(b"test result:") {
-            emit(DocEvent::Finished)?;
+            if !state.pending.bytes().is_empty() {
+                if *state.nested_runs > 0 {
+                    *state.nested_runs -= 1;
+                    return Ok(phase);
+                }
+                state.pending.clear();
+            }
+            let (passed, failed, ignored) = summary_counts(line);
+            emit(DocEvent::Finished {
+                passed,
+                failed,
+                ignored,
+            })?;
             return Ok(Phase::Results);
         }
         match phase {
-            Phase::Results => Self::results_line(line, emit),
+            Phase::Results => Self::results_line(line, state, emit),
             Phase::BeforeSections if line.starts_with(b"---- ") => {
                 emit(DocEvent::FailureLine(line))?;
                 Ok(Phase::InSection)
@@ -114,18 +148,64 @@ impl DocParser {
 
     fn results_line<Error>(
         line: &[u8],
+        state: Step<'_>,
         emit: &mut impl FnMut(DocEvent<'_>) -> Result<(), Error>,
     ) -> Result<Phase, Error> {
+        let Step {
+            pending,
+            nested_runs,
+        } = state;
         if line == b"failures:" {
+            if *nested_runs > 0 {
+                return Ok(Phase::Results);
+            }
+            pending.clear();
             return Ok(Phase::BeforeSections);
         }
-        if let Some(count) = running_count(line) {
-            emit(DocEvent::Running { count })?;
-        } else if let Some((name, outcome)) = result_line(line) {
-            emit(DocEvent::Result { name, outcome })?;
+        if pending.bytes().is_empty() {
+            if let Some(count) = running_count(line) {
+                emit(DocEvent::Running { count })?;
+            } else if let Some((name, rest)) = test_start(line) {
+                match verdict_at(rest) {
+                    Some((0, outcome)) => emit(DocEvent::Result { name, outcome, stray: false })?,
+                    Some((_, outcome)) => emit(DocEvent::Result { name, outcome, stray: true })?,
+                    None => {
+                        pending.clear();
+                        pending.text(name);
+                        *nested_runs = usize::from(running_count(rest).is_some());
+                    }
+                }
+            }
+            return Ok(Phase::Results);
+        }
+        if running_count(line).is_some() {
+            *nested_runs += 1;
+        } else if let Some((name, rest)) = test_start(line) {
+            match verdict_at(rest) {
+                Some((0, outcome)) if *nested_runs > 0 => {
+                    emit(DocEvent::Result { name, outcome, stray: false })?;
+                }
+                Some((_, outcome)) if *nested_runs == 0 => {
+                    emit(DocEvent::Result { name: pending.bytes(), outcome, stray: true })?;
+                    pending.clear();
+                }
+                _ => {}
+            }
+        } else if let Some((_, outcome)) = verdict_at(line)
+            && *nested_runs == 0
+        {
+            let name = pending.bytes();
+            emit(DocEvent::Result { name, outcome, stray: true })?;
+            pending.clear();
         }
         Ok(Phase::Results)
     }
+}
+
+/// The pending test's state, lent to the line step so the parser's fields stay disjoint.
+struct Step<'state> {
+    pending: &'state mut Line<LINE_CAPACITY>,
+    nested_runs: &'state mut usize,
 }
 
 impl Default for DocParser {
@@ -148,23 +228,72 @@ fn running_count(line: &[u8]) -> Option<usize> {
     core::str::from_utf8(number).ok()?.parse().ok()
 }
 
-fn result_line(line: &[u8]) -> Option<(&[u8], DocOutcome)> {
+/// The name and the text after the result marker of a `test <name> ... ` line, with libtest's mode suffix removed.
+///
+/// The name ends at the first marker whose remainder carries a verdict, so a stray ` ... ` inside the output
+/// before the verdict stays in the remainder. A line with no such marker names the test at its first marker.
+fn test_start(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let body = line.strip_prefix(b"test ")?;
-    let split = body
-        .windows(RESULT_MARKER.len())
-        .rposition(|window| window == RESULT_MARKER)?;
-    let name = &body[..split];
-    let verdict = &body[split + RESULT_MARKER.len()..];
-    let outcome = if verdict == b"ok" {
-        DocOutcome::Passed
-    } else if verdict == b"FAILED" {
-        DocOutcome::Failed
-    } else if verdict.starts_with(b"ignored") {
-        DocOutcome::Ignored
-    } else {
-        return None;
-    };
-    Some((name, outcome))
+    let mut first = None;
+    for (at, window) in body.windows(RESULT_MARKER.len()).enumerate() {
+        if window != RESULT_MARKER {
+            continue;
+        }
+        let rest = &body[at + RESULT_MARKER.len()..];
+        if rest.is_empty() || verdict_at(rest).is_some() {
+            return Some((without_test_mode(&body[..at]), rest));
+        }
+        first.get_or_insert(at);
+    }
+    let split = first?;
+    Some((
+        without_test_mode(&body[..split]),
+        &body[split + RESULT_MARKER.len()..],
+    ))
+}
+
+fn without_test_mode(name: &[u8]) -> &[u8] {
+    TEST_MODES
+        .iter()
+        .find_map(|mode| name.strip_suffix(*mode))
+        .unwrap_or(name)
+}
+
+/// The first word that is a libtest verdict at a word boundary; a stray write may precede it on the same line.
+fn verdict_at(text: &[u8]) -> Option<(usize, DocOutcome)> {
+    (0..text.len())
+        .filter(|&at| at == 0 || text[at - 1] == b' ')
+        .find_map(|at| verdict_word(&text[at..]).map(|outcome| (at, outcome)))
+}
+
+fn verdict_word(word: &[u8]) -> Option<DocOutcome> {
+    match word {
+        b"ok" => Some(DocOutcome::Passed),
+        b"FAILED" | b"FAILED (time limit exceeded)" => Some(DocOutcome::Failed),
+        _ if word == b"ignored" || word.starts_with(b"ignored, ") => Some(DocOutcome::Ignored),
+        _ => None,
+    }
+}
+
+fn summary_counts(line: &[u8]) -> (usize, usize, usize) {
+    let (mut passed, mut failed, mut ignored, mut count) = (0, 0, 0, None);
+    for word in line.split(|byte| *byte == b' ') {
+        let text = core::str::from_utf8(word).unwrap_or("");
+        if let Ok(number) = text.parse::<usize>() {
+            count = Some(number);
+            continue;
+        }
+        let Some(number) = count.take() else {
+            continue;
+        };
+        match text.trim_end_matches(';') {
+            "passed" => passed = number,
+            "failed" => failed = number,
+            "ignored" => ignored = number,
+            _ => {}
+        }
+    }
+    (passed, failed, ignored)
 }
 
 /// One borrowed libtest listing result.
@@ -298,7 +427,7 @@ impl<'buffer> ListingSource<'buffer> {
             } else {
                 &self.buffer[self.consumed..self.filled]
             };
-            return Poll::Ready(Self::record_step(framer, chunk, executable, filter).map(
+            return Poll::Ready(Self::record_step(framer, chunk, executable, (filter, |_: &str| false)).map(
                 |(step, consumed_bytes)| {
                     self.consumed += consumed_bytes;
                     step
@@ -341,6 +470,7 @@ impl<'buffer> ListingSource<'buffer> {
         chunk: &'call [u8],
         executable: ExecutablePath<'executable, 'scratch>,
         filter: NameFilter<'_>,
+        hold: impl Fn(&str) -> bool,
         _context: &mut Context<'_>,
     ) -> Poll<
         Result<
@@ -359,7 +489,7 @@ impl<'buffer> ListingSource<'buffer> {
             return Poll::Ready(Ok((ListingSourceStep::NeedMore, 0)));
         }
         let lent = if frame_ready { &[][..] } else { chunk };
-        Poll::Ready(Self::record_step(framer, lent, executable, filter))
+        Poll::Ready(Self::record_step(framer, lent, executable, (filter, hold)))
     }
 
     /// Runs the end-of-stream drain for a completion owner that observed EOF.
@@ -368,6 +498,7 @@ impl<'buffer> ListingSource<'buffer> {
         sessions: &SessionSlots<T, CAPACITY>,
         executable: ExecutablePath<'executable, 'scratch>,
         filter: NameFilter<'_>,
+        hold: impl Fn(&str) -> bool,
         _context: &mut Context<'_>,
     ) -> Poll<
         Result<
@@ -384,7 +515,7 @@ impl<'buffer> ListingSource<'buffer> {
         };
         if frame_ready {
             return Poll::Ready(
-                Self::record_step(framer, &[], executable, filter).map(|(step, _)| step),
+                Self::record_step(framer, &[], executable, (filter, hold)).map(|(step, _)| step),
             );
         }
         Poll::Ready(Self::finish(framer))
@@ -403,15 +534,22 @@ impl<'buffer> ListingSource<'buffer> {
         framer: &'call mut ArtifactFramer<'_>,
         chunk: &'call [u8],
         executable: ExecutablePath<'executable, 'scratch>,
-        filter: NameFilter<'_>,
+        (filter, hold): (NameFilter<'_>, impl Fn(&str) -> bool),
     ) -> Result<
         (ListingSourceStep<'executable, 'scratch, 'call>, usize),
         ListingSourceError<ReadError>,
     > {
+        let postponed = Cell::new(false);
         let step = framer
-            .next_record(chunk, parse_listing_line)
+            .next_record_unless(chunk, parse_listing_line, |parsed| {
+                postponed.set(matches!(parsed, ListingLine::Test(name) if hold(name)));
+                postponed.get()
+            })
             .map_err(ListingSourceError::Record)?;
         Ok(match step {
+            RecordStep::NeedMore { consumed_bytes } if postponed.get() => {
+                (ListingSourceStep::Full, consumed_bytes)
+            }
             RecordStep::NeedMore { consumed_bytes } => {
                 (ListingSourceStep::NeedMore, consumed_bytes)
             }
@@ -461,13 +599,13 @@ mod doc_report_tests {
                 .feed::<()>(chunk, |event| {
                     seen.push(match event {
                         DocEvent::Running { count } => Owned::Running(count),
-                        DocEvent::Result { name, outcome } => {
+                        DocEvent::Result { name, outcome, .. } => {
                             Owned::Result(String::from_utf8_lossy(name).to_string(), outcome)
                         }
                         DocEvent::FailureLine(line) => {
                             Owned::Failure(String::from_utf8_lossy(line).to_string())
                         }
-                        DocEvent::Finished => Owned::Finished,
+                        DocEvent::Finished { .. } => Owned::Finished,
                     });
                     Ok(())
                 })
@@ -586,13 +724,14 @@ mod doc_report_tests {
 
     #[test]
     fn c68_singular_running_header_and_unknown_verdicts_are_handled() {
-        let seen = events(&[b"running 1 test\ntest src/lib.rs - a (line 1) ... bench: 3 ns/iter\ntest src/lib.rs - b (line 2) ... ok\n"]);
+        let seen = events(&[b"running 1 test\ntest src/lib.rs - a (line 1) ... bench: 3 ns/iter\ntest src/lib.rs - b (line 2) ... ok\ntest src/lib.rs - b (line 2) ... ok\n"]);
 
         assert_eq!(
             seen,
             [
                 Owned::Running(1),
-                Owned::Result("src/lib.rs - b (line 2)".to_string(), DocOutcome::Passed)
+                Owned::Result("src/lib.rs - a (line 1)".to_string(), DocOutcome::Passed),
+                Owned::Result("src/lib.rs - b (line 2)".to_string(), DocOutcome::Passed),
             ]
         );
     }
@@ -603,6 +742,233 @@ mod doc_report_tests {
         report.extend_from_slice(b"\nrunning 0 tests\n");
 
         assert_eq!(events(&[&report]), [Owned::Running(0)]);
+    }
+
+    fn results_of(report: &str) -> Vec<(String, DocOutcome)> {
+        events(&[report.as_bytes()])
+            .into_iter()
+            .filter_map(|event| match event {
+                Owned::Result(name, outcome) => Some((name, outcome)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn should_panic_and_compile_fail_names_drop_libtest_mode_suffix() {
+        let report = "running 3 tests\n\
+            test suite::panics - should panic ... ok\n\
+            test suite::expects - should panic ... ok\n\
+            test src/lib.rs - gone (line 9) - compile fail ... ok\n\
+            test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+
+        assert_eq!(
+            results_of(report),
+            [
+                ("suite::panics".to_string(), DocOutcome::Passed),
+                ("suite::expects".to_string(), DocOutcome::Passed),
+                ("src/lib.rs - gone (line 9)".to_string(), DocOutcome::Passed),
+            ]
+        );
+    }
+
+    #[test]
+    fn stray_output_before_a_verdict_belongs_to_the_test_it_follows() {
+        let report = "running 2 tests\n\
+            test suite::chatty ... hello from a raw write\n\
+            ok\n\
+            test suite::loud ... partial stdout ok\n\
+            test suite::broken ... FAILED\n\
+            test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+
+        assert_eq!(
+            results_of(report),
+            [
+                ("suite::chatty".to_string(), DocOutcome::Passed),
+                ("suite::loud".to_string(), DocOutcome::Passed),
+                ("suite::broken".to_string(), DocOutcome::Failed),
+            ]
+        );
+    }
+
+    #[test]
+    fn time_limit_failure_and_ignored_with_reason_are_verdicts() {
+        let report = "test suite::slow ... FAILED (time limit exceeded)\n\
+            test suite::skipped ... ignored, needs a network\n";
+
+        assert_eq!(
+            results_of(report),
+            [
+                ("suite::slow".to_string(), DocOutcome::Failed),
+                ("suite::skipped".to_string(), DocOutcome::Ignored),
+            ]
+        );
+    }
+
+    /// Results as `(name, outcome, stray)` and the count of `test result:` summaries that ended a block.
+    fn stray_results_of(report: &[u8]) -> (Vec<(String, DocOutcome, bool)>, usize) {
+        let mut parser = DocParser::new();
+        let mut results = Vec::new();
+        let mut finished = 0;
+        parser
+            .feed::<()>(report, |event| {
+                match event {
+                    DocEvent::Result { name, outcome, stray } => {
+                        results.push((String::from_utf8_lossy(name).to_string(), outcome, stray));
+                    }
+                    DocEvent::Finished { .. } => finished += 1,
+                    DocEvent::Running { .. } | DocEvent::FailureLine(_) => {}
+                }
+                Ok(())
+            })
+            .expect("collecting events cannot fail");
+        (results, finished)
+    }
+
+    #[test]
+    fn verdict_after_stray_text_is_resolved_as_stray_and_the_next_line_adds_nothing() {
+        let (results, finished) = stray_results_of(b"test x ... all ok\nFAILED\n");
+
+        assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
+        assert_eq!(finished, 0);
+    }
+
+    #[test]
+    fn stray_marker_inside_the_output_keeps_the_name_and_marks_the_verdict_stray() {
+        let (results, _) = stray_results_of(b"test x ... loading ... ok\n");
+
+        assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
+    }
+
+    #[test]
+    fn nested_cargo_output_inside_a_pending_test_keeps_the_outer_verdict_and_ignores_its_summary() {
+        let report = b"test x ... running 1 test\n\
+            test inner ... ok\n\
+            test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
+            ok\n";
+
+        let (results, finished) = stray_results_of(report);
+
+        assert_eq!(
+            results,
+            [
+                ("inner".to_string(), DocOutcome::Passed, false),
+                ("x".to_string(), DocOutcome::Passed, true),
+            ]
+        );
+        assert_eq!(finished, 0, "a stray summary while a name is pending must not end the block");
+    }
+
+    #[test]
+    fn stray_test_line_while_pending_does_not_resolve_the_pending_name() {
+        let (results, _) = stray_results_of(b"test x ... raw\ntest y ... loading ok\nok\n");
+
+        assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
+    }
+
+    #[test]
+    fn forged_verdict_while_pending_marks_the_pending_test_stray_and_the_genuine_line_settles_once() {
+        let (results, _) = stray_results_of(b"test a ... \ntest b ... ok\ntest b ... ok\n");
+
+        assert_eq!(
+            results,
+            [
+                ("a".to_string(), DocOutcome::Passed, true),
+                ("b".to_string(), DocOutcome::Passed, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn failures_header_inside_a_nested_run_keeps_the_pending_name_until_its_block_ends() {
+        let report = b"test x ... running 1 test\n\
+            failures:\n\
+            test inner ... ok\n\
+            test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
+            ok\n";
+
+        let (results, finished) = stray_results_of(report);
+
+        assert_eq!(
+            results,
+            [
+                ("inner".to_string(), DocOutcome::Passed, false),
+                ("x".to_string(), DocOutcome::Passed, true),
+            ]
+        );
+        assert_eq!(finished, 0);
+    }
+
+    #[test]
+    fn a_clean_result_line_is_not_stray() {
+        let (results, finished) = stray_results_of(b"running 1 test\ntest x ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n");
+
+        assert_eq!(results, [("x".to_string(), DocOutcome::Passed, false)]);
+        assert_eq!(finished, 1);
+    }
+
+    #[test]
+    fn a_bare_ok_line_after_a_pending_start_is_a_stray_settle() {
+        let (results, _) = stray_results_of(b"test x ... \nok\n");
+
+        assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
+    }
+
+    #[test]
+    fn a_verdict_on_the_start_line_is_clean() {
+        let (results, _) = stray_results_of(b"test x ... ok\n");
+
+        assert_eq!(results, [("x".to_string(), DocOutcome::Passed, false)]);
+    }
+
+    #[test]
+    fn a_bare_failed_line_after_a_pending_start_is_a_stray_settle() {
+        let (results, _) = stray_results_of(b"test x ... \nFAILED\n");
+
+        assert_eq!(results, [("x".to_string(), DocOutcome::Failed, true)]);
+    }
+
+    #[test]
+    fn final_summary_after_a_pending_name_ends_the_block_and_failure_block_still_parses() {
+        let report = b"running 2 tests\n\
+            test suite::done ... ok\n\
+            test suite::crashed ... \n\
+            failures:\n\
+            ---- suite::other stdout ----\n\
+            thread panicked at src/lib.rs:4:5\n\
+            failures:\n\
+            test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+
+        let (results, finished) = stray_results_of(report);
+        let mut failure_lines = Vec::new();
+        DocParser::new()
+            .feed::<()>(report, |event| {
+                if let DocEvent::FailureLine(line) = event {
+                    failure_lines.push(String::from_utf8_lossy(line).to_string());
+                }
+                Ok(())
+            })
+            .expect("collecting events cannot fail");
+
+        assert_eq!(results, [("suite::done".to_string(), DocOutcome::Passed, false)]);
+        assert_eq!(finished, 1, "the final summary must end the block once the pending name is unsettled");
+        assert_eq!(
+            failure_lines,
+            ["---- suite::other stdout ----", "thread panicked at src/lib.rs:4:5"]
+        );
+    }
+
+    #[test]
+    fn nested_summary_inside_a_pending_test_stays_stray_and_the_final_summary_still_ends_the_block() {
+        let report = b"test x ... running 1 test\n\
+            test inner ... ok\n\
+            test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
+            test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+
+        let (results, finished) = stray_results_of(report);
+
+        assert_eq!(results, [("inner".to_string(), DocOutcome::Passed, false)]);
+        assert_eq!(finished, 1, "only the summary after the nested run closes may end the block");
     }
 }
 
@@ -746,6 +1112,7 @@ mod listing_source_tests {
             chunk,
             EXECUTABLE,
             EVERYTHING,
+            |_| false,
             &mut context,
         )
     }
@@ -1298,6 +1665,7 @@ mod listing_source_tests {
                 sessions,
                 EXECUTABLE,
                 EVERYTHING,
+                |_| false,
                 &mut context,
             ) {
                 Poll::Ready(Ok(ListingSourceStep::Eof)) => break,
@@ -1376,6 +1744,7 @@ mod listing_source_tests {
             &sessions,
             EXECUTABLE,
             EVERYTHING,
+            |_| false,
             &mut context,
         );
         std::println!("lent_eof_unterminated={outcome:?}");
@@ -1415,6 +1784,7 @@ mod listing_source_tests {
             b"alphabet: test\n",
             EXECUTABLE,
             filter,
+            |_| false,
             &mut context,
         );
         assert!(matches!(
@@ -1427,6 +1797,7 @@ mod listing_source_tests {
             ALPHA,
             EXECUTABLE,
             filter,
+            |_| false,
             &mut context,
         );
         assert!(matches!(
@@ -1439,6 +1810,7 @@ mod listing_source_tests {
             b"2 tests, 0 benchmarks\n",
             EXECUTABLE,
             filter,
+            |_| false,
             &mut context,
         );
         assert!(matches!(

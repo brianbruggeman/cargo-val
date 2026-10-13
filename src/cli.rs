@@ -32,6 +32,7 @@ enum Expectation {
     CargoOptionValue,
     MaxFailValue,
     NoTestsValue,
+    ProcessValue,
     FiltersetValue,
     TargetDirValue,
 }
@@ -83,6 +84,7 @@ pub struct CliParser<'argument> {
     exact: bool,
     fail_fast: Option<FailFastArgument<'argument>>,
     no_tests: Option<&'argument [u8]>,
+    process: Option<&'argument [u8]>,
     filterset: Option<&'argument [u8]>,
     target_dir: Option<&'argument [u8]>,
     doc: bool,
@@ -107,6 +109,7 @@ impl<'argument> CliParser<'argument> {
             exact: false,
             fail_fast: None,
             no_tests: None,
+            process: None,
             filterset: None,
             target_dir: None,
             doc: false,
@@ -154,6 +157,7 @@ impl<'argument> CliParser<'argument> {
             }
             b"--max-fail" => self.expectation = Expectation::MaxFailValue,
             b"--no-tests" => self.expectation = Expectation::NoTestsValue,
+            b"--process" => self.expectation = Expectation::ProcessValue,
             b"--filterset" | b"-E" => self.begin_filterset(),
             b"--target-dir" => self.expectation = Expectation::TargetDirValue,
             b"--manifest-path" | b"-m" => {
@@ -176,6 +180,9 @@ impl<'argument> CliParser<'argument> {
             }
             value if value.starts_with(b"--target-dir=") => {
                 self.set_target_dir(&value[b"--target-dir=".len()..]);
+            }
+            value if value.starts_with(b"--process=") => {
+                self.process = Some(&value[b"--process=".len()..]);
             }
             value if value.starts_with(b"--no-tests=") => {
                 self.no_tests = Some(&value[b"--no-tests=".len()..]);
@@ -231,6 +238,10 @@ impl<'argument> CliParser<'argument> {
             }
             Expectation::NoTestsValue => {
                 self.no_tests = Some(argument);
+                true
+            }
+            Expectation::ProcessValue => {
+                self.process = Some(argument);
                 true
             }
             Expectation::FiltersetValue => {
@@ -349,6 +360,16 @@ impl<'argument> CliParser<'argument> {
             Some(&[])
         } else {
             self.no_tests
+        }
+    }
+
+    /// The last `--process` value; one with no value reports an empty value.
+    #[must_use]
+    pub const fn process(&self) -> Option<&'argument [u8]> {
+        if matches!(self.expectation, Expectation::ProcessValue) {
+            Some(&[])
+        } else {
+            self.process
         }
     }
 

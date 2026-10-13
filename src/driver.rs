@@ -13,7 +13,8 @@ use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
     FailFastError, FailFastSources, FiltersetSources, HarnessFault, HarnessRequest, IgnoreError,
-    IgnoreMode, IgnoreSources, NoTestsError, NoTestsPolicy, NoTestsSources, ThreadSources,
+    IgnoreMode, IgnoreSources, NoTestsError, NoTestsPolicy, NoTestsSources, ProcessError, ProcessMode,
+    ProcessSources, ThreadSources,
     TargetDirError, TargetDirMode, TargetDirSources, ThreadsError, ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
@@ -55,6 +56,12 @@ use crate::runner::{
     ChildOutcomeError, OutcomeInput, OutcomeStep,
 };
 use crate::schedule::{SessionSlotId, SessionSlots};
+use crate::sched_binary::{GROUP_CAPACITY, RECORD_BYTES};
+use crate::shard_arena::{DECLARED_BYTES, ShardArena};
+use crate::shard_sched::{SchedTable, SpecialPlan};
+
+mod shard;
+use shard::ShardWatch;
 use crate::selection::{NameFilter, Selection};
 use crate::stop::{self, DocAtTrip, Observation, StopPolicy, StopReport};
 use crate::test_environment::{
@@ -66,6 +73,9 @@ use crate::test_intent::ExactTestIntent;
 pub(crate) const LIVE_CAPACITY: usize = 64;
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
 const INCLUDE_ARGUMENTS: [&[u8]; 1] = [b"--include-ignored"];
+const SHARD_ARGUMENTS: [&[u8]; 1] = [b"--test-threads=1"];
+const SHARD_ONLY_ARGUMENTS: [&[u8]; 2] = [b"--ignored", b"--test-threads=1"];
+const SHARD_INCLUDE_ARGUMENTS: [&[u8]; 2] = [b"--include-ignored", b"--test-threads=1"];
 const IDENTITY_CAPACITY: usize = 128;
 pub(crate) const NAME_CAPACITY: usize = 1024;
 const ENV_CAPACITY: usize = 1024;
@@ -157,6 +167,7 @@ pub enum RunError {
     TestThreads(ThreadsError),
     FailFast(FailFastError),
     NoTests(NoTestsError),
+    Process(ProcessError),
     DocTests,
     Spawn,
     Reactor,
@@ -167,6 +178,7 @@ pub enum RunError {
     CargoFailed,
     Interrupted(i32),
     ListingFailed,
+    DeclaredCapacity,
 }
 
 impl RunError {
@@ -199,6 +211,7 @@ impl RunError {
             Self::TestThreads(error) => error.message(),
             Self::FailFast(error) => error.message(),
             Self::NoTests(error) => error.message(),
+            Self::Process(error) => error.message(),
             Self::DocTests => b"cargo-val: cargo test --doc failed before reporting results\n",
             Self::Spawn => b"cargo-val: child spawn failed\n",
             Self::Reactor => b"cargo-val: reactor operation failed\n",
@@ -208,6 +221,9 @@ impl RunError {
             Self::Outcome => b"cargo-val: child completion failed\n",
             Self::CargoFailed => b"cargo-val: cargo test build failed\n",
             Self::ListingFailed => b"cargo-val: libtest listing failed\n",
+            Self::DeclaredCapacity => {
+                b"cargo-val: declared test scheduling records exceed the build's capacity; raise CARGO_VAL_BUILD_SCHED_RECORD_BYTES\n"
+            }
             Self::Filterset(_) | Self::Interrupted(_) => b"",
         }
     }
@@ -343,6 +359,23 @@ pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: u32,
     output: ChildOutput,
+    shard: Option<ShardWatch>,
+    group: [u8; GROUP_CAPACITY],
+    group_length: usize,
+}
+
+impl TestWatch {
+    fn in_group(&self, group: &[u8]) -> bool {
+        self.group_length != 0 && &self.group[..self.group_length] == group
+    }
+
+    fn verdict(&self) -> LibtestVerdict {
+        if self.shard.is_some() {
+            LibtestVerdict::Shard
+        } else {
+            self.output.verdict()
+        }
+    }
 }
 
 struct Truncation {
@@ -468,6 +501,7 @@ struct Settings {
     jobs: usize,
     max_fail: Option<usize>,
     no_tests: NoTestsPolicy,
+    process: ProcessMode,
     color: bool,
 }
 
@@ -476,7 +510,7 @@ fn runtime_settings(
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
-    let mut pairs = [("", ""); 11];
+    let mut pairs = [("", ""); 12];
     let mut count = 0;
     for key in [
         "RUST_TEST_THREADS",
@@ -484,6 +518,7 @@ fn runtime_settings(
         "CARGO_VAL_MAX_FAIL",
         "CARGO_VAL_FAIL_FAST",
         "CARGO_VAL_NO_TESTS",
+        "CARGO_VAL_PROCESS",
         "CARGO_VAL_COLOR",
         "NO_COLOR",
         "CARGO_VAL_IGNORED",
@@ -500,11 +535,28 @@ fn runtime_settings(
         }
     }
     let source = BorrowedSettings::new(&pairs[..count]);
-    let jobs =
-        ThreadSources::from_settings(&source, harness.test_threads, crate::build_defaults::JOBS)
-            .resolve(LIVE_CAPACITY)
-            .map_err(RunError::TestThreads)?
-            .value;
+    let process = ProcessSources::from_settings(&source, parser.process(), crate::build_defaults::PROCESS)
+        .resolve()
+        .map_err(RunError::Process)?
+        .setting
+        .mode(cfg!(windows));
+    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
+    let default_jobs = match process {
+        ProcessMode::Shard => {
+            let cores = std::thread::available_parallelism().map_or(1, core::num::NonZero::get);
+            crate::config::shard_jobs(crate::build_defaults::SHARD_JOBS, cores)
+                .map(|count| count.min(LIVE_CAPACITY))
+                .ok_or(RunError::TestThreads(ThreadsError {
+                    source: ThreadsSource::BuildDefault,
+                    fault: ThreadsFault::Malformed,
+                }))?
+        }
+        ProcessMode::Test => crate::build_defaults::JOBS,
+    };
+    let jobs = ThreadSources::from_settings(&source, harness.test_threads, default_jobs)
+        .resolve(LIVE_CAPACITY)
+        .map_err(RunError::TestThreads)?
+        .value;
     let max_fail = FailFastSources::from_settings(&source, parser.fail_fast())
         .resolve()
         .map_err(RunError::FailFast)?
@@ -545,6 +597,7 @@ fn runtime_settings(
         jobs,
         max_fail,
         no_tests,
+        process,
         color,
     })
 }
@@ -572,39 +625,13 @@ fn track(target: u32) -> Result<(), RunError> {
     track_child(target).map_err(|_| RunError::Reactor)
 }
 
-fn deliver_exit(
-    ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    watch_slot: &mut Option<TestWatch>,
-    exit_code: i32,
-    reporting: Reporting<'_>,
-) -> Result<(), RunError> {
-    let Some(watch) = watch_slot.as_ref() else {
-        return Ok(());
-    };
-    let outcome = deliver(
-        ledger,
-        HostEvent::Exit {
-            slot: watch.slot,
-            status: exit_code,
-        },
-        reporting,
-        watch.output.verdict(),
-    )?;
-    if let Some(outcome) = outcome {
-        if outcome == TerminalOutcome::Failed {
-            watch.output.write_failure()?;
-        }
-        *watch_slot = None;
-    }
-    Ok(())
-}
-
 // a session's child runs on its own prime lane; its streams and exit arrive as items shaped like the events the outcome ledger already takes
 fn start_session(
     ledger: &Ledger<'_>,
     watches: &mut Watches,
     lanes: &Lanes,
     slot: SessionSlotId,
+    shard: Option<ShardWatch>,
 ) -> Result<(), RunError> {
     let child = ledger
         .sessions()
@@ -618,6 +645,9 @@ fn start_session(
         slot,
         process_id,
         output: ChildOutput::new(),
+        shard,
+        group: [0; GROUP_CAPACITY],
+        group_length: 0,
     });
     Ok(())
 }
@@ -630,24 +660,25 @@ pub(crate) fn session_output(
     stdout: bool,
     bytes: &[u8],
 ) -> Result<(), RunError> {
-    let Some(watch) = watches[index].as_mut() else {
-        return Ok(());
-    };
-    let slot = watch.slot;
     for piece in bytes.chunks(SOURCE_CAPACITY) {
+        let Some(watch) = watches[index].as_mut() else {
+            return Ok(());
+        };
+        let slot = watch.slot;
+        let mut shard_tripped = false;
         let event = if stdout {
             watch.output.observe_stdout(piece);
+            shard_tripped = shard::observe(run, ledger, watch, piece)?;
             HostEvent::Stdout { slot, bytes: piece }
         } else {
             watch.output.observe_stderr(piece);
             HostEvent::Stderr { slot, bytes: piece }
         };
-        let outcome = deliver(ledger, event, run.reporting(), watch.output.verdict())?;
-        if let Some(outcome) = outcome {
-            if outcome == TerminalOutcome::Failed {
-                watch.output.write_failure()?;
-            }
-            watches[index] = None;
+        let step = deliver(ledger, event, run.reporting(), watch.verdict())?;
+        if shard_tripped {
+            shard::stop_all(run, ledger, watches);
+        }
+        if settled(run, ledger, watches, index, step)? {
             return Ok(());
         }
     }
@@ -661,7 +692,7 @@ pub(crate) fn session_ended(
     index: usize,
     stdout: bool,
 ) -> Result<(), RunError> {
-    let Some(watch) = watches[index].as_mut() else {
+    let Some(watch) = watches[index].as_ref() else {
         return Ok(());
     };
     let slot = watch.slot;
@@ -670,14 +701,8 @@ pub(crate) fn session_ended(
     } else {
         HostEvent::StderrEof { slot }
     };
-    let outcome = deliver(ledger, event, run.reporting(), watch.output.verdict())?;
-    if let Some(outcome) = outcome {
-        if outcome == TerminalOutcome::Failed {
-            watch.output.write_failure()?;
-        }
-        watches[index] = None;
-    }
-    Ok(())
+    let step = deliver(ledger, event, run.reporting(), watch.verdict())?;
+    settled(run, ledger, watches, index, step).map(|_| ())
 }
 
 pub(crate) fn session_exited(
@@ -687,10 +712,60 @@ pub(crate) fn session_exited(
     index: usize,
     code: i32,
 ) -> Result<(), RunError> {
-    if let Some(watch) = watches[index].as_ref() {
-        release_child(watch.process_id);
+    let Some(watch) = watches[index].as_ref() else {
+        return Ok(());
+    };
+    release_child(watch.process_id);
+    if run.settings.process == ProcessMode::Test && run.stop_sent.get() && code == shard::STOP_STATUS {
+        return withdraw_terminated(run, ledger, watches, index);
     }
-    deliver_exit(ledger, &mut watches[index], code, run.reporting())
+    let event = HostEvent::Exit {
+        slot: watch.slot,
+        status: code,
+    };
+    let step = deliver(ledger, event, run.reporting(), watch.verdict())?;
+    settled(run, ledger, watches, index, step).map(|_| ())
+}
+
+// a child cargo-val killed on interrupt has no verdict of its own, so it leaves the ledger uncounted and its name is withdrawn once
+fn withdraw_terminated(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+    index: usize,
+) -> Result<(), RunError> {
+    let Some(watch) = watches[index].take() else {
+        return Ok(());
+    };
+    let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
+    ledger.retire(watch.slot).ok_or(RunError::Outcome)?;
+    shard::withdraw_solo(run, ledger, target)
+}
+
+// an exact child retires with its one outcome; a shard child's tests were counted as they streamed, so the shard module settles its exit
+fn settled(
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+    index: usize,
+    step: OutcomeStep<'_>,
+) -> Result<bool, RunError> {
+    match step {
+        OutcomeStep::Reported { outcome, .. } => {
+            if outcome == TerminalOutcome::Failed
+                && let Some(watch) = watches[index].as_ref()
+            {
+                watch.output.write_failure()?;
+            }
+            watches[index] = None;
+            Ok(true)
+        }
+        OutcomeStep::Complete { status } => {
+            shard::finish(run, ledger, watches, index, status)?;
+            Ok(true)
+        }
+        OutcomeStep::Stdout(_) | OutcomeStep::Stderr(_) | OutcomeStep::Pending => Ok(false),
+    }
 }
 
 const LOCK_LINE_CAPACITY: usize = 768;
@@ -774,12 +849,12 @@ fn report_nothing_ran(reporting: Reporting<'_>, target: Option<usize>, name: &[u
     RunError::NothingRan
 }
 
-fn deliver(
+fn deliver<'bytes>(
     ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    event: HostEvent<'_>,
+    event: HostEvent<'bytes>,
     reporting: Reporting<'_>,
     verdict: LibtestVerdict,
-) -> Result<Option<TerminalOutcome>, RunError> {
+) -> Result<OutcomeStep<'bytes>, RunError> {
     let mut report = [0; NAME_CAPACITY + 34];
     let name_length = match event {
         HostEvent::Stdout { .. } | HostEvent::Stderr { .. } => 0,
@@ -829,11 +904,12 @@ fn deliver(
                     },
                 );
             }
-            Ok(Some(outcome))
+            Ok(step)
         }
-        OutcomeStep::Pending | OutcomeStep::Stdout(_) | OutcomeStep::Stderr(_) => {
-            Ok(None)
-        }
+        OutcomeStep::Complete { .. }
+        | OutcomeStep::Pending
+        | OutcomeStep::Stdout(_)
+        | OutcomeStep::Stderr(_) => Ok(step),
     }
 }
 
@@ -982,7 +1058,9 @@ fn launch_listed(
         run.ready.set(Some(slot));
     }
     run.targets.borrow_mut().tally(target, Tally::Launched);
-    start_session(ledger, watches, scan.lanes, slot)
+    start_session(ledger, watches, scan.lanes, slot, None)?;
+    shard::note_group(run, watches, slot.index(), intent.test_name());
+    Ok(())
 }
 
 pub(crate) struct ListingRun<'run> {
@@ -1003,6 +1081,11 @@ pub(crate) struct ListingRun<'run> {
     doc: RefCell<Option<Box<DocRun>>>,
     launch_storage: RefCell<HeldLaunchStorage>,
     ready: Cell<Option<SessionSlotId>>,
+    shards: RefCell<ShardArena<'run>>,
+    sched: RefCell<SchedTable<'run>>,
+    specials: RefCell<SpecialPlan<'run>>,
+    sched_target: Cell<Option<usize>>,
+    stop_sent: Cell<bool>,
 }
 
 #[derive(Default)]
@@ -1025,6 +1108,13 @@ impl ListingRun<'_> {
 
     pub(crate) fn drain_signals(&self) -> Result<(), RunError> {
         self.signals.drain().map_err(|_| RunError::Reactor)
+    }
+
+    // a forwarded signal only reaches children that honor it, so a per-test child that ignores it is terminated here
+    pub(crate) fn interrupt_sessions(&self, ledger: &Ledger<'_>, watches: &Watches) {
+        if self.settings.process == ProcessMode::Test && self.interrupted() && !self.stop_sent.get() {
+            shard::stop_all(self, ledger, watches);
+        }
     }
 
     fn interrupted(&self) -> bool {
@@ -1103,12 +1193,17 @@ fn listing_wanted(
     run: &ListingRun<'_>,
     ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
 ) -> bool {
-    stop::listing_wanted(run.tripped(ledger), ledger.sessions().len(), run.admit_limit())
+    let stopped = run.tripped(ledger);
+    if run.settings.process == ProcessMode::Shard {
+        return stopped || !run.shards.borrow().sealed();
+    }
+    stop::listing_wanted(stopped, ledger.sessions().len(), run.admit_limit())
 }
 
 struct ListingScan<'scan, 'run> {
     run: &'scan ListingRun<'run>,
     lanes: &'scan Lanes,
+    executable: &'scan str,
     target: usize,
     environment: &'scan [u8],
     layout: &'scan TestEnvironmentLayout,
@@ -1127,6 +1222,9 @@ impl ListingScan<'_, '_> {
             ListingSourceStep::Launch(intent) => {
                 if !run.policy.borrow_mut().admit_listed(run.interrupted(), stopped) {
                     return Ok(Flow::Next);
+                }
+                if run.settings.process == ProcessMode::Shard {
+                    return Ok(if shard::collect(run, (self.executable, self.target), intent.test_name())? { Flow::Pause } else { Flow::Next });
                 }
                 launch_listed(self, ledger, watches, intent)?;
                 if ledger.sessions().len() >= run.admit_limit() {
@@ -1706,10 +1804,12 @@ impl CargoDriver<'_> {
         let scan = ListingScan {
             lanes,
             run,
+            executable,
             target: active.target,
             environment: &self.environments[slot_range(active.slot)],
             layout: &active.layout,
         };
+        shard::load_records(run, executable, active.target)?;
         let mut context = Context::from_waker(Waker::noop());
         let mut offset = 0;
         loop {
@@ -1720,6 +1820,7 @@ impl CargoDriver<'_> {
                 &chunk[offset..],
                 ExecutablePath::Borrowed(executable),
                 filter,
+                |name| shard::holds(run, watches, ledger.sessions().len(), name),
                 &mut context,
             ) else {
                 return Ok(offset);
@@ -1761,10 +1862,12 @@ impl CargoDriver<'_> {
         let scan = ListingScan {
             lanes,
             run,
+            executable,
             target: active.target,
             environment: &self.environments[slot_range(active.slot)],
             layout: &active.layout,
         };
+        shard::load_records(run, executable, active.target)?;
         let mut context = Context::from_waker(Waker::noop());
         loop {
             let stopped = run.tripped(ledger);
@@ -1773,13 +1876,17 @@ impl CargoDriver<'_> {
                 ledger.sessions(),
                 ExecutablePath::Borrowed(executable),
                 filter,
+                |name| shard::holds(run, watches, ledger.sessions().len(), name),
                 &mut context,
             ) else {
                 return Ok(false);
             };
             let step = polled.map_err(|_| RunError::ListingStream)?;
             match scan.apply(step, stopped, ledger, watches)? {
-                Flow::Eof => return Ok(true),
+                Flow::Eof => {
+                    shard::seal(run);
+                    return Ok(true);
+                }
                 Flow::Pause => return Ok(false),
                 Flow::Next => {}
             }
@@ -1828,6 +1935,9 @@ impl CargoDriver<'_> {
         ledger: &mut Ledger<'_>,
         watches: &mut Watches,
     ) -> Result<bool, RunError> {
+        if self.dispatch_shards(lanes, run, ledger, watches)? {
+            return Ok(true);
+        }
         if self.settle_listing(lanes, run, ledger, watches)? {
             return Ok(true);
         }
@@ -1891,6 +2001,9 @@ impl CargoDriver<'_> {
         if active.ignoring {
             return self.start_main_listing(lanes).map(|()| true);
         }
+        if shard::busy(run) {
+            return Ok(false);
+        }
         self.active = None;
         if let Some(next) = self.pending_listing.take() {
             self.begin_listing(next, lanes)?;
@@ -1924,9 +2037,9 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
-    let mut storage = run_storage();
+    let mut storage = run_storage(settings.process);
     let storage = &mut storage;
-    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches)) = storage;
+    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked)) = storage;
     let inherited_count = environment
         .collect(inherited)
         .map_err(|_| RunError::Environment)?;
@@ -1963,7 +2076,10 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         exact: parser.exact(),
         targets: RefCell::new(TargetTable::new()),
         started_millis,
-        harness_arguments: ignore_arguments(settings.ignore),
+        harness_arguments: match settings.process {
+            ProcessMode::Shard => shard_arguments(settings.ignore),
+            ProcessMode::Test => ignore_arguments(settings.ignore),
+        },
         environment: inherited,
         library_directories: &library_directories[..directory_count],
         inherited_dylib_path,
@@ -1975,6 +2091,11 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         doc: RefCell::new(doc_tests),
         launch_storage: RefCell::new(held_launch_storage()),
         ready: Cell::new(None),
+        shards: RefCell::new(ShardArena::with_declared(shard_names, DECLARED_BYTES)),
+        sched: RefCell::new(SchedTable::new(sched_bytes)),
+        specials: RefCell::new(SpecialPlan::new(picked)),
+        sched_target: Cell::new(None),
+            stop_sent: Cell::new(false),
     });
     observe_cargo(cargo_child, &mut driver, &run, &mut ledger, watches).await?;
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
@@ -2004,10 +2125,11 @@ type RunStorage<'environment> = (
         Box<SessionSlots<RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>>,
         Box<Watches>,
     ),
+    (Box<[u8]>, Box<[u8]>, Box<[u32]>),
 );
 
 // run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup
-fn run_storage<'environment>() -> RunStorage<'environment> {
+fn run_storage<'environment>(process: ProcessMode) -> RunStorage<'environment> {
     (
         (
             zeroed(FRAME_CAPACITY),
@@ -2021,6 +2143,14 @@ fn run_storage<'environment>() -> RunStorage<'environment> {
         ),
         (zeroed(LIBDIR_CAPACITY * 2), std::vec![b"".as_slice(); ENV_CAPACITY].into_boxed_slice()),
         (Box::new(SessionSlots::new()), (0..LIVE_CAPACITY).map(|_| None).collect()),
+        match process {
+            ProcessMode::Shard => (
+                zeroed(crate::build_defaults::SHARD_ARENA_BYTES + DECLARED_BYTES),
+                zeroed(crate::build_defaults::SCHED_RECORD_BYTES),
+                std::vec![0; crate::build_defaults::SCHED_RECORD_BYTES / RECORD_BYTES].into_boxed_slice(),
+            ),
+            ProcessMode::Test => (zeroed(0), zeroed(crate::build_defaults::SCHED_RECORD_BYTES), std::vec::Vec::new().into_boxed_slice()),
+        },
     )
 }
 
@@ -2072,6 +2202,15 @@ fn filter_text<'argument>(parser: &CliParser<'argument>) -> Result<&'argument st
         .transpose()
         .map_err(|_| RunError::Arguments)?
         .unwrap_or(""))
+}
+
+// a shard runs its tests one at a time so its result lines arrive in listing order and a crash names the test that died
+const fn shard_arguments(mode: IgnoreMode) -> &'static [&'static [u8]] {
+    match mode {
+        IgnoreMode::Skip => &SHARD_ARGUMENTS,
+        IgnoreMode::Only => &SHARD_ONLY_ARGUMENTS,
+        IgnoreMode::Include => &SHARD_INCLUDE_ARGUMENTS,
+    }
 }
 
 const fn ignore_arguments(mode: IgnoreMode) -> &'static [&'static [u8]] {
@@ -2276,13 +2415,13 @@ impl<const CAPACITY: usize> Line<CAPACITY> {
     }
 }
 
-fn write_stop_trailer(report: &StopReport) -> Result<(), RunError> {
+fn write_stop_trailer(report: &StopReport, shards: bool) -> Result<(), RunError> {
     let mut line = LineBuffer::new();
     line.text(b"cargo-val: stopped at --max-fail ");
     line.number(report.max_fail);
     line.text(b"; in flight at trip ");
     line.number(report.in_flight_at_trip);
-    line.text(b" (finished normally); launched after trip ");
+    line.text(if shards { b" (shard children terminated, their unreported names withdrawn); launched after trip " } else { b" (finished normally); launched after trip " });
     line.number(report.launched_after_trip);
     line.text(b"; listed tests not run ");
     line.number(report.listed_not_run);
@@ -2524,12 +2663,12 @@ fn record_doc_event(
             }
             Ok(())
         }
-        DocEvent::Result { name, outcome } => report_doc_result(name, outcome, color, observation),
+        DocEvent::Result { name, outcome, .. } => report_doc_result(name, outcome, color, observation),
         DocEvent::FailureLine(line) => {
             write_fd(2, line)?;
             write_fd(2, b"\n")
         }
-        DocEvent::Finished => Ok(()),
+        DocEvent::Finished { .. } => Ok(()),
     }
 }
 
@@ -2650,7 +2789,7 @@ fn conclude(
     doc_tests: Option<DocTotals>,
 ) -> Result<RunSummary, RunError> {
     if let Some(report) = stop {
-        write_stop_trailer(&report)?;
+        write_stop_trailer(&report, settings.process == ProcessMode::Shard)?;
     }
     if let Some(doc) = &doc_tests {
         write_doc_notice(doc)?;
@@ -2855,13 +2994,14 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod listing_allocation_tests {
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
 
     use super::{DocObservation, ENVIRONMENT_CAPACITY, LISTING_SLOTS, ListingRun, PendingListing, Settings, TargetTable, spawn_listing};
     use crate::edge_spawn::held_launch_storage;
     use crate::cargo_message::TestArtifact;
     use crate::config::{IgnoreMode, NoTestsPolicy};
     use crate::edge_signal::SignalPipe;
+    use crate::shard_sched::{SchedTable, SpecialPlan};
     use crate::stop::StopPolicy;
 
     fn reap(listing: &mut PendingListing) {
@@ -2889,6 +3029,7 @@ mod listing_allocation_tests {
             jobs: 2,
             max_fail: None,
             no_tests: NoTestsPolicy::Pass,
+            process: crate::config::ProcessMode::Test,
             color: false,
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
@@ -2910,6 +3051,11 @@ mod listing_allocation_tests {
             doc: RefCell::new(None),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: core::cell::Cell::new(None),
+            shards: RefCell::new(crate::shard_arena::ShardArena::new(&mut [])),
+            sched: RefCell::new(SchedTable::new(&mut [])),
+            specials: RefCell::new(SpecialPlan::new(&mut [])),
+            sched_target: Cell::new(None),
+            stop_sent: Cell::new(false),
         };
         let artifact = TestArtifact {
             executable,
