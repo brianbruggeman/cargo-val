@@ -450,7 +450,7 @@ fn a_full_shard_that_aborts_at_its_first_test_gives_every_name_exactly_one_solo_
     assert_eq!(run.status, Some(0), "stderr tail: {}", run.stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n"));
     assert_eq!(run.lines_ending("PASS").len(), MANY_NAMES, "every name passes in its solo run, counted once");
     assert_eq!(run.lines_ending("FAIL").len(), 0, "{}", run.stdout.lines().take(5).collect::<Vec<_>>().join("\n"));
-    assert_eq!(run.pids.len(), MANY_NAMES + 1, "one shard child, then exactly one solo child per name");
+    assert_eq!(run.log.lines().count(), MANY_NAMES + 1, "one shard child, then exactly one solo child per name; windows reuses pids, so the log lines are counted, not the distinct pids ({})", run.pids.len());
     assert!(!run.stderr.contains("could not queue"), "{}", run.stderr.lines().take(5).collect::<Vec<_>>().join("\n"));
 }
 
