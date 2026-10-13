@@ -2,7 +2,6 @@
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::fd::AsRawFd;
@@ -11,11 +10,12 @@ use std::process::Command;
 use std::sync::mpsc::RecvTimeoutError;
 
 mod common;
+#[path = "common/fifo.rs"]
+mod fifo;
 
 use common::{fixture_output, output_until};
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
-const SAFETY_BOUND_SECONDS: libc::time_t = 240;
 
 fn probe_directory() -> PathBuf {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -55,21 +55,6 @@ fn open_reader(path: &Path) -> File {
         .expect("a fifo opens for nonblocking read without a writer")
 }
 
-// select(2) reports a fifo whose last writer left on macOS where poll(2) does not; the bound only fails the test, it never decides it
-fn await_readable(fifo: &File, what: &str) {
-    let descriptor = fifo.as_raw_fd();
-    let mut readable: libc::fd_set = unsafe { core::mem::zeroed() };
-    unsafe {
-        libc::FD_ZERO(&raw mut readable);
-        libc::FD_SET(descriptor, &raw mut readable);
-    }
-    let mut timeout = libc::timeval { tv_sec: SAFETY_BOUND_SECONDS, tv_usec: 0 };
-    let ready = unsafe {
-        libc::select(descriptor + 1, &raw mut readable, core::ptr::null_mut(), core::ptr::null_mut(), &raw mut timeout)
-    };
-    assert_eq!(ready, 1, "{what}");
-}
-
 fn gone(pid: libc::pid_t) -> bool {
     let signalled = unsafe { libc::kill(pid, 0) };
     signalled == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
@@ -85,15 +70,12 @@ async fn a_fixture_run_that_misses_its_deadline_fails_and_leaves_no_process_behi
     let warm = fixture_output(&mut blocked_test_command(None));
     assert_eq!(warm.status.code(), Some(0), "the fixture builds and its unblocked test passes");
     let directory = probe_directory();
-    let mut ready = open_reader(&directory.join("ready"));
+    let ready = open_reader(&directory.join("ready"));
     let held = open_reader(&directory.join("held"));
 
     let mut line = String::new();
     let failure = output_until(&mut blocked_test_command(Some(&directory)), |_| {
-        await_readable(&ready, "the blocked test never reported it was blocked");
-        ready
-            .read_to_string(&mut line)
-            .expect("the blocked test wrote its pid before the kill");
+        line = fifo::read_line(ready.as_raw_fd(), "the blocked test never reported it was blocked");
         Err(RecvTimeoutError::Timeout)
     })
     .expect_err("the blocked test never returns, so the driven expiry fires");
@@ -101,7 +83,7 @@ async fn a_fixture_run_that_misses_its_deadline_fails_and_leaves_no_process_behi
     let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
     assert!(failure.contains("outlived"), "{failure}");
     assert!(failure.contains("unit_blocks_when_requested"), "{failure}");
-    await_readable(&held, "the held fifo never reached EOF: the blocked test still holds its write end");
+    fifo::await_readable(held.as_raw_fd(), "the held fifo never reached EOF: the blocked test still holds its write end");
     assert!(gone(blocked), "the blocked test (pid {blocked}) survived the deadline kill");
     assert!(group_gone(blocked), "the blocked test's process group survived the deadline kill");
 }
