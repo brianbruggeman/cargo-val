@@ -34,6 +34,8 @@ struct BuildDefaults {
     spawn_argument_pointers: usize,
     #[setting(default = 1100)]
     spawn_environment_pointers: usize,
+    #[setting(default = 65536)]
+    status_queue_bytes: usize,
 }
 
 impl Validate for BuildDefaults {

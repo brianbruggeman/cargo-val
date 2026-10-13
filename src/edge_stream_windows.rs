@@ -19,7 +19,7 @@ use crate::host::windows_pipe::{
     WindowsPipeReadCompletion, WindowsPipeReadSlot, WindowsPipeReadStart, WindowsPipeReadStartError,
 };
 
-const CAPTURE_BYTES: u32 = 16 * 1024;
+pub(crate) const CAPTURE_BYTES: u32 = 16 * 1024;
 const SCRATCH_BYTES: u32 = 4096;
 const STAGING_BYTES: usize = CAPTURE_BYTES as usize;
 

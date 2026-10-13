@@ -24,6 +24,7 @@ use crate::driver::{
     Watches, run_body, session_ended, session_exited, session_output, write_fd,
 };
 use crate::edge_spawn::Child;
+use crate::status_queue::{self, Capture, Sinks};
 
 pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
@@ -234,22 +235,40 @@ pub(crate) async fn pump(
         core::array::from_fn::<_, ARMS, _>(|index| edge(lanes, port, index)),
         Select::RoundRobin,
     );
+    let _capture = Capture::enter();
+    let mut sinks = Sinks::new();
     let mut parks = 0;
     loop {
+        let mut drained = Ok(());
         let polled = poll_fn(|context| {
-            let polled = step(&merged, context);
+            if let Poll::Ready(Err(error)) = sinks.poll_drain(context) {
+                drained = Err(error);
+                return Poll::Ready(Err(Exhausted));
+            }
+            let polled = if status_queue::resume_due() {
+                Poll::Ready(Ok(Item::Signal(Ok(()))))
+            } else if status_queue::has_room() {
+                step(&merged, context)
+            } else {
+                Poll::Pending
+            };
             parks += usize::from(polled.is_pending());
             polled
         })
         .await;
-        match polled {
-            Ok(item) => {
-                if on_item(item)?.is_break() {
-                    return Ok(parks);
-                }
-            }
-            Err(Exhausted) => return Ok(parks),
+        drained?;
+        let Ok(item) = polled else {
+            poll_fn(|context| sinks.poll_drain(context)).await?;
+            return Ok(parks);
+        };
+        let flow = on_item(item);
+        if matches!(flow, Ok(ControlFlow::Continue(()))) {
+            continue;
         }
+        let delivered = poll_fn(|context| sinks.poll_drain(context)).await;
+        flow.map(|_| ())?;
+        delivered?;
+        return Ok(parks);
     }
 }
 
@@ -359,6 +378,32 @@ fn handle(
     }
 }
 
+// a window the status queue could not take whole stays on the lane, whose gate closes until `resume_doc` finishes it
+fn feed_doc(
+    lanes: &Lanes,
+    doc: &mut DocRun,
+    bytes: &[u8],
+    (range, offset): (Range<u32>, usize),
+    color: bool,
+    observation: &DocObservation,
+) -> Result<(), RunError> {
+    let consumed = doc.stdout_lines(bytes, offset, color, observation)?;
+    let stalled = consumed < bytes.len();
+    doc.set_backlog(stalled.then_some((range, consumed)));
+    lanes[DOC_LANE].3.set(!stalled);
+    Ok(())
+}
+
+fn resume_doc(lanes: &Lanes, doc: &mut DocRun, color: bool, observation: &DocObservation) -> Result<(), RunError> {
+    let Some((range, offset)) = doc.backlog() else {
+        return Ok(());
+    };
+    let slot = lanes[DOC_LANE].0.borrow();
+    let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+    let bytes = stream.window(range.clone()).ok_or(RunError::Reactor)?;
+    feed_doc(lanes, doc, &bytes, (range, offset), color, observation)
+}
+
 fn handle_doc(
     item: Item,
     lanes: &Lanes,
@@ -371,8 +416,8 @@ fn handle_doc(
             let range = range.map_err(|_| RunError::Reactor)?;
             let slot = lanes[DOC_LANE].0.borrow();
             let stream = slot.as_deref().ok_or(RunError::Reactor)?;
-            let bytes = stream.window(range).ok_or(RunError::Reactor)?;
-            doc.stdout_chunk(&bytes, color, observation)
+            let bytes = stream.window(range.clone()).ok_or(RunError::Reactor)?;
+            feed_doc(lanes, doc, &bytes, (range, 0), color, observation)
         }
         Item::Err(_, range) => {
             let range = range.map_err(|_| RunError::Reactor)?;
@@ -420,6 +465,7 @@ pub(crate) async fn observe_doc(
             Item::Signal(ready) => {
                 ready.map_err(|_| RunError::Reactor)?;
                 signals.drain().map_err(|_| RunError::Reactor)?;
+                resume_doc(&lanes, doc, color, observation)?;
             }
             other => handle_doc(other, &lanes, doc, color, observation)?,
         }
@@ -533,6 +579,7 @@ pub(crate) async fn observe_cargo(
     pump(&lanes, Some((&signal, &interrupt)), |item| {
         handle(item, &lanes, driver, run, ledger, watches)?;
         driver.resume(&lanes, run, ledger, watches)?;
+        run.with_doc(|doc, color, observation| resume_doc(&lanes, doc, color, observation))?;
         lanes[CARGO_LANE].3.set(driver.cargo_open());
         lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
         Ok(if driver.finished(run, ledger) {
