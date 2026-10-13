@@ -12,6 +12,10 @@ use std::sync::mpsc;
 #[cfg(unix)]
 use std::time::Duration;
 
+mod common;
+
+use common::fixture_output;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 #[cfg(unix)]
 const WAIT_LINE: &str = "cargo-val: waiting for ";
@@ -141,9 +145,7 @@ async fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lo
     let shared = scratch.join("shared-target");
     let mut holder = hold_build_lock(&scratch, &shared);
 
-    let output = cargo_val(&scratch, &shared, &["--target-dir", "isolated"])
-        .output()
-        .expect("cargo-val is spawnable");
+    let output = fixture_output(&mut cargo_val(&scratch, &shared, &["--target-dir", "isolated"]));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -221,13 +223,8 @@ async fn a_named_target_dir_holds_a_test_and_a_doc_subdirectory() {
     let named = scratch.join("named-target");
     let named_text = named.to_str().expect("utf-8 path");
 
-    let by_flag = cargo_val(&scratch, &shared, &["--target-dir", named_text])
-        .output()
-        .expect("cargo-val is spawnable");
-    let by_setting = cargo_val(&scratch, &shared, &[])
-        .env("CARGO_VAL_TARGET_DIR", named_text)
-        .output()
-        .expect("cargo-val is spawnable");
+    let by_flag = fixture_output(&mut cargo_val(&scratch, &shared, &["--target-dir", named_text]));
+    let by_setting = fixture_output(cargo_val(&scratch, &shared, &[]).env("CARGO_VAL_TARGET_DIR", named_text));
 
     for output in [&by_flag, &by_setting] {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -244,10 +241,7 @@ async fn an_empty_target_dir_setting_is_refused_before_any_build() {
     let scratch = scratch("empty-target");
     let shared = scratch.join("shared-target");
 
-    let output = cargo_val(&scratch, &shared, &[])
-        .env("CARGO_VAL_TARGET_DIR", "")
-        .output()
-        .expect("cargo-val is spawnable");
+    let output = fixture_output(cargo_val(&scratch, &shared, &[]).env("CARGO_VAL_TARGET_DIR", ""));
 
     assert_eq!(output.status.code(), Some(2));
     assert!(

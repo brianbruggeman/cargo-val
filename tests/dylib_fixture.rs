@@ -4,6 +4,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod common;
+
+use common::fixture_output;
+
 const LOADER_VARIABLES: [&str; 3] = [
     "DYLD_FALLBACK_LIBRARY_PATH",
     "DYLD_LIBRARY_PATH",
@@ -28,7 +32,7 @@ fn scrubbed(mut command: Command) -> Command {
 }
 
 fn run(mut command: Command) -> Output {
-    let output = command.output().expect("command starts");
+    let output = fixture_output(&mut command);
     assert!(
         output.status.success(),
         "{command:?} failed: {}\n{}",

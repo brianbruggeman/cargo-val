@@ -20,6 +20,10 @@ use std::sync::mpsc;
 #[cfg(unix)]
 use std::time::Duration;
 
+mod common;
+
+use common::fixture_output;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const SHARD: &str = "shard";
 const SHARD_LONG: &str = "shard_long";
@@ -61,7 +65,8 @@ fn fixture_target() -> PathBuf {
 fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
     let directory = scratch(label);
     let log = directory.join("pids.log");
-    let output: Output = Command::new(CARGO_VAL)
+    let output: Output = fixture_output(
+        Command::new(CARGO_VAL)
         .arg("--manifest-path")
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -77,9 +82,8 @@ fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment: &[(&
         .env("NO_COLOR", "1")
         .env("CARGO_VAL_SHARD_LOG", &log)
         .env("CARGO_TARGET_DIR", fixture_target())
-        .envs(environment.iter().copied())
-        .output()
-        .expect("cargo-val binary is spawnable");
+        .envs(environment.iter().copied()),
+    );
     let log = fs::read_to_string(&log).unwrap_or_default();
     let pids = log
         .lines()

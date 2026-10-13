@@ -9,6 +9,10 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::path::Path;
 
+mod common;
+
+use common::fixture_output;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 struct Run {
@@ -106,10 +110,7 @@ fn run_fixture(
     environment: &[(&str, &str)],
     probe: Option<&PathBuf>,
 ) -> Run {
-    fixture_command(fixture, arguments, environment, probe)
-        .output()
-        .expect("cargo-val binary is spawnable")
-        .into()
+    fixture_output(&mut fixture_command(fixture, arguments, environment, probe)).into()
 }
 
 // mkfifo
@@ -149,11 +150,11 @@ fn run_fixture_holding_doc_child(
     }
     let _ready = open_fifo_both_ends(&directory.join("ready"));
     let _held = open_fifo_both_ends(&directory.join("held"));
-    fixture_command(fixture, arguments, environment, None)
-        .env("CARGO_VAL_FIXTURE_BLOCK_DIR", &directory)
-        .output()
-        .expect("cargo-val binary is spawnable")
-        .into()
+    fixture_output(
+        fixture_command(fixture, arguments, environment, None)
+            .env("CARGO_VAL_FIXTURE_BLOCK_DIR", &directory),
+    )
+    .into()
 }
 
 fn observed_overlaps(probe: &PathBuf) -> Vec<usize> {
@@ -502,7 +503,7 @@ async fn c68_short_manifest_path_is_forwarded_and_not_taken_as_the_filter() {
         .args(["-m", manifest, "--no-fail-fast"])
         .env("NO_COLOR", "1")
         .env("CARGO_TARGET_DIR", target_directory().join("c68-fixture"));
-    let output = command.output().expect("cargo-val binary is spawnable");
+    let output = fixture_output(&mut command);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert_eq!(output.status.code(), Some(0), "{stdout}");
