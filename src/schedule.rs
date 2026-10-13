@@ -148,6 +148,15 @@ impl<T, const CAPACITY: usize> SessionSlots<T, CAPACITY> {
         self.free_head.is_none()
     }
 
+    /// Visits every live value within fixed capacity.
+    pub fn each(&self, mut visit: impl FnMut(&T)) {
+        for entry in &self.entries {
+            if let Entry::Occupied { value, .. } = entry {
+                visit(value);
+            }
+        }
+    }
+
     /// Scans live values within fixed capacity without a second index or move.
     #[must_use]
     pub fn any(&self, mut predicate: impl FnMut(&T) -> bool) -> bool {

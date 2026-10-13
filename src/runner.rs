@@ -127,12 +127,13 @@ impl<const NAME_CAPACITY: usize, const CAPACITY: usize>
     fn admit(
         &mut self,
         child: RunningChild<NAME_CAPACITY>,
+        names: usize,
     ) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
         match self {
             Self::Sessions(sessions) => sessions
                 .insert(child)
                 .map_err(LaunchError::CapacityChanged),
-            Self::Ledger(ledger) => ledger.start(child).map_err(LaunchError::Accounting),
+            Self::Ledger(ledger) => ledger.start_many(child, names).map_err(LaunchError::Accounting),
         }
     }
 }
@@ -225,7 +226,42 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
             completion: ChildCompletion::new(),
             exit_status: None,
         };
-        self.owner.admit(session)
+        self.owner.admit(session, 1)
+    }
+
+    /// Starts one shard child that runs `count` tests, whose names the intent carries joined by NUL, and places it directly in a slot.
+    ///
+    /// The shard is accounted as `count` discovered tests; each reaches its terminal count as its result line streams in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LaunchError`] when the table is full, the spawn fails, the names do not fit the launch storage, or accounting refuses the child.
+    pub fn launch_shard(mut self, count: usize) -> Result<SessionSlotId, LaunchError<NAME_CAPACITY>> {
+        if self.owner.sessions().is_full() {
+            return Err(LaunchError::Full);
+        }
+        let child = spawn_exact(
+            self.storage,
+            executable_bytes(&self.intent),
+            self.intent.test_name().as_bytes(),
+            self.harness_arguments,
+            self.inherited_environment,
+            self.child_overrides,
+            self.current_directory,
+        )
+        .map_err(|error| match error {
+            ExactError::Arguments(error) => LaunchError::Arguments(error),
+            ExactError::Spawn(error) => LaunchError::Spawn(error),
+        })?;
+        let session = RunningChild {
+            child,
+            name: [0; NAME_CAPACITY],
+            name_length: 0,
+            target: self.target,
+            completion: ChildCompletion::new(),
+            exit_status: None,
+        };
+        self.owner.admit(session, count)
     }
 }
 
@@ -244,6 +280,11 @@ pub enum OutcomeStep<'bytes> {
     Stderr(&'bytes [u8]),
     /// Exit or one stream EOF was accepted while another event is still needed.
     Pending,
+    /// A shard child's streams and exit completed; its tests were counted as their result lines arrived, so nothing is counted here.
+    Complete {
+        /// The shard child's exit status.
+        status: i32,
+    },
     /// Both streams and process exit completed, and one label was written.
     Reported {
         /// The terminal category counted by the ledger.
@@ -276,6 +317,8 @@ pub enum LibtestVerdict {
     Skipped,
     /// 0 passed, 0 failed, 0 ignored.
     NothingRan,
+    /// The child ran many tests and reported each as it finished; completion yields its exit status and counts nothing.
+    Shard,
 }
 
 /// One borrowed host event and the sole mutable outcome owner.
@@ -352,6 +395,7 @@ impl<'call, 'ledger: 'call, 'bytes, const NAME_CAPACITY: usize, const CAPACITY: 
             .and_then(|session| session.exit_status)
             .ok_or(ChildOutcomeError::MissingExitStatus)?;
         let outcome = match (status, self.verdict) {
+            (_, LibtestVerdict::Shard) => return Ok(OutcomeStep::Complete { status }),
             (0, LibtestVerdict::NothingRan) => return Err(ChildOutcomeError::NothingRan),
             (0, LibtestVerdict::Skipped) => TerminalOutcome::Ignored,
             (0, _) => TerminalOutcome::Passed,

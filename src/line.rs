@@ -1,6 +1,7 @@
 const DECIMAL_DIGITS: [u8; 10] = *b"0123456789";
 
 /// Fixed-capacity text assembled without allocation; text past the capacity is cut.
+#[derive(Debug)]
 pub struct Line<const CAPACITY: usize> {
     bytes: [u8; CAPACITY],
     length: usize,
@@ -20,6 +21,10 @@ impl<const CAPACITY: usize> Line<CAPACITY> {
         let taken = text.len().min(room);
         self.bytes[self.length..self.length + taken].copy_from_slice(&text[..taken]);
         self.length += taken;
+    }
+
+    pub fn clear(&mut self) {
+        self.length = 0;
     }
 
     pub fn number(&mut self, value: usize) {

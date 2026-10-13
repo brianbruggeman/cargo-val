@@ -206,6 +206,24 @@ impl<'buffer> ArtifactFramer<'buffer> {
         chunk: &'call [u8],
         parse: impl FnOnce(&'call [u8]) -> Result<Parsed, ParseError>,
     ) -> Result<RecordStep<Parsed>, RecordFault<ParseError>> {
+        self.next_record_unless(chunk, parse, |_| false)
+    }
+
+    /// [`Self::next_record`] that leaves a record unconsumed when `hold` says so.
+    ///
+    /// A held record reports [`RecordStep::NeedMore`]: a record whole in `chunk` consumes zero bytes
+    /// so the caller replays it, and a staged record stays framed so [`Self::frame_ready`] stays true.
+    /// Either way the next call parses the same record again, so `hold` sees it once per attempt.
+    ///
+    /// # Errors
+    ///
+    /// The same faults as [`Self::next_record`].
+    pub fn next_record_unless<'call, Parsed, ParseError>(
+        &'call mut self,
+        chunk: &'call [u8],
+        parse: impl FnOnce(&'call [u8]) -> Result<Parsed, ParseError>,
+        hold: impl FnOnce(&Parsed) -> bool,
+    ) -> Result<RecordStep<Parsed>, RecordFault<ParseError>> {
         self.validate_input(chunk)
             .map_err(|error| Self::framing_fault(0, error))?;
         let whole_record_possible = self.source_state.get() == SourceState::Open
@@ -226,7 +244,7 @@ impl<'buffer> ArtifactFramer<'buffer> {
             }
             match self.codec.parse_frame(chunk) {
                 Ok((record, consumed_bytes)) => {
-                    return self.parse_record(record, consumed_bytes, parse);
+                    return self.parse_record(record, (consumed_bytes, 0), parse, hold);
                 }
                 Err(FrameError::Incomplete) => {}
                 Err(error) => {
@@ -251,14 +269,18 @@ impl<'buffer> ArtifactFramer<'buffer> {
         else {
             return Ok(RecordStep::NeedMore { consumed_bytes });
         };
-        framer
-            .consume_frame()
-            .map_err(|error| Self::framing_fault(consumed_bytes, error))?;
-        framer.parse_record(
+        let step = framer.parse_record(
             &framer.buffer[frame_start..frame_end],
-            consumed_bytes,
+            (consumed_bytes, consumed_bytes),
             parse,
-        )
+            hold,
+        )?;
+        if matches!(step, RecordStep::Parsed { .. }) {
+            framer
+                .consume_frame()
+                .map_err(|error| Self::framing_fault(consumed_bytes, error))?;
+        }
+        Ok(step)
     }
 
     /// Largest record, excluding its newline, this framer accepts.
@@ -280,10 +302,14 @@ impl<'buffer> ArtifactFramer<'buffer> {
     fn parse_record<'record, Parsed, ParseError>(
         &self,
         record: &'record [u8],
-        consumed_bytes: usize,
+        (consumed_bytes, held_bytes): (usize, usize),
         parse: impl FnOnce(&'record [u8]) -> Result<Parsed, ParseError>,
+        hold: impl FnOnce(&Parsed) -> bool,
     ) -> Result<RecordStep<Parsed>, RecordFault<ParseError>> {
         match parse(record) {
+            Ok(parsed) if hold(&parsed) => Ok(RecordStep::NeedMore {
+                consumed_bytes: held_bytes,
+            }),
             Ok(parsed) => Ok(RecordStep::Parsed {
                 parsed,
                 consumed_bytes,
@@ -545,6 +571,55 @@ mod tests {
         assert_eq!(buffered_retry, buffered_error);
         std::println!(
             "{{\"direct_buffered_oversize_error_equal\":1,\"direct_buffered_streams_not_poisoned\":1,\"error\":\"frame_too_large:9\"}}"
+        );
+    }
+
+    #[test]
+    fn a_held_whole_record_consumes_nothing_and_is_taken_on_the_retry() {
+        let chunk = b"declared::loads_whole_checkpoint: test\ndeclared::next: test\n";
+        let mut storage = [0_u8; 256];
+        let mut framer = ArtifactFramer::new(&mut storage, 255).expect("storage fits the record limit");
+
+        let postponed = framer
+            .next_record_unless(chunk, Ok::<_, core::convert::Infallible>, |_| true)
+            .expect("a whole record parses before it is held");
+        assert_eq!(postponed, RecordStep::NeedMore { consumed_bytes: 0 });
+        let taken = framer
+            .next_record_unless(chunk, Ok::<_, core::convert::Infallible>, |_| false)
+            .expect("the same record parses again once released");
+
+        assert_eq!(
+            taken,
+            RecordStep::Parsed {
+                parsed: b"declared::loads_whole_checkpoint: test".as_slice(),
+                consumed_bytes: 39
+            }
+        );
+    }
+
+    #[test]
+    fn a_held_staged_record_stays_framed_for_the_retry() {
+        let mut storage = [0_u8; 256];
+        let mut framer = ArtifactFramer::new(&mut storage, 255).expect("storage fits the record limit");
+        let head = framer.next_record(b"declared::loads_", Ok::<_, core::convert::Infallible>).expect("a fragment stages");
+        assert_eq!(head, RecordStep::NeedMore { consumed_bytes: 16 });
+
+        let postponed = framer
+            .next_record_unless(b"whole: test\n", Ok::<_, core::convert::Infallible>, |_| true)
+            .expect("the completed record parses before it is held");
+        assert_eq!(postponed, RecordStep::NeedMore { consumed_bytes: 12 });
+        let ready = framer.frame_ready().expect("framer state is readable");
+        assert!(ready);
+        let taken = framer
+            .next_record_unless(b"", Ok::<_, core::convert::Infallible>, |_| false)
+            .expect("the framed record is taken on the retry");
+
+        assert_eq!(
+            taken,
+            RecordStep::Parsed {
+                parsed: b"declared::loads_whole: test".as_slice(),
+                consumed_bytes: 0
+            }
         );
     }
 }

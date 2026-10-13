@@ -1,4 +1,5 @@
-//! Generates a workspace of thousands of trivial tests and times `cargo test`, `cargo nextest`, and `cargo val` over it.
+//! Generates a workspace of thousands of trivial tests and times `cargo test`, `cargo nextest`, and `cargo val`
+//! (its default process mode, `--process shard`, and `--process test`) over it.
 //!
 //! Build the binary first: `cargo build --release --bin cargo-val`, then `cargo run --release --example scale`.
 //! `SCALE_TESTS` (default 13000) passing tests are split evenly over `SCALE_BINARIES` (default 4) library crates,
@@ -12,11 +13,16 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 const PLANTED: usize = 8;
-const ROUNDS: [[Arm; 3]; 3] = [
-    [Arm::Test, Arm::Nextest, Arm::Val],
-    [Arm::Nextest, Arm::Val, Arm::Test],
-    [Arm::Val, Arm::Test, Arm::Nextest],
+const ARMS: [Arm; 7] = [
+    Arm::Test,
+    Arm::Nextest,
+    Arm::Val,
+    Arm::ValTest,
+    Arm::ValShardHalf,
+    Arm::ValShardOne,
+    Arm::ValShardTwo,
 ];
+const ROUNDS: usize = 3;
 const SHOWN_DIFFERENCES: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -24,6 +30,10 @@ enum Arm {
     Test,
     Nextest,
     Val,
+    ValTest,
+    ValShardHalf,
+    ValShardOne,
+    ValShardTwo,
 }
 
 impl Arm {
@@ -32,6 +42,22 @@ impl Arm {
             Self::Test => "cargo test",
             Self::Nextest => "nextest",
             Self::Val => "cargo val",
+            Self::ValTest => "val test, 1xCPU",
+            Self::ValShardHalf => "val shard, 0.5xCPU",
+            Self::ValShardOne => "val shard, 1xCPU",
+            Self::ValShardTwo => "val shard, 2xCPU",
+        }
+    }
+}
+
+impl Arm {
+    /// Live test processes a cargo-val arm asks for through `CARGO_VAL_JOBS`, as a multiple of the core count.
+    fn children(self, cores: usize) -> Option<usize> {
+        match self {
+            Self::ValTest | Self::ValShardOne => Some(cores),
+            Self::ValShardHalf => Some((cores / 2).max(1)),
+            Self::ValShardTwo => Some((cores * 2).min(64)),
+            Self::Test | Self::Nextest | Self::Val => None,
         }
     }
 }
@@ -186,19 +212,26 @@ fn build_command(arm: Arm, context: &Context) -> Command {
     let jobs = context.jobs.to_string();
     let mut command = match arm {
         Arm::Test | Arm::Nextest => Command::new("cargo"),
-        Arm::Val => Command::new(&context.cargo_val),
+        Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo => Command::new(&context.cargo_val),
     };
     match arm {
         Arm::Test => command.args(["test", "--lib", "--no-fail-fast", "--color", "never", "--target-dir"]),
         Arm::Nextest => command.args(["nextest", "run", "--lib", "--no-fail-fast", "--color", "never", "--target-dir"]),
         Arm::Val => command.args(["val", "--lib", "--no-fail-fast", "--target-dir"]),
+        Arm::ValTest => command.args(["val", "--process", "test", "--lib", "--no-fail-fast", "--target-dir"]),
+        Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo => {
+            command.args(["val", "--process", "shard", "--lib", "--no-fail-fast", "--target-dir"])
+        }
     };
     command.arg(&context.target);
     match arm {
         Arm::Test => command.args(["--", "--test-threads", &jobs]),
         Arm::Nextest => command.args(["-j", &jobs]),
-        Arm::Val => command.args(["--jobs", &jobs]),
+        Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo => command.args(["--jobs", &jobs]),
     };
+    if let Some(children) = arm.children(context.jobs) {
+        command.env("CARGO_VAL_JOBS", children.to_string());
+    }
     command.current_dir(&context.fixture).env_remove("CARGO_TARGET_DIR");
     command
 }
@@ -244,8 +277,8 @@ fn classify(arm: Arm, line: &str) -> Option<(String, bool)> {
         }
         Arm::Nextest if text.starts_with("PASS ") => true,
         Arm::Nextest if text.starts_with("FAIL ") => false,
-        Arm::Val if text.ends_with(" PASS") => true,
-        Arm::Val if text.ends_with(" FAIL") => false,
+        Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo if text.ends_with(" PASS") => true,
+        Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo if text.ends_with(" FAIL") => false,
         _ => return None,
     };
     Some((case_name(text)?, passed))
@@ -313,13 +346,13 @@ fn print_cross_arm_differences(last: &BTreeMap<Arm, Outcomes>, problems: &mut Ve
 }
 
 fn print_table(walls: &BTreeMap<Arm, Vec<f64>>, last: &BTreeMap<Arm, Outcomes>) {
-    println!("{:<12} {:>9} {:>9} {:>9} {:>9} {:>7} {:>8} {:>7}", "arm", "round 1", "round 2", "round 3", "median", "cov %", "passed", "failed");
+    println!("{:<20} {:>9} {:>9} {:>9} {:>9} {:>7} {:>8} {:>7}", "arm", "round 1", "round 2", "round 3", "median", "cov %", "passed", "failed");
     for (arm, seconds) in walls {
         let outcomes = &last[arm];
         let passed = outcomes.values().filter(|passed| **passed).count();
         let cells = seconds.iter().map(|value| format!("{value:>9.3}")).collect::<Vec<_>>().join(" ");
         println!(
-            "{:<12} {cells} {:>9.3} {:>7.2} {:>8} {:>7}",
+            "{:<20} {cells} {:>9.3} {:>7.2} {:>8} {:>7}",
             arm.label(),
             median(seconds),
             coefficient_of_variation(seconds),
@@ -330,12 +363,17 @@ fn print_table(walls: &BTreeMap<Arm, Vec<f64>>, last: &BTreeMap<Arm, Outcomes>) 
 }
 
 fn print_launch_cost(walls: &BTreeMap<Arm, Vec<f64>>, tests: usize) {
-    let (Some(val), Some(test)) = (walls.get(&Arm::Val), walls.get(&Arm::Test)) else {
-        println!("per-launch cost: unavailable without both cargo test and cargo val");
+    let Some(test) = walls.get(&Arm::Test) else {
+        println!("per-launch cost: unavailable without cargo test");
         return;
     };
-    let microseconds = (median(val) - median(test)) / as_float(tests) * 1e6;
-    println!("per-launch cost: (cargo val median - cargo test median) / {tests} tests = {microseconds:.1} us");
+    for arm in ARMS.into_iter().filter(|arm| !matches!(arm, Arm::Test | Arm::Nextest)) {
+        let Some(val) = walls.get(&arm) else {
+            continue;
+        };
+        let microseconds = (median(val) - median(test)) / as_float(tests) * 1e6;
+        println!("per-launch cost: ({} median - cargo test median) / {tests} tests = {microseconds:.1} us", arm.label());
+    }
 }
 
 fn measure() -> Result<bool, String> {
@@ -351,7 +389,7 @@ fn measure() -> Result<bool, String> {
     );
     generate(&context)?;
     build(&context)?;
-    let arms = ROUNDS[0].iter().copied().filter(|arm| *arm != Arm::Nextest || nextest_available()).collect::<Vec<_>>();
+    let arms = ARMS.iter().copied().filter(|arm| *arm != Arm::Nextest || nextest_available()).collect::<Vec<_>>();
     if !arms.contains(&Arm::Nextest) {
         println!("scale: cargo-nextest not found, skipping the nextest arm");
     }
@@ -362,7 +400,9 @@ fn measure() -> Result<bool, String> {
         check_against_expected(*arm, "warm run", &warm, &expected, &mut problems);
     }
     let mut walls = BTreeMap::<Arm, Vec<f64>>::new();
-    for (round, order) in ROUNDS.iter().enumerate() {
+    for round in 0..ROUNDS {
+        let mut order = ARMS;
+        order.rotate_left(round * 3 % ARMS.len());
         for arm in order.iter().filter(|arm| arms.contains(arm)) {
             let observation = run_arm(*arm, &context)?;
             check_against_expected(*arm, &format!("round {}", round + 1), &observation, &expected, &mut problems);

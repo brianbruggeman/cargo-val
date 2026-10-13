@@ -516,6 +516,7 @@ mod spawn {
         let arguments = Arguments::lower(Launch {
             program,
             arguments,
+            names: &[],
             trailing: &[],
             inherited: environment,
             overrides,
@@ -526,8 +527,9 @@ mod spawn {
 
     /// Spawns one exact test child, lowering its launch into `storage` so the call makes no heap allocation.
     ///
-    /// The child runs `program --exact test_name` followed by `harness_arguments`, in `directory`, with the
-    /// inherited `environment` overlaid by `overrides`.
+    /// The child runs `program --exact name...` followed by `harness_arguments`, in `directory`, with the
+    /// inherited `environment` overlaid by `overrides`. `names` is one test name, or several joined by NUL for a shard;
+    /// each is lowered as its own argument in the same caller-owned storage.
     ///
     /// # Errors
     ///
@@ -536,14 +538,14 @@ mod spawn {
     pub fn spawn_exact(
         storage: &mut LaunchStorage,
         program: &[u8],
-        test_name: &[u8],
+        names: &[u8],
         harness_arguments: &[&[u8]],
         environment: &[&[u8]],
         overrides: &[&[u8]],
         directory: &[u8],
     ) -> Result<Child, ExactError> {
-        let exact_test = [b"--exact".as_slice(), test_name];
-        spawn_stored(storage, program, &exact_test, harness_arguments, environment, overrides, directory)
+        let exact: &[&[u8]] = &[b"--exact"];
+        spawn_stored(storage, program, (exact, names), harness_arguments, environment, overrides, directory)
     }
 
     /// Children beyond the job limit that may wait created and frozen; Unix creation is cheap enough that none do.
@@ -557,13 +559,13 @@ mod spawn {
     pub fn spawn_exact_ready(
         storage: &mut LaunchStorage,
         program: &[u8],
-        test_name: &[u8],
+        names: &[u8],
         harness_arguments: &[&[u8]],
         environment: &[&[u8]],
         overrides: &[&[u8]],
         directory: &[u8],
     ) -> Result<Child, ExactError> {
-        spawn_exact(storage, program, test_name, harness_arguments, environment, overrides, directory)
+        spawn_exact(storage, program, names, harness_arguments, environment, overrides, directory)
     }
 
     /// Starts a child created by [`spawn_exact_ready`]; a Unix child already runs.
@@ -585,13 +587,13 @@ mod spawn {
         directory: &[u8],
     ) -> Result<Child, ExactError> {
         let listing: &[&[u8]] = if ignored { &[b"--list", b"--ignored"] } else { &[b"--list"] };
-        spawn_stored(storage, program, listing, &[], environment, overrides, directory)
+        spawn_stored(storage, program, (listing, &[]), &[], environment, overrides, directory)
     }
 
     fn spawn_stored(
         storage: &mut LaunchStorage,
         program: &[u8],
-        arguments: &[&[u8]],
+        (arguments, names): (&[&[u8]], &[u8]),
         trailing: &[&[u8]],
         environment: &[&[u8]],
         overrides: &[&[u8]],
@@ -601,6 +603,7 @@ mod spawn {
             .lower(Launch {
                 program,
                 arguments,
+                names,
                 trailing,
                 inherited: environment,
                 overrides,
@@ -890,6 +893,53 @@ mod spawn {
             );
             assert_eq!(observed, [0, 0], "an exact test launch must not touch the heap");
         }
+
+        #[test]
+        fn shard_launch_lowers_every_name_into_caller_storage_with_zero_heap_allocations() {
+            const NAMES: &[u8] =
+                b"edge_spawn_unix::spawn::tests::fixture_alpha\0edge_spawn_unix::spawn::tests::fixture_beta";
+            let executable = std::env::current_exe().expect("test executable path exists");
+            let executable_text = executable
+                .to_str()
+                .expect("test executable path is valid UTF-8");
+            let inherited_storage = inherited_environment();
+            let inherited = inherited_storage.iter().map(String::as_bytes).collect::<Vec<_>>();
+            let mut storage = LaunchStorage::default();
+            let mut observed = Vec::new();
+
+            for _ in 0..2 {
+                let (result, allocations) = crate::test_alloc::measure_allocations(|| {
+                    spawn_exact(
+                        &mut storage,
+                        executable_text.as_bytes(),
+                        NAMES,
+                        &[b"--test-threads=1"],
+                        &inherited,
+                        &[],
+                        b"/",
+                    )
+                });
+                let child = result.expect("shard child should launch");
+                let mut status = 0;
+                assert_eq!(
+                    unsafe { libc::waitpid(child.process_id().cast_signed(), &raw mut status, 0) },
+                    child.process_id().cast_signed()
+                );
+                let mut stdout_bytes = [0; 8192];
+                let stdout_count = read_capture(child.stdout().raw(), &mut stdout_bytes);
+                let stdout = std::string::String::from_utf8_lossy(&stdout_bytes[..stdout_count]).into_owned();
+                assert_eq!(status, 0, "{stdout}");
+                assert!(stdout.contains("running 2 tests"), "{stdout}");
+                assert!(stdout.contains("tests::fixture_alpha ... ok"), "{stdout}");
+                assert!(stdout.contains("tests::fixture_beta ... ok"), "{stdout}");
+                observed.push(allocations);
+            }
+
+            assert_eq!(observed, [0, 0], "a shard launch must not touch the heap");
+        }
+
+        #[test]
+        fn fixture_beta() {}
 
         #[test]
         fn c38c_setup_spawn_allocates_its_launch_once() {

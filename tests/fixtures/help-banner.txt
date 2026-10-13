@@ -14,6 +14,8 @@ Options:
                    Stop launching tests after N failures (N >= 1); --fail-fast is N = 1
       --no-tests <fail|warn|pass>
                    What a run that selects zero tests does (default: fail)
+      --process <auto|shard|test>
+                   Tests per OS process: shard groups them, test runs one each (default: auto)
   -E, --filterset <EXPR>
                    Select tests with a nextest filterset subset (see below)
       --target-dir <isolated|shared|PATH>
@@ -32,7 +34,7 @@ Test concurrency, highest precedence first (valid range 1..=64):
   1. --test-threads <N> after `--`
   2. RUST_TEST_THREADS
   3. CARGO_VAL_JOBS
-  4. the build-time default (CARGO_VAL_BUILD_JOBS)
+  4. the build-time default (CARGO_VAL_BUILD_JOBS; shard mode: CARGO_VAL_BUILD_SHARD_JOBS, default 2x the cores)
 
 Stop policy, highest precedence first (default: fail fast, --max-fail 1):
   1. --fail-fast, --no-fail-fast, or --max-fail <N> (the last one given wins)
@@ -46,6 +48,15 @@ No-tests policy, highest precedence first (default: fail):
   2. CARGO_VAL_NO_TESTS
 fail and warn print "no tests to run" with the selection to stderr; fail exits 4,
 warn and pass exit 0.
+
+Process mode, highest precedence first (default: auto):
+  1. --process <auto|shard|test>
+  2. CARGO_VAL_PROCESS
+  3. the build-time default (CARGO_VAL_BUILD_PROCESS)
+auto shards on a Windows target and runs one test per process elsewhere. A shard child
+runs a contiguous group of a binary's tests (about one child per job; fewer names when
+the command line limit is reached) and every test is still reported on its own line; a
+test that takes its process down is reported FAIL and the tests behind it run again.
 
 Ignored tests: `#[ignore]`d tests are listed per test binary with `--list --ignored`, are
 not launched by default, and are reported IGNORED and counted separately. CARGO_VAL_IGNORED

@@ -14,14 +14,13 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent};
 
-use crate::edge_spawn_windows::terminate_children;
+use crate::edge_spawn_windows::{STATUS_CONTROL_C_EXIT, terminate_children};
 
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
 const CONVENTIONAL_BASE: i32 = 128;
 const GROUP_CAPACITY: usize = 8;
 const ERROR_ALREADY_EXISTS: i32 = 183;
-const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
 
 // the handler runs on a system thread and can only reach process-global state; 0 means no event is installed
 static EVENT: AtomicUsize = AtomicUsize::new(0);

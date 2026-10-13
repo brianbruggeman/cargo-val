@@ -2207,7 +2207,7 @@ mod spawn {
         Spawn(SpawnError),
     }
 
-    /// Spawns one exact test child as `program --exact test_name` followed by `harness_arguments`.
+    /// Spawns one exact test child as `program --exact name...` followed by `harness_arguments`; `names` is one name, or several joined by NUL for a shard.
     ///
     /// # Errors
     ///
@@ -2215,13 +2215,13 @@ mod spawn {
     pub fn spawn_exact(
         storage: &mut LaunchStorage,
         program: &[u8],
-        test_name: &[u8],
+        names: &[u8],
         harness_arguments: &[&[u8]],
         environment: &[&[u8]],
         overrides: &[&[u8]],
         directory: &[u8],
     ) -> Result<Child, ExactError> {
-        exact(storage, (program, test_name, harness_arguments), (environment, overrides, directory), Start::Now)
+        exact(storage, (program, names, harness_arguments), (environment, overrides, directory), Start::Now)
     }
 
     /// Creates one exact test child frozen inside the run job; [`Child::resume`] starts it, and an interrupt ends it with the job.
@@ -2232,13 +2232,13 @@ mod spawn {
     pub fn spawn_exact_ready(
         storage: &mut LaunchStorage,
         program: &[u8],
-        test_name: &[u8],
+        names: &[u8],
         harness_arguments: &[&[u8]],
         environment: &[&[u8]],
         overrides: &[&[u8]],
         directory: &[u8],
     ) -> Result<Child, ExactError> {
-        exact(storage, (program, test_name, harness_arguments), (environment, overrides, directory), Start::Ready)
+        exact(storage, (program, names, harness_arguments), (environment, overrides, directory), Start::Ready)
     }
 
     /// How many children beyond the job limit may wait created and frozen, so process creation overlaps a running child.
@@ -2251,12 +2251,12 @@ mod spawn {
 
     fn exact(
         storage: &mut LaunchStorage,
-        (program, test_name, harness_arguments): (&[u8], &[u8], &[&[u8]]),
+        (program, names, harness_arguments): (&[u8], &[u8], &[&[u8]]),
         context: (&[&[u8]], &[&[u8]], &[u8]),
         start: Start,
     ) -> Result<Child, ExactError> {
-        let arguments = [b"--exact".as_slice(), test_name]
-            .into_iter()
+        let arguments = core::iter::once(b"--exact".as_slice())
+            .chain(names.split(|byte| *byte == 0).filter(|name| !name.is_empty()))
             .chain(harness_arguments.iter().copied());
         storage.launch(program, arguments, context, (run_job()?, start))
     }

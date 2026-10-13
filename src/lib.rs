@@ -31,6 +31,11 @@ pub mod line;
 pub mod metadata_scan;
 pub mod parked_artifacts;
 pub mod schedule;
+pub mod sched_binary;
+#[cfg(feature = "edge-os")]
+pub mod sched_file;
+pub mod shard_sched;
+pub mod shard_arena;
 pub mod stop;
 pub mod summary;
 pub mod test_environment;

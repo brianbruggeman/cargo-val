@@ -1,0 +1,10 @@
+[package]
+name = "cargo_val_sched_overlap_fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+proxima = { git = "https://github.com/brianbruggeman/proxima.git", rev = "44b18bc95a00d893eb2ecb45cf4d260a3eb4086b", version = "0.1.0", default-features = false, features = ["test-support-tokio"] }

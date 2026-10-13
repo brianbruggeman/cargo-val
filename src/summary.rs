@@ -58,6 +58,8 @@ pub enum Tally {
     Passed,
     Failed,
     Skipped,
+    /// A launched test that a stopped run never ran: it leaves the discovered count it entered at launch.
+    Withdrawn,
 }
 
 impl TargetTable {
@@ -115,6 +117,7 @@ impl TargetTable {
             Tally::Passed => counts.passed += 1,
             Tally::Failed => counts.failed += 1,
             Tally::Skipped => counts.ignored += 1,
+            Tally::Withdrawn => counts.discovered = counts.discovered.saturating_sub(1),
         }
     }
 

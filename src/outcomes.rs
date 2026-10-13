@@ -102,7 +102,16 @@ impl<'sessions, T, const CAPACITY: usize> OutcomeLedger<'sessions, T, CAPACITY> 
     ///
     /// Returns [`StartError`] carrying the child back when a counter overflows or the live table is full.
     pub fn start(&mut self, child: T) -> Result<SessionSlotId, StartError<T>> {
-        let Some(next_discovered) = self.counts.discovered.checked_add(1) else {
+        self.start_many(child, 1)
+    }
+
+    /// Inserts a child that runs `names` selected tests, counting each as discovered; each later reaches a terminal count through [`Self::count`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartError`] carrying the child back when a counter overflows or the live table is full.
+    pub fn start_many(&mut self, child: T, names: usize) -> Result<SessionSlotId, StartError<T>> {
+        let Some(next_discovered) = self.counts.discovered.checked_add(names) else {
             return Err(StartError {
                 error: OutcomeError::CountOverflow,
                 child,
@@ -178,6 +187,38 @@ impl<'sessions, T, const CAPACITY: usize> OutcomeLedger<'sessions, T, CAPACITY> 
         let child = self.live.remove(slot).ok_or(OutcomeError::UnknownSession)?;
         *count = next;
         Ok(child)
+    }
+
+    /// Counts one terminal result for a test whose child keeps running other tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutcomeError::CountOverflow`] when the category counter would overflow.
+    pub fn count(&mut self, outcome: TerminalOutcome) -> Result<(), OutcomeError> {
+        let count = match outcome {
+            TerminalOutcome::Passed => &mut self.counts.passed,
+            TerminalOutcome::Failed => &mut self.counts.failed,
+            TerminalOutcome::Ignored => &mut self.counts.ignored,
+        };
+        increment(count)
+    }
+
+    /// Retires a child whose tests were counted one by one.
+    pub fn retire(&mut self, slot: SessionSlotId) -> Option<T> {
+        self.live.remove(slot)
+    }
+
+    /// Takes `names` back out of the discovered count: tests that were never run, or that will be counted again by a relaunch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutcomeError::CountOverflow`] when fewer names than that are unaccounted.
+    pub fn withdraw(&mut self, names: usize) -> Result<(), OutcomeError> {
+        if names > self.unaccounted() {
+            return Err(OutcomeError::CountOverflow);
+        }
+        self.counts.discovered -= names;
+        Ok(())
     }
 
     /// Returns the current category counts and remaining unaccounted names.
