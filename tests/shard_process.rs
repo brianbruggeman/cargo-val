@@ -42,8 +42,8 @@ fn scratch(label: &str) -> PathBuf {
     directory
 }
 
-fn fixture_target(fixture: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target").join(fixture)
+fn fixture_target() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target")
 }
 
 fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
@@ -64,7 +64,7 @@ fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment: &[(&
         .env_remove("CARGO_VAL_PROCESS")
         .env("NO_COLOR", "1")
         .env("CARGO_VAL_SHARD_LOG", &log)
-        .env("CARGO_TARGET_DIR", fixture_target(fixture))
+        .env("CARGO_TARGET_DIR", fixture_target())
         .envs(environment.iter().copied())
         .output()
         .expect("cargo-val binary is spawnable");
@@ -429,9 +429,9 @@ fn an_abort_before_any_test_runs_each_name_alone_after_one_shard_child_per_shard
 fn a_full_shard_that_aborts_at_its_first_test_gives_every_name_exactly_one_solo_run() {
     let run = run_fixture(MANY, "many", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "1")]);
 
-    assert_eq!(run.status, Some(1), "stderr tail: {}", run.stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n"));
-    assert_eq!(run.lines_ending("FAIL").len(), MANY_NAMES, "every name is counted once");
-    assert_eq!(run.lines_ending("PASS").len(), 0);
+    assert_eq!(run.status, Some(0), "stderr tail: {}", run.stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n"));
+    assert_eq!(run.lines_ending("PASS").len(), MANY_NAMES, "every name passes in its solo run, counted once");
+    assert_eq!(run.lines_ending("FAIL").len(), 0, "{}", run.stdout.lines().take(5).collect::<Vec<_>>().join("\n"));
     assert_eq!(run.pids.len(), MANY_NAMES + 1, "one shard child, then exactly one solo child per name");
     assert!(!run.stderr.contains("could not queue"), "{}", run.stderr.lines().take(5).collect::<Vec<_>>().join("\n"));
 }
@@ -519,7 +519,7 @@ fn interrupt_ends_blocked_child(process: &str, label: &str) {
         .env("CARGO_VAL_SHARD_READY", &ready)
         .env("CARGO_VAL_SHARD_HOLD", &hold)
         .env("CARGO_VAL_SHARD_IGNORE_INT", "1")
-        .env("CARGO_TARGET_DIR", fixture_target(SHARD))
+        .env("CARGO_TARGET_DIR", fixture_target())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
