@@ -15,8 +15,8 @@ const IGNORED_FLOOD_COUNT: usize = 2500;
 const PIPE_CEILING_BYTES: usize = 65_536;
 const WAIT_MILLISECONDS: i32 = 300_000;
 const CHUNK_BYTES: usize = 8_192;
-#[cfg(target_os = "linux")]
-const LINUX_PIPE_BYTES: libc::c_int = 4096;
+const FLOOD_PIPE_BYTES: libc::c_int = 4096;
+const RUN_PIPE_BYTES: libc::c_int = 65_536;
 
 struct Running(Child);
 
@@ -47,14 +47,8 @@ fn make_fifo(path: &Path) {
 }
 
 #[cfg(target_os = "linux")]
-fn shrink_pipe(writer: &PipeWriter) {
-    let resized = unsafe {
-        libc::fcntl(
-            writer.as_raw_fd(),
-            libc::F_SETPIPE_SZ,
-            LINUX_PIPE_BYTES,
-        )
-    };
+fn size_pipe(writer: &PipeWriter, bytes: libc::c_int) {
+    let resized = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETPIPE_SZ, bytes) };
     assert!(
         resized >= 0,
         "F_SETPIPE_SZ: {}",
@@ -63,7 +57,7 @@ fn shrink_pipe(writer: &PipeWriter) {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn shrink_pipe(_writer: &PipeWriter) {}
+fn size_pipe(_writer: &PipeWriter, _bytes: libc::c_int) {}
 
 fn await_readable(descriptor: libc::c_int, label: &str) {
     let mut watched = libc::pollfd {
@@ -163,7 +157,8 @@ fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drain() {
         .expect("done fifo opens read-write so the reader never sees EOF");
 
     let (mut stdout, stdout_writer) = std::io::pipe().expect("stdout pipe is creatable");
-    shrink_pipe(&stdout_writer);
+    // the pump pauses once its status queue is full, so pipe plus queue must hold the fixture's whole stdout for every test to run unread
+    size_pipe(&stdout_writer, RUN_PIPE_BYTES);
     let mut running = Running(spawn_cargo_val(&directory, "full_stdout", stdout_writer));
 
     let names = collect_done_names(&mut done);
@@ -212,7 +207,7 @@ fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_order_
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).expect("run directory is creatable");
     let (mut stdout, stdout_writer) = std::io::pipe().expect("stdout pipe is creatable");
-    shrink_pipe(&stdout_writer);
+    size_pipe(&stdout_writer, FLOOD_PIPE_BYTES);
     let mut running = Running(spawn_cargo_val(&directory, "ignored_flood", stdout_writer));
 
     await_readable(stdout.as_raw_fd(), "stdout");
