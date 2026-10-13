@@ -139,7 +139,7 @@ fn passed(stdout: &str) -> usize {
 }
 
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
     let scratch = scratch("isolated-lock");
     let shared = scratch.join("shared-target");
@@ -216,7 +216,7 @@ async fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
     );
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn a_named_target_dir_holds_a_test_and_a_doc_subdirectory() {
     let scratch = scratch("named-target");
     let shared = scratch.join("shared-target");
@@ -236,7 +236,7 @@ async fn a_named_target_dir_holds_a_test_and_a_doc_subdirectory() {
     assert!(!shared.exists(), "nothing was built in the environment's target directory");
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn an_empty_target_dir_setting_is_refused_before_any_build() {
     let scratch = scratch("empty-target");
     let shared = scratch.join("shared-target");

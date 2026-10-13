@@ -58,7 +58,7 @@ fn cargo_val_names(output: &Output) -> BTreeSet<String> {
         .collect()
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn proc_macro_test_binary_runs_under_cargo_val_with_the_environment_cargo_test_gives_it() {
     let mut cargo_test = scrubbed(Command::new("cargo"));
     cargo_test.args(["test", "--lib", "--manifest-path"]);

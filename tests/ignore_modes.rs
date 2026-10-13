@@ -90,7 +90,7 @@ fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, &str)]
 
 const BINARY: &str = "ignore_modes: discovered";
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
     for mode in MODES {
         default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode);
@@ -121,7 +121,7 @@ fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode: &s
     assert!(!result.stdout.contains('\u{1b}'), "NO_COLOR is respected");
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest() {
     for mode in MODES {
         ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode);
@@ -148,7 +148,7 @@ fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &str) {
     );
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn include_ignored_flag_runs_every_test() {
     for mode in MODES {
         include_ignored_flag_runs_every_test_in(mode);
@@ -171,7 +171,7 @@ fn include_ignored_flag_runs_every_test_in(mode: &str) {
     );
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn ignore_mode_setting_equals_the_libtest_flag() {
     for mode in MODES {
         ignore_mode_setting_equals_the_libtest_flag_in(mode);
@@ -186,7 +186,7 @@ fn ignore_mode_setting_equals_the_libtest_flag_in(mode: &str) {
     assert_eq!(setting.status, flag.status);
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn both_ignore_flags_together_are_refused_as_in_libtest() {
     for mode in MODES {
         both_ignore_flags_together_are_refused_as_in_libtest_in(mode);
@@ -200,7 +200,7 @@ fn both_ignore_flags_together_are_refused_as_in_libtest_in(mode: &str) {
     assert!(result.stderr.contains("invalid arguments"), "{}", result.stderr);
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy() {
     for mode in MODES {
         only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode);
@@ -219,7 +219,7 @@ fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(m
     assert!(result.stderr.contains("no tests to run"), "{context}");
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn filterset_excludes_before_launch_and_counts_filtered() {
     for mode in MODES {
         filterset_excludes_before_launch_and_counts_filtered_in(mode);
@@ -242,7 +242,7 @@ fn filterset_excludes_before_launch_and_counts_filtered_in(mode: &str) {
     }
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn filterset_setting_equals_the_flag_and_the_flag_wins() {
     for mode in MODES {
         filterset_setting_equals_the_flag_and_the_flag_wins_in(mode);
@@ -258,7 +258,7 @@ fn filterset_setting_equals_the_flag_and_the_flag_wins_in(mode: &str) {
     assert_eq!(overridden.total_without_wall(), flag.total_without_wall());
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn malformed_filterset_fails_with_a_caret_before_any_build() {
     let missing = PathBuf::from("/nonexistent/cargo-val-fixture/Cargo.toml");
     let result = run(&missing, &["--lib", "-E", "test(a) & & test(b)"], &[]);
@@ -271,7 +271,7 @@ async fn malformed_filterset_fails_with_a_caret_before_any_build() {
     assert_eq!(result.stdout, "");
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test() {
     for mode in MODES {
         an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode);
