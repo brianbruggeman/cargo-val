@@ -323,7 +323,14 @@ fn run_stop_policy_fixture(
     environment: &[(&str, &str)],
     probe: &PathBuf,
 ) -> Run {
-    run_fixture(STOP_POLICY, arguments, environment, Some(probe))
+    run_fixture(STOP_POLICY, &per_test(arguments), environment, Some(probe))
+}
+
+fn per_test<'a>(arguments: &[&'a str]) -> Vec<&'a str> {
+    ["--process", "test"]
+        .into_iter()
+        .chain(arguments.iter().copied())
+        .collect()
 }
 
 fn max_live(run: &Run, probe: &PathBuf) -> (usize, usize) {
@@ -339,7 +346,7 @@ fn max_live(run: &Run, probe: &PathBuf) -> (usize, usize) {
 }
 
 fn run_stopping(arguments: &[&str], environment: &[(&str, &str)]) -> Run {
-    run_fixture(STOP_POLICY, arguments, environment, None)
+    run_fixture(STOP_POLICY, &per_test(arguments), environment, None)
 }
 
 const THREE_FAILING: (&str, &str) = ("CARGO_VAL_FIXTURE_FAILING", "case_01,case_02,case_03");
@@ -665,9 +672,9 @@ fn c68_doc_test_counts_equal_cargo_test_doc_for_the_same_fixture() {
 fn c68_failing_doc_test_output_is_shown_like_other_failures() {
     let run = run_fixture(DOC_FIXTURE, &["--doc"], &[], None);
 
+    let stderr = run.stderr.replace('\\', "/");
     assert!(
-        run.stderr
-            .contains("---- src/lib.rs - subtract (line 12) stdout ----"),
+        stderr.contains("---- src/lib.rs - subtract (line 12) stdout ----"),
         "{}",
         run.stderr
     );
