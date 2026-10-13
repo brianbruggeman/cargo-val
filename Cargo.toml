@@ -2,6 +2,20 @@
 name = "cargo-val"
 version = "0.1.0"
 edition = "2024"
+description = "A Proxima-based Cargo test runner, invoked as cargo val."
+repository = "https://github.com/brianbruggeman/cargo-val"
+readme = "README.md"
+keywords = ["cargo", "test", "runner", "testing", "cli"]
+categories = ["development-tools::testing", "development-tools::cargo-plugins", "command-line-utilities"]
+include = [
+    "src/**",
+    "/build.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE*",
+    "/tests/fixtures/help-banner.txt",
+]
 
 [[bin]]
 name = "cargo-val"
