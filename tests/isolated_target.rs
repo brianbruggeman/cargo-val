@@ -1,14 +1,24 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self};
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::{Child, Stdio};
+#[cfg(unix)]
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::time::Duration;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
+#[cfg(unix)]
 const WAIT_LINE: &str = "cargo-val: waiting for ";
+#[cfg(unix)]
 const WAIT_LINE_DEADLINE: Duration = Duration::from_secs(240);
 
+#[cfg(unix)]
 const HOLDER_MANIFEST: &str = r#"[package]
 name = "lock_holder"
 version = "0.1.0"
@@ -16,6 +26,7 @@ edition = "2024"
 build = "build.rs"
 "#;
 
+#[cfg(unix)]
 const HOLDER_BUILD_SCRIPT: &str = r#"use std::io::Read;
 
 fn main() {
@@ -26,11 +37,13 @@ fn main() {
 }
 "#;
 
+#[cfg(unix)]
 struct Holder {
     child: Child,
     release: File,
 }
 
+#[cfg(unix)]
 impl Holder {
     fn release(self) {
         let Self { mut child, release } = self;
@@ -55,6 +68,7 @@ fn scratch(label: &str) -> PathBuf {
 }
 
 // the build script blocks reading a fifo, so the build lock is held until the harness closes the writer; no timing is involved
+#[cfg(unix)]
 fn hold_build_lock(scratch: &Path, shared_target: &Path) -> Holder {
     let holder = scratch.join("holder");
     fs::write(holder.join("Cargo.toml"), HOLDER_MANIFEST).expect("holder manifest is writable");
@@ -103,6 +117,7 @@ fn cargo_val(scratch: &Path, shared_target: &Path, arguments: &[&str]) -> Comman
 }
 
 // cargo 1.99 holds separate locks for the artifact and build directories; the package cache lock is global and is not under test
+#[cfg(unix)]
 fn directory_wait(line: &str) -> bool {
     line.starts_with(WAIT_LINE) && !line.contains("package cache")
 }
@@ -119,6 +134,7 @@ fn passed(stdout: &str) -> usize {
     counted.parse().expect("passed is a count")
 }
 
+#[cfg(unix)]
 #[test]
 fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
     let scratch = scratch("isolated-lock");
@@ -144,6 +160,7 @@ fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
     holder.release();
 }
 
+#[cfg(unix)]
 #[test]
 fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
     let scratch = scratch("shared-lock");
