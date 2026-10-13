@@ -23,6 +23,11 @@ use std::time::Duration;
 mod common;
 
 use common::fixture_output;
+#[cfg(unix)]
+#[path = "common/supervise.rs"]
+mod supervise;
+#[cfg(unix)]
+use supervise::supervised;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const SHARD: &str = "shard";
@@ -511,14 +516,14 @@ async fn a_stray_ok_line_is_settled_once_at_two_jobs_too() {
 
 // sigint delivery and fifo rendezvous
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn an_interrupt_ends_a_blocked_shard_child_and_cargo_val_exits_promptly() {
     interrupt_ends_blocked_child("shard", "interrupt-shard");
 }
 
 // sigint delivery and fifo rendezvous
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly() {
     interrupt_ends_blocked_child("test", "interrupt-test");
 }
@@ -535,7 +540,9 @@ fn interrupt_ends_blocked_child(process: &str, label: &str) {
     make_fifo(&ready);
     make_fifo(&hold);
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shard/Cargo.toml");
-    let child = Command::new(CARGO_VAL)
+    let stderr_path = directory.join("stderr");
+    let mut command = Command::new(CARGO_VAL);
+    command
         .arg("--manifest-path")
         .arg(manifest)
         .args(["--process", process, "--no-fail-fast"])
@@ -550,40 +557,34 @@ fn interrupt_ends_blocked_child(process: &str, label: &str) {
         .env("CARGO_VAL_SHARD_HOLD", &hold)
         .env("CARGO_VAL_SHARD_IGNORE_INT", "1")
         .env("CARGO_TARGET_DIR", &interrupt_target)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("cargo-val binary is spawnable");
-    let cargo_val = libc::pid_t::try_from(child.id()).expect("pid fits pid_t");
-    let (pid_sender, pid_receiver) = mpsc::channel();
-    let (exit_sender, exit_receiver) = mpsc::channel();
-    let ready_path = ready.clone();
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = File::open(ready_path).and_then(|mut file| file.read_to_string(&mut text));
-        let _ = pid_sender.send(text);
+        .stdout(Stdio::null())
+        .stderr(File::create(&stderr_path).expect("stderr file is creatable"));
+    let (shard_pid, signalled, exit) = supervised(&mut command, |leader, _, _, exit| {
+        let cargo_val = libc::pid_t::try_from(leader).expect("pid fits pid_t");
+        let (pid_sender, pid_receiver) = mpsc::channel();
+        let ready_path = ready.clone();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = File::open(ready_path).and_then(|mut file| file.read_to_string(&mut text));
+            let _ = pid_sender.send(text);
+        });
+        let shard_text = pid_receiver.recv_timeout(DEADLINE);
+        let shard_pid = shard_text.as_deref().ok().and_then(|text| text.trim().parse::<libc::pid_t>().ok());
+        let signalled = shard_pid.map(|_| unsafe { libc::kill(cargo_val, libc::SIGINT) });
+        let exit = exit.recv_timeout(DEADLINE);
+        if let Some(pid) = shard_pid.filter(|pid| alive(*pid)) {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        (shard_pid, signalled, exit)
     });
-    std::thread::spawn(move || {
-        let _ = exit_sender.send(child.wait_with_output());
-    });
-
-    let shard_text = pid_receiver.recv_timeout(DEADLINE);
-    let shard_pid = shard_text.as_deref().ok().and_then(|text| text.trim().parse::<libc::pid_t>().ok());
-    let signalled = shard_pid.map(|_| unsafe { libc::kill(cargo_val, libc::SIGINT) });
-    let exit = exit_receiver.recv_timeout(DEADLINE);
-    if exit.is_err() {
-        unsafe { libc::kill(cargo_val, libc::SIGKILL) };
-    }
-    if let Some(pid) = shard_pid.filter(|pid| alive(*pid)) {
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
 
     let shard_pid = shard_pid.expect("the shard child reported its pid before the deadline");
     assert_eq!(signalled, Some(0), "sigint reached cargo-val");
-    let output = exit
+    let status = exit
         .expect("cargo-val exits within the deadline after sigint")
-        .expect("cargo-val output is collectable");
-    assert_eq!(output.status.code(), Some(INTERRUPT_STATUS), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        .expect("cargo-val exit status is collectable");
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert_eq!(status.code(), Some(INTERRUPT_STATUS), "stderr: {stderr}");
     let logged = fs::read_to_string(&log).unwrap_or_default();
     assert!(logged.lines().any(|line| line == shard_pid.to_string()), "the logged shard pid is the one that reported: {logged}");
     assert!(!alive(shard_pid), "no shard child survives the interrupt");

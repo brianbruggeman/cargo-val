@@ -1,11 +1,19 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 mod common;
 
-use common::fixture_output;
+use common::{fixture_output, output_within};
+
+#[cfg(unix)]
+#[path = "common/supervise.rs"]
+mod supervise;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
+
+// the help screen is printed by the already-built binary with no build and no wait; 30 s stays inside the 60 s body timeout
+const HELP_DEADLINE: Duration = Duration::from_secs(30);
 
 struct Run {
     status: Option<i32>,
@@ -296,9 +304,13 @@ mod bin_gate_hold {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::sync::mpsc::TryRecvError;
     use std::thread;
+    use std::time::Instant;
 
     use super::{CARGO_VAL, Run, manifest, target_directory};
+    use crate::common::FIXTURE_DEADLINE;
+    use crate::supervise::supervised;
 
     const TEST_FAILED_LINE: &str = "the_bin_target_exists_when_the_test_starts FAIL";
 
@@ -373,18 +385,28 @@ mod bin_gate_hold {
         for (key, value) in environment {
             command.env(key, value);
         }
-        let mut child = command.spawn().expect("cargo-val binary is spawnable");
         let deps = target.join("debug/deps");
-        let status = loop {
-            if let Some(status) = child.try_wait().expect("cargo-val is pollable") {
-                break status;
+        let status = supervised(&mut command, |_, _, _, exit| {
+            let deadline = Instant::now() + FIXTURE_DEADLINE;
+            let mut released = false;
+            loop {
+                match exit.try_recv() {
+                    Ok(waited) => break waited.expect("cargo-val is waitable"),
+                    Err(TryRecvError::Disconnected) => panic!("the wait thread vanished"),
+                    Err(TryRecvError::Empty) => {}
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "cargo-val outlived {FIXTURE_DEADLINE:?} (released={released}); stdout so far:\n{}",
+                    std::fs::read_to_string(&stdout_path).unwrap_or_default()
+                );
+                if !released && observed(release, &deps, &stdout_path) {
+                    release_bin_build(&fifo);
+                    released = true;
+                }
+                thread::yield_now();
             }
-            if observed(release, &deps, &stdout_path) {
-                release_bin_build(&fifo);
-                break child.wait().expect("cargo-val is waitable");
-            }
-            thread::yield_now();
-        };
+        });
         let run = Run {
             status: status.code(),
             stdout: std::fs::read_to_string(&stdout_path).expect("stdout is readable"),
@@ -396,7 +418,7 @@ mod bin_gate_hold {
 }
 
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
     let result = bin_gate_hold::cold_run("on", &[], bin_gate_hold::Release::AfterTestArtifactLinks);
     let context = format!("{}{}", result.stdout, result.stderr);
@@ -411,7 +433,7 @@ async fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
 }
 
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build() {
     let result = bin_gate_hold::cold_run(
         "broken",
@@ -439,7 +461,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
 }
 
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn the_same_fixture_fails_with_the_bin_gate_off() {
     let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails);
     let failed = result
@@ -455,10 +477,7 @@ async fn the_same_fixture_fails_with_the_bin_gate_off() {
 
 #[proxima::test]
 async fn help_prints_the_banner_file_and_documents_the_new_options() {
-    let output = Command::new(CARGO_VAL)
-        .arg("--help")
-        .output()
-        .expect("cargo-val binary is spawnable");
+    let output = output_within(Command::new(CARGO_VAL).arg("--help"), HELP_DEADLINE).unwrap_or_else(|failure| panic!("{failure}"));
     let banner = include_str!("fixtures/help-banner.txt");
 
     assert_eq!(output.status.code(), Some(0));
@@ -493,7 +512,7 @@ fn gate_lines(stderr: &str) -> Vec<String> {
 }
 
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() {
     let result = bin_gate_hold::cold_run(
         "lines",
@@ -517,7 +536,7 @@ async fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() 
 }
 
 #[cfg(unix)]
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn gate_debug_lines_for_park_then_failed_build_then_drop_are_byte_exact() {
     let result = bin_gate_hold::cold_run(
         "drop-lines",
