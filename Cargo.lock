@@ -131,12 +131,12 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 name = "cargo-val"
 version = "0.1.0"
 dependencies = [
- "conflaguration 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "conflaguration",
  "libc",
  "memchr",
- "prime",
  "proxima-codec",
  "proxima-core",
+ "proxima-prime",
  "proxima-primitives",
  "proxima-runtime",
  "serde_json",
@@ -185,19 +185,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9145383355edcdaa0e4c6d2b42bafdd244ab5e7049aced3431f28d0dedcf26c"
 dependencies = [
  "conflaguration-core",
- "conflaguration-derive 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "conflaguration-derive",
  "environs",
- "thiserror",
-]
-
-[[package]]
-name = "conflaguration"
-version = "2.0.0"
-source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d84fc291df35528e6781b5b814884e2d28"
-dependencies = [
- "conflaguration-derive 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
- "environs",
- "memchr",
  "serde",
  "serde-value",
  "thiserror",
@@ -215,16 +204,6 @@ name = "conflaguration-derive"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a60de5c78c5e03d8f928a66c78245819db6420587dbb234eef1bac58bff114b4"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "conflaguration-derive"
-version = "2.0.0"
-source = "git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d84fc291df35528e6781b5b814884e2d28"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -957,13 +936,92 @@ dependencies = [
 ]
 
 [[package]]
-name = "prime"
+name = "proc-macro2"
+version = "1.0.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
+name = "proxima-build"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0df25067385598ff6a0291399d9be8e7a4fa53f8c78424ae84f2cde9ef936a05"
+dependencies = [
+ "conflaguration",
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "proxima-clock"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ee71d600d494c5a5ac09d5d793f7b7b27e07e0ebed05cd753d688b294746745"
+dependencies = [
+ "proxima-primitives",
+]
+
+[[package]]
+name = "proxima-codec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37f47b733914794e3eda35ca387de6c146b7bb24b1d2ffc0580ee17b4c942322"
+dependencies = [
+ "bytes",
+ "memchr",
+ "proxima-core",
+ "thiserror",
+]
+
+[[package]]
+name = "proxima-config"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ffa541e12fef7a264e6a53f7592877c6d5601d4d76692118252dcaa674afe54"
+dependencies = [
+ "arc-swap",
+ "proxima-core",
+ "regex",
+ "serde",
+ "serde-value",
+ "serde_json",
+ "thiserror",
+ "time",
+ "toml",
+ "url",
+]
+
+[[package]]
+name = "proxima-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b78fa81b6cc7a3d9e5fb4dc1e1e1fb5fb8b713e25e6d0af076f3b367c5324e5"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "crossbeam-queue",
+ "futures",
+ "futures-timer",
+ "pin-project-lite",
+ "proxima-build",
+ "smallvec",
+ "thiserror",
+ "thread_local",
+]
+
+[[package]]
+name = "proxima-prime"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1542cffe812790b2cfee5c43211c828c24490cb0c8b65d4ccd8bd81b0d7fefd"
 dependencies = [
  "arc-swap",
  "atomic-waker",
- "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
+ "conflaguration",
  "core_affinity",
  "crossbeam-deque",
  "crossbeam-queue",
@@ -985,82 +1043,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "proc-macro2"
-version = "1.0.107"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
-dependencies = [
- "unicode-ident",
-]
-
-[[package]]
-name = "proxima-build"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
-dependencies = [
- "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
- "serde",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "proxima-clock"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
-dependencies = [
- "proxima-primitives",
-]
-
-[[package]]
-name = "proxima-codec"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
-dependencies = [
- "bytes",
- "memchr",
- "proxima-core",
- "thiserror",
-]
-
-[[package]]
-name = "proxima-config"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
-dependencies = [
- "arc-swap",
- "proxima-core",
- "regex",
- "serde",
- "serde-value",
- "serde_json",
- "thiserror",
- "time",
- "toml",
- "url",
-]
-
-[[package]]
-name = "proxima-core"
-version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
-dependencies = [
- "arc-swap",
- "bytes",
- "crossbeam-queue",
- "futures",
- "futures-timer",
- "pin-project-lite",
- "proxima-build",
- "smallvec",
- "thiserror",
- "thread_local",
-]
-
-[[package]]
 name = "proxima-primitives"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2e9a260bbd0db0e84c6cb66784034edc07142194863033dc2201589c23ca8c8"
 dependencies = [
  "arc-swap",
  "arrayvec",
@@ -1069,7 +1055,7 @@ dependencies = [
  "async-lock",
  "bon",
  "bytes",
- "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
+ "conflaguration",
  "crossbeam-queue",
  "event-listener",
  "fastrand",
@@ -1094,7 +1080,8 @@ dependencies = [
 [[package]]
 name = "proxima-runtime"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e30958a461dee6bb0ce07a41f1b9bf65e3a126c60c70840456c7ee811e1c77b0"
 dependencies = [
  "proxima-core",
  "thiserror",
@@ -1103,12 +1090,13 @@ dependencies = [
 [[package]]
 name = "proxima-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/brianbruggeman/proxima.git?rev=36c730f5a5a89126a7d5710fe76267f21bf07204#36c730f5a5a89126a7d5710fe76267f21bf07204"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bfd1a44986cec253cd11df27e138fad9ca77bc8e5a74da345335dd5f8ce2402"
 dependencies = [
  "arc-swap",
  "bon",
  "bytes",
- "conflaguration 2.0.0 (git+https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28)",
+ "conflaguration",
  "crossbeam-queue",
  "dashmap",
  "fastrand",
