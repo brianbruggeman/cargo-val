@@ -38,12 +38,12 @@ use std::sync::OnceLock;
 use std::time::Instant;
 use std::vec::Vec;
 use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
+use crate::status_queue::{self, EVENT_RESERVE};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
 use crate::edge_signal::{
     SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group,
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
-use crate::edge_output;
 use crate::edge_spawn::{
     ArgumentsError, Child, HeldLaunchStorage, LaunchStorage, READY_AHEAD, SpawnError, held_launch_storage, resume_ready, spawn,
     spawn_in_group, spawn_listed,
@@ -88,7 +88,7 @@ const LISTING_SLOTS: usize = 2;
 const LIBDIR_CAPACITY: usize = 1024;
 const SOURCE_CAPACITY: usize = 8192;
 const FRAME_CAPACITY: usize = 131_072;
-const CAPTURE_CAPACITY: usize = 4096;
+pub(crate) const CAPTURE_CAPACITY: usize = 4096;
 const RESULT_LINE_CAPACITY: usize = NAME_CAPACITY + 64;
 
 struct Identity {
@@ -618,7 +618,7 @@ fn report_filterset_error(text: &[u8], error: FilterError) {
 }
 
 pub(crate) fn write_fd(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
-    edge_output::write(descriptor, bytes).map_err(|_| RunError::Reactor)
+    crate::status_queue::write(descriptor, bytes)
 }
 
 fn track(target: u32) -> Result<(), RunError> {
@@ -1814,6 +1814,10 @@ impl CargoDriver<'_> {
         let mut offset = 0;
         loop {
             let stopped = run.tripped(ledger);
+            if !status_queue::room_for(EVENT_RESERVE) {
+                status_queue::defer();
+                return Ok(offset);
+            }
             let Poll::Ready(polled) = ListingSource::poll_lent(
                 &mut self.listing_framer,
                 ledger.sessions(),
@@ -1871,6 +1875,10 @@ impl CargoDriver<'_> {
         let mut context = Context::from_waker(Waker::noop());
         loop {
             let stopped = run.tripped(ledger);
+            if !status_queue::room_for(EVENT_RESERVE) {
+                status_queue::defer();
+                return Ok(false);
+            }
             let Poll::Ready(polled) = ListingSource::poll_lent_eof(
                 &mut self.listing_framer,
                 ledger.sessions(),
@@ -1943,6 +1951,7 @@ impl CargoDriver<'_> {
         }
         if let Some((range, offset)) = self.listing_backlog()
             && listing_wanted(run, ledger)
+            && status_queue::room_for(EVENT_RESERVE)
         {
             self.listing_chunk(lanes, range, offset, run, ledger, watches)?;
             return Ok(self.listing_backlog().is_none_or(|(_, moved)| moved > offset));
@@ -2508,6 +2517,7 @@ pub(crate) struct DocRun {
     stderr_bytes: [u8; DOC_STDERR_CAPACITY],
     stderr_length: usize,
     lock_watch: LockWatch,
+    backlog: Option<(Range<u32>, usize)>,
 }
 
 fn spawn_doc_tests(
@@ -2560,6 +2570,7 @@ fn spawn_doc_tests(
         stderr_eof: false,
         exit_code: None,
         phase: DocPhase::Starting,
+        backlog: None,
         stderr_bytes: [0; DOC_STDERR_CAPACITY],
         stderr_length: 0,
         lock_watch,
@@ -2568,23 +2579,43 @@ fn spawn_doc_tests(
 
 impl DocRun {
     pub(crate) fn finished(&self) -> bool {
-        self.stdout_eof && self.stderr_eof && self.exit_code.is_some()
+        self.stdout_eof && self.stderr_eof && self.exit_code.is_some() && self.backlog.is_none()
     }
 
     pub(crate) fn take_child(&mut self) -> Option<Child> {
         self.child.take()
     }
 
-    pub(crate) fn stdout_chunk(
+    /// Feeds `bytes` from `offset` one line at a time, stopping while the status queue lacks room for one more event; returns how far it got.
+    pub(crate) fn stdout_lines(
         &mut self,
         bytes: &[u8],
+        mut offset: usize,
         color: bool,
         observation: &DocObservation,
-    ) -> Result<(), RunError> {
-        let phase = &mut self.phase;
-        self.parser.feed(bytes, |event| {
-            record_doc_event(event, phase, color, observation)
-        })
+    ) -> Result<usize, RunError> {
+        while offset < bytes.len() {
+            if !status_queue::has_room() {
+                status_queue::defer();
+                break;
+            }
+            let rest = &bytes[offset..];
+            let line = memchr::memchr(b'\n', rest).map_or(rest.len(), |newline| newline + 1);
+            let phase = &mut self.phase;
+            self.parser.feed(&rest[..line], |event| {
+                record_doc_event(event, phase, color, observation)
+            })?;
+            offset += line;
+        }
+        Ok(offset)
+    }
+
+    pub(crate) fn set_backlog(&mut self, backlog: Option<(Range<u32>, usize)>) {
+        self.backlog = backlog;
+    }
+
+    pub(crate) fn backlog(&self) -> Option<(Range<u32>, usize)> {
+        self.backlog.clone()
     }
 
     pub(crate) fn stdout_ended(&mut self) {

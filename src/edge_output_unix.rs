@@ -166,6 +166,18 @@ impl Pipe for OutputSink {
     }
 }
 
+/// Opens an [`OutputSink`] on a duplicate of standard output (`1`) or standard error (`2`).
+///
+/// # Errors
+/// Returns the OS error from `dup` or from [`OutputSink::new`].
+pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
+    let copy = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    OutputSink::new(unsafe { OwnedFd::from_raw_fd(copy) })
+}
+
 /// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until the kernel takes them.
 ///
 /// The synchronous twin of [`OutputSink`] for the sync report paths that cannot await a gate.

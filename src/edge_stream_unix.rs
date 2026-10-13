@@ -9,7 +9,7 @@ use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
 use proxima_primitives::pipe::{Exhausted, Pipe, UnpinPipe};
 
-const CAPTURE_BYTES: u32 = 16 * 1024;
+pub(crate) const CAPTURE_BYTES: u32 = 16 * 1024;
 const SCRATCH_BYTES: u32 = 4096;
 
 /// Source pipe (`() -> io::Result<Range<u32>>`) for one child output stream: a prime readiness gate, then one nonblocking read per item.

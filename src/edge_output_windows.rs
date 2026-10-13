@@ -3,7 +3,7 @@ use core::future::poll_fn;
 use core::task::{Context, Poll};
 use std::boxed::Box;
 use std::io;
-use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::string::String;
 use std::sync::Once;
 use std::vec::Vec;
@@ -262,6 +262,24 @@ impl Pipe for OutputSink {
     fn call(&self, line: Line<LINE_CAPACITY>) -> impl Future<Output = Result<(), io::Error>> {
         UnpinPipe::call(self, line)
     }
+}
+
+/// Opens an [`OutputSink`] on a duplicate of standard output (`1`) or standard error (`2`).
+///
+/// # Errors
+/// Returns `ERROR_INVALID_HANDLE` when the process has no such standard handle, or the OS error from the duplicate or from [`OutputSink::new`].
+pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
+    let slot = match descriptor {
+        STANDARD_OUTPUT => STD_OUTPUT_HANDLE,
+        STANDARD_ERROR => STD_ERROR_HANDLE,
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    let handle = unsafe { GetStdHandle(slot) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::from_raw_os_error(ERROR_INVALID_HANDLE.cast_signed()));
+    }
+    let borrowed = unsafe { BorrowedHandle::borrow_raw(handle) };
+    OutputSink::new(borrowed.try_clone_to_owned()?)
 }
 
 /// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until Windows takes them.
