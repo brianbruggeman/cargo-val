@@ -44,6 +44,7 @@ mod suite {
     #[test]
     fn e_passes_last() {
         record_process();
+        #[cfg(unix)]
         if std::env::var_os("CARGO_VAL_SHARD_IGNORE_INT").is_some() {
             unsafe extern "C" {
                 fn signal(signal: i32, handler: usize) -> usize;

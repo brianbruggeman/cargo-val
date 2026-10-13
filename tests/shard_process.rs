@@ -1,19 +1,31 @@
-#![cfg(unix)]
-
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+#[cfg(unix)]
 use std::ffi::CString;
-use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::time::Duration;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const SHARD: &str = "shard";
 const SHARD_LONG: &str = "shard_long";
+#[cfg(unix)]
 const DEADLINE: Duration = Duration::from_secs(120);
+#[cfg(unix)]
 const INTERRUPT_STATUS: i32 = 130;
 
 struct Run {
@@ -82,11 +94,15 @@ fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment: &[(&
     }
 }
 
+// mkfifo
+#[cfg(unix)]
 fn make_fifo(path: &Path) {
     let name = CString::new(path.as_os_str().as_bytes()).expect("fifo path has no nul byte");
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo {}", path.display());
 }
 
+// kill(pid, 0) liveness probe
+#[cfg(unix)]
 fn alive(target: libc::pid_t) -> bool {
     unsafe { libc::kill(target, 0) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) }
 }
@@ -186,6 +202,8 @@ fn a_failing_test_prints_its_own_libtest_block_and_no_other_name_does() {
     assert_eq!(run.stderr.matches("---- suite::").count(), 1, "{}", run.stderr);
 }
 
+// the held test blocks on a fifo open
+#[cfg(unix)]
 #[test]
 fn fail_fast_ends_the_shard_and_leaves_its_unreported_names_uncounted() {
     let directory = scratch("hold");
@@ -487,16 +505,22 @@ fn a_stray_ok_line_is_settled_once_at_two_jobs_too() {
     assert_eq!(shard.lines_ending("PASS").len(), 3, "{}", shard.stdout);
 }
 
+// sigint delivery and fifo rendezvous
+#[cfg(unix)]
 #[test]
 fn an_interrupt_ends_a_blocked_shard_child_and_cargo_val_exits_promptly() {
     interrupt_ends_blocked_child("shard", "interrupt-shard");
 }
 
+// sigint delivery and fifo rendezvous
+#[cfg(unix)]
 #[test]
 fn a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly() {
     interrupt_ends_blocked_child("test", "interrupt-test");
 }
 
+// libc::kill and fifos
+#[cfg(unix)]
 fn interrupt_ends_blocked_child(process: &str, label: &str) {
     let directory = scratch(label);
     let ready = directory.join("ready");

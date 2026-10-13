@@ -27,7 +27,7 @@ jobs:
           - os: windows-latest
             lib_test_floor: 233
             lib_test_args: "-- --test-threads=1"
-            integration_test_floor: 294
+            integration_test_floor: 341
             integration_test_args: "--test-threads=1"
     runs-on: ${{ matrix.os }}
     steps:

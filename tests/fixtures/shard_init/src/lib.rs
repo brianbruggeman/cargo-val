@@ -4,7 +4,8 @@ mod suite {
 
     #[used]
     #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
-    #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".init_array"))]
+    #[cfg_attr(all(unix, not(target_os = "macos")), unsafe(link_section = ".init_array"))]
+    #[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
     static ABORT_BEFORE_MAIN: extern "C" fn() = abort_before_main;
 
     // only a test child (`--exact`) aborts, so listing the binary still works; the pid lands before the abort

@@ -1,10 +1,13 @@
-#![cfg(unix)]
-
-use std::ffi::CString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
+
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::path::Path;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
@@ -109,6 +112,8 @@ fn run_fixture(
         .into()
 }
 
+// mkfifo
+#[cfg(unix)]
 fn make_fifo(path: &Path) {
     let name = CString::new(path.as_os_str().as_bytes()).expect("fifo path has no nul byte");
     let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
@@ -121,6 +126,8 @@ fn make_fifo(path: &Path) {
     );
 }
 
+// fifo rendezvous with the fixture
+#[cfg(unix)]
 fn open_fifo_both_ends(path: &Path) -> fs::File {
     fs::OpenOptions::new()
         .read(true)
@@ -129,6 +136,8 @@ fn open_fifo_both_ends(path: &Path) -> fs::File {
         .expect("fifo opens for read and write without waiting for a peer")
 }
 
+// fifo rendezvous with the fixture
+#[cfg(unix)]
 fn run_fixture_holding_doc_child(
     fixture: &str,
     arguments: &[&str],
@@ -618,7 +627,7 @@ fn cargo_test_doc_reference() -> DocReference {
 fn doc_lines(run: &Run, label: &str) -> usize {
     run.stdout
         .lines()
-        .filter(|line| line.starts_with("src/lib.rs - ") && line.ends_with(&format!(" {label}")))
+        .filter(|line| line.replace('\\', "/").starts_with("src/lib.rs - ") && line.ends_with(&format!(" {label}")))
         .count()
 }
 
@@ -749,6 +758,8 @@ fn c68_explicit_doc_selection_on_a_package_without_a_library_fails_loudly() {
     assert!(run.stderr.contains("no library targets found"));
 }
 
+// holds the doc child on a fifo
+#[cfg(unix)]
 #[test]
 fn c68_a_trip_before_doc_tests_execute_interrupts_the_doc_child_and_says_so() {
     let run = run_fixture_holding_doc_child(

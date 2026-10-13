@@ -4,7 +4,8 @@ mod abort {
 
     #[used]
     #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
-    #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".init_array"))]
+    #[cfg_attr(all(unix, not(target_os = "macos")), unsafe(link_section = ".init_array"))]
+    #[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
     static ABORT_BEFORE_MAIN: extern "C" fn() = abort_before_main;
 
     extern "C" fn abort_before_main() {
@@ -19,12 +20,14 @@ mod abort {
         }
         let names = arguments[exact + 1..].iter().filter(|argument| !argument.starts_with('-')).count();
         if names > 1 {
+            #[cfg(unix)]
             suppress_core_dump();
             std::process::abort();
         }
     }
 
     // a core dump costs ~30 ms through the kernel pipe handler; the shard abort needs none
+    #[cfg(unix)]
     fn suppress_core_dump() {
         let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         unsafe {
