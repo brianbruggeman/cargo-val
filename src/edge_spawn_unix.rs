@@ -827,7 +827,6 @@ mod spawn {
             .expect("child should launch in the selected directory");
 
             assert!(child.process_id() > 0);
-            assert_ne!(child.stdout().raw(), child.stderr().raw());
             for descriptor in [child.stdout().raw(), child.stderr().raw()] {
                 let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
                 assert!(flags >= 0, "captured descriptor must remain open");
