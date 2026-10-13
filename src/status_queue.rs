@@ -1,9 +1,9 @@
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::pin::Pin;
 use core::task::{Context, Poll, ready};
 use std::io;
 
-use proxima_primitives::pipe::UnpinPipe;
+use proxima_primitives::pipe::{BoundedQueue, EnqueueOutcome, FailMode, UnpinPipe};
 
 use crate::build_defaults::STATUS_QUEUE_BYTES;
 use crate::driver::{CAPTURE_CAPACITY, NAME_CAPACITY, RunError};
@@ -11,33 +11,91 @@ use crate::edge_output::{self, OutputSink};
 use crate::edge_stream::CAPTURE_BYTES;
 use crate::line::Line;
 
-const CHUNK: usize = 512;
-const HEADER: usize = 5;
+const RECORD_BYTES: usize = 512;
+const SLOTS: usize = STATUS_QUEUE_BYTES / RECORD_BYTES;
 // worst case one handled item queues: stdout and stderr captures with their headers and truncation markers.
 const HANDLER_FRAMING_BYTES: usize = 256;
 // one gated event: a result line is a name, a label and its header; a failure line travels with its headers.
 const REPORT_FRAMING_BYTES: usize = 64;
-pub(crate) const EVENT_RESERVE: usize = HEADER + NAME_CAPACITY + REPORT_FRAMING_BYTES;
+pub(crate) const EVENT_RESERVE: usize = NAME_CAPACITY + REPORT_FRAMING_BYTES;
 const LANE_CHUNK: usize = CAPTURE_BYTES as usize;
 const CAPTURE_PAIR: usize = 2 * CAPTURE_CAPACITY + HANDLER_FRAMING_BYTES;
 const UNGATED_BYTES: usize = if LANE_CHUNK > CAPTURE_PAIR { LANE_CHUNK } else { CAPTURE_PAIR };
+// small writes each take a whole record, so an item also reserves a count of writes beyond its byte volume.
+const WRITES_PER_ITEM: usize = 16;
 // every unbounded writer is gated per event, so one item queues at most one lane chunk or capture pair ungated, plus the event the gate admitted.
-const ITEM_RESERVE: usize = HEADER + UNGATED_BYTES + EVENT_RESERVE;
+const ITEM_RECORDS: usize = (UNGATED_BYTES + EVENT_RESERVE).div_ceil(RECORD_BYTES) + WRITES_PER_ITEM;
 
-const _: () = assert!(STATUS_QUEUE_BYTES >= ITEM_RESERVE, "status queue must hold one item");
+const _: () = assert!(SLOTS >= ITEM_RECORDS, "status queue must hold one item");
 
-struct Queue {
-    bytes: [u8; STATUS_QUEUE_BYTES],
-    read: usize,
+/// One queued write fragment: the descriptor it belongs to and up to `RECORD_BYTES` of its bytes.
+#[derive(Clone, Copy)]
+struct Record {
+    descriptor: u8,
     length: usize,
-    capturing: bool,
-    deferred: bool,
+    bytes: [u8; RECORD_BYTES],
+}
+
+impl Record {
+    const fn empty(descriptor: u8) -> Self {
+        Self { descriptor, length: 0, bytes: [0; RECORD_BYTES] }
+    }
+
+    fn fill(&mut self, fragment: &[u8]) -> usize {
+        let taken = fragment.len().min(RECORD_BYTES - self.length);
+        self.bytes[self.length..self.length + taken].copy_from_slice(&fragment[..taken]);
+        self.length += taken;
+        taken
+    }
+
+    const fn is_full(&self) -> bool {
+        self.length == RECORD_BYTES
+    }
+
+    fn line(&self) -> Line<RECORD_BYTES> {
+        let mut line = Line::new();
+        line.text(&self.bytes[..self.length]);
+        line
+    }
+}
+
+// the tail is the record still being packed by consecutive writes to one descriptor; the ring holds only sealed records, older than it.
+struct Queue {
+    records: BoundedQueue<Record>,
+    tail: RefCell<Option<Record>>,
+    capturing: Cell<bool>,
+    deferred: Cell<bool>,
 }
 
 std::thread_local! {
-    static QUEUE: RefCell<Queue> = const {
-        RefCell::new(Queue { bytes: [0; STATUS_QUEUE_BYTES], read: 0, length: 0, capturing: false, deferred: false })
+    // allocated once, on first use by the pump thread; FailClosed so a status line is never silently dropped.
+    static QUEUE: Queue = Queue {
+        records: BoundedQueue::new(SLOTS, FailMode::FailClosed),
+        tail: RefCell::new(None),
+        capturing: Cell::new(false),
+        deferred: Cell::new(false),
     };
+}
+
+fn records_for(bytes: usize) -> usize {
+    bytes.div_ceil(RECORD_BYTES)
+}
+
+fn free_slots(queue: &Queue) -> usize {
+    queue.records.capacity() - queue.records.len()
+}
+
+// one slot beyond the fragments covers sealing a partly packed tail when the descriptor changes
+fn can_take(queue: &Queue, bytes: usize) -> bool {
+    free_slots(queue) > records_for(bytes)
+}
+
+fn seal(queue: &Queue, tail: &mut Option<Record>) -> bool {
+    tail.take().is_none_or(|record| queue.records.enqueue(record) == EnqueueOutcome::Enqueued)
+}
+
+fn next_record(queue: &Queue) -> Option<Record> {
+    queue.records.dequeue().or_else(|| queue.tail.borrow_mut().take())
 }
 
 /// Scope inside which [`write`] queues instead of writing; the async pump holds one and drains through [`Sinks`] after every item.
@@ -50,73 +108,70 @@ pub(crate) struct Capture {
 
 impl Capture {
     pub(crate) fn enter() -> Self {
-        let previous = QUEUE.with_borrow_mut(|queue| core::mem::replace(&mut queue.capturing, true));
+        let previous = QUEUE.with(|queue| queue.capturing.replace(true));
         Self { previous }
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        QUEUE.with_borrow_mut(|queue| queue.capturing = self.previous);
+        QUEUE.with(|queue| queue.capturing.set(self.previous));
     }
 }
 
-/// Whether the queue can take `bytes` more, with their header; the per-event gate of every writer that can emit an unbounded amount.
+/// Whether the queue can take `bytes` more as records; the per-event gate of every writer that can emit an unbounded amount.
 pub(crate) fn room_for(bytes: usize) -> bool {
-    QUEUE.with_borrow(|queue| STATUS_QUEUE_BYTES - (queue.length - queue.read) >= HEADER + bytes)
+    QUEUE.with(|queue| can_take(queue, bytes))
 }
 
 /// Whether the queue can take the worst-case output of the next handled item.
 pub(crate) fn has_room() -> bool {
-    room_for(ITEM_RESERVE - HEADER)
+    QUEUE.with(|queue| free_slots(queue) >= ITEM_RECORDS)
 }
 
 /// Marks that a writer paused for lack of room; its backlog waits for [`resume_due`].
 pub(crate) fn defer() {
-    QUEUE.with_borrow_mut(|queue| queue.deferred = true);
+    QUEUE.with(|queue| queue.deferred.set(true));
 }
 
 /// True once, when a drain has freed room for a paused backlog; the pump then delivers the resume path.
 pub(crate) fn resume_due() -> bool {
-    QUEUE.with_borrow_mut(|queue| {
-        let due = queue.deferred && STATUS_QUEUE_BYTES - (queue.length - queue.read) >= ITEM_RESERVE;
-        queue.deferred &= !due;
+    QUEUE.with(|queue| {
+        let due = queue.deferred.get() && free_slots(queue) >= ITEM_RECORDS;
+        queue.deferred.set(queue.deferred.get() && !due);
         due
     })
 }
 
 pub(crate) fn write(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
-    let queued = QUEUE.with_borrow_mut(|queue| queue.capturing && append(queue, descriptor, bytes));
-    if queued {
+    if QUEUE.with(|queue| queue.capturing.get() && append(queue, descriptor, bytes)) {
         return Ok(());
     }
     edge_output::write(descriptor, bytes).map_err(|_| RunError::Reactor)
 }
 
 // the per-event gates make a refusal unreachable; the caller then writes synchronously rather than lose the bytes
-fn append(queue: &mut Queue, descriptor: i32, bytes: &[u8]) -> bool {
-    let (Ok(length), Ok(tag)) = (u32::try_from(bytes.len()), u8::try_from(descriptor)) else {
+fn append(queue: &Queue, descriptor: i32, bytes: &[u8]) -> bool {
+    let Ok(tag) = u8::try_from(descriptor) else {
         return false;
     };
-    if queue.length + HEADER + bytes.len() > STATUS_QUEUE_BYTES {
-        compact(queue);
-    }
-    let end = queue.length + HEADER + bytes.len();
-    if end > STATUS_QUEUE_BYTES {
+    if !can_take(queue, bytes.len()) {
+        queue.records.note_drop();
         return false;
     }
-    let start = queue.length;
-    queue.bytes[start] = tag;
-    queue.bytes[start + 1..start + HEADER].copy_from_slice(&length.to_le_bytes());
-    queue.bytes[start + HEADER..end].copy_from_slice(bytes);
-    queue.length = end;
+    let mut tail = queue.tail.borrow_mut();
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        if tail.as_ref().is_some_and(|record| record.descriptor != tag) && !seal(queue, &mut tail) {
+            return false;
+        }
+        let record = tail.get_or_insert_with(|| Record::empty(tag));
+        remaining = &remaining[record.fill(remaining)..];
+        if record.is_full() && !seal(queue, &mut tail) {
+            return false;
+        }
+    }
     true
-}
-
-fn compact(queue: &mut Queue) {
-    queue.bytes.copy_within(queue.read..queue.length, 0);
-    queue.length -= queue.read;
-    queue.read = 0;
 }
 
 /// Standard output and standard error as [`OutputSink`] pipes, opened on the first byte each receives.
@@ -129,17 +184,18 @@ impl Sinks {
         Self { standard: [None, None] }
     }
 
-    /// Writes queued status output, in append order, as `Line<512>` steps through the sinks, until a full descriptor parks it on its writable gate.
+    /// Writes queued status records, in append order, as `Line<512>` steps through the sinks, until a full descriptor parks it on its writable gate.
     ///
+    /// A source of `Record` (the ring dequeue) into a sink of `Line` (the `OutputSink` pipe), the shape of the telemetry `Drainer`.
     /// Returns `Pending` with the unwritten tail still queued, so the caller keeps polling its other arms and appending; a line a
     /// sink already took stays in that sink and is finished before the next one, so dropping the poll loses nothing.
     pub(crate) fn poll_drain(&mut self, context: &mut Context<'_>) -> Poll<Result<(), RunError>> {
         for sink in self.standard.iter().flatten() {
             ready!(poll_line(sink, Line::new(), context))?;
         }
-        while let Some((descriptor, chunk)) = next_chunk() {
-            let sink = self.sink(descriptor)?;
-            ready!(poll_line(sink, chunk, context))?;
+        while let Some(record) = QUEUE.with(next_record) {
+            let sink = self.sink(i32::from(record.descriptor))?;
+            ready!(poll_line(sink, record.line(), context))?;
         }
         Poll::Ready(Ok(()))
     }
@@ -156,37 +212,9 @@ impl Sinks {
     }
 }
 
-fn poll_line(sink: &OutputSink, line: Line<CHUNK>, context: &mut Context<'_>) -> Poll<Result<(), RunError>> {
+fn poll_line(sink: &OutputSink, line: Line<RECORD_BYTES>, context: &mut Context<'_>) -> Poll<Result<(), RunError>> {
     let mut call = UnpinPipe::call(sink, line);
     Pin::new(&mut call).poll(context).map_err(|_| RunError::Reactor)
-}
-
-fn next_chunk() -> Option<(i32, Line<CHUNK>)> {
-    QUEUE.with_borrow_mut(|queue| {
-        if queue.read >= queue.length {
-            queue.read = 0;
-            queue.length = 0;
-            return None;
-        }
-        let read = queue.read;
-        let descriptor = i32::from(queue.bytes[read]);
-        let mut header = [0; 4];
-        header.copy_from_slice(&queue.bytes[read + 1..read + HEADER]);
-        let remaining = u32::from_le_bytes(header) as usize;
-        let take = remaining.min(CHUNK);
-        let start = read + HEADER;
-        let mut line = Line::<CHUNK>::new();
-        line.text(&queue.bytes[start..start + take]);
-        if take == remaining {
-            queue.read = start + take;
-        } else {
-            let rest = u32::try_from(remaining - take).ok()?;
-            queue.bytes[start + take - HEADER] = u8::try_from(descriptor).ok()?;
-            queue.bytes[start + take - HEADER + 1..start + take].copy_from_slice(&rest.to_le_bytes());
-            queue.read = start + take - HEADER;
-        }
-        Some((descriptor, line))
-    })
 }
 
 #[cfg(all(test, unix))]
