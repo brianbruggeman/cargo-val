@@ -6,3 +6,6 @@ publish = false
 build = "build.rs"
 
 [workspace]
+
+[dependencies]
+libc = "0.2.190"
