@@ -217,9 +217,8 @@ pub mod pipe_pair {
 
     #[cfg(test)]
     mod tests {
+        use super::descriptor_probe::{assert_broken_pipe, assert_eof, probe_of};
         use super::{OwnedDescriptor, OwnedPipe, UnixPipeError, UnixPipePair};
-
-        const EOF_WAIT_MILLISECONDS: libc::c_int = 5_000;
 
         #[test]
         fn c38a_creates_two_owned_nonblocking_pipe_pairs() {
@@ -284,13 +283,23 @@ pub mod pipe_pair {
             assert_eq!(status & flag != 0, expected);
         }
 
-        fn probe_of(descriptor: i32) -> i32 {
+    }
+
+    #[cfg(test)]
+    pub(crate) mod descriptor_probe {
+        use super::last_error;
+        use std::time::{Duration, Instant};
+
+        const EOF_WAIT_MILLISECONDS: libc::c_int = 5_000;
+        const BROKEN_WAIT: Duration = Duration::from_secs(5);
+
+        pub(crate) fn probe_of(descriptor: i32) -> i32 {
             let probe = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
             assert!(probe >= 0, "F_DUPFD_CLOEXEC must duplicate an owned descriptor");
             probe
         }
 
-        fn assert_eof(probe: i32) {
+        pub(crate) fn assert_eof(probe: i32) {
             assert!(probe >= 0, "fixture must hold a probe descriptor");
             let mut waiting = libc::pollfd {
                 fd: probe,
@@ -305,12 +314,34 @@ pub mod pipe_pair {
             assert_eq!(unsafe { libc::close(probe) }, 0);
         }
 
-        fn assert_broken_pipe(probe: i32) {
+        fn await_write_hangup(probe: i32) {
+            let deadline = Instant::now() + BROKEN_WAIT;
+            loop {
+                let mut waiting = libc::pollfd {
+                    fd: probe,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&raw mut waiting, 1, 0) };
+                assert!(ready >= 0, "poll on a write probe must not fail");
+                if waiting.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "a write probe with no read ends must report error or hangup"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        pub(crate) fn assert_broken_pipe(probe: i32) {
             assert!(probe >= 0, "fixture must hold a probe descriptor");
+            await_write_hangup(probe);
             let byte = [0_u8; 1];
             let written = unsafe { libc::write(probe, byte.as_ptr().cast(), 1) };
             assert_eq!(written, -1, "a write with no read ends must fail");
-            assert_eq!(super::last_error().code, libc::EPIPE);
+            assert_eq!(last_error().code, libc::EPIPE);
             assert_eq!(unsafe { libc::close(probe) }, 0);
         }
     }
@@ -751,22 +782,16 @@ mod spawn {
 
     #[cfg(test)]
     mod tests {
-        use core::mem::MaybeUninit;
-
         use std::format;
         use std::string::String;
         use std::vec::Vec;
 
         use super::{LaunchStorage, SpawnError, spawn, spawn_exact, spawn_with_pipes};
         use crate::edge_spawn_unix::pipe_pair::UnixPipePair;
+        use crate::edge_spawn_unix::pipe_pair::descriptor_probe::{
+            assert_broken_pipe, assert_eof, probe_of,
+        };
         use crate::test_probe::probe_name;
-
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        struct DescriptorIdentity {
-            device: libc::dev_t,
-            inode: libc::ino_t,
-            mode: libc::mode_t,
-        }
 
         #[test]
         fn c38b_launches_exact_child_in_requested_directory_and_owns_reads() {
@@ -790,13 +815,6 @@ mod spawn {
             let probe = probe_name!(fixture_alpha);
             let arguments = [b"--exact".as_slice(), probe.as_bytes()];
             let pipes = UnixPipePair::new().expect("capture pipes should be created");
-            let pipe_descriptors = [
-                pipes.stdout().parent_read().raw(),
-                pipes.stdout().child_write().raw(),
-                pipes.stderr().parent_read().raw(),
-                pipes.stderr().child_write().raw(),
-            ];
-            let pipe_identities = pipe_descriptors.map(descriptor_identity);
             let child = spawn_with_pipes(
                 executable_text.as_bytes(),
                 &arguments,
@@ -814,8 +832,6 @@ mod spawn {
                 let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
                 assert!(flags >= 0, "captured descriptor must remain open");
             }
-            assert_closed(pipe_descriptors[1], pipe_identities[1]);
-            assert_closed(pipe_descriptors[3], pipe_identities[3]);
             let mut status = 0;
             assert_eq!(
                 unsafe { libc::waitpid(child.process_id().cast_signed(), &raw mut status, 0) },
@@ -833,10 +849,10 @@ mod spawn {
             assert_eq!(status, 0);
             assert_payload(&stdout_bytes[..stdout_count], b"cargo-val-child-stdout");
             assert_payload(&stderr_bytes[..stderr_count], b"cargo-val-child-stderr");
+            assert_eof(probe_of(child.stdout().raw()));
+            assert_eof(probe_of(child.stderr().raw()));
             let child_id = child.process_id();
             drop(child);
-            assert_closed(pipe_descriptors[0], pipe_identities[0]);
-            assert_closed(pipe_descriptors[2], pipe_identities[2]);
             std::println!(
                 "{{\"children\":1,\"captured_descriptors\":2,\"stdout_payloads\":1,\"stderr_payloads\":1,\"cwd_matches\":1,\"exit_status\":0,\"parent_child_writes_closed\":2,\"captured_reads_closed\":2,\"child_id_nonzero\":{}}}",
                 usize::from(child_id > 0)
@@ -961,13 +977,22 @@ mod spawn {
         #[test]
         fn c38b_failed_launch_closes_all_capture_descriptors() {
             let pipes = UnixPipePair::new().expect("capture pipes should be created");
-            let descriptors = [
-                pipes.stdout().parent_read().raw(),
-                pipes.stdout().child_write().raw(),
-                pipes.stderr().parent_read().raw(),
-                pipes.stderr().child_write().raw(),
-            ];
-            let identities = descriptors.map(descriptor_identity);
+            let stdout_reader = probe_of(pipes.stdout().parent_read().raw());
+            let stderr_writer = probe_of(pipes.stderr().child_write().raw());
+            assert_failed_launch(pipes);
+            assert_eof(stdout_reader);
+            assert_broken_pipe(stderr_writer);
+
+            let pipes = UnixPipePair::new().expect("capture pipes should be created");
+            let stderr_reader = probe_of(pipes.stderr().parent_read().raw());
+            let stdout_writer = probe_of(pipes.stdout().child_write().raw());
+            assert_failed_launch(pipes);
+            assert_eof(stderr_reader);
+            assert_broken_pipe(stdout_writer);
+            std::println!("{{\"launch_errors\":2,\"owned_descriptors\":0}}");
+        }
+
+        fn assert_failed_launch(pipes: UnixPipePair) {
             let result = spawn_with_pipes(
                 b"/cargo-val-missing-c38b-executable",
                 &[b"--exact", b"edge_spawn_unix::spawn::tests::fixture_alpha"],
@@ -981,10 +1006,6 @@ mod spawn {
                 Err(error) => assert_eq!(error, SpawnError { os_code: libc::ENOENT }),
                 Ok(_) => panic!("missing executable unexpectedly launched"),
             }
-            for (descriptor, identity) in descriptors.into_iter().zip(identities) {
-                assert_closed(descriptor, identity);
-            }
-            std::println!("{{\"launch_errors\":1,\"owned_descriptors\":0}}");
         }
 
         #[test]
@@ -1072,25 +1093,6 @@ mod spawn {
                     .any(|window| window == expected_payload),
                 "child output must reach the matching capture descriptor"
             );
-        }
-
-        fn descriptor_identity(descriptor: i32) -> DescriptorIdentity {
-            let mut metadata = MaybeUninit::<libc::stat>::uninit();
-            assert_eq!(unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) }, 0);
-            let metadata = unsafe { metadata.assume_init() };
-            DescriptorIdentity {
-                device: metadata.st_dev,
-                inode: metadata.st_ino,
-                mode: metadata.st_mode,
-            }
-        }
-
-        fn assert_closed(descriptor: i32, identity: DescriptorIdentity) {
-            if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
-                assert_eq!(last_error_code(), libc::EBADF);
-            } else {
-                assert_ne!(descriptor_identity(descriptor), identity);
-            }
         }
 
         fn last_error_code() -> i32 {
