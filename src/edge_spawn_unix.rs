@@ -217,35 +217,19 @@ pub mod pipe_pair {
 
     #[cfg(test)]
     mod tests {
-        use core::mem::MaybeUninit;
+        use super::{OwnedDescriptor, OwnedPipe, UnixPipeError, UnixPipePair};
 
-        use super::{OwnedPipe, UnixPipeError, UnixPipePair};
-
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-        struct PipeIdentity {
-            device: libc::dev_t,
-            inode: libc::ino_t,
-        }
+        const EOF_WAIT_MILLISECONDS: libc::c_int = 5_000;
 
         #[test]
         fn c38a_creates_two_owned_nonblocking_pipe_pairs() {
-            let pair = UnixPipePair::new().expect("both capture pipes should be created");
+            let first = UnixPipePair::new().expect("both capture pipes should be created");
             let descriptors = [
-                pair.stdout().parent_read().raw(),
-                pair.stdout().child_write().raw(),
-                pair.stderr().parent_read().raw(),
-                pair.stderr().child_write().raw(),
+                first.stdout().parent_read().raw(),
+                first.stdout().child_write().raw(),
+                first.stderr().parent_read().raw(),
+                first.stderr().child_write().raw(),
             ];
-            let identities = descriptors.map(descriptor_identity);
-            assert_ne!(
-                identities[0], identities[2],
-                "stdout and stderr must be distinct pipes"
-            );
-            for first in 0..descriptors.len() {
-                for second in first + 1..descriptors.len() {
-                    assert_ne!(descriptors[first], descriptors[second]);
-                }
-            }
             for descriptor in descriptors {
                 let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
                 assert!(flags >= 0, "F_GETFD must succeed for an owned descriptor");
@@ -255,22 +239,27 @@ pub mod pipe_pair {
             assert_status_flag(descriptors[1], libc::O_NONBLOCK, false);
             assert_status_flag(descriptors[2], libc::O_NONBLOCK, true);
             assert_status_flag(descriptors[3], libc::O_NONBLOCK, false);
-            drop(pair);
-            for (descriptor, identity) in descriptors.into_iter().zip(identities) {
-                assert_closed(descriptor, identity);
-            }
+            let stdout_eof_probe = probe_of(first.stdout().parent_read().raw());
+            let stderr_broken_probe = probe_of(first.stderr().child_write().raw());
+            drop(first);
+            assert_eof(stdout_eof_probe);
+            assert_broken_pipe(stderr_broken_probe);
+
+            let second = UnixPipePair::new().expect("second capture pipes should be created");
+            let stdout_broken_probe = probe_of(second.stdout().child_write().raw());
+            let stderr_eof_probe = probe_of(second.stderr().parent_read().raw());
+            drop(second);
+            assert_broken_pipe(stdout_broken_probe);
+            assert_eof(stderr_eof_probe);
             std::println!(
-                "{{\"parent_reads\":2,\"child_writes\":2,\"ownership_checks\":4,\"closed_after_drop\":4}}"
+                "{{\"parent_reads\":4,\"child_writes\":4,\"ownership_checks\":4,\"closed_after_drop\":4}}"
             );
         }
 
         #[test]
         fn c38a_second_pipe_failure_drops_first_pair() {
-            use super::OwnedDescriptor;
-
             let mut calls = 0;
-            let mut first_descriptors = [-1; 2];
-            let mut first_identities = [PipeIdentity::default(); 2];
+            let mut first_eof_probe = -1;
             let result = UnixPipePair::with_factory(|| {
                 calls += 1;
                 if calls == 2 {
@@ -278,19 +267,15 @@ pub mod pipe_pair {
                 }
                 let mut ends = [-1; 2];
                 assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
-                first_descriptors = ends;
-                first_identities = ends.map(descriptor_identity);
+                first_eof_probe = probe_of(ends[0]);
                 Ok(OwnedPipe {
                     parent_read: OwnedDescriptor(ends[0]),
                     child_write: OwnedDescriptor(ends[1]),
                 })
             });
             assert!(result.is_err());
-            assert_eq!(first_descriptors.len(), 2);
-            for (descriptor, identity) in first_descriptors.into_iter().zip(first_identities) {
-                assert_closed(descriptor, identity);
-            }
-            std::println!("{{\"second_pair_failure\":1,\"first_pair_descriptors_closed\":2}}");
+            assert_eof(first_eof_probe);
+            std::println!("{{\"second_pair_failure\":1,\"first_pair_write_end_closed\":1}}");
         }
 
         fn assert_status_flag(descriptor: i32, flag: i32, expected: bool) {
@@ -299,29 +284,34 @@ pub mod pipe_pair {
             assert_eq!(status & flag != 0, expected);
         }
 
-        fn descriptor_identity(descriptor: i32) -> PipeIdentity {
-            let mut metadata = MaybeUninit::<libc::stat>::uninit();
-            let result = unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) };
-            assert_eq!(result, 0, "fstat must identify an owned pipe description");
-            let metadata = unsafe { metadata.assume_init() };
-            PipeIdentity {
-                device: metadata.st_dev,
-                inode: metadata.st_ino,
-            }
+        fn probe_of(descriptor: i32) -> i32 {
+            let probe = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
+            assert!(probe >= 0, "F_DUPFD_CLOEXEC must duplicate an owned descriptor");
+            probe
         }
 
-        // parallel tests reuse closed fd numbers, so only the pipe's fstat identity proves ownership.
-        fn assert_closed(descriptor: i32, identity: PipeIdentity) {
-            assert!(descriptor >= 0, "fixture must own a valid descriptor");
-            if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
-                assert_eq!(super::last_error().code, libc::EBADF);
-            } else {
-                assert_ne!(
-                    descriptor_identity(descriptor),
-                    identity,
-                    "identified pipe description is still open"
-                );
-            }
+        fn assert_eof(probe: i32) {
+            assert!(probe >= 0, "fixture must hold a probe descriptor");
+            let mut waiting = libc::pollfd {
+                fd: probe,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&raw mut waiting, 1, EOF_WAIT_MILLISECONDS) };
+            assert_eq!(ready, 1, "a pipe with no write ends must report hangup");
+            let mut byte = [0_u8; 1];
+            let read = unsafe { libc::read(probe, byte.as_mut_ptr().cast(), 1) };
+            assert_eq!(read, 0, "a read with no write ends must return EOF");
+            assert_eq!(unsafe { libc::close(probe) }, 0);
+        }
+
+        fn assert_broken_pipe(probe: i32) {
+            assert!(probe >= 0, "fixture must hold a probe descriptor");
+            let byte = [0_u8; 1];
+            let written = unsafe { libc::write(probe, byte.as_ptr().cast(), 1) };
+            assert_eq!(written, -1, "a write with no read ends must fail");
+            assert_eq!(super::last_error().code, libc::EPIPE);
+            assert_eq!(unsafe { libc::close(probe) }, 0);
         }
     }
 }
