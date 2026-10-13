@@ -12,23 +12,48 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            lib_test_floor: 202
+            lib_test_args: ""
+          - os: macos-latest
+            lib_test_floor: 206
+            lib_test_args: ""
+          # windows edge tests assert process-wide handle counts, which parallel tests perturb
+          - os: windows-latest
+            lib_test_floor: 191
+            lib_test_args: "-- --test-threads=1"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run cargo test with failure payload
         shell: bash
+        env:
+          LIB_TEST_FLOOR: ${{ matrix.lib_test_floor }}
+          LIB_TEST_ARGS: ${{ matrix.lib_test_args }}
         run: |
           set +e
-          cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core${{ runner.os == 'Windows' && ',edge-os' || '' }} --lib -- --test-threads=1 2>&1 | tee cargo-test-output.txt
+          set -o pipefail
+          cargo test --no-default-features --features proxima-codec,proxima-primitives,proxima-core,edge-os --lib $LIB_TEST_ARGS 2>&1 | tee cargo-test-output.txt
           test_status=$?
           cat cargo-test-output.txt
+          lib_count="$(awk '/^test result: / { print $4; exit }' cargo-test-output.txt)"
+          floor_status=0
+          if [ -z "$lib_count" ] || [ "$lib_count" -lt "$LIB_TEST_FLOOR" ]; then
+            printf '::error title=lib test count below floor::passed=%s floor=%s\n' "${lib_count:-none}" "$LIB_TEST_FLOOR"
+            floor_status=1
+          fi
+          echo "lib tests parsed: ${lib_count:-none} (floor $LIB_TEST_FLOOR, cargo exit $test_status)"
           if [ "$test_status" -ne 0 ]; then
             failure_excerpt="$(awk 'found || /^failures:/ { found = 1; print }' cargo-test-output.txt | tail -c 8000 | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/,/%2C/g' | awk '{ if (NR > 1) printf "%%0A"; printf "%s", $0 }')"
             printf '::error title=native cargo test failure::exit status %s%%0A%s\n' "$test_status" "$failure_excerpt"
+            exit "$test_status"
           fi
-          exit "$test_status"
+          if [ "$floor_status" -ne 0 ]; then
+            exit 1
+          fi
+          echo "lib tests passed: $lib_count (floor $LIB_TEST_FLOOR)"
       - name: Run dylib environment fixture against cargo test
         if: runner.os != 'Windows'
         shell: bash
