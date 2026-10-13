@@ -472,8 +472,8 @@ mod tests {
         counts
     }
 
-    #[test]
-    fn shard_size_is_ceil_of_names_over_jobs_so_a_binary_launches_about_jobs_children() {
+    #[proxima::test]
+    async fn shard_size_is_ceil_of_names_over_jobs_so_a_binary_launches_about_jobs_children() {
         let table = [(13_usize, 4_usize, [4_usize, 4, 4, 1].as_slice()), (3, 4, &[1, 1, 1]), (8, 2, &[4, 4]), (5, 1, &[5])];
         for (names, jobs, expected) in table {
             let listed: Vec<std::string::String> = (0..names).map(|index| std::format!("suite::case_{index:04}")).collect();
@@ -487,8 +487,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn real_listing_names_round_trip_through_a_shard_in_listing_order() {
+    #[proxima::test]
+    async fn real_listing_names_round_trip_through_a_shard_in_listing_order() {
         let names = listed_names();
         let mut storage = std::vec![0_u8; 1024];
         let mut arena = arena_with(&mut storage, &names);
@@ -501,8 +501,8 @@ mod tests {
         assert_eq!(shard.count, 3);
     }
 
-    #[test]
-    fn long_names_split_a_shard_at_the_command_line_budget() {
+    #[proxima::test]
+    async fn long_names_split_a_shard_at_the_command_line_budget() {
         let long: Vec<std::string::String> = (0..40).map(|index| std::format!("{}::case_{index:02}", "module_".repeat(150))).collect();
         let borrowed: Vec<&str> = long.iter().map(std::string::String::as_str).collect();
         let mut storage = std::vec![0_u8; 128 * 1024];
@@ -518,8 +518,8 @@ mod tests {
         assert!(units.iter().all(|total| *total <= crate::build_defaults::SHARD_COMMAND_UNITS), "{units:?}");
     }
 
-    #[test]
-    fn shard_size_never_exceeds_the_name_count_build_setting_even_for_one_job() {
+    #[proxima::test]
+    async fn shard_size_never_exceeds_the_name_count_build_setting_even_for_one_job() {
         let total = crate::build_defaults::SHARD_NAMES * 2 + 5;
         let mut storage = std::vec![0_u8; total * 8];
         let mut arena = ShardArena::new(&mut storage);
@@ -539,15 +539,15 @@ mod tests {
         counts
     }
 
-    #[test]
-    fn units_count_quoting_for_names_a_windows_command_line_must_escape() {
+    #[proxima::test]
+    async fn units_count_quoting_for_names_a_windows_command_line_must_escape() {
         assert_eq!(command_units(b"plain::name"), 12);
         assert_eq!(command_units(b"has space"), 21);
         assert_eq!(command_units("naive::caf\u{e9}".as_bytes()), 12);
     }
 
-    #[test]
-    fn push_refuses_a_name_past_the_storage_and_a_name_with_nul() {
+    #[proxima::test]
+    async fn push_refuses_a_name_past_the_storage_and_a_name_with_nul() {
         let mut storage = std::vec![0_u8; 80];
         let mut arena = ShardArena::new(&mut storage);
 
@@ -558,8 +558,8 @@ mod tests {
         assert!(arena.carrying());
     }
 
-    #[test]
-    fn a_parked_name_leads_the_next_batch_after_reset() {
+    #[proxima::test]
+    async fn a_parked_name_leads_the_next_batch_after_reset() {
         let mut storage = std::vec![0_u8; 80];
         let mut arena = ShardArena::new(&mut storage);
         arena.push(&"m".repeat(74)).expect("fits the main area");
@@ -577,8 +577,8 @@ mod tests {
         assert!(!arena.carrying());
     }
 
-    #[test]
-    fn locate_hits_the_expected_offset_first_and_falls_back_to_a_scan() {
+    #[proxima::test]
+    async fn locate_hits_the_expected_offset_first_and_falls_back_to_a_scan() {
         let mut storage = std::vec![0_u8; 256];
         let mut arena = arena_with(&mut storage, &["m::a", "m::b", "m::c"]);
         arena.seal(1);
@@ -598,8 +598,8 @@ mod tests {
         (owed, super::Reported::new())
     }
 
-    #[test]
-    fn owed_names_are_carved_one_solo_each_from_the_shards_own_bytes_and_idle_waits_for_them() {
+    #[proxima::test]
+    async fn owed_names_are_carved_one_solo_each_from_the_shards_own_bytes_and_idle_waits_for_them() {
         let mut storage = std::vec![0_u8; 512];
         let mut arena = arena_with(&mut storage, &["m::a", "m::b", "m::c"]);
         arena.seal(1);
@@ -619,8 +619,8 @@ mod tests {
         assert!(arena.idle());
     }
 
-    #[test]
-    fn a_shard_launches_only_while_a_record_slot_is_reserved_for_it() {
+    #[proxima::test]
+    async fn a_shard_launches_only_while_a_record_slot_is_reserved_for_it() {
         let slots = crate::build_defaults::SHARD_RETRY_SLOTS;
         let names: Vec<std::string::String> = (0..=slots).map(|index| std::format!("m::t{index}")).collect();
         let mut storage = std::vec![0_u8; 8192];
@@ -642,8 +642,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_output_reruns_are_taken_by_carve_rerun_and_stopped_discard_keeps_them() {
+    #[proxima::test]
+    async fn only_output_reruns_are_taken_by_carve_rerun_and_stopped_discard_keeps_them() {
         let mut storage = std::vec![0_u8; 256];
         let mut arena = arena_with(&mut storage, &["m::a", "m::b", "m::c"]);
         arena.seal(1);
@@ -662,8 +662,8 @@ mod tests {
         assert!(arena.carve_rerun().is_none());
     }
 
-    #[test]
-    fn reset_clears_owed_reruns_for_the_next_batch() {
+    #[proxima::test]
+    async fn reset_clears_owed_reruns_for_the_next_batch() {
         let mut storage = std::vec![0_u8; 256];
         let mut arena = arena_with(&mut storage, &["m::a", "m::b"]);
         arena.seal(1);

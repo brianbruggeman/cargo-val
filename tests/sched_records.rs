@@ -51,8 +51,8 @@ fn declared(binary: &str) -> Vec<(String, u8, String)> {
     entries
 }
 
-#[test]
-fn the_host_binary_format_yields_every_declared_record_with_flags_and_group() {
+#[proxima::test]
+async fn the_host_binary_format_yields_every_declared_record_with_flags_and_group() {
     let entries = declared(&built_test_binary());
 
     let expected: Vec<(&str, u8, &str)> = vec![
@@ -73,8 +73,8 @@ fn the_host_binary_format_yields_every_declared_record_with_flags_and_group() {
     assert_eq!(entries, expected);
 }
 
-#[test]
-fn a_binary_without_the_section_declares_nothing_and_a_non_object_is_unsupported() {
+#[proxima::test]
+async fn a_binary_without_the_section_declares_nothing_and_a_non_object_is_unsupported() {
     let plain = Path::new(env!("CARGO_BIN_EXE_cargo-val")).to_str().expect("path is UTF-8").to_string();
     let garbage = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let mut storage = vec![0_u8; 4096];

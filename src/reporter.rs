@@ -50,8 +50,8 @@ mod tests {
     use super::{ReportError, write_report};
     use crate::outcomes::TerminalOutcome;
 
-    #[test]
-    fn writes_colored_and_plain_records_and_rejects_short_buffer_atomically() {
+    #[proxima::test]
+    async fn writes_colored_and_plain_records_and_rejects_short_buffer_atomically() {
         let outcomes = [TerminalOutcome::Passed, TerminalOutcome::Failed];
         let (formatted, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut colored = [0; 32];

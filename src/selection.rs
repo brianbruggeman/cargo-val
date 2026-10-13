@@ -104,8 +104,8 @@ mod tests {
     use crate::filterset::{Filterset, Prepared};
     use crate::ignored_set::IgnoredSet;
 
-    #[test]
-    fn name_filter_admits_substring_and_exact_by_their_own_rule() {
+    #[proxima::test]
+    async fn name_filter_admits_substring_and_exact_by_their_own_rule() {
         assert!(NameFilter::Substring("alpha").admits("alpha"));
         assert!(NameFilter::Substring("alpha").admits("alphabet"));
         assert!(!NameFilter::Substring("alpha").admits("beta"));
@@ -116,8 +116,8 @@ mod tests {
         std::println!("{{\"substring_admitted\":3,\"exact_admitted\":1,\"exact_nonmatch\":2}}");
     }
 
-    #[test]
-    fn disposition_follows_libtest_ignore_semantics_and_the_filterset() {
+    #[proxima::test]
+    async fn disposition_follows_libtest_ignore_semantics_and_the_filterset() {
         let mut ignored = Box::new(IgnoredSet::new());
         ignored.insert(b"fixture::ignored_by_default").expect("one name fits");
         let parsed = Filterset::parse(b"not test(skipped_by_expression)").expect("expression parses");

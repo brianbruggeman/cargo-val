@@ -430,8 +430,8 @@ mod tests {
         .expect("root completes")
     }
 
-    #[test]
-    fn a_file_takes_the_synchronous_write_branch() {
+    #[proxima::test]
+    async fn a_file_takes_the_synchronous_write_branch() {
         let directory = tempdir().expect("scratch directory");
         let path = directory.path().join("report.txt");
         let file = std::fs::File::create(&path).expect("report file opens");
@@ -444,8 +444,8 @@ mod tests {
         std::println!("{{\"output_branch\":\"{}\"}}", sink.mode());
     }
 
-    #[test]
-    fn an_anonymous_pipe_reports_which_branch_carried_the_line() {
+    #[proxima::test]
+    async fn an_anonymous_pipe_reports_which_branch_carried_the_line() {
         let (mut reader, writer) = pipe().expect("anonymous pipe is created");
 
         let sink = OutputSink::new(OwnedHandle::from(writer)).expect("pipe classifies");
@@ -460,8 +460,8 @@ mod tests {
         std::println!("{{\"output_branch\":\"{branch}\"}}");
     }
 
-    #[test]
-    fn standard_descriptors_outside_one_and_two_are_refused() {
+    #[proxima::test]
+    async fn standard_descriptors_outside_one_and_two_are_refused() {
         let error = super::write(7, b"ignored").expect_err("descriptor 7 is not a standard stream");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);

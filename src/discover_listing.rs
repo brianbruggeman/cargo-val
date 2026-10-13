@@ -614,8 +614,8 @@ mod doc_report_tests {
         seen
     }
 
-    #[test]
-    fn c68_real_cargo_test_doc_report_yields_one_pass_one_fail_one_ignored() {
+    #[proxima::test]
+    async fn c68_real_cargo_test_doc_report_yields_one_pass_one_fail_one_ignored() {
         let seen = events(&[REAL_REPORT.as_bytes()]);
 
         let results = seen
@@ -639,8 +639,8 @@ mod doc_report_tests {
         assert_eq!(seen.last(), Some(&Owned::Finished));
     }
 
-    #[test]
-    fn c68_failure_output_is_the_failing_section_only_and_includes_the_panic_message() {
+    #[proxima::test]
+    async fn c68_failure_output_is_the_failing_section_only_and_includes_the_panic_message() {
         let seen = events(&[REAL_REPORT.as_bytes()]);
 
         let failure_lines = seen
@@ -668,8 +668,8 @@ mod doc_report_tests {
         );
     }
 
-    #[test]
-    fn c68_split_chunks_produce_the_same_events_as_one_chunk() {
+    #[proxima::test]
+    async fn c68_split_chunks_produce_the_same_events_as_one_chunk() {
         let whole = events(&[REAL_REPORT.as_bytes()]);
         let bytes = REAL_REPORT.as_bytes();
         let chunks = bytes.chunks(7).collect::<Vec<_>>();
@@ -685,8 +685,8 @@ mod doc_report_tests {
         lf_report().replace('\n', "\r\n")
     }
 
-    #[test]
-    fn c68_crlf_report_yields_the_same_events_as_lf() {
+    #[proxima::test]
+    async fn c68_crlf_report_yields_the_same_events_as_lf() {
         let crlf = crlf_report();
 
         assert_eq!(
@@ -695,8 +695,8 @@ mod doc_report_tests {
         );
     }
 
-    #[test]
-    fn c68_crlf_report_split_at_every_boundary_yields_the_same_events_as_lf() {
+    #[proxima::test]
+    async fn c68_crlf_report_split_at_every_boundary_yields_the_same_events_as_lf() {
         let crlf = crlf_report();
         let bytes = crlf.as_bytes();
         let expected = events(&[lf_report().as_bytes()]);
@@ -707,23 +707,23 @@ mod doc_report_tests {
         }
     }
 
-    #[test]
-    fn c68_crlf_report_split_into_single_bytes_yields_the_same_events_as_lf() {
+    #[proxima::test]
+    async fn c68_crlf_report_split_into_single_bytes_yields_the_same_events_as_lf() {
         let crlf = crlf_report();
         let chunks = crlf.as_bytes().chunks(1).collect::<Vec<_>>();
 
         assert_eq!(events(&chunks), events(&[lf_report().as_bytes()]));
     }
 
-    #[test]
-    fn c68_zero_doctest_report_is_a_running_zero_block() {
+    #[proxima::test]
+    async fn c68_zero_doctest_report_is_a_running_zero_block() {
         let seen = events(&[b"\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"]);
 
         assert_eq!(seen, [Owned::Running(0), Owned::Finished]);
     }
 
-    #[test]
-    fn c68_singular_running_header_and_unknown_verdicts_are_handled() {
+    #[proxima::test]
+    async fn c68_singular_running_header_and_unknown_verdicts_are_handled() {
         let seen = events(&[b"running 1 test\ntest src/lib.rs - a (line 1) ... bench: 3 ns/iter\ntest src/lib.rs - b (line 2) ... ok\ntest src/lib.rs - b (line 2) ... ok\n"]);
 
         assert_eq!(
@@ -736,8 +736,8 @@ mod doc_report_tests {
         );
     }
 
-    #[test]
-    fn c68_overlong_lines_are_truncated_without_corrupting_the_next_line() {
+    #[proxima::test]
+    async fn c68_overlong_lines_are_truncated_without_corrupting_the_next_line() {
         let mut report = std::vec![b'x'; 5000];
         report.extend_from_slice(b"\nrunning 0 tests\n");
 
@@ -754,8 +754,8 @@ mod doc_report_tests {
             .collect()
     }
 
-    #[test]
-    fn should_panic_and_compile_fail_names_drop_libtest_mode_suffix() {
+    #[proxima::test]
+    async fn should_panic_and_compile_fail_names_drop_libtest_mode_suffix() {
         let report = "running 3 tests\n\
             test suite::panics - should panic ... ok\n\
             test suite::expects - should panic ... ok\n\
@@ -772,8 +772,8 @@ mod doc_report_tests {
         );
     }
 
-    #[test]
-    fn stray_output_before_a_verdict_belongs_to_the_test_it_follows() {
+    #[proxima::test]
+    async fn stray_output_before_a_verdict_belongs_to_the_test_it_follows() {
         let report = "running 2 tests\n\
             test suite::chatty ... hello from a raw write\n\
             ok\n\
@@ -791,8 +791,8 @@ mod doc_report_tests {
         );
     }
 
-    #[test]
-    fn time_limit_failure_and_ignored_with_reason_are_verdicts() {
+    #[proxima::test]
+    async fn time_limit_failure_and_ignored_with_reason_are_verdicts() {
         let report = "test suite::slow ... FAILED (time limit exceeded)\n\
             test suite::skipped ... ignored, needs a network\n";
 
@@ -825,23 +825,23 @@ mod doc_report_tests {
         (results, finished)
     }
 
-    #[test]
-    fn verdict_after_stray_text_is_resolved_as_stray_and_the_next_line_adds_nothing() {
+    #[proxima::test]
+    async fn verdict_after_stray_text_is_resolved_as_stray_and_the_next_line_adds_nothing() {
         let (results, finished) = stray_results_of(b"test x ... all ok\nFAILED\n");
 
         assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
         assert_eq!(finished, 0);
     }
 
-    #[test]
-    fn stray_marker_inside_the_output_keeps_the_name_and_marks_the_verdict_stray() {
+    #[proxima::test]
+    async fn stray_marker_inside_the_output_keeps_the_name_and_marks_the_verdict_stray() {
         let (results, _) = stray_results_of(b"test x ... loading ... ok\n");
 
         assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
     }
 
-    #[test]
-    fn nested_cargo_output_inside_a_pending_test_keeps_the_outer_verdict_and_ignores_its_summary() {
+    #[proxima::test]
+    async fn nested_cargo_output_inside_a_pending_test_keeps_the_outer_verdict_and_ignores_its_summary() {
         let report = b"test x ... running 1 test\n\
             test inner ... ok\n\
             test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
@@ -859,15 +859,15 @@ mod doc_report_tests {
         assert_eq!(finished, 0, "a stray summary while a name is pending must not end the block");
     }
 
-    #[test]
-    fn stray_test_line_while_pending_does_not_resolve_the_pending_name() {
+    #[proxima::test]
+    async fn stray_test_line_while_pending_does_not_resolve_the_pending_name() {
         let (results, _) = stray_results_of(b"test x ... raw\ntest y ... loading ok\nok\n");
 
         assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
     }
 
-    #[test]
-    fn forged_verdict_while_pending_marks_the_pending_test_stray_and_the_genuine_line_settles_once() {
+    #[proxima::test]
+    async fn forged_verdict_while_pending_marks_the_pending_test_stray_and_the_genuine_line_settles_once() {
         let (results, _) = stray_results_of(b"test a ... \ntest b ... ok\ntest b ... ok\n");
 
         assert_eq!(
@@ -879,8 +879,8 @@ mod doc_report_tests {
         );
     }
 
-    #[test]
-    fn failures_header_inside_a_nested_run_keeps_the_pending_name_until_its_block_ends() {
+    #[proxima::test]
+    async fn failures_header_inside_a_nested_run_keeps_the_pending_name_until_its_block_ends() {
         let report = b"test x ... running 1 test\n\
             failures:\n\
             test inner ... ok\n\
@@ -899,37 +899,37 @@ mod doc_report_tests {
         assert_eq!(finished, 0);
     }
 
-    #[test]
-    fn a_clean_result_line_is_not_stray() {
+    #[proxima::test]
+    async fn a_clean_result_line_is_not_stray() {
         let (results, finished) = stray_results_of(b"running 1 test\ntest x ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n");
 
         assert_eq!(results, [("x".to_string(), DocOutcome::Passed, false)]);
         assert_eq!(finished, 1);
     }
 
-    #[test]
-    fn a_bare_ok_line_after_a_pending_start_is_a_stray_settle() {
+    #[proxima::test]
+    async fn a_bare_ok_line_after_a_pending_start_is_a_stray_settle() {
         let (results, _) = stray_results_of(b"test x ... \nok\n");
 
         assert_eq!(results, [("x".to_string(), DocOutcome::Passed, true)]);
     }
 
-    #[test]
-    fn a_verdict_on_the_start_line_is_clean() {
+    #[proxima::test]
+    async fn a_verdict_on_the_start_line_is_clean() {
         let (results, _) = stray_results_of(b"test x ... ok\n");
 
         assert_eq!(results, [("x".to_string(), DocOutcome::Passed, false)]);
     }
 
-    #[test]
-    fn a_bare_failed_line_after_a_pending_start_is_a_stray_settle() {
+    #[proxima::test]
+    async fn a_bare_failed_line_after_a_pending_start_is_a_stray_settle() {
         let (results, _) = stray_results_of(b"test x ... \nFAILED\n");
 
         assert_eq!(results, [("x".to_string(), DocOutcome::Failed, true)]);
     }
 
-    #[test]
-    fn final_summary_after_a_pending_name_ends_the_block_and_failure_block_still_parses() {
+    #[proxima::test]
+    async fn final_summary_after_a_pending_name_ends_the_block_and_failure_block_still_parses() {
         let report = b"running 2 tests\n\
             test suite::done ... ok\n\
             test suite::crashed ... \n\
@@ -958,8 +958,8 @@ mod doc_report_tests {
         );
     }
 
-    #[test]
-    fn nested_summary_inside_a_pending_test_stays_stray_and_the_final_summary_still_ends_the_block() {
+    #[proxima::test]
+    async fn nested_summary_inside_a_pending_test_stays_stray_and_the_final_summary_still_ends_the_block() {
         let report = b"test x ... running 1 test\n\
             test inner ... ok\n\
             test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
@@ -1170,8 +1170,8 @@ mod listing_source_tests {
         }
     }
 
-    #[test]
-    fn c50_launches_one_borrowed_intent_then_pauses_at_full_capacity() {
+    #[proxima::test]
+    async fn c50_launches_one_borrowed_intent_then_pauses_at_full_capacity() {
         let (observation, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut source_storage = [0_u8; 64];
             let mut frame_storage = [0_u8; 65];
@@ -1239,8 +1239,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn c50_collect_all_control_emits_first_intent_only_after_eof() {
+    #[proxima::test]
+    async fn c50_collect_all_control_emits_first_intent_only_after_eof() {
         let mut reader = HeldListingReader::new();
         let mut context = Context::from_waker(Waker::noop());
         let mut collected = [0_u8; 64];
@@ -1279,8 +1279,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn c50_direct_listing_replays_tail_without_copying_complete_lines() {
+    #[proxima::test]
+    async fn c50_direct_listing_replays_tail_without_copying_complete_lines() {
         let combined = b"alpha: test\nbeta: test\n";
         let mut frame_storage = [0_u8; 65];
         let mut framer =
@@ -1321,8 +1321,8 @@ mod listing_source_tests {
         }
     }
 
-    #[test]
-    fn c50_direct_and_buffered_errors_keep_framing_and_poison_contracts() {
+    #[proxima::test]
+    async fn c50_direct_and_buffered_errors_keep_framing_and_poison_contracts() {
         let sessions = SessionSlots::<(), 1>::new();
         let invalid = b"\xff: test\n";
         let mut direct_storage = [0_u8; 65];
@@ -1423,8 +1423,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn stops_consuming_listing_when_live_child_slots_are_full() {
+    #[proxima::test]
+    async fn stops_consuming_listing_when_live_child_slots_are_full() {
         let mut buffer = [0; 65];
         let mut framer = ArtifactFramer::new(&mut buffer, 64).expect("fixed listing capacity");
         let mut sessions = SessionSlots::<&str, 1>::new();
@@ -1444,8 +1444,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn resumes_listing_after_child_slot_is_retired() {
+    #[proxima::test]
+    async fn resumes_listing_after_child_slot_is_retired() {
         let mut buffer = [0; 65];
         let mut framer = ArtifactFramer::new(&mut buffer, 64).expect("fixed listing capacity");
         let mut sessions = SessionSlots::<&str, 1>::new();
@@ -1464,8 +1464,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn dispatch_pipe_does_not_allocate_and_probe_detects_allocation() {
+    #[proxima::test]
+    async fn dispatch_pipe_does_not_allocate_and_probe_detects_allocation() {
         let mut buffer = [0; 65];
         let mut framer = ArtifactFramer::new(&mut buffer, 64).expect("fixed listing capacity");
         let sessions = SessionSlots::<&str, 1>::new();
@@ -1489,8 +1489,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn launches_before_eof_and_only_pulls_again_after_slot_retirement() {
+    #[proxima::test]
+    async fn launches_before_eof_and_only_pulls_again_after_slot_retirement() {
         let listing = b"alpha: test\nbeta: test\n";
         let (result, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut storage = [0; 65];
@@ -1541,8 +1541,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn rejects_delaying_first_launch_until_listing_eof() {
+    #[proxima::test]
+    async fn rejects_delaying_first_launch_until_listing_eof() {
         let mut storage = [0; 65];
         let mut framer = ArtifactFramer::new(&mut storage, 64).expect("listing storage fits");
         let sessions = SessionSlots::<(), 1>::new();
@@ -1683,8 +1683,8 @@ mod listing_source_tests {
         }
     }
 
-    #[test]
-    fn lent_chunk_every_split_matches_async_read_for_the_libtest_terse_listing() {
+    #[proxima::test]
+    async fn lent_chunk_every_split_matches_async_read_for_the_libtest_terse_listing() {
         let reference = names_via_async_read();
         assert_eq!(reference.len(), 3);
         let sessions = SessionSlots::<(), 4>::new();
@@ -1710,8 +1710,8 @@ mod listing_source_tests {
         );
     }
 
-    #[test]
-    fn lent_chunk_with_sessions_full_returns_full_and_leaves_consumed_unchanged() {
+    #[proxima::test]
+    async fn lent_chunk_with_sessions_full_returns_full_and_leaves_consumed_unchanged() {
         let mut frame_storage = [0_u8; 129];
         let mut framer =
             ArtifactFramer::new(&mut frame_storage, 128).expect("framer accepts a line");
@@ -1726,8 +1726,8 @@ mod listing_source_tests {
         std::println!("{{\"full_cases_checked\":1,\"full_consumed\":0}}");
     }
 
-    #[test]
-    fn lent_eof_with_unterminated_line_returns_the_listing_framing_error() {
+    #[proxima::test]
+    async fn lent_eof_with_unterminated_line_returns_the_listing_framing_error() {
         let mut frame_storage = [0_u8; 129];
         let mut framer =
             ArtifactFramer::new(&mut frame_storage, 128).expect("framer accepts a line");
@@ -1756,8 +1756,8 @@ mod listing_source_tests {
         ));
     }
 
-    #[test]
-    fn lent_zero_length_chunk_is_zero_consumed_need_more_and_leaves_the_framer_untouched() {
+    #[proxima::test]
+    async fn lent_zero_length_chunk_is_zero_consumed_need_more_and_leaves_the_framer_untouched() {
         let mut frame_storage = [0_u8; 129];
         let mut framer =
             ArtifactFramer::new(&mut frame_storage, 128).expect("framer accepts a line");
@@ -1770,8 +1770,8 @@ mod listing_source_tests {
         assert!(framer.is_empty());
     }
 
-    #[test]
-    fn exact_filter_filters_a_superstring_name_and_launches_the_equal_one() {
+    #[proxima::test]
+    async fn exact_filter_filters_a_superstring_name_and_launches_the_equal_one() {
         let mut frame_storage = [0_u8; 65];
         let mut framer =
             ArtifactFramer::new(&mut frame_storage, 64).expect("framer accepts a line");

@@ -74,8 +74,8 @@ mod tests {
         event.admit(sessions)
     }
 
-    #[test]
-    fn c48h_validates_a_borrowed_event_through_the_ledger_view() {
+    #[proxima::test]
+    async fn c48h_validates_a_borrowed_event_through_the_ledger_view() {
         let (observation, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut sessions = SessionSlots::<u8, 1>::new();
             let mut ledger = OutcomeLedger::new(&mut sessions).expect("table starts empty");
@@ -118,8 +118,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48g_events_borrow_output_and_reject_exit_for_retired_generation() {
+    #[proxima::test]
+    async fn c48g_events_borrow_output_and_reject_exit_for_retired_generation() {
         let (result, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut sessions = SessionSlots::<(), 1>::new();
             let retired = sessions
@@ -187,8 +187,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48g_exit_keeps_slot_live_for_late_stream_output() {
+    #[proxima::test]
+    async fn c48g_exit_keeps_slot_live_for_late_stream_output() {
         let (result, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut sessions = SessionSlots::<u8, 1>::new();
             let slot = sessions.insert(7).expect("session slot is available");
@@ -288,8 +288,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48j_accepts_eof_for_each_live_child_stream() {
+    #[proxima::test]
+    async fn c48j_accepts_eof_for_each_live_child_stream() {
         let (events, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut sessions = SessionSlots::<(), 1>::new();
             let slot = sessions.insert(()).expect("session slot is available");
@@ -308,8 +308,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48j_rejects_eof_from_a_retired_slot_generation() {
+    #[proxima::test]
+    async fn c48j_rejects_eof_from_a_retired_slot_generation() {
         let (events, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut sessions = SessionSlots::<(), 1>::new();
             let retired = sessions

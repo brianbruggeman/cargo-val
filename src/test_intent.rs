@@ -42,8 +42,8 @@ mod tests {
     use super::ExactTestIntent;
     use crate::ExecutablePath;
 
-    #[test]
-    fn intent_borrows_path_and_name_without_allocating() {
+    #[proxima::test]
+    async fn intent_borrows_path_and_name_without_allocating() {
         let executable = String::from("target/debug/deps/fixture");
         let test_name = String::from("alpha");
         let executable_path = executable.as_str();

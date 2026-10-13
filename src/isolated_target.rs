@@ -220,15 +220,15 @@ mod tests {
         b"    Blocking waiting for file lock on build directory\n   Compiling resume v0.1.0\n";
     const CACHE_LINE: &[u8] = b"    Blocking waiting for file lock on package cache\n";
 
-    #[test]
-    fn the_workspace_key_is_fnv_1a_64_in_lowercase_hex() {
+    #[proxima::test]
+    async fn the_workspace_key_is_fnv_1a_64_in_lowercase_hex() {
         assert_eq!(&workspace_key(b""), b"cbf29ce484222325");
         assert_eq!(&workspace_key(b"a"), b"af63dc4c8601ec8c");
         assert_ne!(workspace_key(b"/repos/a"), workspace_key(b"/repos/b"));
     }
 
-    #[test]
-    fn isolated_directories_sit_under_the_target_directory_keyed_by_workspace() {
+    #[proxima::test]
+    async fn isolated_directories_sit_under_the_target_directory_keyed_by_workspace() {
         let directories = BuildDirectories::isolated(b"/tmp/cargo_target", b"/repos/resume")
             .expect("path fits");
         let key = workspace_key(b"/repos/resume");
@@ -244,8 +244,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn two_workspaces_sharing_one_target_directory_get_distinct_directories() {
+    #[proxima::test]
+    async fn two_workspaces_sharing_one_target_directory_get_distinct_directories() {
         let first = BuildDirectories::isolated(b"/tmp/cargo_target", b"/repos/a").expect("fits");
         let second = BuildDirectories::isolated(b"/tmp/cargo_target", b"/repos/b").expect("fits");
 
@@ -253,24 +253,24 @@ mod tests {
         assert_ne!(first.test.directory(), first.doc.directory());
     }
 
-    #[test]
-    fn a_named_root_holds_a_test_and_a_doc_subdirectory() {
+    #[proxima::test]
+    async fn a_named_root_holds_a_test_and_a_doc_subdirectory() {
         let directories = BuildDirectories::under(b"target/own").expect("fits");
 
         assert_eq!(directories.test.directory(), b"target/own/test");
         assert_eq!(directories.doc.directory(), b"target/own/doc");
     }
 
-    #[test]
-    fn a_path_longer_than_the_storage_or_holding_nul_is_refused() {
+    #[proxima::test]
+    async fn a_path_longer_than_the_storage_or_holding_nul_is_refused() {
         let long = [b'd'; super::PATH_CAPACITY + 64];
 
         assert!(BuildDirectories::isolated(&long, b"/w").is_none());
         assert!(BuildDirectories::under(b"a\0b").is_none());
     }
 
-    #[test]
-    fn a_wait_line_is_announced_once_wherever_the_chunks_split() {
+    #[proxima::test]
+    async fn a_wait_line_is_announced_once_wherever_the_chunks_split() {
         for split in 0..=BUILD_LINE.len() {
             let mut watch = LockWatch::new();
             let (head, tail) = BUILD_LINE.split_at(split);
@@ -285,8 +285,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn each_lock_kind_is_announced_once_so_a_package_cache_wait_never_hides_a_build_directory_wait() {
+    #[proxima::test]
+    async fn each_lock_kind_is_announced_once_so_a_package_cache_wait_never_hides_a_build_directory_wait() {
         let mut watch = LockWatch::new();
         let stream = [CACHE_LINE, CACHE_LINE, BUILD_LINE, BUILD_LINE];
 
@@ -296,8 +296,8 @@ mod tests {
         assert_eq!(watch.which(), b"build directory");
     }
 
-    #[test]
-    fn the_package_cache_and_unknown_locks_are_told_apart() {
+    #[proxima::test]
+    async fn the_package_cache_and_unknown_locks_are_told_apart() {
         let mut cache = LockWatch::new();
         let mut other = LockWatch::new();
 
@@ -308,16 +308,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ordinary_cargo_output_never_announces() {
+    #[proxima::test]
+    async fn ordinary_cargo_output_never_announces() {
         let mut watch = LockWatch::new();
         let output = b"   Compiling a v0.1.0\n    Finished `test` profile in 0.3s\nfile lock on file lock\n";
 
         assert_eq!(watch.observe(output), None);
     }
 
-    #[test]
-    fn the_directory_is_kept_for_the_message_and_cut_at_the_storage() {
+    #[proxima::test]
+    async fn the_directory_is_kept_for_the_message_and_cut_at_the_storage() {
         let mut watch = LockWatch::new();
         watch.set_directory(b"/tmp/cargo_target");
         assert_eq!(watch.directory(), b"/tmp/cargo_target");

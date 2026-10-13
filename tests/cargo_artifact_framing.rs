@@ -126,8 +126,8 @@ fn next_selection<'call>(
     framer.next_record(chunk, |record| select(record, scratch, max_record_bytes))
 }
 
-#[test]
-fn two_artifacts_emit_before_source_eof() {
+#[proxima::test]
+async fn two_artifacts_emit_before_source_eof() {
     ALLOCATION_COUNT.store(0, Ordering::Relaxed);
     set_tracking(false);
     let mut buffer = [0; 256];
@@ -223,8 +223,8 @@ fn two_artifacts_emit_before_source_eof() {
     );
 }
 
-#[test]
-fn record_without_newline_is_rejected_at_eof() {
+#[proxima::test]
+async fn record_without_newline_is_rejected_at_eof() {
     let mut buffer = [0; 64];
     let mut framer = ArtifactFramer::new(&mut buffer, 63).expect("buffer capacity");
     let partial_record = b"{\"reason\":\"compiler-artifact\"";
@@ -270,8 +270,8 @@ fn record_without_newline_is_rejected_at_eof() {
     );
 }
 
-#[test]
-fn parse_failure_poisoning_prevents_clean_eof_after_discard() {
+#[proxima::test]
+async fn parse_failure_poisoning_prevents_clean_eof_after_discard() {
     let mut buffer = [0; 8];
     let mut scratch = [0; 8];
     let mut framer = ArtifactFramer::new(&mut buffer, 7).expect("buffer capacity");
@@ -286,8 +286,8 @@ fn parse_failure_poisoning_prevents_clean_eof_after_discard() {
     assert_eq!(framer.push(b"\n"), Err(ArtifactStreamError::Poisoned));
 }
 
-#[test]
-fn fixed_buffer_applies_backpressure_to_an_oversized_record() {
+#[proxima::test]
+async fn fixed_buffer_applies_backpressure_to_an_oversized_record() {
     let mut buffer = [0; 4];
     let mut framer = ArtifactFramer::new(&mut buffer, 3).expect("buffer capacity");
     let mut scratch = [0; 8];
@@ -304,8 +304,8 @@ fn fixed_buffer_applies_backpressure_to_an_oversized_record() {
     );
 }
 
-#[test]
-fn next_record_reports_consumed_ignored_records_before_draining_the_next_record() {
+#[proxima::test]
+async fn next_record_reports_consumed_ignored_records_before_draining_the_next_record() {
     let ignored_then_test = b"{\"reason\":\"build-finished\",\"success\":true}\n{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"bin\"],\"test\":true},\"profile\":{\"test\":true},\"executable\":\"/fixture/next\"}\n";
     let first_record_length = newline_end(ignored_then_test);
     let mut buffer = [0; 256];
@@ -333,8 +333,8 @@ fn next_record_reports_consumed_ignored_records_before_draining_the_next_record(
     assert_eq!(parsed.expect("test artifact selected"), "/fixture/next");
 }
 
-#[test]
-fn next_record_replays_unconsumed_chunk_tail_before_selecting_the_next_record() {
+#[proxima::test]
+async fn next_record_replays_unconsumed_chunk_tail_before_selecting_the_next_record() {
     let records = b"{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"bin\"],\"test\":true},\"profile\":{\"test\":true},\"executable\":\"/fixture/a\"}\n{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"bin\"],\"test\":true},\"profile\":{\"test\":true},\"executable\":\"/fixture/b\"}\n";
     let first_record_length = newline_end(records);
     let mut buffer = [0; 128];
@@ -360,8 +360,8 @@ fn next_record_replays_unconsumed_chunk_tail_before_selecting_the_next_record() 
     );
 }
 
-#[test]
-fn one_byte_chunks_preserve_incremental_delimiter_state() {
+#[proxima::test]
+async fn one_byte_chunks_preserve_incremental_delimiter_state() {
     let record = b"record split across one-byte chunks\n";
     let mut buffer = [0; 64];
     let mut framer = ArtifactFramer::new(&mut buffer, 63).expect("buffer capacity");

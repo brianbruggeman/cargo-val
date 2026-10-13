@@ -105,8 +105,8 @@ pub fn glob_matches(pattern: &[u8], text: &[u8]) -> bool {
 mod tests {
     use super::{GlobFault, glob_matches, glob_validate};
 
-    #[test]
-    fn glob_semantics_follow_globset_defaults() {
+    #[proxima::test]
+    async fn glob_semantics_follow_globset_defaults() {
         let cases: [(&str, &str, bool); 16] = [
             ("proxima-core", "proxima-core", true),
             ("proxima-core", "proxima-core-extra", false),
@@ -137,8 +137,8 @@ mod tests {
         assert_eq!(checked, cases.len());
     }
 
-    #[test]
-    fn validation_refuses_what_the_matcher_cannot_honor() {
+    #[proxima::test]
+    async fn validation_refuses_what_the_matcher_cannot_honor() {
         assert_eq!(glob_validate(b"a[bc"), Err(GlobFault::UnclosedClass { offset: 1 }));
         assert_eq!(glob_validate(b"x{a,b}"), Err(GlobFault::Alternation { offset: 1 }));
         assert_eq!(glob_validate(b"[]a]*"), Ok(()));

@@ -107,8 +107,8 @@ fn alive(target: libc::pid_t) -> bool {
     unsafe { libc::kill(target, 0) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) }
 }
 
-#[test]
-fn shard_mode_runs_a_binary_in_about_jobs_children_and_reports_every_test() {
+#[proxima::test]
+async fn shard_mode_runs_a_binary_in_about_jobs_children_and_reports_every_test() {
     let run = run_fixture(
         SHARD,
         "children",
@@ -122,8 +122,8 @@ fn shard_mode_runs_a_binary_in_about_jobs_children_and_reports_every_test() {
     assert_eq!(run.pids.len(), 2, "5 tests over 2 jobs is ceil(5/2) = 3 names per shard, so 2 children");
 }
 
-#[test]
-fn test_mode_still_runs_each_test_in_its_own_child() {
+#[proxima::test]
+async fn test_mode_still_runs_each_test_in_its_own_child() {
     let run = run_fixture(
         SHARD,
         "per-test",
@@ -136,8 +136,8 @@ fn test_mode_still_runs_each_test_in_its_own_child() {
     assert_eq!(run.pids.len(), 5);
 }
 
-#[test]
-fn environment_selects_the_mode_and_the_command_line_overrides_it() {
+#[proxima::test]
+async fn environment_selects_the_mode_and_the_command_line_overrides_it() {
     let from_environment = run_fixture(
         SHARD,
         "env-mode",
@@ -154,16 +154,16 @@ fn environment_selects_the_mode_and_the_command_line_overrides_it() {
     assert_eq!((from_environment.pids.len(), overridden.pids.len()), (1, 5));
 }
 
-#[test]
-fn an_unknown_process_mode_is_refused_with_its_source() {
+#[proxima::test]
+async fn an_unknown_process_mode_is_refused_with_its_source() {
     let run = run_fixture(SHARD, "bad-mode", &["--process", "batch"], &[]);
 
     assert_eq!(run.status, Some(2));
     assert!(run.stderr.contains("--process must be auto, shard, or test"), "{}", run.stderr);
 }
 
-#[test]
-fn a_test_that_aborts_inside_a_shard_fails_alone_and_every_unsettled_name_runs_solo() {
+#[proxima::test]
+async fn a_test_that_aborts_inside_a_shard_fails_alone_and_every_unsettled_name_runs_solo() {
     let run = run_fixture(
         SHARD,
         "abort",
@@ -186,8 +186,8 @@ fn a_test_that_aborts_inside_a_shard_fails_alone_and_every_unsettled_name_runs_s
     assert_eq!(run.pids.len(), 5, "one shard child, then one solo child for each of the four names it did not settle");
 }
 
-#[test]
-fn a_failing_test_prints_its_own_libtest_block_and_no_other_name_does() {
+#[proxima::test]
+async fn a_failing_test_prints_its_own_libtest_block_and_no_other_name_does() {
     let run = run_fixture(
         SHARD,
         "failure-block",
@@ -204,8 +204,8 @@ fn a_failing_test_prints_its_own_libtest_block_and_no_other_name_does() {
 
 // the held test blocks on a fifo open
 #[cfg(unix)]
-#[test]
-fn fail_fast_ends_the_shard_and_leaves_its_unreported_names_uncounted() {
+#[proxima::test]
+async fn fail_fast_ends_the_shard_and_leaves_its_unreported_names_uncounted() {
     let directory = scratch("hold");
     let hold = directory.join("hold");
     make_fifo(&hold);
@@ -227,8 +227,8 @@ fn fail_fast_ends_the_shard_and_leaves_its_unreported_names_uncounted() {
     assert!(run.stdout.contains("listed tests not run 1"), "{}", run.stdout);
 }
 
-#[test]
-fn names_past_the_command_line_budget_split_into_more_shards_than_jobs() {
+#[proxima::test]
+async fn names_past_the_command_line_budget_split_into_more_shards_than_jobs() {
     let run = run_fixture(
         SHARD_LONG,
         "long-names",
@@ -256,8 +256,8 @@ fn field<'line>(line: &'line str, key: &str) -> &'line str {
         .unwrap_or_else(|| panic!("{key} is in {line}"))
 }
 
-#[test]
-fn declared_tests_share_processes_by_group_and_serial_tests_run_with_nothing_else_in_flight() {
+#[proxima::test]
+async fn declared_tests_share_processes_by_group_and_serial_tests_run_with_nothing_else_in_flight() {
     let run = run_fixture(
         SCHED,
         "sched",
@@ -290,8 +290,8 @@ fn declared_tests_share_processes_by_group_and_serial_tests_run_with_nothing_els
     assert_eq!(run.pids.len(), 7, "one child per launched shard");
 }
 
-#[test]
-fn a_group_runs_one_child_at_a_time_even_with_free_jobs() {
+#[proxima::test]
+async fn a_group_runs_one_child_at_a_time_even_with_free_jobs() {
     let run = run_fixture(
         SCHED,
         "group-cap",
@@ -347,8 +347,8 @@ fn overlaps(first: &Interval, second: &Interval) -> bool {
     first.start < second.end && second.start < first.end
 }
 
-#[test]
-fn per_test_mode_runs_serial_alone_and_one_child_per_group_at_a_time() {
+#[proxima::test]
+async fn per_test_mode_runs_serial_alone_and_one_child_per_group_at_a_time() {
     let run = run_fixture(
         OVERLAP,
         "overlap",
@@ -390,8 +390,8 @@ fn statuses(run: &Run) -> BTreeSet<String> {
         .collect()
 }
 
-#[test]
-fn should_panic_and_stray_child_output_report_the_same_as_per_test_mode() {
+#[proxima::test]
+async fn should_panic_and_stray_child_output_report_the_same_as_per_test_mode() {
     let shard = run_fixture(
         QUIRKS,
         "quirks-shard",
@@ -412,8 +412,8 @@ fn should_panic_and_stray_child_output_report_the_same_as_per_test_mode() {
     assert!(!shard.stderr.contains("ended without a result line"), "{}", shard.stderr);
 }
 
-#[test]
-fn a_crash_inside_a_should_panic_test_fails_that_test_alone_like_per_test_mode() {
+#[proxima::test]
+async fn a_crash_inside_a_should_panic_test_fails_that_test_alone_like_per_test_mode() {
     let environment = [("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_QUIRK_ABORT", "suite::panics_then_aborts")];
     let shard = run_fixture(QUIRKS, "quirks-abort-shard", &["--process", "shard", "--no-fail-fast"], &environment);
     let per_test = run_fixture(QUIRKS, "quirks-abort-test", &["--process", "test", "--no-fail-fast"], &environment);
@@ -430,8 +430,8 @@ const STRAY: &str = "shard_stray";
 const MANY: &str = "shard_many";
 const MANY_NAMES: usize = 4096;
 
-#[test]
-fn an_abort_before_any_test_runs_each_name_alone_after_one_shard_child_per_shard() {
+#[proxima::test]
+async fn an_abort_before_any_test_runs_each_name_alone_after_one_shard_child_per_shard() {
     let one = run_fixture(INIT, "init-one", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_INIT_ABORT", "1")]);
     let two = run_fixture(INIT, "init-two", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "2"), ("CARGO_VAL_INIT_ABORT", "1")]);
 
@@ -443,8 +443,8 @@ fn an_abort_before_any_test_runs_each_name_alone_after_one_shard_child_per_shard
     }
 }
 
-#[test]
-fn a_full_shard_that_aborts_at_its_first_test_gives_every_name_exactly_one_solo_run() {
+#[proxima::test]
+async fn a_full_shard_that_aborts_at_its_first_test_gives_every_name_exactly_one_solo_run() {
     let run = run_fixture(MANY, "many", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "1")]);
 
     assert_eq!(run.status, Some(0), "stderr tail: {}", run.stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n"));
@@ -454,8 +454,8 @@ fn a_full_shard_that_aborts_at_its_first_test_gives_every_name_exactly_one_solo_
     assert!(!run.stderr.contains("could not queue"), "{}", run.stderr.lines().take(5).collect::<Vec<_>>().join("\n"));
 }
 
-#[test]
-fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
+#[proxima::test]
+async fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
     let run = run_fixture(SHARD, "fail-fast-block", &["--process", "shard"], &[("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_SHARD_FAIL", "1")]);
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
@@ -463,8 +463,8 @@ fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
     assert!(run.stderr.contains("requested shard failure in d"), "{}", run.stderr);
 }
 
-#[test]
-fn fail_fast_after_a_crash_keeps_the_crash_as_a_failure_and_withdraws_only_the_rest() {
+#[proxima::test]
+async fn fail_fast_after_a_crash_keeps_the_crash_as_a_failure_and_withdraws_only_the_rest() {
     let run = run_fixture(
         SHARD,
         "fail-fast-crash",
@@ -479,8 +479,8 @@ fn fail_fast_after_a_crash_keeps_the_crash_as_a_failure_and_withdraws_only_the_r
     assert!(run.stdout.contains("listed tests not run 3"), "{full}");
 }
 
-#[test]
-fn a_stray_ok_line_before_the_verdict_is_decided_by_running_the_test_alone() {
+#[proxima::test]
+async fn a_stray_ok_line_before_the_verdict_is_decided_by_running_the_test_alone() {
     let shard = run_fixture(STRAY, "stray-shard", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "1")]);
     let per_test = run_fixture(STRAY, "stray-test", &["--process", "test", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "1")]);
 
@@ -496,8 +496,8 @@ fn a_stray_ok_line_before_the_verdict_is_decided_by_running_the_test_alone() {
     );
 }
 
-#[test]
-fn a_stray_ok_line_is_settled_once_at_two_jobs_too() {
+#[proxima::test]
+async fn a_stray_ok_line_is_settled_once_at_two_jobs_too() {
     let shard = run_fixture(STRAY, "stray-two", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "2")]);
 
     assert_eq!(shard.status, Some(1), "stdout: {}\nstderr: {}", shard.stdout, shard.stderr);
@@ -507,15 +507,15 @@ fn a_stray_ok_line_is_settled_once_at_two_jobs_too() {
 
 // sigint delivery and fifo rendezvous
 #[cfg(unix)]
-#[test]
-fn an_interrupt_ends_a_blocked_shard_child_and_cargo_val_exits_promptly() {
+#[proxima::test]
+async fn an_interrupt_ends_a_blocked_shard_child_and_cargo_val_exits_promptly() {
     interrupt_ends_blocked_child("shard", "interrupt-shard");
 }
 
 // sigint delivery and fifo rendezvous
 #[cfg(unix)]
-#[test]
-fn a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly() {
+#[proxima::test]
+async fn a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly() {
     interrupt_ends_blocked_child("test", "interrupt-test");
 }
 

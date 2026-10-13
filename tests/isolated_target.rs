@@ -135,8 +135,8 @@ fn passed(stdout: &str) -> usize {
 }
 
 #[cfg(unix)]
-#[test]
-fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
+#[proxima::test]
+async fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
     let scratch = scratch("isolated-lock");
     let shared = scratch.join("shared-target");
     let mut holder = hold_build_lock(&scratch, &shared);
@@ -161,8 +161,8 @@ fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
 }
 
 #[cfg(unix)]
-#[test]
-fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
+#[proxima::test]
+async fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
     let scratch = scratch("shared-lock");
     let shared = scratch.join("shared-target");
     let holder = hold_build_lock(&scratch, &shared);
@@ -214,8 +214,8 @@ fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
     );
 }
 
-#[test]
-fn a_named_target_dir_holds_a_test_and_a_doc_subdirectory() {
+#[proxima::test]
+async fn a_named_target_dir_holds_a_test_and_a_doc_subdirectory() {
     let scratch = scratch("named-target");
     let shared = scratch.join("shared-target");
     let named = scratch.join("named-target");
@@ -239,8 +239,8 @@ fn a_named_target_dir_holds_a_test_and_a_doc_subdirectory() {
     assert!(!shared.exists(), "nothing was built in the environment's target directory");
 }
 
-#[test]
-fn an_empty_target_dir_setting_is_refused_before_any_build() {
+#[proxima::test]
+async fn an_empty_target_dir_setting_is_refused_before_any_build() {
     let scratch = scratch("empty-target");
     let shared = scratch.join("shared-target");
 

@@ -248,8 +248,8 @@ mod tests {
     use super::{OutcomeError, OutcomeLedger, StartError, TerminalOutcome};
     use crate::schedule::SessionSlots;
 
-    #[test]
-    fn c48h_accounts_outcomes_in_the_coordinator_owned_session_table() {
+    #[proxima::test]
+    async fn c48h_accounts_outcomes_in_the_coordinator_owned_session_table() {
         let (result, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut live = SessionSlots::<u8, 3>::new();
             let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
@@ -300,8 +300,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48h_rejects_a_stale_generation_without_changing_counts() {
+    #[proxima::test]
+    async fn c48h_rejects_a_stale_generation_without_changing_counts() {
         let (result, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut live = SessionSlots::<u8, 1>::new();
             let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
@@ -331,8 +331,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48h_rejects_replacing_ledger_while_a_child_is_live() {
+    #[proxima::test]
+    async fn c48h_rejects_replacing_ledger_while_a_child_is_live() {
         let mut live = SessionSlots::<u8, 1>::new();
         let slot = {
             let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
@@ -346,8 +346,8 @@ mod tests {
         assert_eq!(live.get(slot), Some(&9));
     }
 
-    #[test]
-    fn c48h_returns_child_when_the_live_table_is_full() {
+    #[proxima::test]
+    async fn c48h_returns_child_when_the_live_table_is_full() {
         let mut live = SessionSlots::<u8, 1>::new();
         let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
         ledger.start(4).expect("first child owns the only slot");
@@ -372,8 +372,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48h_returns_child_when_discovered_count_overflows() {
+    #[proxima::test]
+    async fn c48h_returns_child_when_discovered_count_overflows() {
         let mut live = SessionSlots::<u8, 1>::new();
         let mut ledger = OutcomeLedger::new(&mut live).expect("table starts empty");
         ledger.counts.discovered = usize::MAX;

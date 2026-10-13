@@ -179,8 +179,8 @@ mod tests {
         event.expect("exit edge yielded a status, not an io fault")
     }
 
-    #[test]
-    fn c39_wakes_for_exit_and_control_without_semaphore_mode() {
+    #[proxima::test]
+    async fn c39_wakes_for_exit_and_control_without_semaphore_mode() {
         in_single_threaded_process(|| {
             let held = fork_child(0, true);
             let pid = held.pid;
@@ -199,8 +199,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn c41_registration_race_control_observes_already_exited_child() {
+    #[proxima::test]
+    async fn c41_registration_race_control_observes_already_exited_child() {
         let finished = fork_child(FAST_CHILD_CODE, false);
         let pid = finished.pid;
         wait_exit_without_reaping(pid);
@@ -216,8 +216,8 @@ mod tests {
         assert!(zombie_is_released(pid));
     }
 
-    #[test]
-    fn c59_exit_event_wakes_for_signal_and_reap_reports_signal_and_releases_zombie() {
+    #[proxima::test]
+    async fn c59_exit_event_wakes_for_signal_and_reap_reports_signal_and_releases_zombie() {
         let held = fork_child(0, true);
         let pid = held.pid;
 
@@ -237,8 +237,8 @@ mod tests {
         assert!(zombie_is_released(pid));
     }
 
-    #[test]
-    fn exit_gate_never_hangs_on_exiting_child() {
+    #[proxima::test]
+    async fn exit_gate_never_hangs_on_exiting_child() {
         let finished = fork_child(FAST_CHILD_CODE, false);
         let pid = finished.pid;
 
@@ -252,8 +252,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exit_sources_compose_into_fan_in_and_merge_both_statuses_then_exhaust() {
+    #[proxima::test]
+    async fn exit_sources_compose_into_fan_in_and_merge_both_statuses_then_exhaust() {
         let first = fork_child(3, false);
         let second = fork_child(5, false);
         let merged = FanIn::new(

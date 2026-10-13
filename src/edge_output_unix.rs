@@ -366,8 +366,8 @@ mod tests {
         unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFL) }
     }
 
-    #[test]
-    fn writes_block_without_blocking_thread() {
+    #[proxima::test]
+    async fn writes_block_without_blocking_thread() {
         in_single_threaded_process(|| {
             let (reader, writer) = pipe_pair();
             set_nonblocking(&reader);
@@ -405,8 +405,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn dropped_call_loses_no_line_and_keeps_order() {
+    #[proxima::test]
+    async fn dropped_call_loses_no_line_and_keeps_order() {
         in_single_threaded_process(|| {
             let (reader, writer) = pipe_pair();
             set_nonblocking(&reader);
@@ -438,8 +438,8 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_pipe_description_flags_restored_on_drop() {
+    #[proxima::test]
+    async fn macos_pipe_description_flags_restored_on_drop() {
         in_single_threaded_process(|| {
             let (reader, writer) = pipe_pair();
             let before = flags(&writer);
@@ -464,8 +464,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn socketpair_receives_the_line() {
+    #[proxima::test]
+    async fn socketpair_receives_the_line() {
         in_single_threaded_process(|| {
             let (writer, mut peer) = UnixStream::pair().expect("socketpair");
             let outcome = run_on_this_thread(CoreId(0), async move {
@@ -481,8 +481,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn tempfile_receives_the_line_without_a_gate() {
+    #[proxima::test]
+    async fn tempfile_receives_the_line_without_a_gate() {
         in_single_threaded_process(|| {
             let directory = tempdir().expect("temporary directory");
             let path = directory.path().join("report.txt");
@@ -502,8 +502,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn openpty_slave_receives_the_line() {
+    #[proxima::test]
+    async fn openpty_slave_receives_the_line() {
         in_single_threaded_process(|| {
             let (mut master, mut slave) = (-1, -1);
             let status = unsafe {

@@ -770,51 +770,51 @@ mod tests {
     mod cases {
         use super::*;
 
-        #[test]
-        fn fail_fast_spares_output_reruns() {
+        #[proxima::test]
+        async fn fail_fast_spares_output_reruns() {
             assert!(spared_by_stop(false, OUTPUT));
         }
 
-        #[test]
-        fn fail_fast_kills_deciding_and_plain_sessions() {
+        #[proxima::test]
+        async fn fail_fast_kills_deciding_and_plain_sessions() {
             assert!(!spared_by_stop(false, DECIDING));
             assert!(!spared_by_stop(false, None));
         }
 
-        #[test]
-        fn interrupt_kills_everything() {
+        #[proxima::test]
+        async fn interrupt_kills_everything() {
             assert!(!spared_by_stop(true, OUTPUT));
             assert!(!spared_by_stop(true, DECIDING));
             assert!(!spared_by_stop(true, None));
         }
 
-        #[test]
-        fn deciding_solos_are_killed_on_fail_fast() {
+        #[proxima::test]
+        async fn deciding_solos_are_killed_on_fail_fast() {
             assert!(!spared_by_stop(false, DECIDING));
             assert!(!withdrawn_solo(false, true, DECIDING, 0));
         }
 
-        #[test]
-        fn interrupted_deciding_solo_is_withdrawn_for_any_status() {
+        #[proxima::test]
+        async fn interrupted_deciding_solo_is_withdrawn_for_any_status() {
             assert!(withdrawn_solo(true, false, DECIDING, 0));
             assert!(withdrawn_solo(true, false, DECIDING, 1));
             assert!(withdrawn_solo(true, false, DECIDING, STOP_STATUS));
         }
 
-        #[test]
-        fn fail_fast_stop_status_withdraws_deciding_solo() {
+        #[proxima::test]
+        async fn fail_fast_stop_status_withdraws_deciding_solo() {
             assert!(withdrawn_solo(false, true, DECIDING, STOP_STATUS));
         }
 
-        #[test]
-        fn natural_exit_of_deciding_solo_is_not_withdrawn() {
+        #[proxima::test]
+        async fn natural_exit_of_deciding_solo_is_not_withdrawn() {
             assert!(!withdrawn_solo(false, false, DECIDING, 0));
             assert!(!withdrawn_solo(false, false, DECIDING, 1));
             assert!(!withdrawn_solo(false, true, DECIDING, 1));
         }
 
-        #[test]
-        fn output_solo_is_never_withdrawn_by_the_decision() {
+        #[proxima::test]
+        async fn output_solo_is_never_withdrawn_by_the_decision() {
             assert!(!withdrawn_solo(true, true, OUTPUT, STOP_STATUS));
             assert!(!withdrawn_solo(false, true, OUTPUT, STOP_STATUS));
         }
@@ -949,8 +949,8 @@ mod pause_tests {
         NAMES.iter().all(|name| output.matches(&std::format!("{name} PASS")).count() == 1)
     }
 
-    #[test]
-    fn a_full_status_queue_pauses_framing_and_the_drained_remainder_settles_each_test_once() {
+    #[proxima::test]
+    async fn a_full_status_queue_pauses_framing_and_the_drained_remainder_settles_each_test_once() {
         in_single_threaded_process(|| {
             let mut reader = redirect_standard_streams();
             let outcome = run_on_this_thread(CoreId(0), async move {
@@ -985,8 +985,8 @@ mod pause_tests {
         });
     }
 
-    #[test]
-    fn an_unfilled_status_queue_settles_the_whole_piece_without_pausing() {
+    #[proxima::test]
+    async fn an_unfilled_status_queue_settles_the_whole_piece_without_pausing() {
         in_single_threaded_process(|| {
             let mut reader = redirect_standard_streams();
             let outcome = run_on_this_thread(CoreId(0), async move {

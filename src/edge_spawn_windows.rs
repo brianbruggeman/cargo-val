@@ -482,8 +482,8 @@ pub mod handles {
             exit_code
         }
 
-        #[test]
-        fn c44a_restricts_child_inheritance_to_three_stdio_handles() {
+        #[proxima::test]
+        async fn c44a_restricts_child_inheritance_to_three_stdio_handles() {
             let (stdin_read, stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (stderr_read, stderr_write) = create_pipe();
@@ -579,8 +579,8 @@ pub mod handles {
             ));
         }
 
-        #[test]
-        fn c44a_rejects_builder_storage_shortage_without_handle_leaks() {
+        #[proxima::test]
+        async fn c44a_rejects_builder_storage_shortage_without_handle_leaks() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, _stdout_write) = create_pipe();
             let (stderr_read, _stderr_write) = create_pipe();
@@ -641,8 +641,8 @@ pub mod handles {
             peeked != 0 && buffer == *SENTINEL_BYTES
         }
 
-        #[test]
-        fn child_handle_probe() {
+        #[proxima::test]
+        async fn child_handle_probe() {
             let Ok(sentinel_value) = std::env::var("CARGO_VAL_SENTINEL_HANDLE") else {
                 return;
             };
@@ -863,8 +863,8 @@ pub mod pipe_pair {
             .collect()
         }
 
-        #[test]
-        fn c45a_creates_one_overlapped_parent_reader_and_inheritable_writer() {
+        #[proxima::test]
+        async fn c45a_creates_one_overlapped_parent_reader_and_inheritable_writer() {
             let handles_before = current_process_handle_count();
             let mut pipe_pair = WindowsPipePair::new(&unique_pipe_name())
                 .expect("the operating system creates a connected named-pipe pair");
@@ -969,8 +969,8 @@ pub mod pipe_pair {
             );
         }
 
-        #[test]
-        fn c45a_duplicate_pipe_creation_leaves_no_handle_leaks() {
+        #[proxima::test]
+        async fn c45a_duplicate_pipe_creation_leaves_no_handle_leaks() {
             let handles_before = current_process_handle_count();
             let pipe_name = unique_pipe_name();
             let pipe_pair = WindowsPipePair::new(&pipe_name)
@@ -1453,13 +1453,13 @@ pub mod pool {
             }
         }
 
-        #[test]
-        fn edge_pool_probe_alpha_child_entry() {
+        #[proxima::test]
+        async fn edge_pool_probe_alpha_child_entry() {
             edge_pool_probe_alpha();
         }
 
-        #[test]
-        fn edge_pool_probe_beta_child_entry() {
+        #[proxima::test]
+        async fn edge_pool_probe_beta_child_entry() {
             edge_pool_probe_beta();
         }
 
@@ -1566,8 +1566,8 @@ pub mod pool {
             count
         }
 
-        #[test]
-        fn edge_exact_launch_after_setup_performs_zero_heap_allocations() {
+        #[proxima::test]
+        async fn edge_exact_launch_after_setup_performs_zero_heap_allocations() {
             let fixture = Fixture::new();
             let references = fixture.references();
             let mut storage = LaunchStorage::new();
@@ -1595,8 +1595,8 @@ pub mod pool {
             assert!(String::from_utf8_lossy(&output).contains(ALPHA_MARKER));
         }
 
-        #[test]
-        fn edge_process_handle_count_is_stable_across_200_sequential_slot_launches() {
+        #[proxima::test]
+        async fn edge_process_handle_count_is_stable_across_200_sequential_slot_launches() {
             let _serial = HANDLE_COUNT_GUARD.lock().expect("handle count guard is not poisoned");
             let fixture = Fixture::new();
             let mut storage = LaunchStorage::new();
@@ -1620,8 +1620,8 @@ pub mod pool {
             assert_eq!(storage.slots.len(), 1, "sequential launches share one slot");
         }
 
-        #[test]
-        fn edge_reused_slot_delivers_only_the_second_childs_stdout() {
+        #[proxima::test]
+        async fn edge_reused_slot_delivers_only_the_second_childs_stdout() {
             let fixture = Fixture::new();
             let mut storage = LaunchStorage::new();
             let first = launch(&fixture, &mut storage, &alpha_name());
@@ -1639,8 +1639,8 @@ pub mod pool {
             assert!(!second_text.contains(ALPHA_MARKER), "no byte of the first child reaches the second: {second_text}");
         }
 
-        #[test]
-        fn edge_ready_child_runs_only_after_resume() {
+        #[proxima::test]
+        async fn edge_ready_child_runs_only_after_resume() {
             let fixture = Fixture::new();
             let references = fixture.references();
             let mut storage = LaunchStorage::new();
@@ -1662,8 +1662,8 @@ pub mod pool {
             assert!(String::from_utf8_lossy(&output).contains(BETA_MARKER));
         }
 
-        #[test]
-        fn edge_ready_child_is_terminated_with_the_run_job_and_never_ran() {
+        #[proxima::test]
+        async fn edge_ready_child_is_terminated_with_the_run_job_and_never_ran() {
             let fixture = Fixture::new();
             let references = fixture.references();
             let mut storage = LaunchStorage::new();
@@ -1688,8 +1688,8 @@ pub mod pool {
             assert!(output.is_empty(), "a frozen child wrote nothing");
         }
 
-        #[test]
-        fn edge_terminated_child_reports_the_cargo_val_stop_code() {
+        #[proxima::test]
+        async fn edge_terminated_child_reports_the_cargo_val_stop_code() {
             let fixture = Fixture::new();
             let references = fixture.references();
             let mut storage = LaunchStorage::new();
@@ -2542,8 +2542,8 @@ mod spawn {
             exit_code
         }
 
-        #[test]
-        fn c44b_launches_one_exact_child_and_owns_one_process_handle() {
+        #[proxima::test]
+        async fn c44b_launches_one_exact_child_and_owns_one_process_handle() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -2590,8 +2590,8 @@ mod spawn {
             );
         }
 
-        #[test]
-        fn nonexistent_probe_name_runs_zero_tests_and_fails_the_ran_one_test_guard() {
+        #[proxima::test]
+        async fn nonexistent_probe_name_runs_zero_tests_and_fails_the_ran_one_test_guard() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -2634,8 +2634,8 @@ mod spawn {
             );
         }
 
-        #[test]
-        fn c44b_missing_executable_returns_without_handle_leaks() {
+        #[proxima::test]
+        async fn c44b_missing_executable_returns_without_handle_leaks() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (_stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -2697,8 +2697,8 @@ mod spawn {
             std::println!("{{\"launch_errors\":1,\"owned_process_handles\":0}}");
         }
 
-        #[test]
-        fn c44c_child_receives_unicode_environment_override_without_parent_mutation() {
+        #[proxima::test]
+        async fn c44c_child_receives_unicode_environment_override_without_parent_mutation() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -2752,8 +2752,8 @@ mod spawn {
             );
         }
 
-        #[test]
-        fn c44c_child_environment_control_omits_unlisted_values() {
+        #[proxima::test]
+        async fn c44c_child_environment_control_omits_unlisted_values() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -2804,8 +2804,8 @@ mod spawn {
             );
         }
 
-        #[test]
-        fn c44d_child_uses_requested_working_directory_without_parent_mutation() {
+        #[proxima::test]
+        async fn c44d_child_uses_requested_working_directory_without_parent_mutation() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -2862,8 +2862,8 @@ mod spawn {
             std::println!("{{\"child_directory_matches\":1,\"parent_directory_changes\":0}}");
         }
 
-        #[test]
-        fn c44d_wrong_directory_control_is_rejected_by_child_probe() {
+        #[proxima::test]
+        async fn c44d_wrong_directory_control_is_rejected_by_child_probe() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -2939,8 +2939,8 @@ mod spawn {
             in_job != 0
         }
 
-        #[test]
-        fn c67_job_object_carries_kill_on_close_die_on_exception_and_below_normal_priority() {
+        #[proxima::test]
+        async fn c67_job_object_carries_kill_on_close_die_on_exception_and_below_normal_priority() {
             let job = WindowsJob::new().expect("the run job is created");
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
 
@@ -2973,8 +2973,8 @@ mod spawn {
             );
         }
 
-        #[test]
-        fn c67_limit_constants_match_windows_sys_values() {
+        #[proxima::test]
+        async fn c67_limit_constants_match_windows_sys_values() {
             assert_eq!(
                 WINDOWS_JOB_KILL_ON_JOB_CLOSE,
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -2991,8 +2991,8 @@ mod spawn {
             );
         }
 
-        #[test]
-        fn c67_child_is_created_inside_the_run_job_and_thread_handle_is_closed() {
+        #[proxima::test]
+        async fn c67_child_is_created_inside_the_run_job_and_thread_handle_is_closed() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -3040,8 +3040,8 @@ mod spawn {
             std::println!("{{\"child_in_job\":1,\"handles_retained_per_child\":1}}");
         }
 
-        #[test]
-        fn c67_child_without_job_list_is_outside_the_run_job() {
+        #[proxima::test]
+        async fn c67_child_without_job_list_is_outside_the_run_job() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -3083,8 +3083,8 @@ mod spawn {
             assert_child_ran(&stdout_read, ProbeOutcome::Passed);
         }
 
-        #[test]
-        fn c67_unterminated_executable_is_rejected_before_creation() {
+        #[proxima::test]
+        async fn c67_unterminated_executable_is_rejected_before_creation() {
             let (stdin_read, _stdin_write) = create_pipe();
             let (_stdout_read, stdout_write) = create_pipe();
             let (_stderr_read, stderr_write) = create_pipe();
@@ -3116,8 +3116,8 @@ mod spawn {
 
             assert!(matches!(result, Err(WindowsSpawnError::InvalidExecutable)));
         }
-        #[test]
-        fn child_process_probe() {
+        #[proxima::test]
+        async fn child_process_probe() {
             if !env::args().any(|argument| argument == "--exact") {
                 return;
             }
@@ -3130,8 +3130,8 @@ mod spawn {
             }
         }
 
-        #[test]
-        fn child_environment_probe() {
+        #[proxima::test]
+        async fn child_environment_probe() {
             let Ok(expectation) = env::var(EXPECT_PRESENT_KEY) else {
                 return;
             };
@@ -3146,8 +3146,8 @@ mod spawn {
             }
         }
 
-        #[test]
-        fn child_working_directory_probe() {
+        #[proxima::test]
+        async fn child_working_directory_probe() {
             let Some(expected_directory) = env::var_os(EXPECT_DIRECTORY_KEY) else {
                 return;
             };

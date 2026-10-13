@@ -144,8 +144,8 @@ pub const fn listing_wanted(stopped: bool, live_sessions: usize, jobs: usize) ->
 mod tests {
     use super::*;
 
-    #[test]
-    fn never_trips_without_max_fail() {
+    #[proxima::test]
+    async fn never_trips_without_max_fail() {
         let policy = StopPolicy::new(None);
 
         assert_eq!(policy.observe_failures(1_000), Observation::Clear);
@@ -153,16 +153,16 @@ mod tests {
         assert_eq!(policy.report(), None);
     }
 
-    #[test]
-    fn trips_exactly_at_max_fail() {
+    #[proxima::test]
+    async fn trips_exactly_at_max_fail() {
         let policy = StopPolicy::new(Some(3));
 
         assert_eq!(policy.observe_failures(2), Observation::Clear);
         assert_eq!(policy.observe_failures(3), Observation::FirstTrip);
     }
 
-    #[test]
-    fn records_in_flight_once() {
+    #[proxima::test]
+    async fn records_in_flight_once() {
         let mut policy = StopPolicy::new(Some(1));
 
         policy.record_trip(4, DocAtTrip::NotSpawned);
@@ -174,8 +174,8 @@ mod tests {
         assert_eq!(report.doc_at_trip, DocAtTrip::NotSpawned);
     }
 
-    #[test]
-    fn report_is_none_before_trip() {
+    #[proxima::test]
+    async fn report_is_none_before_trip() {
         let mut policy = StopPolicy::new(Some(2));
         policy.launched();
         policy.target_skipped();
@@ -184,8 +184,8 @@ mod tests {
         assert_eq!(policy.report(), None);
     }
 
-    #[test]
-    fn report_matches_worked_sequence() {
+    #[proxima::test]
+    async fn report_matches_worked_sequence() {
         let mut policy = StopPolicy::new(Some(2));
         assert_eq!(policy.target_listed(), 0);
         assert_eq!(policy.target_listed(), 1);
@@ -211,8 +211,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn real_ignore_modes_listing_admits_all_when_running_and_counts_when_stopped() {
+    #[proxima::test]
+    async fn real_ignore_modes_listing_admits_all_when_running_and_counts_when_stopped() {
         const LISTING: &str = include_str!("../tests/fixtures/listing/ignore_modes_list.txt");
         let tests = LISTING.lines().filter(|line| line.ends_with(": test")).count();
         let mut running = StopPolicy::new(Some(1));
@@ -228,8 +228,8 @@ mod tests {
         assert_eq!(stopped.report().expect("tripped").listed_not_run, 3);
     }
 
-    #[test]
-    fn listing_is_wanted_while_a_slot_is_free_or_once_stopped() {
+    #[proxima::test]
+    async fn listing_is_wanted_while_a_slot_is_free_or_once_stopped() {
         assert!(listing_wanted(false, 3, 4));
         assert!(!listing_wanted(false, 4, 4));
         assert!(listing_wanted(true, 4, 4));

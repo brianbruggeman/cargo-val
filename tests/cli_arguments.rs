@@ -46,8 +46,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 }
 
-#[test]
-fn help_and_version_select_top_level_actions() {
+#[proxima::test]
+async fn help_and_version_select_top_level_actions() {
     let mut help_parser = CliParser::new();
     help_parser.push(b"--help");
     assert_eq!(help_parser.action(), CliAction::Help);
@@ -57,8 +57,8 @@ fn help_and_version_select_top_level_actions() {
     assert_eq!(version_parser.action(), CliAction::Version);
 }
 
-#[test]
-fn test_arguments_after_separator_are_not_cargo_val_options() {
+#[proxima::test]
+async fn test_arguments_after_separator_are_not_cargo_val_options() {
     let mut parser = CliParser::new();
     parser.push(b"--manifest-path");
     parser.push(b"tests/fixtures/workspace/Cargo.toml");
@@ -82,8 +82,8 @@ fn test_arguments_after_separator_are_not_cargo_val_options() {
     assert!(!parser.has_invalid_cargo_option_value());
 }
 
-#[test]
-fn missing_or_empty_manifest_path_is_rejected() {
+#[proxima::test]
+async fn missing_or_empty_manifest_path_is_rejected() {
     let mut missing_parser = CliParser::new();
     missing_parser.push(b"--manifest-path");
     assert!(missing_parser.has_invalid_manifest_path());
@@ -97,8 +97,8 @@ fn missing_or_empty_manifest_path_is_rejected() {
     assert!(missing_target_parser.has_invalid_cargo_option_value());
 }
 
-#[test]
-fn argv_parsing_allocates_nothing_and_probe_detects_allocation() {
+#[proxima::test]
+async fn argv_parsing_allocates_nothing_and_probe_detects_allocation() {
     ALLOCATION_COUNT.store(0, Ordering::Relaxed);
     set_tracking(true);
     let mut parser = CliParser::new();

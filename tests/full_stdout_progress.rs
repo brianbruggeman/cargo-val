@@ -142,8 +142,8 @@ fn drain_stdout(stdout: &mut PipeReader) -> Vec<u8> {
     }
 }
 
-#[test]
-fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drain() {
+#[proxima::test]
+async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drain() {
     let directory = target_directory()
         .join("full-stdout")
         .join(format!("run-{}", std::process::id()));
@@ -199,8 +199,8 @@ fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drain() {
     );
 }
 
-#[test]
-fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_order_after_drain() {
+#[proxima::test]
+async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_order_after_drain() {
     let directory = target_directory()
         .join("full-stdout")
         .join(format!("flood-{}", std::process::id()));

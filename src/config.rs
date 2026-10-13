@@ -680,8 +680,8 @@ fn format_milli(fraction: &str) -> Option<usize> {
 mod shard_jobs_tests {
     use super::shard_jobs;
 
-    #[test]
-    fn counts_and_multiples_of_the_core_count_resolve_to_children() {
+    #[proxima::test]
+    async fn counts_and_multiples_of_the_core_count_resolve_to_children() {
         let table = [
             ("2x", 8, Some(16)),
             ("1x", 8, Some(8)),
@@ -715,8 +715,8 @@ mod layers_tests {
         layers.supplied().map(|(_, text)| text)
     }
 
-    #[test]
-    fn no_tests_precedence_table() {
+    #[proxima::test]
+    async fn no_tests_precedence_table() {
         let table: [(Layers<'_>, Resolved<NoTestsPolicy>); 6] = [
             (NO_TESTS, Ok((NoTestsPolicy::Fail, Source::BuildDefault))),
             (NO_TESTS.configured(Some("warn")), Ok((NoTestsPolicy::Warn, Source::Configured))),
@@ -733,8 +733,8 @@ mod layers_tests {
         }
     }
 
-    #[test]
-    fn refusals_name_the_layer_that_supplied_the_value() {
+    #[proxima::test]
+    async fn refusals_name_the_layer_that_supplied_the_value() {
         assert_eq!(
             NO_TESTS.command_line(Some(b"ignore")).resolve::<NoTestsPolicy>().map_err(SettingError::message),
             Err(&b"cargo-val: --no-tests must be fail, warn, or pass\n"[..])
@@ -749,15 +749,15 @@ mod layers_tests {
         );
     }
 
-    #[test]
-    fn a_setting_with_no_layer_and_no_default_is_refused_as_a_build_default() {
+    #[proxima::test]
+    async fn a_setting_with_no_layer_and_no_default_is_refused_as_a_build_default() {
         let bare = TARGET_DIR.build_default(None);
 
         assert_eq!(bare.resolve::<TargetDirMode<'_>>(), Err(refused(TARGET_DIR, Source::BuildDefault)));
     }
 
-    #[test]
-    fn process_precedence_is_command_line_then_environment_then_build_default() {
+    #[proxima::test]
+    async fn process_precedence_is_command_line_then_environment_then_build_default() {
         let table: [(Layers<'_>, Resolved<ProcessSetting>); 6] = [
             (PROCESS.build_default(Some("auto")), Ok((ProcessSetting::Auto, Source::BuildDefault))),
             (PROCESS.build_default(Some("test")), Ok((ProcessSetting::Test, Source::BuildDefault))),
@@ -783,8 +783,8 @@ mod layers_tests {
         }
     }
 
-    #[test]
-    fn target_dir_command_line_beats_setting_beats_build_default_and_each_variant_parses() {
+    #[proxima::test]
+    async fn target_dir_command_line_beats_setting_beats_build_default_and_each_variant_parses() {
         let isolated = TARGET_DIR.build_default(Some("isolated"));
         let table: [(Layers<'_>, Resolved<TargetDirMode<'_>>); 8] = [
             (isolated, Ok((TargetDirMode::Isolated, Source::BuildDefault))),
@@ -810,29 +810,29 @@ mod layers_tests {
         }
     }
 
-    #[test]
-    fn the_built_in_default_resolves_to_shared_from_the_build_default_source() {
+    #[proxima::test]
+    async fn the_built_in_default_resolves_to_shared_from_the_build_default_source() {
         let layers = TARGET_DIR.build_default(Some(crate::build_defaults::TARGET_DIR));
 
         assert_eq!(layers.resolve::<TargetDirMode<'_>>(), Ok((TargetDirMode::Shared, Source::BuildDefault)));
     }
 
-    #[test]
-    fn auto_shards_on_a_windows_target_and_runs_one_test_per_child_on_unix() {
+    #[proxima::test]
+    async fn auto_shards_on_a_windows_target_and_runs_one_test_per_child_on_unix() {
         assert_eq!(ProcessSetting::Auto.mode(true), ProcessMode::Shard);
         assert_eq!(ProcessSetting::Auto.mode(false), ProcessMode::Test);
     }
 
-    #[test]
-    fn a_forced_setting_overrides_auto_on_every_target() {
+    #[proxima::test]
+    async fn a_forced_setting_overrides_auto_on_every_target() {
         for windows_target in [true, false] {
             assert_eq!(ProcessSetting::Shard.mode(windows_target), ProcessMode::Shard);
             assert_eq!(ProcessSetting::Test.mode(windows_target), ProcessMode::Test);
         }
     }
 
-    #[test]
-    fn settings_and_builder_construct_the_same_layers_for_every_family() {
+    #[proxima::test]
+    async fn settings_and_builder_construct_the_same_layers_for_every_family() {
         let pairs = [
             ("CARGO_VAL_PROCESS", "shard"),
             ("CARGO_VAL_NO_TESTS", "warn"),
@@ -864,8 +864,8 @@ mod layers_tests {
         );
     }
 
-    #[test]
-    fn harness_flags_select_the_ignore_mode_and_beat_the_setting() {
+    #[proxima::test]
+    async fn harness_flags_select_the_ignore_mode_and_beat_the_setting() {
         let include: [&[u8]; 1] = [b"--include-ignored"];
         assert_eq!(
             HarnessRequest::parse(&include).map(|request| request.ignore),
@@ -882,8 +882,8 @@ mod layers_tests {
         }
     }
 
-    #[test]
-    fn a_harness_flag_beats_the_ignored_setting_and_the_setting_beats_skip() {
+    #[proxima::test]
+    async fn a_harness_flag_beats_the_ignored_setting_and_the_setting_beats_skip() {
         let settings = BorrowedSettings::new(&[("CARGO_VAL_IGNORED", "include")]);
         let only = HarnessRequest::parse(&[&b"--ignored"[..]]).expect("--ignored is a supported harness flag");
         let none = HarnessRequest::parse(&[]).expect("no harness arguments is valid");
@@ -896,8 +896,8 @@ mod layers_tests {
         assert_eq!(none.ignore_mode(&invalid), Err(refused(IGNORE, Source::Configured)));
     }
 
-    #[test]
-    fn filterset_command_line_wins_over_the_setting_and_nothing_supplied_is_none() {
+    #[proxima::test]
+    async fn filterset_command_line_wins_over_the_setting_and_nothing_supplied_is_none() {
         let pairs = [("CARGO_VAL_FILTERSET", "test(alpha)")];
         let settings = BorrowedSettings::new(&pairs);
 
@@ -923,8 +923,8 @@ mod concurrency_tests {
         Err(ThreadsError { source, fault })
     }
 
-    #[test]
-    fn c68_precedence_table_resolves_each_source_alone_and_in_combination() {
+    #[proxima::test]
+    async fn c68_precedence_table_resolves_each_source_alone_and_in_combination() {
         let table: [(ThreadSources<'_>, Result<ThreadsChoice, ThreadsError>); 9] = [
             (
                 ThreadSources::builder(DEFAULT),
@@ -974,8 +974,8 @@ mod concurrency_tests {
         }
     }
 
-    #[test]
-    fn c68_capacity_boundaries_and_every_source_fault_name_the_supplier() {
+    #[proxima::test]
+    async fn c68_capacity_boundaries_and_every_source_fault_name_the_supplier() {
         let capacity_edge = ThreadSources::builder(DEFAULT).configured_jobs(Some("64"));
         assert_eq!(
             capacity_edge.resolve(CAPACITY),
@@ -1010,8 +1010,8 @@ mod concurrency_tests {
         );
     }
 
-    #[test]
-    fn c68_harness_request_accepts_ignored_and_both_test_threads_forms() {
+    #[proxima::test]
+    async fn c68_harness_request_accepts_ignored_and_both_test_threads_forms() {
         let separated: [&[u8]; 3] = [b"--ignored", b"--test-threads", b"4"];
         let joined: [&[u8]; 1] = [b"--test-threads=1"];
         let empty: [&[u8]; 0] = [];
@@ -1039,8 +1039,8 @@ mod concurrency_tests {
         );
     }
 
-    #[test]
-    fn c68_harness_request_rejects_every_other_libtest_flag_and_a_dangling_value() {
+    #[proxima::test]
+    async fn c68_harness_request_rejects_every_other_libtest_flag_and_a_dangling_value() {
         let rejected: [&[u8]; 8] = [
             b"--nocapture",
             b"--exact",
@@ -1073,8 +1073,8 @@ mod concurrency_tests {
         );
     }
 
-    #[test]
-    fn c68_settings_and_builder_construct_the_same_sources() {
+    #[proxima::test]
+    async fn c68_settings_and_builder_construct_the_same_sources() {
         let pairs = [
             ("RUST_TEST_THREADS", "3"),
             ("CARGO_VAL_JOBS", "5"),
@@ -1125,8 +1125,8 @@ mod fail_fast_tests {
         Err(FailFastError { source })
     }
 
-    #[test]
-    fn c68_stop_policy_precedence_table() {
+    #[proxima::test]
+    async fn c68_stop_policy_precedence_table() {
         let table: [(FailFastSources<'_>, Result<FailFastChoice, FailFastError>); 10] = [
             (
                 FailFastSources::builder(),
@@ -1180,8 +1180,8 @@ mod fail_fast_tests {
         }
     }
 
-    #[test]
-    fn c68_malformed_max_fail_names_the_supplier() {
+    #[proxima::test]
+    async fn c68_malformed_max_fail_names_the_supplier() {
         let command_line =
             FailFastSources::builder().command_line(Some(FailFastArgument::MaxFail(b"x")));
         let configured = FailFastSources::builder().configured_max_fail(Some("0"));
@@ -1196,8 +1196,8 @@ mod fail_fast_tests {
         assert_eq!(negative.resolve(), refused(FailFastSource::CommandLine));
     }
 
-    #[test]
-    fn c68_settings_and_builder_construct_the_same_stop_policy() {
+    #[proxima::test]
+    async fn c68_settings_and_builder_construct_the_same_stop_policy() {
         let pairs = [
             ("CARGO_VAL_MAX_FAIL", "4"),
             ("CARGO_VAL_FAIL_FAST", "false"),

@@ -127,15 +127,15 @@ mod tests {
         status.code()
     }
 
-    #[test]
-    fn exit_code_seven_is_reported_through_the_process_gate() {
+    #[proxima::test]
+    async fn exit_code_seven_is_reported_through_the_process_gate() {
         let code = exit_code_of(Command::new("cmd").args(["/C", "exit 7"]));
 
         assert_eq!(code, Some(7));
     }
 
-    #[test]
-    fn a_crash_ntstatus_stays_distinct_from_an_ordinary_exit_code() {
+    #[proxima::test]
+    async fn a_crash_ntstatus_stays_distinct_from_an_ordinary_exit_code() {
         let crash = exit_code_of(Command::new("powershell").args([
             "-NoProfile",
             "-Command",

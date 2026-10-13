@@ -50,8 +50,8 @@ fn parse<'text>(
     parse_cargo_message(line, scratch, RECORD_LIMIT, DEPTH_LIMIT)
 }
 
-#[test]
-fn test_artifact_carries_executable_package_and_manifest_borrowed_from_the_record() {
+#[proxima::test]
+async fn test_artifact_carries_executable_package_and_manifest_borrowed_from_the_record() {
     let mut scratch = [0_u8; 64];
 
     let (message, allocations) = count_allocations(|| parse(TEST_ARTIFACT, &mut scratch));
@@ -73,8 +73,8 @@ fn test_artifact_carries_executable_package_and_manifest_borrowed_from_the_recor
     assert_eq!(allocations, 0);
 }
 
-#[test]
-fn build_script_reports_search_paths_output_directory_and_environment_in_emitted_order() {
+#[proxima::test]
+async fn build_script_reports_search_paths_output_directory_and_environment_in_emitted_order() {
     let mut scratch = [0_u8; 1024];
     let mut storage = [0_u8; 512];
 
@@ -121,8 +121,8 @@ fn build_script_reports_search_paths_output_directory_and_environment_in_emitted
     assert_eq!(allocations, 0);
 }
 
-#[test]
-fn build_script_without_search_paths_or_variables_still_reports_its_output_directory() {
+#[proxima::test]
+async fn build_script_without_search_paths_or_variables_still_reports_its_output_directory() {
     let record = br#"{"reason":"build-script-executed","package_id":"path+file:///work/a#0.1.0","linked_libs":[],"linked_paths":[],"cfgs":[],"env":[],"out_dir":"/work/a/out"}"#;
     let mut scratch = [0_u8; 8];
 
@@ -136,8 +136,8 @@ fn build_script_without_search_paths_or_variables_still_reports_its_output_direc
     assert_eq!(script.environment.iter().count(), 0);
 }
 
-#[test]
-fn escaped_windows_paths_are_decoded_into_scratch() {
+#[proxima::test]
+async fn escaped_windows_paths_are_decoded_into_scratch() {
     let manifest = "C:\\work\\buildscript_probe\\Cargo.toml";
     let executable = "C:\\work\\target\\debug\\deps\\buildscript_probe-3724f85eaba568c3.exe";
     let record = serde_json::json!({
@@ -165,8 +165,8 @@ fn escaped_windows_paths_are_decoded_into_scratch() {
     );
 }
 
-#[test]
-fn records_without_a_test_executable_are_ignored() {
+#[proxima::test]
+async fn records_without_a_test_executable_are_ignored() {
     let not_test_profile = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","profile":{"test":false},"executable":"/work/a/target/debug/a"}"#;
     let no_executable = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","profile":{"test":true},"executable":null}"#;
     let build_finished = br#"{"reason":"build-finished","success":true}"#;
@@ -181,8 +181,8 @@ fn records_without_a_test_executable_are_ignored() {
     );
 }
 
-#[test]
-fn malformed_artifacts_are_rejected_with_their_reason() {
+#[proxima::test]
+async fn malformed_artifacts_are_rejected_with_their_reason() {
     let missing_package = br#"{"reason":"compiler-artifact","manifest_path":"/work/a/Cargo.toml","profile":{"test":true},"executable":"/work/a/t"}"#;
     let missing_manifest = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","profile":{"test":true},"executable":"/work/a/t"}"#;
     let build_script_without_output = br#"{"reason":"build-script-executed","package_id":"path+file:///work/a#0.1.0","linked_libs":[],"linked_paths":[],"cfgs":[],"env":[]}"#;
@@ -211,15 +211,15 @@ fn malformed_artifacts_are_rejected_with_their_reason() {
     );
 }
 
-#[test]
-fn allocation_probe_detects_a_heap_allocation() {
+#[proxima::test]
+async fn allocation_probe_detects_a_heap_allocation() {
     let (_, allocations) = count_allocations(|| black_box(Vec::<u8>::with_capacity(1)));
 
     assert_eq!(allocations, 1);
 }
 
-#[test]
-fn a_built_bin_target_is_reported_by_its_package_and_a_bin_unit_test_is_not() {
+#[proxima::test]
+async fn a_built_bin_target_is_reported_by_its_package_and_a_bin_unit_test_is_not() {
     let bin = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","target":{"kind":["bin"],"crate_types":["bin"],"name":"a"},"profile":{"test":false},"executable":"/work/a/target/debug/a"}"#;
     let library = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"a"},"profile":{"test":false},"executable":null}"#;
     let bin_unit_test = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","target":{"kind":["bin"],"crate_types":["bin"],"name":"a"},"profile":{"test":true},"executable":"/work/a/target/debug/deps/a-0123456789abcdef"}"#;
@@ -239,8 +239,8 @@ fn a_built_bin_target_is_reported_by_its_package_and_a_bin_unit_test_is_not() {
     ));
 }
 
-#[test]
-fn crlf_terminated_artifact_record_selects_the_same_executable_as_lf() {
+#[proxima::test]
+async fn crlf_terminated_artifact_record_selects_the_same_executable_as_lf() {
     let mut lf_record = TEST_ARTIFACT.to_vec();
     while matches!(lf_record.last(), Some(b'\n' | b'\r')) {
         lf_record.pop();

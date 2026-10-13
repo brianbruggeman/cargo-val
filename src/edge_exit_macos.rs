@@ -201,8 +201,8 @@ mod tests {
         event.expect("exit edge yielded a status, not an io fault")
     }
 
-    #[test]
-    fn c41_wakes_for_child_exit_and_control_without_worker_threads() {
+    #[proxima::test]
+    async fn c41_wakes_for_child_exit_and_control_without_worker_threads() {
         in_single_threaded_process(|| {
             let held = fork_child(0, true);
             let pid = held.pid;
@@ -221,8 +221,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn c41_registration_race_control_observes_already_exited_child() {
+    #[proxima::test]
+    async fn c41_registration_race_control_observes_already_exited_child() {
         let finished = fork_child(FAST_CHILD_CODE, false);
         let pid = finished.pid;
         wait_exit_without_reaping(pid);
@@ -235,8 +235,8 @@ mod tests {
         assert!(zombie_is_released(pid));
     }
 
-    #[test]
-    fn c97_watch_never_returns_an_unregistered_unreaped_child() {
+    #[proxima::test]
+    async fn c97_watch_never_returns_an_unregistered_unreaped_child() {
         let held = fork_child(0, true);
         let pid = held.pid;
         assert_eq!(
@@ -253,8 +253,8 @@ mod tests {
         assert!(zombie_is_released(pid), "the late source leaves no zombie");
     }
 
-    #[test]
-    fn c97_watch_of_a_pid_that_is_not_our_child_errors_instead_of_parking() {
+    #[proxima::test]
+    async fn c97_watch_of_a_pid_that_is_not_our_child_errors_instead_of_parking() {
         let finished = fork_child(0, false);
         let pid = finished.pid;
         reap_reported(pid).expect("reap the child so the pid is no longer ours");
@@ -267,8 +267,8 @@ mod tests {
         assert!(drive.exhausted_after_exit, "a fault is the one item too");
     }
 
-    #[test]
-    fn c59_exit_event_carries_signal_status_and_blocking_reap_releases_zombie() {
+    #[proxima::test]
+    async fn c59_exit_event_carries_signal_status_and_blocking_reap_releases_zombie() {
         let held = fork_child(0, true);
         let pid = held.pid;
 
@@ -285,8 +285,8 @@ mod tests {
         assert!(zombie_is_released(pid));
     }
 
-    #[test]
-    fn c54_unregistered_exit_uses_bounded_wait_then_reap() {
+    #[proxima::test]
+    async fn c54_unregistered_exit_uses_bounded_wait_then_reap() {
         let held = fork_child(0, true);
         let pid = held.pid;
         held.release();
@@ -299,8 +299,8 @@ mod tests {
         assert!(zombie_is_released(pid));
     }
 
-    #[test]
-    fn exit_gate_never_hangs_on_exiting_child() {
+    #[proxima::test]
+    async fn exit_gate_never_hangs_on_exiting_child() {
         let finished = fork_child(FAST_CHILD_CODE, false);
         let pid = finished.pid;
 
@@ -314,8 +314,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exit_sources_compose_into_fan_in_and_merge_both_statuses_then_exhaust() {
+    #[proxima::test]
+    async fn exit_sources_compose_into_fan_in_and_merge_both_statuses_then_exhaust() {
         let first = fork_child(3, false);
         let second = fork_child(5, false);
         let merged = FanIn::new(

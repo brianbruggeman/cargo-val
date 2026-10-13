@@ -452,8 +452,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn c49z_borrows_complete_record_and_stages_fragmented_record() {
+    #[proxima::test]
+    async fn c49z_borrows_complete_record_and_stages_fragmented_record() {
         let complete_record = b"{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"test\"],\"test\":true},\"profile\":{\"test\":true},\"package_id\":\"path+file:///fixture#0.1.0\",\"manifest_path\":\"/fixture/Cargo.toml\",\"executable\":\"/fixture/first\"}\n";
         let (observed, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut storage = [0_u8; 256];
@@ -534,8 +534,8 @@ mod tests {
         std::println!("{{\"fragmented_record_staged\":1,\"fragmented_path_borrows_framer\":1}}");
     }
 
-    #[test]
-    fn c49z_oversized_complete_record_matches_buffered_framing_error() {
+    #[proxima::test]
+    async fn c49z_oversized_complete_record_matches_buffered_framing_error() {
         let oversized_record = b"123456789\n";
         let expected = ArtifactStreamError::Framing(FrameError::FrameTooLarge { len: 9 });
         let mut direct_storage = [0_u8; 16];
@@ -574,8 +574,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_held_whole_record_consumes_nothing_and_is_taken_on_the_retry() {
+    #[proxima::test]
+    async fn a_held_whole_record_consumes_nothing_and_is_taken_on_the_retry() {
         let chunk = b"declared::loads_whole_checkpoint: test\ndeclared::next: test\n";
         let mut storage = [0_u8; 256];
         let mut framer = ArtifactFramer::new(&mut storage, 255).expect("storage fits the record limit");
@@ -597,8 +597,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_held_staged_record_stays_framed_for_the_retry() {
+    #[proxima::test]
+    async fn a_held_staged_record_stays_framed_for_the_retry() {
         let mut storage = [0_u8; 256];
         let mut framer = ArtifactFramer::new(&mut storage, 255).expect("storage fits the record limit");
         let head = framer.next_record(b"declared::loads_", Ok::<_, core::convert::Infallible>).expect("a fragment stages");

@@ -794,13 +794,13 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn corpus_is_the_real_interop_selection() {
+    #[proxima::test]
+    async fn corpus_is_the_real_interop_selection() {
         assert_eq!(corpus().len(), 737);
     }
 
-    #[test]
-    fn each_matcher_selects_what_a_direct_scan_of_the_names_selects() {
+    #[proxima::test]
+    async fn each_matcher_selects_what_a_direct_scan_of_the_names_selects() {
         let rows = corpus();
         let cases: [(&str, Vec<usize>); 12] = [
             ("all()", reference(&rows, |_| true)),
@@ -830,8 +830,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn operators_and_symbols_agree_and_precedence_follows_nextest() {
+    #[proxima::test]
+    async fn operators_and_symbols_agree_and_precedence_follows_nextest() {
         let rows = corpus();
         let draft = "test(draft_acceptance)";
         let matrix = "binary(capability_matrix)";
@@ -855,8 +855,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn escapes_decode_before_matching() {
+    #[proxima::test]
+    async fn escapes_decode_before_matching() {
         let filterset = Filterset::parse(br"test(=a\)b\,c\\d\u{3a}\u{3a}e)").expect("escapes parse");
         let candidate = |test| Candidate {
             package: "p",
@@ -904,8 +904,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn not_partitions_the_set_with_the_expression() {
+    #[proxima::test]
+    async fn not_partitions_the_set_with_the_expression() {
         let rows = corpus();
         let mut checked = 0;
         for expression in expression_corpus() {
@@ -918,8 +918,8 @@ mod tests {
         assert_eq!(checked, 8 + 8 * 8 * 3);
     }
 
-    #[test]
-    fn a_and_b_is_a_subset_of_a_and_of_b() {
+    #[proxima::test]
+    async fn a_and_b_is_a_subset_of_a_and_of_b() {
         let rows = corpus();
         let atoms = expression_corpus();
         let lefts: Vec<(&String, Vec<bool>)> = atoms.iter().step_by(7).map(|left| (left, match_set(left, &rows))).collect();
@@ -936,8 +936,8 @@ mod tests {
         assert!(checked > 100, "{checked}");
     }
 
-    #[test]
-    fn malformed_expressions_fail_with_the_kind_and_offset_of_the_first_bad_token() {
+    #[proxima::test]
+    async fn malformed_expressions_fail_with_the_kind_and_offset_of_the_first_bad_token() {
         let cases: [(&str, FilterErrorKind, usize); 17] = [
             ("", FilterErrorKind::UnexpectedEnd, 0),
             ("test(a", FilterErrorKind::UnexpectedEnd, 6),
