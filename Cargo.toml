@@ -37,11 +37,11 @@ edge-os = ["dep:prime", "dep:proxima-runtime", "proxima-primitives/alloc"]
 [dependencies]
 conflaguration = { version = "2.0.0", default-features = false, features = ["derive", "alloc"] }
 memchr = { version = "2.8.3", default-features = false }
-prime = { git = "https://github.com/brianbruggeman/proxima.git", rev = "36c730f5a5a89126a7d5710fe76267f21bf07204", version = "0.1.0", default-features = false, features = ["std", "runtime-prime-executor", "runtime-prime-reactor", "runtime-prime-inbox-alloc", "runtime-prime-timer"], optional = true }
-proxima-codec = { git = "https://github.com/brianbruggeman/proxima.git", rev = "36c730f5a5a89126a7d5710fe76267f21bf07204", version = "0.1.0", default-features = false, optional = true }
-proxima-core = { git = "https://github.com/brianbruggeman/proxima.git", rev = "36c730f5a5a89126a7d5710fe76267f21bf07204", version = "0.1.0", default-features = false, features = ["io-async"], optional = true }
-proxima-primitives = { git = "https://github.com/brianbruggeman/proxima.git", rev = "36c730f5a5a89126a7d5710fe76267f21bf07204", version = "0.1.0", default-features = false, optional = true }
-proxima-runtime = { git = "https://github.com/brianbruggeman/proxima.git", rev = "36c730f5a5a89126a7d5710fe76267f21bf07204", version = "0.1.0", default-features = false, optional = true }
+prime = { package = "proxima-prime", version = "0.1.0", default-features = false, features = ["std", "runtime-prime-executor", "runtime-prime-reactor", "runtime-prime-inbox-alloc", "runtime-prime-timer"], optional = true }
+proxima-codec = { version = "0.1.0", default-features = false, optional = true }
+proxima-core = { version = "0.1.0", default-features = false, features = ["io-async"], optional = true }
+proxima-primitives = { version = "0.1.0", default-features = false, optional = true }
+proxima-runtime = { version = "0.1.0", default-features = false, optional = true }
 
 [build-dependencies]
 conflaguration = { version = "2.0.0", features = ["derive", "codegen"] }
