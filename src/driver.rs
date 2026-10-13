@@ -881,13 +881,13 @@ const fn event_slot(event: &HostEvent<'_>) -> SessionSlotId {
 }
 
 #[inline(never)]
-fn report_nothing_ran(reporting: Reporting<'_>, target: Option<usize>, name: &[u8]) -> RunError {
+fn report_nothing_ran(targets: &RefCell<TargetTable>, target: Option<usize>, name: &[u8]) -> RunError {
     let mut line = Line::<CONTEXT_CAPACITY>::new();
     line.text(b"cargo-val: test ");
     line.text(name);
     line.text(b" in ");
     if let Some(target) = target {
-        line.text(reporting.targets.borrow().id(target));
+        line.text(targets.borrow().id(target));
     }
     line.text(b" exited 0 but libtest reported 0 passed, 0 failed, 0 ignored\n");
     let _ = write_fd(2, line.bytes());
@@ -928,7 +928,7 @@ fn deliver<'bytes>(
     .apply()
     .map_err(|error| match error {
         ChildOutcomeError::NothingRan => {
-            report_nothing_ran(reporting, target, &report[..name_length.saturating_sub(1)])
+            report_nothing_ran(reporting.targets, target, &report[..name_length.saturating_sub(1)])
         }
         _ => RunError::Outcome,
     })?;
