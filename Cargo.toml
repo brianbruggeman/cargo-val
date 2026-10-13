@@ -3,6 +3,7 @@ name = "cargo-val"
 version = "0.1.0"
 edition = "2024"
 description = "A Proxima-based Cargo test runner, invoked as cargo val."
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/brianbruggeman/cargo-val"
 readme = "README.md"
 keywords = ["cargo", "test", "runner", "testing", "cli"]
