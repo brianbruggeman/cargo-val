@@ -75,6 +75,22 @@ fn await_readable(fifo: &File, what: &str) {
     assert_eq!(ready, 1, "{what}");
 }
 
+fn read_pid(ready: &mut File) -> libc::pid_t {
+    let mut line = Vec::new();
+    let mut chunk = [0u8; 32];
+    while !line.ends_with(b"\n") {
+        await_readable(ready, "the blocked test never reported it was blocked");
+        match ready.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => line.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("the ready fifo failed to read: {error}"),
+        }
+    }
+    let text = String::from_utf8(line).expect("the ready fifo carries utf-8");
+    text.trim().parse().unwrap_or_else(|error| panic!("the ready fifo carries one pid, got {text:?}: {error}"))
+}
+
 fn gone(pid: libc::pid_t) -> bool {
     let signalled = unsafe { libc::kill(pid, 0) };
     signalled == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
@@ -97,10 +113,7 @@ async fn a_panicking_supervised_test_still_kills_its_group() {
 
     let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
         supervised(&mut command, |leader_pid, _, _, _| {
-            await_readable(&ready, "the blocked test never reported it was blocked");
-            let mut line = String::new();
-            ready.read_to_string(&mut line).expect("the blocked test wrote its pid");
-            blocked = line.trim().parse().expect("the ready fifo carries one pid");
+            blocked = read_pid(&mut ready);
             leader = libc::pid_t::try_from(leader_pid).expect("a pid fits pid_t");
             panic!("{CALLER_PANIC}");
         })
