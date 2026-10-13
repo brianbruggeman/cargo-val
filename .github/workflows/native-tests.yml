@@ -16,13 +16,18 @@ jobs:
           - os: ubuntu-latest
             lib_test_floor: 246
             lib_test_args: ""
+            # placeholder until the first CI run reports the real count; replace with that count
+            integration_test_floor: 1
           - os: macos-latest
             lib_test_floor: 250
             lib_test_args: ""
+            integration_test_floor: 379
           # windows edge tests assert process-wide handle counts, which parallel tests perturb
           - os: windows-latest
             lib_test_floor: 233
             lib_test_args: "-- --test-threads=1"
+            # placeholder until the first CI run reports the real count; replace with that count
+            integration_test_floor: 1
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +59,28 @@ jobs:
             exit 1
           fi
           echo "lib tests passed: $lib_count (floor $LIB_TEST_FLOOR)"
+      - name: Run integration tests and assert their count
+        timeout-minutes: 30
+        shell: bash
+        env:
+          INTEGRATION_TEST_FLOOR: ${{ matrix.integration_test_floor }}
+        run: |
+          set +e
+          set -o pipefail
+          cargo test --locked --tests --no-fail-fast 2>&1 | tee integration-test-output.txt
+          test_status=$?
+          integration_count="$(awk '/^test result: / { total += $4 } END { print total + 0 }' integration-test-output.txt)"
+          floor_status=0
+          if [ "$integration_count" -lt "$INTEGRATION_TEST_FLOOR" ]; then
+            printf '::error title=integration test count below floor::passed=%s floor=%s\n' "$integration_count" "$INTEGRATION_TEST_FLOOR"
+            floor_status=1
+          fi
+          echo "integration tests parsed: $integration_count (floor $INTEGRATION_TEST_FLOOR, cargo exit $test_status)"
+          if [ "$test_status" -ne 0 ]; then
+            printf '::error title=integration cargo test failure::exit status %s\n' "$test_status"
+            exit "$test_status"
+          fi
+          exit "$floor_status"
       - name: Run dylib environment fixture against cargo test
         if: runner.os != 'Windows'
         shell: bash
