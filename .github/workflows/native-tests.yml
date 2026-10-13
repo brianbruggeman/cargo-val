@@ -18,16 +18,19 @@ jobs:
             lib_test_args: ""
             # placeholder until the first CI run reports the real count; replace with that count
             integration_test_floor: 1
+            integration_test_args: ""
           - os: macos-latest
             lib_test_floor: 250
             lib_test_args: ""
             integration_test_floor: 379
+            integration_test_args: ""
           # windows edge tests assert process-wide handle counts, which parallel tests perturb
           - os: windows-latest
             lib_test_floor: 233
             lib_test_args: "-- --test-threads=1"
             # placeholder until the first CI run reports the real count; replace with that count
             integration_test_floor: 1
+            integration_test_args: "--test-threads=1"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -60,25 +63,54 @@ jobs:
           fi
           echo "lib tests passed: $lib_count (floor $LIB_TEST_FLOOR)"
       - name: Run integration tests and assert their count
-        timeout-minutes: 30
+        timeout-minutes: 60
         shell: bash
         env:
           INTEGRATION_TEST_FLOOR: ${{ matrix.integration_test_floor }}
+          INTEGRATION_TEST_ARGS: ${{ matrix.integration_test_args }}
         run: |
           set +e
           set -o pipefail
-          cargo test --locked --tests --no-fail-fast 2>&1 | tee integration-test-output.txt
-          test_status=$?
+          cargo test --locked --tests --no-run --message-format=json > integration-build.json
+          build_status=$?
+          if [ "$build_status" -ne 0 ]; then
+            printf '::error title=integration test build failed::exit status %s\n' "$build_status"
+            exit "$build_status"
+          fi
+          jq -r 'select(.reason == "compiler-artifact" and .executable != null and (.target.kind | index("test"))) | .executable' integration-build.json > integration-executables.txt
+          executable_count="$(wc -l < integration-executables.txt | tr -d ' ')"
+          echo "integration test binaries: $executable_count"
+          if [ "$executable_count" -eq 0 ]; then
+            printf '::error title=no integration test binaries found::the json build listed none\n'
+            exit 1
+          fi
+          : > integration-test-output.txt
+          binaries_failed=0
+          while IFS= read -r executable; do
+            binary_name="$(basename "$executable")"
+            started_at="$(date +%s)"
+            timeout 600 "$executable" $INTEGRATION_TEST_ARGS < /dev/null > binary-output.txt 2>&1
+            binary_status=$?
+            cat binary-output.txt
+            cat binary-output.txt >> integration-test-output.txt
+            echo "binary $binary_name exit $binary_status secs $(( $(date +%s) - started_at ))"
+            if [ "$binary_status" -eq 124 ]; then
+              printf '::error title=integration test binary timed out::%s ran past 600s\n' "$binary_name"
+            fi
+            if [ "$binary_status" -ne 0 ]; then
+              binaries_failed=1
+            fi
+          done < integration-executables.txt
           integration_count="$(awk '/^test result: / { total += $4 } END { print total + 0 }' integration-test-output.txt)"
           floor_status=0
           if [ "$integration_count" -lt "$INTEGRATION_TEST_FLOOR" ]; then
             printf '::error title=integration test count below floor::passed=%s floor=%s\n' "$integration_count" "$INTEGRATION_TEST_FLOOR"
             floor_status=1
           fi
-          echo "integration tests parsed: $integration_count (floor $INTEGRATION_TEST_FLOOR, cargo exit $test_status)"
-          if [ "$test_status" -ne 0 ]; then
-            printf '::error title=integration cargo test failure::exit status %s\n' "$test_status"
-            exit "$test_status"
+          echo "integration tests parsed: $integration_count (floor $INTEGRATION_TEST_FLOOR, binaries failed $binaries_failed)"
+          if [ "$binaries_failed" -ne 0 ]; then
+            printf '::error title=integration cargo test failure::one or more integration test binaries exited nonzero\n'
+            exit 1
           fi
           exit "$floor_status"
       - name: Run dylib environment fixture against cargo test
