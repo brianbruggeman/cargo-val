@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
+use common::fixture_output;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 struct Run {
@@ -62,7 +66,7 @@ fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str
     for (key, value) in environment {
         command.env(key, value);
     }
-    let output = command.output().expect("cargo-val binary is spawnable");
+    let output = fixture_output(&mut command);
     Run {
         status: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

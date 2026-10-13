@@ -5,6 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
+use common::fixture_output;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 fn target_directory() -> PathBuf {
@@ -38,7 +42,8 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
     let manifest =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/same_name/Cargo.toml");
 
-    let output = Command::new(CARGO_VAL)
+    let mut command = Command::new(CARGO_VAL);
+    command
         .arg("--manifest-path")
         .arg(manifest)
         .env_remove("RUST_TEST_THREADS")
@@ -51,10 +56,8 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
         .env(
             "CARGO_TARGET_DIR",
             target_directory().join("same-name-fixture"),
-        )
-        .output()
-        .expect("cargo-val binary is spawnable");
-
+        );
+    let output = fixture_output(&mut command);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let passed = stdout
