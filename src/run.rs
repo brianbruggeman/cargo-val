@@ -21,7 +21,7 @@ use crate::edge_signal::SignalPipe;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, run_body, session_ended, session_exited, session_output, write_fd,
+    Watches, run_body, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::status_queue::{self, Capture, Sinks};
@@ -116,7 +116,7 @@ impl UnpinPipe for Edge<'_> {
                 stream_step(&lane.0, lane.3.get(), context, (*id, Item::Out, Item::OutEnd))
             }
             Edge::Err(id, lane) => stream_step(&lane.1, true, context, (*id, Item::Err, Item::ErrEnd)),
-            Edge::Exit(id, lane) => exit_step(&lane.2, *id, context),
+            Edge::Exit(id, lane) => exit_step(&lane.2, lane.3.get() || *id < JOB_BASE, *id, context),
             Edge::Signal(gate) => {
                 gate.map_or(Poll::Ready(Err(Exhausted)), |gate| signal_step(gate, context))
             }
@@ -160,11 +160,16 @@ fn stream_step(
     }
 }
 
+// a session's exit waits behind its paused stdout, so the shard's last results are counted before it settles
 fn exit_step(
     slot: &RefCell<Option<ExitSource>>,
+    wanted: bool,
     id: usize,
     context: &mut Context<'_>,
 ) -> Poll<Result<Item, Exhausted>> {
+    if !wanted {
+        return Poll::Pending;
+    }
     let mut guard = slot.borrow_mut();
     let polled = match guard.as_ref() {
         Some(exit) => step(exit, context),
@@ -541,6 +546,22 @@ pub(crate) async fn collect_libdir(child: Child, output: &mut [u8]) -> Result<us
     Ok(end)
 }
 
+// a paused shard window finishes here as soon as the queue has room; its lane's stdout and exit stay gated until then
+fn resume_sessions(
+    lanes: &Lanes,
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+) -> Result<(), RunError> {
+    for index in 0..watches.len() {
+        if watches[index].as_ref().is_some_and(shard_stalled) {
+            let finished = session_resume(lanes, run, ledger, watches, index)?;
+            lanes[JOB_BASE + index].3.set(finished);
+        }
+    }
+    Ok(())
+}
+
 fn session_chunk(
     lanes: &Lanes,
     lane: usize,
@@ -553,8 +574,12 @@ fn session_chunk(
     let range = range.map_err(|_| RunError::Reactor)?;
     let slot = if stdout { lanes[lane].0.borrow() } else { lanes[lane].1.borrow() };
     let stream = slot.as_deref().ok_or(RunError::Reactor)?;
-    let bytes = stream.window(range).ok_or(RunError::Reactor)?;
-    session_output(run, ledger, watches, lane - JOB_BASE, stdout, &bytes)
+    let bytes = stream.window(range.clone()).ok_or(RunError::Reactor)?;
+    session_output(run, ledger, watches, lane - JOB_BASE, stdout, (range, &bytes))?;
+    if stdout {
+        lanes[lane].3.set(!watches[lane - JOB_BASE].as_ref().is_some_and(shard_stalled));
+    }
+    Ok(())
 }
 
 /// Observes the cargo build child, its listings, and the old port through prime sources only, until every launched child is accounted for.
@@ -580,6 +605,7 @@ pub(crate) async fn observe_cargo(
         handle(item, &lanes, driver, run, ledger, watches)?;
         driver.resume(&lanes, run, ledger, watches)?;
         run.with_doc(|doc, color, observation| resume_doc(&lanes, doc, color, observation))?;
+        resume_sessions(&lanes, run, ledger, watches)?;
         lanes[CARGO_LANE].3.set(driver.cargo_open());
         lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
         Ok(if driver.finished(run, ledger) {

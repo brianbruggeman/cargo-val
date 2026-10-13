@@ -658,9 +658,9 @@ pub(crate) fn session_output(
     watches: &mut Watches,
     index: usize,
     stdout: bool,
-    bytes: &[u8],
+    (window, bytes): (Range<u32>, &[u8]),
 ) -> Result<(), RunError> {
-    for piece in bytes.chunks(SOURCE_CAPACITY) {
+    for (piece_index, piece) in bytes.chunks(SOURCE_CAPACITY).enumerate() {
         let Some(watch) = watches[index].as_mut() else {
             return Ok(());
         };
@@ -668,7 +668,17 @@ pub(crate) fn session_output(
         let mut shard_tripped = false;
         let event = if stdout {
             watch.output.observe_stdout(piece);
-            shard_tripped = shard::observe(run, ledger, watch, piece)?;
+            let start = piece_index * SOURCE_CAPACITY;
+            let consumed = if shard::stalled(watch) {
+                0
+            } else {
+                let observed = shard::observe(run, ledger, watch, piece)?;
+                shard_tripped = observed.stop;
+                observed.consumed
+            };
+            if consumed < piece.len() {
+                shard::stall(watch, window.clone(), start + consumed);
+            }
             HostEvent::Stdout { slot, bytes: piece }
         } else {
             watch.output.observe_stderr(piece);
@@ -683,6 +693,41 @@ pub(crate) fn session_output(
         }
     }
     Ok(())
+}
+
+pub(crate) fn shard_stalled(watch: &TestWatch) -> bool {
+    shard::stalled(watch)
+}
+
+/// Feeds the unframed remainder of a window whose framing paused, once the status queue has room again.
+/// Returns whether the window finished, so the caller reopens the lane's gate.
+pub(crate) fn session_resume(
+    lanes: &Lanes,
+    run: &ListingRun<'_>,
+    ledger: &mut Ledger<'_>,
+    watches: &mut Watches,
+    index: usize,
+) -> Result<bool, RunError> {
+    let Some(watch) = watches[index].as_mut() else {
+        return Ok(true);
+    };
+    if !shard::stalled(watch) || !status_queue::has_room() {
+        return Ok(!shard::stalled(watch));
+    }
+    let Some((window, offset)) = shard::take_backlog(watch) else {
+        return Ok(true);
+    };
+    let slot = lanes[JOB_BASE + index].0.borrow();
+    let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+    let bytes = stream.window(window.clone()).ok_or(RunError::Reactor)?;
+    let observed = shard::observe(run, ledger, watch, &bytes[offset..])?;
+    if offset + observed.consumed < bytes.len() {
+        shard::stall(watch, window, offset + observed.consumed);
+    }
+    if observed.stop {
+        shard::stop_all(run, ledger, watches);
+    }
+    Ok(watches[index].as_ref().is_none_or(|watch| !shard::stalled(watch)))
 }
 
 pub(crate) fn session_ended(
@@ -3045,6 +3090,10 @@ mod listing_allocation_tests {
 
     #[test]
     fn spawning_a_listing_child_allocates_zero_times() {
+        crate::edge_exit::fixture::in_single_threaded_process(spawning_a_listing_child_allocates_zero_times_in_isolation);
+    }
+
+    fn spawning_a_listing_child_allocates_zero_times_in_isolation() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");

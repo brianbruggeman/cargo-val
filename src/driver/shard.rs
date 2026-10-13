@@ -6,6 +6,8 @@ use super::{
     Watches, executable_text, override_entries, report_launch_failure, slot_range, start_session, write_fd,
     write_report,
 };
+use core::ops::Range;
+
 use crate::build_defaults::SHARD_COMMAND_UNITS;
 use crate::discover_listing::{DocEvent, DocOutcome, DocParser};
 use crate::edge_signal::release_child;
@@ -17,6 +19,7 @@ use crate::run::Lanes;
 use crate::sched_file::{Loaded, load};
 use crate::shard_arena::{Located, PushError, Rerun, Reported, Shard, ShardArena};
 use crate::shard_sched::{Class, group_key};
+use crate::status_queue::{self, EVENT_RESERVE};
 use crate::stop::Observation;
 
 pub(super) const FAILURE_CAPACITY: usize = 16384;
@@ -44,6 +47,10 @@ pub(super) struct ShardWatch {
     deferred: (usize, usize, usize),
     group: [u8; GROUP_CAPACITY],
     group_length: usize,
+    /// The lane window and the offset in it where framing paused for lack of status room; the lane stays gated until it is fed.
+    backlog: Option<(Range<u32>, usize)>,
+    /// How many times framing paused on a full status queue.
+    pauses: usize,
 }
 
 impl ShardWatch {
@@ -61,6 +68,8 @@ impl ShardWatch {
             keeping: false,
             streamed: (0, 0, 0),
             deferred: (0, 0, 0),
+            backlog: None,
+            pauses: 0,
             group: [0; GROUP_CAPACITY],
             group_length: group.len().min(GROUP_CAPACITY),
         };
@@ -184,20 +193,67 @@ fn spared_by_stop(interrupted: bool, rerun: Option<Rerun>) -> bool {
     !interrupted && matches!(rerun, Some(Rerun::OutputOnly))
 }
 
-/// Feeds one chunk of a shard child's stdout to its libtest parser, counting each test as its result line completes.
-/// Returns whether the run tripped its stop policy, so the caller ends the other sessions once this watch is released.
+/// What one pass over a lane piece did: whether the stop policy tripped, and how many bytes the framer consumed before it paused.
+pub(super) struct Observed {
+    pub(super) stop: bool,
+    pub(super) consumed: usize,
+}
+
+/// Whether this shard's framing is paused on a window the status queue could not take whole.
+pub(super) fn stalled(watch: &TestWatch) -> bool {
+    watch.shard.as_ref().is_some_and(|shard| shard.backlog.is_some())
+}
+
+/// Records where framing paused; the first pause in a window wins, since later pieces of that window are fed by the resume.
+pub(super) fn stall(watch: &mut TestWatch, window: Range<u32>, offset: usize) {
+    if let Some(shard) = watch.shard.as_mut() {
+        shard.backlog.get_or_insert((window, offset));
+    }
+}
+
+/// Takes the paused window so the resume can feed its unframed remainder.
+pub(super) fn take_backlog(watch: &mut TestWatch) -> Option<(Range<u32>, usize)> {
+    watch.shard.as_mut().and_then(|shard| shard.backlog.take())
+}
+
+// frame: In = unframed lane bytes, Out = one line with its newline (a trailing partial line is the whole remainder), Err = none.
+// it consumes exactly the bytes it returns and never captures them; the output capture happened before any parse.
+fn frame_line(bytes: &[u8]) -> &[u8] {
+    let length = memchr::memchr(b'\n', bytes).map_or(bytes.len(), |newline| newline + 1);
+    &bytes[..length]
+}
+
+fn debug_pause(run: &ListingRun<'_>, pauses: usize) {
+    if !run.settings.debug {
+        return;
+    }
+    let mut line = Line::<96>::new();
+    line.text(b"cargo-val: debug: shard output paused pauses=");
+    line.number(pauses);
+    line.text(b"\n");
+    let _ = write_fd(2, line.bytes());
+}
+
+/// Feeds a shard child's stdout to its libtest parser as a pipe chain, counting each test as its result line completes.
+///
+/// The chain per line: `frame_line` (In = unframed bytes, Out = one line, no error) -> `DocParser::feed`
+/// (In = one line, Out = [`DocEvent`], Err = the settle error) -> settle (In = [`DocEvent`], Out = a status record
+/// written to the queue, Err = [`RunError`]). Before each line's settle step the status queue must have room for one
+/// event; without it the chain stops there, defers, and returns how far it got so the caller keeps the remainder on the lane.
+/// `stop` reports that the run tripped its stop policy, so the caller ends the other sessions once this watch is released.
 pub(super) fn observe(
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
     watch: &mut TestWatch,
     bytes: &[u8],
-) -> Result<bool, RunError> {
+) -> Result<Observed, RunError> {
     let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
+    let whole = Observed { stop: false, consumed: bytes.len() };
     let Some(shard_watch) = watch.shard.as_mut() else {
-        return Ok(false);
+        return Ok(whole);
     };
     if shard_watch.shard.rerun.is_some() {
-        return Ok(false);
+        return Ok(whole);
     }
     let ShardWatch {
         shard,
@@ -212,11 +268,13 @@ pub(super) fn observe(
         keeping,
         streamed,
         deferred,
+        backlog: _,
+        pauses,
         ..
     } = shard_watch;
     let shard = *shard;
     let mut stop = false;
-    parser.feed(bytes, |event| {
+    let mut settle = |event: DocEvent<'_>| -> Result<(), RunError> {
         match event {
             DocEvent::Result { name, outcome, stray } => {
                 let located = run.shards.borrow().locate(shard, *expected, name);
@@ -270,8 +328,20 @@ pub(super) fn observe(
             DocEvent::Running { .. } => {}
         }
         Ok(())
-    })?;
-    Ok(stop)
+    };
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if !status_queue::room_for(EVENT_RESERVE) {
+            *pauses += 1;
+            status_queue::defer();
+            debug_pause(run, *pauses);
+            break;
+        }
+        let line = frame_line(&bytes[offset..]);
+        parser.feed(line, &mut settle)?;
+        offset += line.len();
+    }
+    Ok(Observed { stop, consumed: offset })
 }
 
 fn debug_launch(run: &ListingRun<'_>, watches: &Watches, (class, shard): (Class, Shard), in_flight: usize) {
@@ -740,5 +810,197 @@ mod tests {
             assert!(!withdrawn_solo(true, true, OUTPUT, STOP_STATUS));
             assert!(!withdrawn_solo(false, true, OUTPUT, STOP_STATUS));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pause_tests {
+    use core::cell::{Cell, RefCell};
+    use core::future::poll_fn;
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    use prime::os::core_shard::run_on_this_thread;
+    use proxima_runtime::CoreId;
+
+    use super::{ChildOutput, GROUP_CAPACITY, Ledger, ListingRun, ShardArena, ShardWatch, TestWatch, status_queue};
+    use crate::config::{IgnoreMode, NoTestsPolicy, ProcessMode};
+    use crate::driver::{DocObservation, Settings, TargetTable};
+    use crate::edge_exit::fixture::in_single_threaded_process;
+    use crate::edge_signal::SignalPipe;
+    use crate::edge_spawn::held_launch_storage;
+    use crate::outcomes::OutcomeLedger;
+    use crate::schedule::SessionSlots;
+    use crate::shard_sched::{SchedTable, SpecialPlan};
+    use crate::status_queue::{Capture, EVENT_RESERVE, Sinks};
+    use crate::stop::StopPolicy;
+
+    const NAMES: [&str; 3] = ["parser::tests::reads_a_header", "parser::tests::rejects_a_bad_tag", "parser::tests::keeps_order"];
+    const PIECE: &[u8] = b"test parser::tests::reads_a_header ... ok\ntest parser::tests::rejects_a_bad_tag ... ok\ntest parser::tests::keeps_order ... ok\n";
+    const FILLER: [u8; 512] = [b'y'; 512];
+
+    fn open_pipe() -> (OwnedFd, OwnedFd) {
+        let mut ends = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "pipe is created");
+        let pair = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+        for end in [&pair.0, &pair.1] {
+            let flags = unsafe { libc::fcntl(end.as_raw_fd(), libc::F_GETFL) };
+            assert_eq!(unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0, "end turns nonblocking");
+        }
+        pair
+    }
+
+    fn redirect_standard_streams() -> std::fs::File {
+        let (reader, writer) = open_pipe();
+        let null = std::fs::OpenOptions::new().write(true).open("/dev/null").expect("null device opens");
+        assert!(unsafe { libc::dup2(writer.as_raw_fd(), 1) } >= 0, "stdout points at the pipe");
+        assert!(unsafe { libc::dup2(null.as_raw_fd(), 2) } >= 0, "stderr points at the null device");
+        std::fs::File::from(reader)
+    }
+
+    fn drained_text(reader: &mut std::fs::File) -> std::string::String {
+        let mut bytes = std::vec::Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while let Ok(count @ 1..) = reader.read(&mut buffer) {
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        std::string::String::from_utf8(bytes).expect("report lines are UTF-8")
+    }
+
+    fn fill_status_queue() {
+        while status_queue::room_for(EVENT_RESERVE) {
+            status_queue::write(2, &FILLER).expect("filler queues");
+        }
+    }
+
+    fn settings() -> Settings {
+        Settings {
+            bin_gate: false,
+            debug: false,
+            ignore: IgnoreMode::Include,
+            filterset: None,
+            jobs: 1,
+            max_fail: None,
+            no_tests: NoTestsPolicy::Pass,
+            process: ProcessMode::Shard,
+            color: false,
+        }
+    }
+
+    fn run_over<'run>(signals: &'run SignalPipe, settings: &'run Settings, names: &'run mut [u8]) -> ListingRun<'run> {
+        let mut arena = ShardArena::new(names);
+        for name in NAMES {
+            arena.push(name).expect("name fits the arena");
+        }
+        arena.seal(1);
+        ListingRun {
+            signals,
+            filter: "",
+            exact: false,
+            targets: RefCell::new(TargetTable::new()),
+            started_millis: 0,
+            harness_arguments: &[],
+            environment: &[],
+            library_directories: &[],
+            inherited_dylib_path: None,
+            home: None,
+            settings,
+            prepared: None,
+            docs: DocObservation::default(),
+            policy: RefCell::new(StopPolicy::new(None)),
+            doc: RefCell::new(None),
+            launch_storage: RefCell::new(held_launch_storage()),
+            ready: Cell::new(None),
+            shards: RefCell::new(arena),
+            sched: RefCell::new(SchedTable::new(&mut [])),
+            specials: RefCell::new(SpecialPlan::new(&mut [])),
+            sched_target: Cell::new(None),
+            stop_sent: Cell::new(false),
+        }
+    }
+
+    fn shard_watch(run: &ListingRun<'_>) -> TestWatch {
+        let shard = run.shards.borrow_mut().carve(0).expect("one shard carves from the sealed names");
+        let mut scratch = SessionSlots::<u8, 1>::new();
+        TestWatch {
+            slot: scratch.insert(0).expect("scratch table has a slot"),
+            process_id: 0,
+            output: ChildOutput::new(),
+            shard: Some(ShardWatch::new(shard, b"")),
+            group: [0; GROUP_CAPACITY],
+            group_length: 0,
+        }
+    }
+
+    fn pauses(watch: &TestWatch) -> usize {
+        watch.shard.as_ref().expect("watch is a shard").pauses
+    }
+
+    fn seen_once(output: &str) -> bool {
+        NAMES.iter().all(|name| output.matches(&std::format!("{name} PASS")).count() == 1)
+    }
+
+    #[test]
+    fn a_full_status_queue_pauses_framing_and_the_drained_remainder_settles_each_test_once() {
+        in_single_threaded_process(|| {
+            let mut reader = redirect_standard_streams();
+            let outcome = run_on_this_thread(CoreId(0), async move {
+                let signals = SignalPipe::install().expect("signal pipe installs in the isolated process");
+                let settings = settings();
+                let mut names = [0_u8; 512];
+                let run = run_over(&signals, &settings, &mut names);
+                let mut sessions = SessionSlots::new();
+                let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
+                let mut watch = shard_watch(&run);
+                let _capture = Capture::enter();
+                fill_status_queue();
+
+                let paused = super::observe(&run, &mut ledger, &mut watch, PIECE).expect("observe pauses without failing");
+                let after_pause = (paused.consumed, paused.stop, pauses(&watch), ledger.snapshot().passed);
+
+                let mut sinks = Sinks::new();
+                poll_fn(|context| sinks.poll_drain(context)).await.expect("drain completes into the pipe and null device");
+                let resumed = super::observe(&run, &mut ledger, &mut watch, &PIECE[paused.consumed..]).expect("observe resumes");
+                poll_fn(|context| sinks.poll_drain(context)).await.expect("settled lines drain");
+                (after_pause, resumed.consumed, ledger.snapshot().passed, drained_text(&mut reader))
+            });
+            let ((consumed, stop, pause_count, passed_while_paused), resumed, passed, text) = outcome.expect("root completes");
+
+            assert_eq!(consumed, 0, "a full queue stops framing before the first line");
+            assert!(!stop, "a pause is not a stop-policy trip");
+            assert_eq!(pause_count, 1, "the pause is counted once");
+            assert_eq!(passed_while_paused, 0, "nothing settles while paused");
+            assert_eq!(resumed, PIECE.len(), "the drained queue takes the whole piece");
+            assert_eq!(passed, 3, "each of the three tests counts once");
+            assert!(seen_once(&text), "each result line is reported exactly once: {text}");
+        });
+    }
+
+    #[test]
+    fn an_unfilled_status_queue_settles_the_whole_piece_without_pausing() {
+        in_single_threaded_process(|| {
+            let mut reader = redirect_standard_streams();
+            let outcome = run_on_this_thread(CoreId(0), async move {
+                let signals = SignalPipe::install().expect("signal pipe installs in the isolated process");
+                let settings = settings();
+                let mut names = [0_u8; 512];
+                let run = run_over(&signals, &settings, &mut names);
+                let mut sessions = SessionSlots::new();
+                let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
+                let mut watch = shard_watch(&run);
+                let _capture = Capture::enter();
+
+                let observed = super::observe(&run, &mut ledger, &mut watch, PIECE).expect("observe settles");
+                let mut sinks = Sinks::new();
+                poll_fn(|context| sinks.poll_drain(context)).await.expect("settled lines drain");
+                (observed.consumed, pauses(&watch), ledger.snapshot().passed, drained_text(&mut reader))
+            });
+            let (consumed, pause_count, passed, text) = outcome.expect("root completes");
+
+            assert_eq!(consumed, PIECE.len(), "the whole piece is consumed");
+            assert_eq!(pause_count, 0, "an unfilled queue never pauses");
+            assert_eq!(passed, 3, "all three tests count");
+            assert!(seen_once(&text), "each result line is reported exactly once: {text}");
+        });
     }
 }
