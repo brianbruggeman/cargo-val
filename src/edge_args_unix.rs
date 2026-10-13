@@ -394,8 +394,8 @@ mod lowering {
             }
         }
 
-        #[test]
-        fn c37_lowers_exact_argv_and_child_environment() {
+        #[proxima::test]
+        async fn c37_lowers_exact_argv_and_child_environment() {
             let lowered = Arguments::lower(launch(
                 b"target/debug/deps/fixture",
                 &[b"--exact", b"alpha"],
@@ -416,8 +416,8 @@ mod lowering {
             std::println!("{{\"inherited_entries\":1,\"child_overrides\":1,\"argv_pairs\":1}}");
         }
 
-        #[test]
-        fn c52_forwards_ignored_flag_after_the_exact_test_name() {
+        #[proxima::test]
+        async fn c52_forwards_ignored_flag_after_the_exact_test_name() {
             let mut storage = LaunchStorage::default();
             let lowered = storage
                 .lower(Launch {
@@ -445,8 +445,8 @@ mod lowering {
             std::println!("{{\"exact_name_before_harness_flag\":1,\"ignored_flag_bytes\":9}}");
         }
 
-        #[test]
-        fn c37_lowers_the_working_directory_after_the_environment() {
+        #[proxima::test]
+        async fn c37_lowers_the_working_directory_after_the_environment() {
             let mut storage = LaunchStorage::default();
             let lowered = storage
                 .lower(Launch {
@@ -460,23 +460,23 @@ mod lowering {
             assert_eq!(strings(lowered.envp()), ["A=1"]);
         }
 
-        #[test]
-        fn c37_rejects_an_interior_nul_in_the_test_name() {
+        #[proxima::test]
+        async fn c37_rejects_an_interior_nul_in_the_test_name() {
             let result = Arguments::lower(launch(b"fixture", &[b"--exact", b"al\0pha"], &[], &[]));
 
             assert_eq!(result.unwrap_err(), ArgumentsError::InteriorNul);
             std::println!("{{\"interior_nul_control_rejected\":1}}");
         }
 
-        #[test]
-        fn c37_rejects_an_interior_nul_in_the_program() {
+        #[proxima::test]
+        async fn c37_rejects_an_interior_nul_in_the_program() {
             let result = Arguments::lower(launch(b"fix\0ture", &[], &[], &[]));
 
             assert_eq!(result.unwrap_err(), ArgumentsError::InteriorNul);
         }
 
-        #[test]
-        fn c37_rejects_an_environment_entry_without_a_key() {
+        #[proxima::test]
+        async fn c37_rejects_an_environment_entry_without_a_key() {
             let missing_separator = Arguments::lower(launch(b"fixture", &[], &[b"NOEQUALS"], &[]));
             let empty_key = Arguments::lower(launch(b"fixture", &[], &[], &[b"=value"]));
 
@@ -490,8 +490,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c37_keeps_inherited_order_and_appends_overrides_last() {
+        #[proxima::test]
+        async fn c37_keeps_inherited_order_and_appends_overrides_last() {
             let lowered = Arguments::lower(launch(
                 b"fixture",
                 &[],
@@ -503,8 +503,8 @@ mod lowering {
             assert_eq!(strings(lowered.lowered().envp()), ["A=1", "C=3", "B=9", "D=4"]);
         }
 
-        #[test]
-        fn c37_reports_required_and_available_when_arguments_exceed_the_pointer_storage() {
+        #[proxima::test]
+        async fn c37_reports_required_and_available_when_arguments_exceed_the_pointer_storage() {
             let mut storage = LaunchStorage::default();
             let available = super::SPAWN_ARGUMENT_POINTERS;
             let flags = std::vec![b"--flag".as_slice(); available];
@@ -523,8 +523,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c37_reports_required_and_available_when_strings_exceed_the_byte_storage() {
+        #[proxima::test]
+        async fn c37_reports_required_and_available_when_strings_exceed_the_byte_storage() {
             let mut storage = LaunchStorage::default();
             let available = super::SPAWN_STRING_BYTES;
             let name = std::vec![b'a'; available];
@@ -540,8 +540,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c37_reports_required_and_available_when_environment_exceeds_the_pointer_storage() {
+        #[proxima::test]
+        async fn c37_reports_required_and_available_when_environment_exceeds_the_pointer_storage() {
             let mut storage = LaunchStorage::default();
             let available = super::SPAWN_ENVIRONMENT_POINTERS;
             let entries = std::vec![b"K=v".as_slice(); available];
@@ -677,8 +677,8 @@ mod environment {
             left.is_some() == right.is_some()
         }
 
-        #[test]
-        fn c52_unix_lends_three_runtime_values_without_copying() {
+        #[proxima::test]
+        async fn c52_unix_lends_three_runtime_values_without_copying() {
             temp_env::with_vars(
                 [
                     ("CARGO_VAL_JOBS", Some("2")),
@@ -713,8 +713,8 @@ mod environment {
             );
         }
 
-        #[test]
-        fn c52_unix_rejects_null_for_present_empty_no_color() {
+        #[proxima::test]
+        async fn c52_unix_rejects_null_for_present_empty_no_color() {
             let present_entries: [*const c_char; 2] = [c"NO_COLOR=".as_ptr(), ptr::null()];
             let absent_entries: [*const c_char; 1] = [ptr::null()];
             let present = unsafe { Environment::from_raw(present_entries.as_ptr()) };

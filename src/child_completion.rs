@@ -287,8 +287,8 @@ impl Default for ChildCompletion {
 mod tests {
     use super::{ChildCompletion, ChildCompletionEvent};
 
-    #[test]
-    fn c48i_retires_after_exit_and_streams_in_either_order() {
+    #[proxima::test]
+    async fn c48i_retires_after_exit_and_streams_in_either_order() {
         let ((), allocations) = crate::test_alloc::measure_allocations(|| {
             let mut exit_first = ChildCompletion::new();
             assert!(
@@ -526,8 +526,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48i_waits_for_windows_read_cancellation_and_both_streams() {
+    #[proxima::test]
+    async fn c48i_waits_for_windows_read_cancellation_and_both_streams() {
         let ((), allocations) = crate::test_alloc::measure_allocations(|| {
             windows_cancellation_scenario();
             windows_completed_read_scenario();

@@ -32,8 +32,8 @@ fn rendezvous_directory() -> PathBuf {
     directory
 }
 
-#[test]
-fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
+#[proxima::test]
+async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
     let directory = rendezvous_directory();
     let manifest =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/same_name/Cargo.toml");

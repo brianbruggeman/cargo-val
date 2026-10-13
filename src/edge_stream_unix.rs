@@ -368,8 +368,8 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn c42_reads_both_child_streams_from_the_shared_kqueue() {
+    #[proxima::test]
+    async fn c42_reads_both_child_streams_from_the_shared_kqueue() {
         in_single_threaded_process(|| {
             let captured = drive_children(b"out", b"err");
 
@@ -382,8 +382,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn c40_reads_both_child_streams_without_intermediate_buffers() {
+    #[proxima::test]
+    async fn c40_reads_both_child_streams_without_intermediate_buffers() {
         in_single_threaded_process(|| {
             let captured = drive_children(b"out", b"err");
 
@@ -395,8 +395,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn c49_native_child_stdout_yields_before_the_child_closes_it() {
+    #[proxima::test]
+    async fn c49_native_child_stdout_yields_before_the_child_closes_it() {
         in_single_threaded_process(|| {
             let captured = drive_children(CARGO_RECORDS, b"");
 
@@ -423,8 +423,8 @@ mod tests {
         payload
     };
 
-    #[test]
-    fn stream_past_capacity_keeps_draining_through_the_scratch_tail() {
+    #[proxima::test]
+    async fn stream_past_capacity_keeps_draining_through_the_scratch_tail() {
         in_single_threaded_process(|| {
             let captured = drive_children(&OVERFLOW_PAYLOAD, b"");
             let retained = super::CAPTURE_BYTES as usize;
@@ -442,8 +442,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn stream_parks_until_writer_writes() {
+    #[proxima::test]
+    async fn stream_parks_until_writer_writes() {
         in_single_threaded_process(|| {
             let pipes = UnixPipePair::new().expect("pipe is created");
             let reader = adopt(pipes.stdout().parent_read());

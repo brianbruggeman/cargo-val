@@ -576,8 +576,8 @@ mod tests {
             .find_map(|entry| entry.strip_prefix(key)?.strip_prefix('='))
     }
 
-    #[test]
-    fn library_path_lists_linked_then_artifact_then_deps_then_sysroot_then_inherited() {
+    #[proxima::test]
+    async fn library_path_lists_linked_then_artifact_then_deps_then_sysroot_then_inherited() {
         let mut linked_storage = [0; 256];
         let mut linked = LinkedDirectories::new(&mut linked_storage);
         linked
@@ -614,8 +614,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn package_variables_and_working_directory_come_from_cargo_json() {
+    #[proxima::test]
+    async fn package_variables_and_working_directory_come_from_cargo_json() {
         let mut storage = [0; 2048];
         let artifact = TestArtifact {
             package_id: "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.228-rc.1+build.5",
@@ -645,8 +645,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn path_package_without_a_name_fragment_is_named_by_its_directory() {
+    #[proxima::test]
+    async fn path_package_without_a_name_fragment_is_named_by_its_directory() {
         let mut storage = [0; 2048];
 
         let layout =
@@ -661,8 +661,8 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_without_an_inherited_path_appends_the_loader_defaults() {
+    #[proxima::test]
+    async fn macos_without_an_inherited_path_appends_the_loader_defaults() {
         let mut storage = [0; 2048];
 
         let layout = TestEnvironmentLayout::build(
@@ -679,8 +679,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_without_an_inherited_path_appends_no_loader_defaults() {
+    #[proxima::test]
+    async fn linux_without_an_inherited_path_appends_no_loader_defaults() {
         let mut storage = [0; 2048];
 
         let layout = TestEnvironmentLayout::build(
@@ -701,8 +701,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn examples_directory_maps_to_the_artifact_and_deps_directories() {
+    #[proxima::test]
+    async fn examples_directory_maps_to_the_artifact_and_deps_directories() {
         let mut storage = [0; 2048];
         let artifact = TestArtifact {
             executable: EXAMPLES_EXECUTABLE,
@@ -721,8 +721,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn malformed_package_id_and_short_storage_are_rejected_with_their_reason() {
+    #[proxima::test]
+    async fn malformed_package_id_and_short_storage_are_rejected_with_their_reason() {
         let mut storage = [0; 2048];
         let no_fragment = TestArtifact {
             package_id: "path+file:///repo/tests/fixtures/dylib_env",
@@ -748,8 +748,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn linked_directories_reject_a_separator_and_report_overflow() {
+    #[proxima::test]
+    async fn linked_directories_reject_a_separator_and_report_overflow() {
         let mut storage = [0; 24];
         let mut linked = LinkedDirectories::new(&mut storage);
         let separator_path = if cfg!(windows) {
@@ -769,8 +769,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn one_build_serves_every_test_launch_without_allocating() {
+    #[proxima::test]
+    async fn one_build_serves_every_test_launch_without_allocating() {
         let mut storage = [0; 2048];
         let libraries = [SYSROOT_LIBDIR];
         let (layout, build_allocations) = crate::test_alloc::measure_allocations(|| {
@@ -805,8 +805,8 @@ mod tests {
         assert!(checksum > 0);
     }
 
-    #[test]
-    fn build_script_output_supplies_out_dir_and_rustc_env_to_its_own_package_only() {
+    #[proxima::test]
+    async fn build_script_output_supplies_out_dir_and_rustc_env_to_its_own_package_only() {
         let mut scratch = [0_u8; 1024];
         let script = build_script_message(BUILD_SCRIPT_RECORD, &mut scratch);
         let mut outputs_storage = [0_u8; 1024];
@@ -836,8 +836,8 @@ mod tests {
         assert_eq!(lookup(&layout, &storage, "PROBE_ANSWER"), Some("42"));
     }
 
-    #[test]
-    fn rustc_env_cannot_replace_package_variables_and_the_latest_script_wins() {
+    #[proxima::test]
+    async fn rustc_env_cannot_replace_package_variables_and_the_latest_script_wins() {
         let package_id = "path+file:///repo/tests/fixtures/dylib_env#0.1.0";
         let first = serde_json::json!({
             "reason": "build-script-executed", "package_id": package_id,

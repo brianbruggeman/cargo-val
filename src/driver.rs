@@ -3071,8 +3071,8 @@ mod tests {
         std::string::String::from_utf8(line.bytes().to_vec()).expect("launch line is UTF-8")
     }
 
-    #[test]
-    fn launch_failure_line_names_each_cause() {
+    #[proxima::test]
+    async fn launch_failure_line_names_each_cause() {
         let cases = [
             (
                 LaunchCause::Full,
@@ -3110,8 +3110,8 @@ mod tests {
         assert_eq!(checked, 6);
     }
 
-    #[test]
-    fn longest_launch_failure_line_fits_the_error_line() {
+    #[proxima::test]
+    async fn longest_launch_failure_line_fits_the_error_line() {
         let longest = LaunchCause::NameTooLong {
             required: usize::MAX,
             available: usize::MAX,
@@ -3121,8 +3121,8 @@ mod tests {
         assert!(line.len() < ERROR_LINE_CAPACITY);
     }
 
-    #[test]
-    fn libtest_result_lines_classify_the_exact_child() {
+    #[proxima::test]
+    async fn libtest_result_lines_classify_the_exact_child() {
         use crate::runner::LibtestVerdict;
         let cases: [(&[u8], LibtestVerdict); 6] = [
             (b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.00s", LibtestVerdict::Ran),
@@ -3154,8 +3154,8 @@ mod tests {
         Ok(set)
     }
 
-    #[test]
-    fn real_ignored_listing_fills_the_set_at_every_chunk_size() {
+    #[proxima::test]
+    async fn real_ignored_listing_fills_the_set_at_every_chunk_size() {
         const IGNORED: &[u8] = include_bytes!("../tests/fixtures/listing/ignore_modes_list_ignored.txt");
         for chunk_size in [1, 2, 7, 16, IGNORED.len()] {
             let set = collected(chunk_size, IGNORED).expect("real listing frames");
@@ -3165,8 +3165,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn full_listing_names_every_test_and_skips_the_summary() {
+    #[proxima::test]
+    async fn full_listing_names_every_test_and_skips_the_summary() {
         const LISTING: &[u8] = include_bytes!("../tests/fixtures/listing/ignore_modes_list.txt");
         let set = collected(5, LISTING).expect("real listing frames");
 
@@ -3175,23 +3175,23 @@ mod tests {
         assert!(set.contains(b"fixture::fails"));
     }
 
-    #[test]
-    fn invalid_utf8_listing_line_is_refused() {
+    #[proxima::test]
+    async fn invalid_utf8_listing_line_is_refused() {
         let outcome = collected(4, b"fixture::\xff: test\n");
 
         assert!(matches!(outcome, Err(RunError::ListingStream)));
     }
 
-    #[test]
-    fn listing_line_past_the_record_limit_is_refused() {
+    #[proxima::test]
+    async fn listing_line_past_the_record_limit_is_refused() {
         let mut listing = std::vec![b'a'; super::RESULT_LINE_CAPACITY + 1];
         listing.extend_from_slice(b"\n");
 
         assert!(matches!(collected(64, &listing), Err(RunError::ListingStream)));
     }
 
-    #[test]
-    fn refusal_without_detail_renders_its_static_message() {
+    #[proxima::test]
+    async fn refusal_without_detail_renders_its_static_message() {
         let line = RunError::Reactor.render();
         assert_eq!(line.bytes(), RunError::Reactor.message());
     }
@@ -3217,8 +3217,8 @@ mod listing_allocation_tests {
         }
     }
 
-    #[test]
-    fn spawning_a_listing_child_allocates_zero_times() {
+    #[proxima::test]
+    async fn spawning_a_listing_child_allocates_zero_times() {
         crate::edge_exit::fixture::in_single_threaded_process(spawning_a_listing_child_allocates_zero_times_in_isolation);
     }
 

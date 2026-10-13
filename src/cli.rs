@@ -482,8 +482,8 @@ mod tests {
         ("-m", "tests/fixtures/workspace/Cargo.toml"),
     ];
 
-    #[test]
-    fn c68_every_value_taking_option_forwards_its_value_and_never_makes_it_the_filter() {
+    #[proxima::test]
+    async fn c68_every_value_taking_option_forwards_its_value_and_never_makes_it_the_filter() {
         let mut checked = 0;
         for (option, value) in VALUE_OPTIONS {
             let separated = [option.as_bytes(), value.as_bytes(), b"fixture::passes"];
@@ -505,8 +505,8 @@ mod tests {
         assert_eq!(checked, VALUE_OPTIONS.len());
     }
 
-    #[test]
-    fn c68_long_options_also_forward_in_the_equals_joined_form() {
+    #[proxima::test]
+    async fn c68_long_options_also_forward_in_the_equals_joined_form() {
         let joined = [
             "--message-format=json",
             "--color=never",
@@ -540,8 +540,8 @@ mod tests {
         assert_eq!(checked, joined.len());
     }
 
-    #[test]
-    fn target_dir_is_cargo_vals_own_setting_and_is_never_forwarded() {
+    #[proxima::test]
+    async fn target_dir_is_cargo_vals_own_setting_and_is_never_forwarded() {
         type Case<'case> = (&'case [&'case [u8]], Option<&'case [u8]>);
         let cases: [Case<'_>; 4] = [
             (&[b"--target-dir", b"target/own", b"fixture::passes"], Some(b"target/own")),
@@ -562,8 +562,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn target_dir_without_a_usable_value_is_a_cargo_option_fault() {
+    #[proxima::test]
+    async fn target_dir_without_a_usable_value_is_a_cargo_option_fault() {
         let cases: [&[&[u8]]; 4] = [
             &[b"--target-dir"],
             &[b"--target-dir="],
@@ -581,8 +581,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn c68_short_manifest_path_forms_record_the_manifest_path() {
+    #[proxima::test]
+    async fn c68_short_manifest_path_forms_record_the_manifest_path() {
         for (arguments, expected) in [
             (
                 &[b"-m".as_slice(), b"a/Cargo.toml"][..],
@@ -611,8 +611,8 @@ mod tests {
         assert!(dangling.has_invalid_manifest_path());
     }
 
-    #[test]
-    fn c68_stop_policy_and_no_tests_options_are_consumed_not_forwarded() {
+    #[proxima::test]
+    async fn c68_stop_policy_and_no_tests_options_are_consumed_not_forwarded() {
         let mut parser = CliParser::new();
         for argument in [
             b"--max-fail".as_slice(),
@@ -642,8 +642,8 @@ mod tests {
         assert_eq!(max_fail.cargo_arguments(), [] as [&[u8]; 0]);
     }
 
-    #[test]
-    fn c48d_retains_external_cargo_and_harness_arguments_by_reference() {
+    #[proxima::test]
+    async fn c48d_retains_external_cargo_and_harness_arguments_by_reference() {
         let cargo_arguments = serde_json::from_str::<Vec<String>>(include_str!(
             "../specs/cargo-val/evidence/c48d-cli/cargo-argv.json"
         ))
@@ -690,8 +690,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c48d_rejects_a_missing_cargo_option_value_before_spawn() {
+    #[proxima::test]
+    async fn c48d_rejects_a_missing_cargo_option_value_before_spawn() {
         let mut rejected_invocations = 0;
         let missing_trailing_value = [
             b"val".as_slice(),

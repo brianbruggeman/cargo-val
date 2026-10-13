@@ -687,8 +687,8 @@ mod lowering {
             [executable, "--exact", test_name]
         }
 
-        #[test]
-        fn c43_quotes_executable_and_escapes_trailing_backslashes() {
+        #[proxima::test]
+        async fn c43_quotes_executable_and_escapes_trailing_backslashes() {
             let intent = exact_intent("C:\\target dir\\fixture.exe", "alpha \\");
             let mut command_line = [0xA5; 128];
             let mut environment_block = [0xA5; 2];
@@ -720,8 +720,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c43_encodes_sorted_unicode_environment_override_in_caller_storage() {
+        #[proxima::test]
+        async fn c43_encodes_sorted_unicode_environment_override_in_caller_storage() {
             let intent = exact_intent("fixture.exe", "alpha");
             let inherited = ["PARENT=kept", "CARGO_VAL=old", "=C:=C:\\work"];
             let overrides = ["cargo_val=λ🚀"];
@@ -752,8 +752,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c43_rejects_short_utf16_storage_without_partial_writes() {
+        #[proxima::test]
+        async fn c43_rejects_short_utf16_storage_without_partial_writes() {
             let intent = exact_intent("C:\\target dir\\fixture.exe", "alpha");
             let mut command_line = [0xA5; 41];
             let original_command_line = command_line;
@@ -780,8 +780,8 @@ mod lowering {
             std::println!("{{\"short_storage_rejected\":1,\"partial_writes\":0}}");
         }
 
-        #[test]
-        fn per_binary_environment_and_directory_lower_for_every_test_without_allocating() {
+        #[proxima::test]
+        async fn per_binary_environment_and_directory_lower_for_every_test_without_allocating() {
             let (executable, manifest_path, manifest_directory) = if cfg!(windows) {
                 (
                     "C:\\work\\target\\debug\\deps\\dylib_env-3f2a1c9d8e7b6a50",
@@ -881,8 +881,8 @@ mod lowering {
             entries
         }
 
-        #[test]
-        fn arena_merge_matches_full_lowering_for_the_process_environment_and_overrides() {
+        #[proxima::test]
+        async fn arena_merge_matches_full_lowering_for_the_process_environment_and_overrides() {
             let inherited = process_environment();
             let inherited_texts: std::vec::Vec<&str> = inherited.iter().map(std::string::String::as_str).collect();
             let mut command = std::vec![0_u16; 8];
@@ -918,8 +918,8 @@ mod lowering {
             }
         }
 
-        #[test]
-        fn arena_merge_rejects_duplicate_overrides_and_short_storage() {
+        #[proxima::test]
+        async fn arena_merge_rejects_duplicate_overrides_and_short_storage() {
             let base = [u16::from(b'A'), u16::from(b'='), u16::from(b'1'), 0, 0];
             let mut storage = [0_u16; 64];
             assert_eq!(
@@ -933,8 +933,8 @@ mod lowering {
             ));
         }
 
-        #[test]
-        fn arena_command_line_matches_full_lowering_for_quoted_parts() {
+        #[proxima::test]
+        async fn arena_command_line_matches_full_lowering_for_quoted_parts() {
             let parts: [&[u8]; 5] = [
                 b"C:\\Program Files\\t\\deps\\app-1a2b.exe",
                 b"--exact",
@@ -960,8 +960,8 @@ mod lowering {
             ));
         }
 
-        #[test]
-        fn c67_job_limit_flags_kill_on_close_die_on_exception_and_priority() {
+        #[proxima::test]
+        async fn c67_job_limit_flags_kill_on_close_die_on_exception_and_priority() {
             let flags = super::windows_job_limit_flags();
 
             assert_eq!(flags, 0x2000 | 0x400 | 0x20);
@@ -971,22 +971,22 @@ mod lowering {
             assert_eq!(super::WINDOWS_BELOW_NORMAL_PRIORITY, 0x4000);
         }
 
-        #[test]
-        fn c67_creation_flags_inherit_the_console_and_declare_unicode_environment() {
+        #[proxima::test]
+        async fn c67_creation_flags_inherit_the_console_and_declare_unicode_environment() {
             let flags = super::windows_creation_flags();
 
             assert_eq!(flags, 0x0008_0000 | 0x0000_0400);
             assert_eq!(flags & super::WINDOWS_CREATE_NO_WINDOW, 0);
         }
 
-        #[test]
-        fn c67_attribute_count_grows_by_one_for_the_job_list() {
+        #[proxima::test]
+        async fn c67_attribute_count_grows_by_one_for_the_job_list() {
             assert_eq!(super::windows_attribute_count(false), 1);
             assert_eq!(super::windows_attribute_count(true), 2);
         }
 
-        #[test]
-        fn c67_attribute_storage_words_round_up_to_whole_words() {
+        #[proxima::test]
+        async fn c67_attribute_storage_words_round_up_to_whole_words() {
             let word = core::mem::size_of::<usize>();
 
             assert_eq!(super::windows_attribute_storage_words(0), 0);
@@ -999,8 +999,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c67_executable_path_encodes_absolute_paths_nul_terminated() {
+        #[proxima::test]
+        async fn c67_executable_path_encodes_absolute_paths_nul_terminated() {
             let mut storage = [0xA5_u16; 128];
             let path = "C:\\Users\\runner\\work\\target\\debug\\deps\\cargo_val-0a1b2c3d4e5f.exe";
 
@@ -1018,8 +1018,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c67_executable_path_accepts_unc_and_verbatim_prefixes() {
+        #[proxima::test]
+        async fn c67_executable_path_accepts_unc_and_verbatim_prefixes() {
             let mut storage = [0_u16; 64];
 
             assert!(super::write_executable_path("\\\\?\\C:\\a\\b.exe", &mut storage).is_ok());
@@ -1028,8 +1028,8 @@ mod lowering {
             );
         }
 
-        #[test]
-        fn c67_executable_path_rejects_relative_names_that_would_search_path() {
+        #[proxima::test]
+        async fn c67_executable_path_rejects_relative_names_that_would_search_path() {
             let mut storage = [0_u16; 64];
 
             for relative in [
@@ -1047,8 +1047,8 @@ mod lowering {
             }
         }
 
-        #[test]
-        fn c67_executable_path_rejects_interior_nul_and_short_storage() {
+        #[proxima::test]
+        async fn c67_executable_path_rejects_interior_nul_and_short_storage() {
             let mut storage = [0_u16; 4];
 
             assert_eq!(

@@ -63,8 +63,8 @@ impl CountingDispatcher {
     }
 }
 
-#[test]
-fn dispatches_first_name_before_listing_eof() {
+#[proxima::test]
+async fn dispatches_first_name_before_listing_eof() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     let mut source = GatedListingSource { state: 0 };
@@ -104,8 +104,8 @@ fn dispatches_first_name_before_listing_eof() {
     assert_eq!(framer.finish(), Ok(()));
 }
 
-#[test]
-fn ignores_summary_without_stalling_later_name() {
+#[proxima::test]
+async fn ignores_summary_without_stalling_later_name() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     let summary = b"1 test, 0 benchmarks\n";
@@ -118,8 +118,8 @@ fn ignores_summary_without_stalling_later_name() {
     assert_eq!(second_consumed, 12);
 }
 
-#[test]
-fn reports_framing_failure_without_emitting_name() {
+#[proxima::test]
+async fn reports_framing_failure_without_emitting_name() {
     let mut buffer = [0; 4];
     let mut framer = ArtifactFramer::new(&mut buffer, 3).expect("small fixed listing capacity");
     let result = discover(&mut framer, b"longer: test\n");
@@ -132,8 +132,8 @@ fn reports_framing_failure_without_emitting_name() {
     ));
 }
 
-#[test]
-fn withholds_split_line_until_newline_arrives() {
+#[proxima::test]
+async fn withholds_split_line_until_newline_arrives() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     let line = b"alpha: test\n";
@@ -153,8 +153,8 @@ fn withholds_split_line_until_newline_arrives() {
     }
 }
 
-#[test]
-fn drains_buffered_line_before_accepting_new_chunk() {
+#[proxima::test]
+async fn drains_buffered_line_before_accepting_new_chunk() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     let fragment = b"al";
@@ -178,8 +178,8 @@ fn drains_buffered_line_before_accepting_new_chunk() {
     assert_eq!(framer.finish(), Ok(()));
 }
 
-#[test]
-fn lent_chunk_consumes_one_line_and_leaves_the_tail_with_the_caller() {
+#[proxima::test]
+async fn lent_chunk_consumes_one_line_and_leaves_the_tail_with_the_caller() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     let chunk = b"alpha: test\nbeta: test\n";
@@ -194,8 +194,8 @@ fn lent_chunk_consumes_one_line_and_leaves_the_tail_with_the_caller() {
     assert_eq!(framer.finish(), Ok(()));
 }
 
-#[test]
-fn replays_short_copy_tail_before_reading_another_chunk() {
+#[proxima::test]
+async fn replays_short_copy_tail_before_reading_another_chunk() {
     let mut buffer = [0; 12];
     let mut framer = ArtifactFramer::new(&mut buffer, 11).expect("fixed line capacity");
     let chunk = b"alpha: test\nbeta: test\n";
@@ -211,8 +211,8 @@ fn replays_short_copy_tail_before_reading_another_chunk() {
     assert_eq!(framer.finish(), Ok(()));
 }
 
-#[test]
-fn parser_failure_reports_progress_and_poisons_stream() {
+#[proxima::test]
+async fn parser_failure_reports_progress_and_poisons_stream() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     let malformed_chunk = b"\xff: test\nok: test\n";
@@ -233,8 +233,8 @@ fn parser_failure_reports_progress_and_poisons_stream() {
     ));
 }
 
-#[test]
-fn empty_poll_after_eof_returns_no_line() {
+#[proxima::test]
+async fn empty_poll_after_eof_returns_no_line() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     assert_eq!(framer.finish(), Ok(()));
@@ -244,8 +244,8 @@ fn empty_poll_after_eof_returns_no_line() {
     );
 }
 
-#[test]
-fn nonempty_input_after_eof_is_rejected_even_with_buffered_line() {
+#[proxima::test]
+async fn nonempty_input_after_eof_is_rejected_even_with_buffered_line() {
     let mut buffer = [0; 33];
     let mut framer = ArtifactFramer::new(&mut buffer, 32).expect("fixed listing capacity");
     assert_eq!(

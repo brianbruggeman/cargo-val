@@ -158,15 +158,15 @@ mod tests {
         DiscoveryFsm::new(bins, gate)
     }
 
-    #[test]
-    fn gate_off_never_waits() {
+    #[proxima::test]
+    async fn gate_off_never_waits() {
         let discovery = fsm(BinGate::Off);
 
         assert!(!discovery.waits(PROBE));
     }
 
-    #[test]
-    fn metadata_gate_waits_until_a_bin_of_that_package_is_built() {
+    #[proxima::test]
+    async fn metadata_gate_waits_until_a_bin_of_that_package_is_built() {
         let mut discovery = fsm(BinGate::Metadata);
         assert!(discovery.waits(PROBE));
         assert!(!discovery.waits(ELSEWHERE));
@@ -178,8 +178,8 @@ mod tests {
         assert!(!discovery.waits(PROBE));
     }
 
-    #[test]
-    fn build_success_stops_every_package_waiting() {
+    #[proxima::test]
+    async fn build_success_stops_every_package_waiting() {
         let mut discovery = fsm(BinGate::BuildFinished);
         assert!(discovery.waits(PROBE));
 
@@ -189,8 +189,8 @@ mod tests {
         assert!(!discovery.waits(ELSEWHERE));
     }
 
-    #[test]
-    fn build_failure_keeps_packages_waiting_and_a_clean_exit_cannot_stand_over_dropped_artifacts() {
+    #[proxima::test]
+    async fn build_failure_keeps_packages_waiting_and_a_clean_exit_cannot_stand_over_dropped_artifacts() {
         let mut discovery = fsm(BinGate::BuildFinished);
 
         discovery.build_finished(false);
@@ -201,8 +201,8 @@ mod tests {
         assert!(!discovery.lost_artifacts_on_clean_exit(0));
     }
 
-    #[test]
-    fn stdout_eof_while_the_build_is_running_counts_as_failed() {
+    #[proxima::test]
+    async fn stdout_eof_while_the_build_is_running_counts_as_failed() {
         let mut discovery = fsm(BinGate::BuildFinished);
 
         discovery.stdout_eof();
@@ -211,8 +211,8 @@ mod tests {
         assert!(discovery.waits(PROBE));
     }
 
-    #[test]
-    fn stdout_eof_after_a_successful_build_keeps_the_build_succeeded() {
+    #[proxima::test]
+    async fn stdout_eof_after_a_successful_build_keeps_the_build_succeeded() {
         let mut discovery = fsm(BinGate::BuildFinished);
         discovery.build_finished(true);
 
@@ -222,8 +222,8 @@ mod tests {
         assert!(!discovery.waits(PROBE));
     }
 
-    #[test]
-    fn drained_needs_both_streams_an_exit_and_nothing_parked_or_running() {
+    #[proxima::test]
+    async fn drained_needs_both_streams_an_exit_and_nothing_parked_or_running() {
         let mut discovery = fsm(BinGate::BuildFinished);
         discovery.stdout_eof();
         discovery.stderr_eof();

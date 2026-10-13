@@ -210,28 +210,28 @@ fn interrupt_doctest(label: &str, arguments: &[&str], signal: libc::c_int, expec
     );
 }
 
-#[test]
-fn c72_doc_only_run_forwards_sigint_to_the_doctest_group_and_exits_130() {
+#[proxima::test]
+async fn c72_doc_only_run_forwards_sigint_to_the_doctest_group_and_exits_130() {
     interrupt_doctest("doc-int", &["--doc"], libc::SIGINT, SIGINT_STATUS);
 }
 
-#[test]
-fn c72_doc_only_run_forwards_sigterm_to_the_doctest_group_and_exits_143() {
+#[proxima::test]
+async fn c72_doc_only_run_forwards_sigterm_to_the_doctest_group_and_exits_143() {
     interrupt_doctest("doc-term", &["--doc"], libc::SIGTERM, SIGTERM_STATUS);
 }
 
-#[test]
-fn c72_default_run_forwards_sigint_to_the_doctest_group_and_exits_130() {
+#[proxima::test]
+async fn c72_default_run_forwards_sigint_to_the_doctest_group_and_exits_130() {
     interrupt_doctest("all-int", &[], libc::SIGINT, SIGINT_STATUS);
 }
 
-#[test]
-fn c72_default_run_forwards_sigterm_to_the_doctest_group_and_exits_143() {
+#[proxima::test]
+async fn c72_default_run_forwards_sigterm_to_the_doctest_group_and_exits_143() {
     interrupt_doctest("all-term", &[], libc::SIGTERM, SIGTERM_STATUS);
 }
 
-#[test]
-fn c74_running_test_receives_sigint_sent_to_cargo_val_alone_and_exits_130() {
+#[proxima::test]
+async fn c74_running_test_receives_sigint_sent_to_cargo_val_alone_and_exits_130() {
     interrupt(
         "test-int",
         "blocked_test",

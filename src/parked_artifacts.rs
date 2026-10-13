@@ -167,8 +167,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn released_in_arrival_order_and_only_when_the_package_is_ready() {
+    #[proxima::test]
+    async fn released_in_arrival_order_and_only_when_the_package_is_ready() {
         let mut parked = Box::new(ParkedArtifacts::new());
         for (package, target) in [("a#1", "one"), ("b#1", "two"), ("a#1", "three")] {
             parked.park(&artifact(package, target)).expect("room");
@@ -184,8 +184,8 @@ mod tests {
         assert!(parked.is_empty());
     }
 
-    #[test]
-    fn full_and_oversized_are_refused_not_dropped() {
+    #[proxima::test]
+    async fn full_and_oversized_are_refused_not_dropped() {
         let mut parked = Box::new(ParkedArtifacts::new());
         for _ in 0..64 {
             parked.park(&artifact("a#1", "t")).expect("room");

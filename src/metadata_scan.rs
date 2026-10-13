@@ -387,8 +387,8 @@ mod tests {
 
     const TWO_PACKAGES: &str = r#"{"packages":[{"name":"parser","version":"0.3.1","id":"path+file:///repo/parser#0.3.1","dependencies":[{"name":"x","kind":null}],"targets":[{"kind":["lib"],"crate_types":["lib"],"name":"parser"},{"kind":["bin"],"crate_types":["bin"],"name":"parse"},{"kind":["bin"],"crate_types":["bin"],"name":"lint"},{"kind":["test"],"crate_types":["bin"],"name":"cli"}],"manifest_path":"/repo/parser/Cargo.toml"},{"name":"plain","version":"0.1.0","id":"path+file:///repo/plain#0.1.0","targets":[{"kind":["lib"],"crate_types":["lib"],"name":"plain"},{"kind":["test"],"crate_types":["bin"],"name":"it"}]}],"workspace_members":["path+file:///repo/parser#0.3.1","path+file:///repo/plain#0.1.0"],"resolve":null,"target_directory":"/repo/target","version":1}"#;
 
-    #[test]
-    fn counts_bin_targets_per_package_and_ignores_every_other_kind() {
+    #[proxima::test]
+    async fn counts_bin_targets_per_package_and_ignores_every_other_kind() {
         let mut scan = Box::new(MetadataScan::new());
         for chunk in TWO_PACKAGES.as_bytes().chunks(7) {
             scan.feed(chunk).expect("document fits");
@@ -405,14 +405,14 @@ mod tests {
         assert!(!counts.awaiting("path+file:///repo/parser#0.3.1"));
     }
 
-    #[test]
-    fn a_document_deeper_than_the_fixed_stack_is_refused() {
+    #[proxima::test]
+    async fn a_document_deeper_than_the_fixed_stack_is_refused() {
         let mut scan = Box::new(MetadataScan::new());
         assert_eq!(scan.feed(b"[[[[[[[[["), Err(ScanFault::TooDeep));
     }
 
-    #[test]
-    fn reports_the_target_directory_and_workspace_root_of_the_root_object_only() {
+    #[proxima::test]
+    async fn reports_the_target_directory_and_workspace_root_of_the_root_object_only() {
         let document = r#"{"packages":[{"name":"x","id":"path+file:///w#0.1.0","manifest_path":"/w/Cargo.toml","targets":[]}],"workspace_members":[],"workspace_root":"/Users/dev/work space","target_directory":"/tmp/cargo_target","version":1}"#;
         let mut scan = Box::new(MetadataScan::new());
         for chunk in document.as_bytes().chunks(5) {
@@ -424,8 +424,8 @@ mod tests {
         assert_eq!(facts.workspace_root(), Some(&b"/Users/dev/work space"[..]));
     }
 
-    #[test]
-    fn an_escaped_or_overlong_directory_is_reported_as_absent() {
+    #[proxima::test]
+    async fn an_escaped_or_overlong_directory_is_reported_as_absent() {
         let overlong = std::format!(
             r#"{{"packages":[],"workspace_root":"/{}","target_directory":"/a\"b","version":1}}"#,
             "d".repeat(super::PATH_CAPACITY)

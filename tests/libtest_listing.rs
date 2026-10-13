@@ -50,8 +50,8 @@ unsafe impl GlobalAlloc for AllocationCounter {
     }
 }
 
-#[test]
-fn parse_one_listing_line() {
+#[proxima::test]
+async fn parse_one_listing_line() {
     ALLOCATION_COUNT.store(0, Ordering::Relaxed);
     set_tracking(true);
     let name_input = b"suite::alpha: test";
@@ -101,8 +101,8 @@ fn parse_one_listing_line() {
     );
 }
 
-#[test]
-fn framer_rejects_a_listing_line_over_the_record_limit() {
+#[proxima::test]
+async fn framer_rejects_a_listing_line_over_the_record_limit() {
     let mut buffer = [0; 9];
     let mut framer =
         ArtifactFramer::new(&mut buffer, 8).expect("storage holds a record and newline");
@@ -131,8 +131,8 @@ fn framer_rejects_a_listing_line_over_the_record_limit() {
     ));
 }
 
-#[test]
-fn framer_rejects_a_listing_line_missing_its_newline_at_eof() {
+#[proxima::test]
+async fn framer_rejects_a_listing_line_missing_its_newline_at_eof() {
     let mut buffer = [0; 33];
     let mut framer =
         ArtifactFramer::new(&mut buffer, 32).expect("storage holds a record and newline");

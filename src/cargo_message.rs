@@ -600,8 +600,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn target_name_kind_and_package_name_come_from_the_cargo_line() {
+    #[proxima::test]
+    async fn target_name_kind_and_package_name_come_from_the_cargo_line() {
         assert_eq!(
             artifact(LIBRARY),
             ("proxima-model-interop".into(), "proxima_model_interop".into(), "lib".into(), true)

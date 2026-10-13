@@ -801,8 +801,8 @@ mod tests {
         std::string::String::from_utf8(buffer[..length].to_vec()).expect("libtest output is UTF-8")
     }
 
-    #[test]
-    fn c51a_launches_exact_child_before_listing_eof_and_stops_at_full_slot() {
+    #[proxima::test]
+    async fn c51a_launches_exact_child_before_listing_eof_and_stops_at_full_slot() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut source_bytes = [0; 128];
@@ -902,8 +902,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn same_test_name_from_two_targets_is_live_twice() {
+    #[proxima::test]
+    async fn same_test_name_from_two_targets_is_live_twice() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut sessions = SessionSlots::<RunningChild<64>, 3>::new();
@@ -923,8 +923,8 @@ mod tests {
         assert_eq!(sessions.len(), 2);
     }
 
-    #[test]
-    fn c51a_duplicate_and_name_capacity_controls_reject_before_spawn() {
+    #[proxima::test]
+    async fn c51a_duplicate_and_name_capacity_controls_reject_before_spawn() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut sessions = SessionSlots::<RunningChild<64>, 2>::new();
@@ -971,8 +971,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs() {
+    #[proxima::test]
+    async fn c51b_accounts_pass_and_fail_after_exit_and_both_stream_eofs() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut sessions = SessionSlots::<RunningChild<64>, 2>::new();
@@ -1040,8 +1040,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c51b_duplicate_exit_is_rejected_while_child_remains_live() {
+    #[proxima::test]
+    async fn c51b_duplicate_exit_is_rejected_while_child_remains_live() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let mut sessions = SessionSlots::<RunningChild<64>, 1>::new();
@@ -1145,22 +1145,22 @@ mod tests {
         assert_eq!(written, marker.len().cast_signed());
     }
 
-    #[test]
-    fn fixture_alpha() {
+    #[proxima::test]
+    async fn fixture_alpha() {
         if std::env::var_os("CARGO_VAL_C51A_CHILD").is_some() {
             write_marker(b"cargo-val-c51a-child");
         }
     }
 
-    #[test]
-    fn fixture_beta() {
+    #[proxima::test]
+    async fn fixture_beta() {
         if std::env::var_os("CARGO_VAL_C51A_CHILD").is_some() {
             write_marker(b"cargo-val-c51a-child");
         }
     }
 
-    #[test]
-    fn fixture_fail() {
+    #[proxima::test]
+    async fn fixture_fail() {
         if std::env::var_os("CARGO_VAL_C51B_FAIL").is_some() {
             write_marker(b"cargo-val-c51b-failure");
             panic!("cargo-val-c51b-fixture-failure");
@@ -1202,8 +1202,8 @@ mod cause_tests {
         sessions.remove(slot).expect("the child is stored")
     }
 
-    #[test]
-    fn every_launch_error_variant_maps_to_its_cause() {
+    #[proxima::test]
+    async fn every_launch_error_variant_maps_to_its_cause() {
         let cases: [(LaunchError<64>, LaunchCause); 6] = [
             (LaunchError::Full, LaunchCause::Full),
             (LaunchError::Duplicate, LaunchCause::Duplicate),
@@ -1247,8 +1247,8 @@ mod arguments_cause_tests {
     use super::{LaunchCause, LaunchError};
     use crate::edge_spawn::ArgumentsError;
 
-    #[test]
-    fn an_arguments_refusal_keeps_its_required_and_available_sizes() {
+    #[proxima::test]
+    async fn an_arguments_refusal_keeps_its_required_and_available_sizes() {
         let error = LaunchError::<64>::Arguments(ArgumentsError::StringBytesTooSmall {
             required: 140_000,
             available: 65_536,
@@ -1272,8 +1272,8 @@ mod launch_allocation_tests {
     use crate::schedule::SessionSlots;
     use crate::test_intent::ExactTestIntent;
 
-    #[test]
-    fn launching_an_exact_test_child_makes_zero_heap_allocations() {
+    #[proxima::test]
+    async fn launching_an_exact_test_child_makes_zero_heap_allocations() {
         let executable = std::env::current_exe().expect("test executable path is available");
         let executable = executable.to_str().expect("test executable path is UTF-8");
         let inherited_storage = std::env::vars()

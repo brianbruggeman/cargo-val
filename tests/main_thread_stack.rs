@@ -16,8 +16,8 @@ fn fixture_arguments(target: &Path) -> Vec<Vec<u8>> {
         .collect()
 }
 
-#[test]
-fn drive_completes_on_a_one_mebibyte_stack() {
+#[proxima::test]
+async fn drive_completes_on_a_one_mebibyte_stack() {
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("main-thread-stack");
     let arguments = fixture_arguments(&target);
 
@@ -36,8 +36,8 @@ fn drive_completes_on_a_one_mebibyte_stack() {
     assert_eq!((summary.passed, summary.failed), (2, 0));
 }
 
-#[test]
-fn drive_future_stays_small() {
+#[proxima::test]
+async fn drive_future_stays_small() {
     let future = drive(Vec::new());
 
     let size = core::mem::size_of_val(&future);

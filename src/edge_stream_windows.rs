@@ -372,8 +372,8 @@ mod tests {
         UnpinPipe::call(stream, ()).await
     }
 
-    #[test]
-    fn c45c_yields_each_record_then_ends_when_the_child_closes_its_writer() {
+    #[proxima::test]
+    async fn c45c_yields_each_record_then_ends_when_the_child_closes_its_writer() {
         let mut pair = pipe_pair();
         let writer = pair.child_write_handle().expect("child writer is open");
         let stream = stream_over(&pair);
@@ -395,8 +395,8 @@ mod tests {
         assert!(ended, "the closed writer ends the stream");
     }
 
-    #[test]
-    fn c45c_reports_end_for_a_pipe_whose_writer_closed_before_the_first_read() {
+    #[proxima::test]
+    async fn c45c_reports_end_for_a_pipe_whose_writer_closed_before_the_first_read() {
         let mut pair = pipe_pair();
         pair.close_child_write_handle();
         let stream = stream_over(&pair);
@@ -410,8 +410,8 @@ mod tests {
         assert!(ended, "a closed pipe ends without waiting for a packet that never comes");
     }
 
-    #[test]
-    fn c45c_keeps_draining_into_the_scratch_tail_once_the_window_is_full() {
+    #[proxima::test]
+    async fn c45c_keeps_draining_into_the_scratch_tail_once_the_window_is_full() {
         let pair = pipe_pair();
         let writer = pair.child_write_handle().expect("child writer is open") as usize;
         let stream = stream_over(&pair);

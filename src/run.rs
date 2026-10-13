@@ -800,8 +800,8 @@ mod tests {
         .expect("root completes")
     }
 
-    #[test]
-    fn host_libdir_is_the_directory_that_holds_libstd() {
+    #[proxima::test]
+    async fn host_libdir_is_the_directory_that_holds_libstd() {
         let entries = environment();
         let inherited: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
         let child = spawn_libdir_query(None, None, &inherited).expect("rustc spawns");
@@ -815,8 +815,8 @@ mod tests {
         assert!(has_libstd, "no libstd-* in {libdir}");
     }
 
-    #[test]
-    fn spawn_returns_while_rustc_is_still_running_and_prime_collects_its_output() {
+    #[proxima::test]
+    async fn spawn_returns_while_rustc_is_still_running_and_prime_collects_its_output() {
         use std::io::Write;
         use std::os::unix::ffi::OsStrExt;
 
@@ -858,8 +858,8 @@ mod tests {
         assert_eq!(libdir, "/opt/fake-toolchain/lib");
     }
 
-    #[test]
-    fn unknown_target_is_reported_as_an_output_failure() {
+    #[proxima::test]
+    async fn unknown_target_is_reported_as_an_output_failure() {
         let entries = environment();
         let inherited: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
         let child = spawn_libdir_query(None, Some(b"not-a-real-triple"), &inherited).expect("rustc spawns");
@@ -869,8 +869,8 @@ mod tests {
         assert_eq!(result, Err(RunError::RustcLibdir));
     }
 
-    #[test]
-    fn interrupt_arm_yields_once_on_the_scan_after_the_signal_fires() {
+    #[proxima::test]
+    async fn interrupt_arm_yields_once_on_the_scan_after_the_signal_fires() {
         let signal = proxima_core::signal::Signal::new();
         let source = proxima_primitives::pipe::SignalSource::new(&signal);
         let mut context = Context::from_waker(Waker::noop());
@@ -884,8 +884,8 @@ mod tests {
         assert!(matches!(super::step(&alone, &mut context), Poll::Pending), "an exhausted source parks the merge");
     }
 
-    #[test]
-    fn cargo_build_child_discovery_over_prime_sources_matches_blocking_capture() {
+    #[proxima::test]
+    async fn cargo_build_child_discovery_over_prime_sources_matches_blocking_capture() {
         let target = tempdir().expect("target directory");
         let arguments = cargo_arguments(target.path().to_str().expect("utf8 temp path"));
         let mut expected = blocking_capture(&arguments);

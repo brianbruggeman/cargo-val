@@ -138,8 +138,8 @@ mod tests {
 
     const IGNORED: &str = include_str!("../tests/fixtures/filterset/interop-ignored.txt");
 
-    #[test]
-    fn holds_exactly_the_real_ignored_names_of_the_interop_selection() {
+    #[proxima::test]
+    async fn holds_exactly_the_real_ignored_names_of_the_interop_selection() {
         let mut set = Box::new(IgnoredSet::new());
         let names: Vec<&str> = IGNORED.lines().collect();
         for name in &names {
@@ -155,8 +155,8 @@ mod tests {
         assert!(prefixes_absent);
     }
 
-    #[test]
-    fn entry_capacity_is_refused_not_overwritten() {
+    #[proxima::test]
+    async fn entry_capacity_is_refused_not_overwritten() {
         let mut set = Box::new(IgnoredSet::new());
         let mut accepted = 0;
         let mut refusal = None;

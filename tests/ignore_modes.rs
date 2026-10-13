@@ -86,8 +86,8 @@ fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, &str)]
 
 const BINARY: &str = "ignore_modes: discovered";
 
-#[test]
-fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
+#[proxima::test]
+async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
     for mode in MODES {
         default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode);
     }
@@ -117,8 +117,8 @@ fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode: &s
     assert!(!result.stdout.contains('\u{1b}'), "NO_COLOR is respected");
 }
 
-#[test]
-fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest() {
+#[proxima::test]
+async fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest() {
     for mode in MODES {
         ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode);
     }
@@ -144,8 +144,8 @@ fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &str) {
     );
 }
 
-#[test]
-fn include_ignored_flag_runs_every_test() {
+#[proxima::test]
+async fn include_ignored_flag_runs_every_test() {
     for mode in MODES {
         include_ignored_flag_runs_every_test_in(mode);
     }
@@ -167,8 +167,8 @@ fn include_ignored_flag_runs_every_test_in(mode: &str) {
     );
 }
 
-#[test]
-fn ignore_mode_setting_equals_the_libtest_flag() {
+#[proxima::test]
+async fn ignore_mode_setting_equals_the_libtest_flag() {
     for mode in MODES {
         ignore_mode_setting_equals_the_libtest_flag_in(mode);
     }
@@ -182,8 +182,8 @@ fn ignore_mode_setting_equals_the_libtest_flag_in(mode: &str) {
     assert_eq!(setting.status, flag.status);
 }
 
-#[test]
-fn both_ignore_flags_together_are_refused_as_in_libtest() {
+#[proxima::test]
+async fn both_ignore_flags_together_are_refused_as_in_libtest() {
     for mode in MODES {
         both_ignore_flags_together_are_refused_as_in_libtest_in(mode);
     }
@@ -196,8 +196,8 @@ fn both_ignore_flags_together_are_refused_as_in_libtest_in(mode: &str) {
     assert!(result.stderr.contains("invalid arguments"), "{}", result.stderr);
 }
 
-#[test]
-fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy() {
+#[proxima::test]
+async fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy() {
     for mode in MODES {
         only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode);
     }
@@ -215,8 +215,8 @@ fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(m
     assert!(result.stderr.contains("no tests to run"), "{context}");
 }
 
-#[test]
-fn filterset_excludes_before_launch_and_counts_filtered() {
+#[proxima::test]
+async fn filterset_excludes_before_launch_and_counts_filtered() {
     for mode in MODES {
         filterset_excludes_before_launch_and_counts_filtered_in(mode);
     }
@@ -238,8 +238,8 @@ fn filterset_excludes_before_launch_and_counts_filtered_in(mode: &str) {
     }
 }
 
-#[test]
-fn filterset_setting_equals_the_flag_and_the_flag_wins() {
+#[proxima::test]
+async fn filterset_setting_equals_the_flag_and_the_flag_wins() {
     for mode in MODES {
         filterset_setting_equals_the_flag_and_the_flag_wins_in(mode);
     }
@@ -254,8 +254,8 @@ fn filterset_setting_equals_the_flag_and_the_flag_wins_in(mode: &str) {
     assert_eq!(overridden.total_without_wall(), flag.total_without_wall());
 }
 
-#[test]
-fn malformed_filterset_fails_with_a_caret_before_any_build() {
+#[proxima::test]
+async fn malformed_filterset_fails_with_a_caret_before_any_build() {
     let missing = PathBuf::from("/nonexistent/cargo-val-fixture/Cargo.toml");
     let result = run(&missing, &["--lib", "-E", "test(a) & & test(b)"], &[]);
 
@@ -267,8 +267,8 @@ fn malformed_filterset_fails_with_a_caret_before_any_build() {
     assert_eq!(result.stdout, "");
 }
 
-#[test]
-fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test() {
+#[proxima::test]
+async fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test() {
     for mode in MODES {
         an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode);
     }
@@ -392,8 +392,8 @@ mod bin_gate_hold {
 }
 
 #[cfg(unix)]
-#[test]
-fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
+#[proxima::test]
+async fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
     let result = bin_gate_hold::cold_run("on", &[], bin_gate_hold::Release::AfterTestArtifactLinks);
     let context = format!("{}{}", result.stdout, result.stderr);
 
@@ -407,8 +407,8 @@ fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
 }
 
 #[cfg(unix)]
-#[test]
-fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build() {
+#[proxima::test]
+async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build() {
     let result = bin_gate_hold::cold_run(
         "broken",
         &[("RUSTFLAGS", "--cfg broken_bin"), ("CARGO_VAL_LOG", "debug")],
@@ -435,8 +435,8 @@ fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build() {
 }
 
 #[cfg(unix)]
-#[test]
-fn the_same_fixture_fails_with_the_bin_gate_off() {
+#[proxima::test]
+async fn the_same_fixture_fails_with_the_bin_gate_off() {
     let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails);
     let failed = result
         .stdout
@@ -449,8 +449,8 @@ fn the_same_fixture_fails_with_the_bin_gate_off() {
     assert_eq!(result.status, Some(1));
 }
 
-#[test]
-fn help_prints_the_banner_file_and_documents_the_new_options() {
+#[proxima::test]
+async fn help_prints_the_banner_file_and_documents_the_new_options() {
     let output = Command::new(CARGO_VAL)
         .arg("--help")
         .output()
@@ -489,8 +489,8 @@ fn gate_lines(stderr: &str) -> Vec<String> {
 }
 
 #[cfg(unix)]
-#[test]
-fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() {
+#[proxima::test]
+async fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() {
     let result = bin_gate_hold::cold_run(
         "lines",
         &[("CARGO_VAL_LOG", "debug")],
@@ -513,8 +513,8 @@ fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() {
 }
 
 #[cfg(unix)]
-#[test]
-fn gate_debug_lines_for_park_then_failed_build_then_drop_are_byte_exact() {
+#[proxima::test]
+async fn gate_debug_lines_for_park_then_failed_build_then_drop_are_byte_exact() {
     let result = bin_gate_hold::cold_run(
         "drop-lines",
         &[("RUSTFLAGS", "--cfg broken_bin"), ("CARGO_VAL_LOG", "debug")],

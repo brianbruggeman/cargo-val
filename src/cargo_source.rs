@@ -322,8 +322,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn c49_emits_borrowed_artifact_before_reader_eof() {
+    #[proxima::test]
+    async fn c49_emits_borrowed_artifact_before_reader_eof() {
         let (observed, allocations) = crate::test_alloc::measure_allocations(|| {
             let mut source_storage = [0_u8; 256];
             let mut frame_storage = [0_u8; 256];
@@ -402,8 +402,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c49_eof_wait_control_withholds_the_same_artifact() {
+    #[proxima::test]
+    async fn c49_eof_wait_control_withholds_the_same_artifact() {
         let mut reader = HeldReader {
             records: Some(CARGO_RECORDS),
             release_eof: false,
@@ -611,18 +611,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn lent_chunk_every_split_matches_async_read_for_the_single_artifact_fixture() {
+    #[proxima::test]
+    async fn lent_chunk_every_split_matches_async_read_for_the_single_artifact_fixture() {
         assert_every_split_matches(CARGO_RECORDS, 1);
     }
 
-    #[test]
-    fn lent_chunk_every_split_matches_async_read_for_the_three_artifact_fixture() {
+    #[proxima::test]
+    async fn lent_chunk_every_split_matches_async_read_for_the_three_artifact_fixture() {
         assert_every_split_matches(THREE_ARTIFACTS, 3);
     }
 
-    #[test]
-    fn lent_eof_with_unterminated_record_returns_the_artifact_framing_error() {
+    #[proxima::test]
+    async fn lent_eof_with_unterminated_record_returns_the_artifact_framing_error() {
         let mut frame_storage = [0_u8; 256];
         let mut scratch = [0_u8; 64];
         let mut framer = ArtifactFramer::new(&mut frame_storage, 255).expect("record storage fits");
@@ -641,8 +641,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn lent_zero_length_chunk_is_zero_consumed_progress_and_leaves_the_framer_untouched() {
+    #[proxima::test]
+    async fn lent_zero_length_chunk_is_zero_consumed_progress_and_leaves_the_framer_untouched() {
         let mut frame_storage = [0_u8; 256];
         let mut scratch = [0_u8; 64];
         let mut framer = ArtifactFramer::new(&mut frame_storage, 255).expect("record storage fits");

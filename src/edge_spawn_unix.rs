@@ -220,8 +220,8 @@ pub mod pipe_pair {
         use super::descriptor_probe::{assert_broken_pipe, assert_eof, probe_of};
         use super::{OwnedDescriptor, OwnedPipe, UnixPipeError, UnixPipePair};
 
-        #[test]
-        fn c38a_creates_two_owned_nonblocking_pipe_pairs() {
+        #[proxima::test]
+        async fn c38a_creates_two_owned_nonblocking_pipe_pairs() {
             let first = UnixPipePair::new().expect("both capture pipes should be created");
             let descriptors = [
                 first.stdout().parent_read().raw(),
@@ -255,8 +255,8 @@ pub mod pipe_pair {
             );
         }
 
-        #[test]
-        fn c38a_second_pipe_failure_drops_first_pair() {
+        #[proxima::test]
+        async fn c38a_second_pipe_failure_drops_first_pair() {
             let mut calls = 0;
             let mut first_eof_probe = -1;
             let result = UnixPipePair::with_factory(|| {
@@ -793,8 +793,8 @@ mod spawn {
         };
         use crate::test_probe::probe_name;
 
-        #[test]
-        fn c38b_launches_exact_child_in_requested_directory_and_owns_reads() {
+        #[proxima::test]
+        async fn c38b_launches_exact_child_in_requested_directory_and_owns_reads() {
             let executable = std::env::current_exe().expect("test executable path exists");
             let executable_text = executable
                 .to_str()
@@ -858,8 +858,8 @@ mod spawn {
             );
         }
 
-        #[test]
-        fn c38c_exact_test_launch_makes_zero_heap_allocations() {
+        #[proxima::test]
+        async fn c38c_exact_test_launch_makes_zero_heap_allocations() {
             let executable = std::env::current_exe().expect("test executable path exists");
             let executable_text = executable
                 .to_str()
@@ -899,8 +899,8 @@ mod spawn {
             assert_eq!(observed, [0, 0], "an exact test launch must not touch the heap");
         }
 
-        #[test]
-        fn shard_launch_lowers_every_name_into_caller_storage_with_zero_heap_allocations() {
+        #[proxima::test]
+        async fn shard_launch_lowers_every_name_into_caller_storage_with_zero_heap_allocations() {
             const NAMES: &[u8] =
                 b"edge_spawn_unix::spawn::tests::fixture_alpha\0edge_spawn_unix::spawn::tests::fixture_beta";
             let executable = std::env::current_exe().expect("test executable path exists");
@@ -943,11 +943,11 @@ mod spawn {
             assert_eq!(observed, [0, 0], "a shard launch must not touch the heap");
         }
 
-        #[test]
-        fn fixture_beta() {}
+        #[proxima::test]
+        async fn fixture_beta() {}
 
-        #[test]
-        fn c38c_setup_spawn_allocates_its_launch_once() {
+        #[proxima::test]
+        async fn c38c_setup_spawn_allocates_its_launch_once() {
             let executable = std::env::current_exe().expect("test executable path exists");
             let executable_text = executable
                 .to_str()
@@ -973,8 +973,8 @@ mod spawn {
             assert_eq!(allocations, 3, "string bytes, argv, and envp are the setup launch's only allocations");
         }
 
-        #[test]
-        fn c38b_failed_launch_closes_all_capture_descriptors() {
+        #[proxima::test]
+        async fn c38b_failed_launch_closes_all_capture_descriptors() {
             let pipes = UnixPipePair::new().expect("capture pipes should be created");
             let stdout_reader = probe_of(pipes.stdout().parent_read().raw());
             let stderr_writer = probe_of(pipes.stderr().child_write().raw());
@@ -1007,8 +1007,8 @@ mod spawn {
             }
         }
 
-        #[test]
-        fn fixture_alpha() {
+        #[proxima::test]
+        async fn fixture_alpha() {
             if !std::env::args().any(|argument| argument == "--exact") {
                 return;
             }

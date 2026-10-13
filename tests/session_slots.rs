@@ -45,8 +45,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 }
 
-#[test]
-fn fixed_slots_hold_and_reuse_child_session_values() {
+#[proxima::test]
+async fn fixed_slots_hold_and_reuse_child_session_values() {
     let mut sessions = SessionSlots::<&str, 2>::new();
     assert_eq!(sessions.capacity(), 2);
     assert!(sessions.is_empty());
@@ -76,16 +76,16 @@ fn fixed_slots_hold_and_reuse_child_session_values() {
     assert!(sessions.is_empty());
 }
 
-#[test]
-fn zero_capacity_never_admits_a_session() {
+#[proxima::test]
+async fn zero_capacity_never_admits_a_session() {
     let mut sessions = SessionSlots::<u8, 0>::new();
     assert_eq!(sessions.insert(7), Err(7));
     assert!(sessions.is_full());
     assert_eq!(sessions.len(), 0);
 }
 
-#[test]
-fn slot_operations_allocate_nothing_and_probe_counts_allocations() {
+#[proxima::test]
+async fn slot_operations_allocate_nothing_and_probe_counts_allocations() {
     let mut sessions = SessionSlots::<&str, 2>::new();
     ALLOCATION_COUNT.store(0, Ordering::Relaxed);
     set_tracking(true);

@@ -240,8 +240,8 @@ mod tests {
         String::from_utf8(render(label.as_bytes(), counts, wall).bytes().to_vec()).expect("ascii")
     }
 
-    #[test]
-    fn fixture_lines_have_the_exact_documented_shape() {
+    #[proxima::test]
+    async fn fixture_lines_have_the_exact_documented_shape() {
         let counts = Counts {
             discovered: 3,
             passed: 1,
@@ -260,8 +260,8 @@ mod tests {
         assert_eq!(text("t", &Counts::default(), Some(7)), "t: discovered 0, passed 0, failed 0, ignored 0, filtered 0, wall 0.007s\n");
     }
 
-    #[test]
-    fn a_launched_name_that_never_finishes_is_unbalanced_and_named() {
+    #[proxima::test]
+    async fn a_launched_name_that_never_finishes_is_unbalanced_and_named() {
         let mut table = Box::new(TargetTable::new());
         assert!(table.begin("cli_run", None));
         assert!(table.begin("cli_run", Some("extra")));
@@ -277,8 +277,8 @@ mod tests {
         assert_eq!(table.total().discovered, 4);
     }
 
-    #[test]
-    fn an_over_long_id_is_refused() {
+    #[proxima::test]
+    async fn an_over_long_id_is_refused() {
         let mut table = Box::new(TargetTable::new());
         let long = "x".repeat(129);
         assert!(!table.begin(&long, None));

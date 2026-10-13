@@ -326,8 +326,8 @@ mod tests {
     use crate::edge_spawn_windows::handles::WindowsOwnedHandle;
     use crate::edge_spawn_windows::pipe_pair::WindowsPipePair;
 
-    #[test]
-    fn c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix() {
+    #[proxima::test]
+    async fn c45b_reads_borrowed_bytes_and_preserves_the_unread_suffix() {
         report_stage("stdout_begin");
         let mut pipe_pair =
             WindowsPipePair::new(&unique_pipe_name()).expect("the named pipe pair is created");
@@ -480,8 +480,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn c45b_retains_storage_until_cancel_completion() {
+    #[proxima::test]
+    async fn c45b_retains_storage_until_cancel_completion() {
         report_stage("cancel_begin");
         let pipe_pair =
             WindowsPipePair::new(&unique_pipe_name()).expect("the named pipe pair is created");
@@ -585,8 +585,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c45b_reports_synchronous_eof_without_an_iocp_packet() {
+    #[proxima::test]
+    async fn c45b_reports_synchronous_eof_without_an_iocp_packet() {
         report_stage("immediate_eof_begin");
         let mut pipe_pair =
             WindowsPipePair::new(&unique_pipe_name()).expect("the named pipe pair is created");

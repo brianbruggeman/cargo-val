@@ -264,8 +264,8 @@ mod tests {
         drained
     }
 
-    #[test]
-    fn drain_parks_on_a_full_stderr_and_completes_after_the_reader_drains() {
+    #[proxima::test]
+    async fn drain_parks_on_a_full_stderr_and_completes_after_the_reader_drains() {
         in_single_threaded_process(|| {
             let (reader, writer) = pipe_pair();
             set_nonblocking(&reader);

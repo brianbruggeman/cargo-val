@@ -166,8 +166,8 @@ fn assert_malformed_and_escaped_field_parses(scratch: &mut [u8]) {
     );
 }
 
-#[test]
-fn artifact_records_borrow_decode_and_enforce_caller_bounds() {
+#[proxima::test]
+async fn artifact_records_borrow_decode_and_enforce_caller_bounds() {
     ALLOCATION_COUNT.store(0, Ordering::Relaxed);
     COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
     let allocation_control = vec![1_u8];
