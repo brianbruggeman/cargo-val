@@ -101,7 +101,7 @@ jobs:
               fi
             done < integration-executables.txt
           else
-            cargo test --locked --tests $( [ -n "$INTEGRATION_TEST_ARGS" ] && echo "-- $INTEGRATION_TEST_ARGS" ) 2>&1 | tee integration-test-output.txt
+            cargo test --locked --tests --no-fail-fast $( [ -n "$INTEGRATION_TEST_ARGS" ] && echo "-- $INTEGRATION_TEST_ARGS" ) 2>&1 | tee integration-test-output.txt
             if [ "${PIPESTATUS[0]}" -ne 0 ]; then
               binaries_failed=1
             fi
