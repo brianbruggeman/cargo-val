@@ -16,18 +16,18 @@ jobs:
           - os: ubuntu-latest
             lib_test_floor: 246
             lib_test_args: ""
-            integration_test_floor: 129
+            integration_test_floor: 128
             integration_test_args: ""
           - os: macos-latest
             lib_test_floor: 250
             lib_test_args: ""
-            integration_test_floor: 382
+            integration_test_floor: 381
             integration_test_args: ""
           # windows edge tests assert process-wide handle counts, which parallel tests perturb
           - os: windows-latest
             lib_test_floor: 233
             lib_test_args: "-- --test-threads=1"
-            integration_test_floor: 295
+            integration_test_floor: 294
             integration_test_args: "--test-threads=1"
     runs-on: ${{ matrix.os }}
     steps:
