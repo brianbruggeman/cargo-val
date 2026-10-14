@@ -26,8 +26,8 @@ fn spawn_true() -> Result<Child, RunError> {
     spawn(b"true", &[], &[], &[], None).map_err(|_| RunError::Spawn)
 }
 
-#[test]
-fn a_full_signal_table_refuses_the_spawn_before_any_child_exists() {
+#[proxima::test(timeout = "60s")]
+async fn a_full_signal_table_refuses_the_spawn_before_any_child_exists() {
     let _turn = TURN.lock();
     hold_slots(SIGNAL_SLOTS);
     let children_before = unreaped_children();
@@ -41,8 +41,8 @@ fn a_full_signal_table_refuses_the_spawn_before_any_child_exists() {
     assert!(!children_after, "a refused spawn must leave no child behind");
 }
 
-#[test]
-fn a_free_signal_table_spawns_a_child_that_the_reservation_then_tracks() {
+#[proxima::test(timeout = "60s")]
+async fn a_free_signal_table_spawns_a_child_that_the_reservation_then_tracks() {
     let _turn = TURN.lock();
 
     let child = spawn_reserved(spawn_true).expect("a free slot admits the spawn");
@@ -56,8 +56,8 @@ fn a_free_signal_table_spawns_a_child_that_the_reservation_then_tracks() {
     assert!(children_after, "the probe must see the child the control spawn made");
 }
 
-#[test]
-fn a_failed_spawn_returns_its_reservation_to_the_table() {
+#[proxima::test(timeout = "60s")]
+async fn a_failed_spawn_returns_its_reservation_to_the_table() {
     let _turn = TURN.lock();
     hold_slots(SIGNAL_SLOTS - 1);
 
@@ -71,8 +71,8 @@ fn a_failed_spawn_returns_its_reservation_to_the_table() {
     assert_eq!(exhausted, Err(TABLE_FULL));
 }
 
-#[test]
-fn an_abandoned_reservation_is_reusable() {
+#[proxima::test]
+async fn an_abandoned_reservation_is_reusable() {
     let _turn = TURN.lock();
     hold_slots(SIGNAL_SLOTS);
 
@@ -85,8 +85,8 @@ fn an_abandoned_reservation_is_reusable() {
     assert_eq!(admitted, Ok(()));
 }
 
-#[test]
-fn tracking_a_child_needs_a_reservation() {
+#[proxima::test]
+async fn tracking_a_child_needs_a_reservation() {
     let _turn = TURN.lock();
 
     assert_eq!(track_child(4242), Err(libc::EINVAL));
