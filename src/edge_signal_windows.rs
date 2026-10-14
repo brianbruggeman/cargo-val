@@ -242,8 +242,8 @@ fn last_error() -> i32 {
 mod tests {
     use super::{GROUP_CAPACITY, TABLE_FULL, abandon_group, reserve_group};
 
-    #[test]
-    fn a_full_group_table_refuses_the_reservation_and_an_abandoned_slot_admits_it() {
+    #[proxima::test]
+    async fn a_full_group_table_refuses_the_reservation_and_an_abandoned_slot_admits_it() {
         let first = reserve_group().expect("a free slot admits the group");
         for _ in 1..GROUP_CAPACITY {
             reserve_group().expect("a free slot admits the group");

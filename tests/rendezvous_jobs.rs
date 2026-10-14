@@ -2,16 +2,21 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
+use common::fixture_output;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const PEERS: usize = 12;
 
-#[test]
-fn twelve_tests_alive_at_once_under_jobs_twelve_all_report_pass() {
+#[proxima::test(timeout = "310s")]
+async fn twelve_tests_alive_at_once_under_jobs_twelve_all_report_pass() {
     let rendezvous = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rendezvous-{}", std::process::id()));
     let _ = fs::remove_dir_all(&rendezvous);
     fs::create_dir_all(&rendezvous).expect("rendezvous directory is creatable under the target tmpdir");
 
-    let output = Command::new(CARGO_VAL)
+    let mut command = Command::new(CARGO_VAL);
+    command
         .arg("--manifest-path")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rendezvous/Cargo.toml"))
         .args(["--process", "test", "--no-fail-fast"])
@@ -22,9 +27,8 @@ fn twelve_tests_alive_at_once_under_jobs_twelve_all_report_pass() {
         .env("NO_COLOR", "1")
         .env("CARGO_VAL_JOBS", PEERS.to_string())
         .env("CARGO_VAL_FIXTURE_RENDEZVOUS_DIR", &rendezvous)
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target"))
-        .output()
-        .expect("cargo-val binary is spawnable");
+        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target"));
+    let output = fixture_output(&mut command).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
