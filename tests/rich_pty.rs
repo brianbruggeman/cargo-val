@@ -599,3 +599,32 @@ async fn the_final_scrollback_holds_the_excerpt_once_and_no_pinned_row_after_the
     assert!(scrollback[summary..].iter().all(|line| !line.contains(marker) && !line.starts_with(" FAIL 1")), "{}", shown(&scrollback.join("\n")));
     assert!(scrollback.iter().all(|line| !line.starts_with(" FAIL 1")), "no pinned row survives the erase:\n{}", shown(&scrollback.join("\n")));
 }
+
+const TIMELINE_HEADER: &str = "cargo val  timeline";
+
+async fn leave_a_sub_screen_with_a_lone_escape(master: &ChildStream, mut keys: File) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(b"s").expect("the timeline key is writable");
+    let (timeline, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(TIMELINE_HEADER)).await;
+    output.extend_from_slice(&timeline);
+    keys.write_all(b"\x1b").expect("the lone escape is writable");
+    let (back, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    output.extend_from_slice(&back);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[proxima::test]
+async fn a_lone_escape_in_a_post_run_sub_screen_returns_to_review_on_the_next_tick_without_another_key() {
+    let (output, status) = run_driven("rich_pty_fail", "rich", &NO_COLOR, async |master, keys, _release, _leader| leave_a_sub_screen_with_a_lone_escape(master, keys).await).await;
+
+    let timeline = output.rfind(TIMELINE_HEADER).unwrap_or_else(|| panic!("the timeline screen was never drawn:\n{}", shown(&output)));
+    let review_after = output[timeline..].find(REVIEW_HEADER).unwrap_or_else(|| panic!("review was not redrawn after the lone escape:\n{}", shown(&output[timeline..])));
+    assert_eq!(status.code(), Some(1), "a run with a failure exits 1 after leaving review: {status}");
+    assert!(review_after > 0, "review returned after the timeline frame, {review_after} bytes later");
+    let receipt = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(&output)));
+    let after_receipt = &output[receipt..];
+    assert!(!after_receipt.contains(FRAME_START) && !after_receipt.contains(REVIEW_HEADER) && !after_receipt.contains(TIMELINE_HEADER), "frame bytes followed the receipt:\n{}", shown(after_receipt));
+}
