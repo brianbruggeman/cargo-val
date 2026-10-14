@@ -24,7 +24,7 @@ async fn drive_completes_on_a_one_mebibyte_stack() {
     let summary = std::thread::Builder::new()
         .stack_size(WINDOWS_MAIN_THREAD_STACK)
         .spawn(move || {
-            prime::os::core_shard::run_on_this_thread(CoreId(0), drive(arguments))
+            prime::os::core_shard::run_on_this_thread_as::<prime::os::reactor::Hangup, _>(CoreId(0), drive(arguments))
                 .expect("prime root runs")
                 .expect("fixture run completes")
         })

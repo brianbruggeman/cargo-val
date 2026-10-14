@@ -13,6 +13,7 @@ use std::os::unix::process::CommandExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use cargo_val::edge_stream_unix::ChildStream;
 use futures::FutureExt;
@@ -25,11 +26,14 @@ mod exit_wait;
 mod binary;
 #[path = "common/fifo.rs"]
 mod fifo;
+#[path = "common/hangup.rs"]
+mod hangup;
 #[path = "common/supervise.rs"]
 mod supervise;
 
 use common::{FIXTURE_DEADLINE, drain, drain_until, fixture_output};
 use exit_wait::{ExitSource, until_exit};
+use hangup::on_hangup_runtime;
 use binary::EXIT_WITH_PARENT;
 use supervise::supervised;
 
@@ -41,6 +45,7 @@ const DETACHED: &str = "detached";
 const BLOCKED: &str = "blocked";
 const ARMED: &str = "armed";
 const GONE_DEADLINE: Duration = Duration::from_secs(60);
+const GONE_PROMPT: Duration = Duration::from_secs(10);
 
 fn fixture_manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{fixture}/Cargo.toml"))
@@ -166,12 +171,15 @@ async fn reaping_on_panic(cargo_val: &Cell<libc::pid_t>, body: impl Future<Outpu
 
 // the lifeline is the intermediary's stderr, which cargo-val inherits: once the intermediary is dead only cargo-val holds its write end, so EOF means cargo-val is gone
 async fn await_cargo_val_gone(lifeline: &ChildStream, what: &str) {
+    let started = Instant::now();
     let (_, fault) = timeout(GONE_DEADLINE, drain(lifeline)).await.unwrap_or_else(|elapsed| panic!("{what}: still running after {GONE_DEADLINE:?} ({elapsed:?})"));
     assert!(fault.is_none(), "{what}: the lifeline failed to read: {fault:?}");
+    assert!(started.elapsed() < GONE_PROMPT, "{what}: gone only after {:?}, not within {GONE_PROMPT:?} of its parent dying", started.elapsed());
 }
 
 // select(2), not the reactor: a kqueue stream on a fifo is not woken when its last writer leaves, and a poll(2) never reports it on macOS
 fn await_fifo_eof(held: &File, what: &str) {
+    let started = Instant::now();
     let descriptor = held.as_raw_fd();
     let mut readable: libc::fd_set = unsafe { core::mem::zeroed() };
     unsafe {
@@ -184,6 +192,7 @@ fn await_fifo_eof(held: &File, what: &str) {
     let mut byte = [0_u8; 1];
     let count = unsafe { libc::read(descriptor, byte.as_mut_ptr().cast(), 1) };
     assert_eq!(count, 0, "{what}: the held fifo carried data instead of EOF");
+    assert!(started.elapsed() < GONE_PROMPT, "{what}: reached EOF only after {:?}, not within {GONE_PROMPT:?} of its parent dying", started.elapsed());
 }
 
 const PRIME_ROOT_THREADS: usize = 1;
@@ -207,98 +216,104 @@ fn kill_intermediary(leader: u32) {
     assert_eq!(unsafe { libc::kill(leader, libc::SIGKILL) }, 0, "the intermediary is killable");
 }
 
-#[proxima::test(timeout = "310s")]
-async fn a_run_waiting_on_a_blocked_test_exits_and_kills_it_when_its_parent_is_sigkilled() {
-    let directory = probe_directory(BLOCKED);
-    let ready = Box::new(ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready")))));
-    let held = open_reader(&directory.join("held"));
-    let arguments = format!("--manifest-path\n{}\n--lib\nunit_blocks_when_requested", fixture_manifest("blocked_test").display());
-    warm_fixture(&arguments, BLOCKED).await;
-    let mut command = intermediary_command(BLOCKED, &arguments, BLOCKED);
-    command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory);
+#[test]
+fn a_run_waiting_on_a_blocked_test_exits_and_kills_it_when_its_parent_is_sigkilled() {
+    on_hangup_runtime(async {
+        let directory = probe_directory(BLOCKED);
+        let ready = Box::new(ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready")))));
+        let held = open_reader(&directory.join("held"));
+        let arguments = format!("--manifest-path\n{}\n--lib\nunit_blocks_when_requested", fixture_manifest("blocked_test").display());
+        warm_fixture(&arguments, BLOCKED).await;
+        let mut command = intermediary_command(BLOCKED, &arguments, BLOCKED);
+        command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory);
 
-    let cargo_val = Cell::new(0);
-    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
-        reaping_on_panic(&cargo_val, async {
-            armed_pid(announcements, &cargo_val, exit, lifeline).await;
-            let what = "the blocked test never reported it was blocked";
-            let line = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", announcements), ("stderr", lifeline)]).await;
-            let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
-            assert_eq!(unsafe { libc::kill(blocked, 0) }, 0, "the blocked test is alive while its parent is");
+        let cargo_val = Cell::new(0);
+        supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
+            reaping_on_panic(&cargo_val, async {
+                armed_pid(announcements, &cargo_val, exit, lifeline).await;
+                let what = "the blocked test never reported it was blocked";
+                let line = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", announcements), ("stderr", lifeline)]).await;
+                let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
+                assert_eq!(unsafe { libc::kill(blocked, 0) }, 0, "the blocked test is alive while its parent is");
 
-            kill_intermediary(leader);
+                kill_intermediary(leader);
 
-            await_fifo_eof(&held, "the blocked test still holds the held fifo after its run's parent died");
-            await_cargo_val_gone(lifeline, "cargo-val after its parent died").await;
+                await_fifo_eof(&held, "the blocked test still holds the held fifo after its run's parent died");
+                await_cargo_val_gone(lifeline, "cargo-val after its parent died").await;
+            })
+            .await;
         })
         .await;
-    })
-    .await;
+    });
 }
 
-#[proxima::test(timeout = "310s")]
-async fn a_run_blocked_writing_to_an_unread_terminal_exits_when_its_parent_is_sigkilled() {
-    let arguments = format!("--manifest-path\n{}\n--tests\n--no-fail-fast", fixture_manifest("cli_run").display());
-    let mut command = intermediary_command(PTY, &arguments, PTY);
+#[test]
+fn a_run_blocked_writing_to_an_unread_terminal_exits_when_its_parent_is_sigkilled() {
+    on_hangup_runtime(async {
+        let arguments = format!("--manifest-path\n{}\n--tests\n--no-fail-fast", fixture_manifest("cli_run").display());
+        let mut command = intermediary_command(PTY, &arguments, PTY);
 
-    let cargo_val = Cell::new(0);
-    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
-        reaping_on_panic(&cargo_val, async {
-            armed_pid(announcements, &cargo_val, exit, lifeline).await;
-            assert_eq!(thread_count(cargo_val.get()), PRIME_ROOT_THREADS, "cargo-val runs only on the prime root thread: no watcher thread exists");
+        let cargo_val = Cell::new(0);
+        supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
+            reaping_on_panic(&cargo_val, async {
+                armed_pid(announcements, &cargo_val, exit, lifeline).await;
+                assert_eq!(thread_count(cargo_val.get()), PRIME_ROOT_THREADS, "cargo-val runs only on the prime root thread: no watcher thread exists");
 
-            kill_intermediary(leader);
+                kill_intermediary(leader);
 
-            await_cargo_val_gone(lifeline, "cargo-val after its parent died").await;
+                await_cargo_val_gone(lifeline, "cargo-val after its parent died").await;
+            })
+            .await;
         })
         .await;
-    })
-    .await;
+    });
 }
 
-#[proxima::test(timeout = "310s")]
-async fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finishes() {
-    let directory = probe_directory(DETACHED);
-    let ready = Box::new(ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready")))));
-    let held = Box::new(ChildStream::new(OwnedFd::from(open_reader(&directory.join("held")))));
-    let stdout_file = directory.join("stdout.txt");
-    let arguments = format!("--manifest-path\n{}\n--lib\nunit_blocks_when_requested", fixture_manifest("blocked_test").display());
-    warm_fixture(&arguments, DETACHED).await;
-    let mut command = intermediary_command(DETACHED, &arguments, DETACHED);
-    command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory).env(STDOUT_FILE, &stdout_file);
+#[test]
+fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finishes() {
+    on_hangup_runtime(async {
+        let directory = probe_directory(DETACHED);
+        let ready = Box::new(ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready")))));
+        let held = Box::new(ChildStream::new(OwnedFd::from(open_reader(&directory.join("held")))));
+        let stdout_file = directory.join("stdout.txt");
+        let arguments = format!("--manifest-path\n{}\n--lib\nunit_blocks_when_requested", fixture_manifest("blocked_test").display());
+        warm_fixture(&arguments, DETACHED).await;
+        let mut command = intermediary_command(DETACHED, &arguments, DETACHED);
+        command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory).env(STDOUT_FILE, &stdout_file);
 
-    let cargo_val = Cell::new(0);
-    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
-        reaping_on_panic(&cargo_val, async {
-            armed_pid(announcements, &cargo_val, exit, lifeline).await;
-            let what = "the blocked test never reported it was blocked";
-            let line = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", announcements), ("stderr", lifeline)]).await;
-            let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
+        let cargo_val = Cell::new(0);
+        supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
+            reaping_on_panic(&cargo_val, async {
+                armed_pid(announcements, &cargo_val, exit, lifeline).await;
+                let what = "the blocked test never reported it was blocked";
+                let line = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", announcements), ("stderr", lifeline)]).await;
+                let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
 
-            kill_intermediary(leader);
+                kill_intermediary(leader);
 
-            // the blocked test opens this fifo read-write before announcing itself, so a nonblocking write open fails with ENXIO only if that process is gone, which is how a run that died with its parent fails here
-            let mut release = OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(directory.join("block"))
-                .unwrap_or_else(|error| {
-                    let path = directory.join("block");
-                    panic!("open(O_WRONLY|O_NONBLOCK) of {} failed with {error} (errno {:?}): no process holds the block fifo open, and the blocked test (pid {blocked}, alive={}) opens it read-write before announcing itself", path.display(), error.raw_os_error(), unsafe { libc::kill(blocked, 0) } == 0)
-                });
-            release.write_all(b"1").expect("the release byte fits the fifo the blocked test reads");
-            drop(release);
-            await_cargo_val_gone(lifeline, "the released run").await;
-            timeout(GONE_DEADLINE, fifo::until_eof(&held, "the released test"))
-                .await
-                .unwrap_or_else(|elapsed| panic!("the released test never closed the held fifo ({elapsed:?})"));
+                // the blocked test opens this fifo read-write before announcing itself, so a nonblocking write open fails with ENXIO only if that process is gone, which is how a run that died with its parent fails here
+                let mut release = OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(directory.join("block"))
+                    .unwrap_or_else(|error| {
+                        let path = directory.join("block");
+                        panic!("open(O_WRONLY|O_NONBLOCK) of {} failed with {error} (errno {:?}): no process holds the block fifo open, and the blocked test (pid {blocked}, alive={}) opens it read-write before announcing itself", path.display(), error.raw_os_error(), unsafe { libc::kill(blocked, 0) } == 0)
+                    });
+                release.write_all(b"1").expect("the release byte fits the fifo the blocked test reads");
+                drop(release);
+                await_cargo_val_gone(lifeline, "the released run").await;
+                timeout(GONE_DEADLINE, fifo::until_eof(&held, "the released test"))
+                    .await
+                    .unwrap_or_else(|elapsed| panic!("the released test never closed the held fifo ({elapsed:?})"));
+            })
+            .await;
         })
         .await;
-    })
-    .await;
 
-    let report = fs::read_to_string(&stdout_file).expect("the run wrote its report to the stdout file");
-    assert!(report.lines().any(|line| line.starts_with("SUMMARY  passed=1 failed=0")), "the run did not finish normally:\n{report}");
+        let report = fs::read_to_string(&stdout_file).expect("the run wrote its report to the stdout file");
+        assert!(report.lines().any(|line| line.starts_with("SUMMARY  passed=1 failed=0")), "the run did not finish normally:\n{report}");
+    });
 }
 
 #[test]
@@ -318,6 +333,7 @@ fn a_nonblocking_write_open_of_a_fifo_needs_a_holder_and_fails_enxio_without_one
     assert_eq!(released.raw_os_error(), Some(libc::ENXIO), "{released} opening {}", block.display());
 }
 
+// libtest runs sibling tests on their own threads, so the count is only stable in a process that runs this one test alone
 #[test]
 fn signalling_a_group_whose_only_member_is_an_unreaped_zombie_is_not_a_failure() {
     let mut leader = Command::new("/bin/sleep").arg("600").process_group(0).spawn().expect("sleep spawns as its own group leader");
@@ -338,6 +354,16 @@ fn signalling_a_group_whose_only_member_is_an_unreaped_zombie_is_not_a_failure()
 
 #[test]
 fn the_thread_count_check_sees_a_thread_the_process_spawned() {
+    let status = Command::new(std::env::current_exe().expect("the test binary path"))
+        .args(["--ignored", "--exact", "--test-threads=1", "thread_count_probe"])
+        .status()
+        .expect("the probe is spawnable");
+    assert!(status.success(), "the probe in its own process failed: {status:?}");
+}
+
+#[test]
+#[ignore = "re-executed alone by the_thread_count_check_sees_a_thread_the_process_spawned"]
+fn thread_count_probe() {
     let own_pid = libc::pid_t::try_from(std::process::id()).expect("a pid fits pid_t");
     let baseline = thread_count(own_pid);
     let (started, started_receiver) = std::sync::mpsc::channel();
