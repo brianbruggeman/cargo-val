@@ -50,8 +50,8 @@ async fn the_stream_stays_pending_while_the_writer_is_open_and_ends_when_it_clos
     fifo::until_eof(&stream, "the stream must end once the writer closes").await;
 }
 
-#[test]
-fn read_to_string_fails_with_would_block_while_the_writer_is_still_open() {
+#[proxima::test]
+async fn read_to_string_fails_with_would_block_while_the_writer_is_still_open() {
     let (mut reader, mut writer) = nonblocking_pipe();
     writer.write_all(PID_LINE).expect("the writer writes the pid line");
 

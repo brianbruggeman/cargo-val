@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
+use common::fixture_output;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const ESCAPE: u8 = 0x1b;
 
@@ -22,21 +26,21 @@ fn manifest() -> PathBuf {
         .join("tests/fixtures/build_error/Cargo.toml")
 }
 
-fn run_build_error() -> Run {
-    run_with(&["--lib"])
+async fn run_build_error() -> Run {
+    run_with(&["--lib"]).await
 }
 
-fn run_with(arguments: &[&str]) -> Run {
-    let output = Command::new(CARGO_VAL)
+async fn run_with(arguments: &[&str]) -> Run {
+    let mut command = Command::new(CARGO_VAL);
+    command
         .arg("--manifest-path")
         .arg(manifest())
         .args(arguments)
         .env("NO_COLOR", "1")
         .env("CARGO_TERM_COLOR", "always")
         .env_remove("CARGO_VAL_COLOR")
-        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-fixture"))
-        .output()
-        .expect("cargo-val binary is spawnable");
+        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-fixture"));
+    let output = fixture_output(&mut command).await;
     Run {
         status: output.status.code(),
         text: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -44,9 +48,9 @@ fn run_with(arguments: &[&str]) -> Run {
     }
 }
 
-#[test]
-fn a_type_error_shows_rustcs_diagnostic_before_the_build_failed_line() {
-    let result = run_build_error();
+#[proxima::test(timeout = "310s")]
+async fn a_type_error_shows_rustcs_diagnostic_before_the_build_failed_line() {
+    let result = run_build_error().await;
     let location_text = format!("{}:4", Path::new("src").join("lib.rs").display());
 
     let error = result
@@ -66,9 +70,9 @@ fn a_type_error_shows_rustcs_diagnostic_before_the_build_failed_line() {
     assert!(location < failed, "{}", result.text);
 }
 
-#[test]
-fn rustcs_diagnostics_precede_cargos_summary_which_precedes_cargo_vals_line() {
-    let result = run_build_error();
+#[proxima::test(timeout = "310s")]
+async fn rustcs_diagnostics_precede_cargos_summary_which_precedes_cargo_vals_line() {
+    let result = run_build_error().await;
 
     let diagnostic = result
         .text
@@ -87,9 +91,9 @@ fn rustcs_diagnostics_precede_cargos_summary_which_precedes_cargo_vals_line() {
     assert!(summary < failed, "{}", result.text);
 }
 
-#[test]
-fn a_failed_build_also_shows_the_warnings_cargo_reported() {
-    let result = run_build_error();
+#[proxima::test(timeout = "310s")]
+async fn a_failed_build_also_shows_the_warnings_cargo_reported() {
+    let result = run_build_error().await;
 
     assert!(
         result.text.contains("warning: unused doc comment"),
@@ -98,9 +102,9 @@ fn a_failed_build_also_shows_the_warnings_cargo_reported() {
     );
 }
 
-#[test]
-fn colour_off_diagnostics_carry_no_escape_bytes() {
-    let result = run_build_error();
+#[proxima::test(timeout = "310s")]
+async fn colour_off_diagnostics_carry_no_escape_bytes() {
+    let result = run_build_error().await;
 
     let escaped = result.stderr.contains(&ESCAPE);
 
@@ -108,16 +112,16 @@ fn colour_off_diagnostics_carry_no_escape_bytes() {
     assert!(!escaped, "{}", result.text);
 }
 
-#[test]
-fn a_build_failure_exits_3() {
-    let result = run_build_error();
+#[proxima::test(timeout = "310s")]
+async fn a_build_failure_exits_3() {
+    let result = run_build_error().await;
 
     assert_eq!(result.status, Some(3), "{}", result.text);
 }
 
-#[test]
-fn an_unknown_flag_is_an_invocation_error_naming_the_flag_and_exiting_2() {
-    let result = run_with(&["--bogus"]);
+#[proxima::test(timeout = "310s")]
+async fn an_unknown_flag_is_an_invocation_error_naming_the_flag_and_exiting_2() {
+    let result = run_with(&["--bogus"]).await;
 
     assert_eq!(result.status, Some(2), "{}", result.text);
     assert!(result.text.contains("--bogus"), "{}", result.text);
