@@ -32,12 +32,71 @@ pub async fn supervised<Outcome>(
             value
         }
         Ok(Err(payload)) => panic::resume_unwind(payload),
-        Err(elapsed) => panic!(
-            "{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}\nprocess group at the deadline:\n{group}\nlock holders at the deadline:\n{locks}\nstdout so far:\n{}\nstderr so far:\n{}",
-            String::from_utf8_lossy(&stdout.retained()),
-            String::from_utf8_lossy(&stderr.retained()),
-        ),
+        Err(elapsed) => {
+            let message = format!(
+                "{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}\nprocess group at the deadline:\n{group}\nlock holders at the deadline:\n{locks}\nstdout so far:\n{}\nstderr so far:\n{}",
+                String::from_utf8_lossy(&stdout.retained()),
+                String::from_utf8_lossy(&stderr.retained()),
+            );
+            let name = current_test_name();
+            let report = persisted_report(&name, deadline, &group, &locks, &tail(&stdout.retained()), &tail(&stderr.retained()));
+            panic!("{message}\n{}", persist_report(&name, &report));
+        }
     }
+}
+
+const REPORT_TAIL: usize = 64 * 1024;
+
+fn tail(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(REPORT_TAIL)..]).into_owned()
+}
+
+// nextest runs one test per process as `--exact <name>`; libtest names its thread after the test; the executable stem is the last resort
+fn current_test_name() -> String {
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let exact = arguments.iter().position(|argument| argument == "--exact").and_then(|index| arguments.get(index + 1)).cloned();
+    let thread = std::thread::current().name().filter(|name| *name != "main").map(str::to_owned);
+    let executable = std::env::current_exe().ok().and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()));
+    exact.or(thread).or(executable).unwrap_or_else(|| "unknown-test".to_string())
+}
+
+fn persisted_report(name: &str, deadline: Duration, group: &str, locks: &str, stdout: &str, stderr: &str) -> String {
+    let uptime = capture("uptime", [] as [&str; 0]);
+    let sccache = sccache_stats();
+    format!(
+        "test: {name}\ndeadline: {deadline:?}\nuptime: {}\nprocess group at the deadline:\n{group}\nlock holders at the deadline:\n{locks}\nsccache --show-stats:\n{sccache}\nstdout (last {REPORT_TAIL} bytes):\n{stdout}\nstderr (last {REPORT_TAIL} bytes):\n{stderr}\n",
+        uptime.trim(),
+    )
+}
+
+fn sccache_stats() -> String {
+    match Command::new("sccache").arg("--show-stats").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "sccache is not on PATH".to_string(),
+        Err(error) => format!("sccache did not run: {error}"),
+    }
+}
+
+// the report must outlive the agent's scratch logs; a failed write is reported in the message instead of replacing the test failure
+fn persist_report(name: &str, report: &str) -> String {
+    match write_report(name, report) {
+        Ok(path) => format!("deadline report: {}", path.display()),
+        Err(error) => {
+            eprintln!("deadline report not written: {error}");
+            format!("deadline report not written: {error}")
+        }
+    }
+}
+
+fn write_report(name: &str, report: &str) -> std::io::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    let directory = PathBuf::from(home).join(".cache/cargo-val-deadlines");
+    std::fs::create_dir_all(&directory)?;
+    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+    let safe = name.chars().map(|character| if character.is_ascii_alphanumeric() || character == '-' || character == '_' { character } else { '_' }).collect::<String>();
+    let path = directory.join(format!("{seconds}-{}-{safe}.log", std::process::id()));
+    std::fs::write(&path, report)?;
+    Ok(path)
 }
 
 // the group as the deadline found it: which of cargo, rustc and the test were alive and in what state is what separates a build that is waiting from a build that is stuck
