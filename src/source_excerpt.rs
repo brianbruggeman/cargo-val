@@ -234,6 +234,7 @@ fn write_number(out: &mut Vec<u8>, number: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::fmt::Write;
     use std::format;
     use std::string::ToString;
 
@@ -288,7 +289,77 @@ mod tests {
         assert_eq!(excerpt.len(), WINDOW);
         assert_eq!(excerpt.first_line(), total - 6);
         assert_eq!(excerpt.failing_index(), 6);
-        assert_eq!(excerpt.row(6), source.split(|byte| *byte == b'\n').rev().nth(1).expect("terminated file"));
+        let last = source.split(|byte| *byte == b'\n').rev().nth(1).expect("terminated file");
+        assert_eq!(excerpt.row(6), last.strip_suffix(b"\r").unwrap_or(last));
+    }
+
+    fn excerpt_of_file_with(bytes: &[u8], line: u32) -> (Vec<Vec<u8>>, usize, u32) {
+        let dir = tempfile::tempdir().expect("tempdir is creatable");
+        std::fs::write(dir.path().join("lib.rs"), bytes).expect("tempdir is writable");
+        let source = read_source(dir.path(), b"lib.rs").expect("file was just written");
+        let excerpt = Excerpt::new(&source, line, 1).expect("line is inside the file");
+        let rows = (0..excerpt.len()).map(|index| excerpt.row(index).to_vec()).collect();
+        (rows, excerpt.failing_index(), excerpt.first_line())
+    }
+
+    fn numbered_lines(count: u32, ending: &str) -> String {
+        (1..=count).fold(String::new(), |mut text, number| {
+            write!(text, "let value_{number} = {number};{ending}").expect("writing to a String cannot fail");
+            text
+        })
+    }
+
+    #[test]
+    fn a_crlf_file_on_disk_yields_rows_without_carriage_returns_and_the_same_window_as_lf() {
+        let crlf = numbered_lines(12, "\r\n");
+        let lf = numbered_lines(12, "\n");
+
+        let (crlf_rows, crlf_failing, crlf_first) = excerpt_of_file_with(crlf.as_bytes(), 12);
+        let (lf_rows, lf_failing, lf_first) = excerpt_of_file_with(lf.as_bytes(), 12);
+
+        assert_eq!((crlf_rows.len(), crlf_first, crlf_failing), (WINDOW, 6, 6));
+        assert!(crlf_rows.iter().all(|row| !row.contains(&b'\r')));
+        assert_eq!((crlf_rows, crlf_first, crlf_failing), (lf_rows, lf_first, lf_failing));
+    }
+
+    #[test]
+    fn a_crlf_file_counts_lines_like_an_lf_file_and_rejects_the_line_past_the_end() {
+        let crlf = numbered_lines(5, "\r\n");
+
+        let error = Excerpt::new(crlf.as_bytes(), 6, 1).expect_err("only five lines");
+
+        assert_eq!(error, SourceError::LineOutOfRange { line: 6, total: 5 });
+    }
+
+    #[test]
+    fn a_final_line_without_a_newline_is_the_last_row_and_keeps_the_window_full() {
+        let unterminated = numbered_lines(9, "\n").trim_end().to_string();
+
+        let (rows, failing, first) = excerpt_of_file_with(unterminated.as_bytes(), 9);
+
+        assert_eq!((rows.len(), first, failing), (WINDOW, 3, 6));
+        assert_eq!(rows[6], b"let value_9 = 9;");
+    }
+
+    #[test]
+    fn a_crlf_file_whose_last_line_has_no_terminator_trims_only_the_interior_carriage_returns() {
+        let mixed = format!("{}let value_4 = 4;", numbered_lines(3, "\r\n"));
+
+        let (rows, failing, _) = excerpt_of_file_with(mixed.as_bytes(), 4);
+
+        assert_eq!(rows, [&b"let value_1 = 1;"[..], b"let value_2 = 2;", b"let value_3 = 3;", b"let value_4 = 4;"]);
+        assert_eq!(failing, 3);
+    }
+
+    #[test]
+    fn the_caret_row_of_a_crlf_line_has_no_carriage_return_and_spans_the_token() {
+        let source = b"fn main() {\r\n    boom();\r\n}\r\n";
+        let mut out = Vec::new();
+
+        Excerpt::new(source, 2, 5).expect("three lines").write_plain(&mut out, b"here");
+
+        assert_eq!(memchr_iter(b'\r', &out).count(), 0);
+        assert!(memchr::memmem::find(&out, b"      |     ^^^^ here\n").is_some(), "{}", String::from_utf8_lossy(&out));
     }
 
     #[test]
