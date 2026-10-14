@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -106,7 +107,8 @@ async fn blocked_run(label: &str, arguments: &[&str]) -> Blocked {
         let running = running_line(&before).unwrap_or_else(|| panic!("stdout ended with no RUNNING line:\n{before}")).to_owned();
         let pid = fifo::first_line(&ready, "the fixture never reached the rendezvous").await;
         assert!(pid.trim().parse::<u32>().is_ok_and(|pid| pid > 0), "the fixture wrote its pid: {pid:?}");
-        let released = OpenOptions::new().write(true).open(directory.join("block")).expect("the fixture is blocked reading the fifo");
+        let mut released = OpenOptions::new().write(true).open(directory.join("block")).expect("the fixture holds the block fifo before announcing");
+        released.write_all(b"1").expect("the release byte fits the fifo the blocked test reads");
         drop(released);
         let (after, fault) = drain(stdout).await;
         assert!(fault.is_none(), "stdout failed after the release: {fault:?}");
