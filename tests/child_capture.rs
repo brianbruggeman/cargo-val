@@ -1,10 +1,11 @@
 use std::process::{Command, Output};
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 fn echo_command() -> Command {
     #[cfg(windows)]
@@ -22,13 +23,13 @@ fn echo_command() -> Command {
 }
 
 fn version_command() -> Command {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command.arg("--version");
     command
 }
 
 fn help_command() -> Command {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command.arg("--help");
     command
 }

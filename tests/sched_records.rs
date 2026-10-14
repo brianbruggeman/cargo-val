@@ -6,6 +6,8 @@ use cargo_val::sched_binary::{Absent, RECORD_BYTES, decode};
 use cargo_val::sched_file::{Loaded, load};
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 
@@ -80,7 +82,8 @@ async fn the_host_binary_format_yields_every_declared_record_with_flags_and_grou
 
 #[proxima::test]
 async fn a_binary_without_the_section_declares_nothing_and_a_non_object_is_unsupported() {
-    let plain = Path::new(env!("CARGO_BIN_EXE_cargo-val")).to_str().expect("path is UTF-8").to_string();
+    let program = binary::command();
+    let plain = Path::new(program.get_program()).to_str().expect("path is UTF-8").to_string();
     let garbage = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let mut storage = vec![0_u8; 4096];
 

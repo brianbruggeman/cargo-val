@@ -1,8 +1,9 @@
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::{fixture_output, output_within};
 
@@ -10,7 +11,6 @@ use common::{fixture_output, output_within};
 #[path = "common/supervise.rs"]
 mod supervise;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 // the help screen is printed by the already-built binary with no build and no wait; 30 s stays inside the 60 s body timeout
 const HELP_DEADLINE: Duration = Duration::from_secs(30);
@@ -56,7 +56,7 @@ fn manifest(fixture: &str) -> PathBuf {
 }
 
 async fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = crate::binary::command();
     command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
@@ -304,13 +304,12 @@ mod bin_gate_hold {
     use std::fs::OpenOptions;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
-    use std::process::Command;
     use std::thread;
 
     use futures::future::join3;
     use proxima_primitives::pipe::Pipe;
 
-    use super::{CARGO_VAL, Run, manifest, target_directory};
+    use super::{Run, manifest, target_directory};
     use crate::common::{ChildStream, FIXTURE_DEADLINE, drain, drain_until};
     use crate::supervise::supervised;
 
@@ -359,7 +358,7 @@ mod bin_gate_hold {
         std::fs::create_dir_all(&target).expect("target directory is creatable");
         let fifo = target.join("bin-hold");
         make_fifo(&fifo);
-        let mut command = Command::new(CARGO_VAL);
+        let mut command = crate::binary::command();
         command
             .env("CARGO_VAL_OUTPUT", "rich")
             .arg("--manifest-path")
@@ -449,7 +448,7 @@ async fn the_same_fixture_fails_with_the_bin_gate_off() {
 
 #[proxima::test]
 async fn help_prints_the_banner_file_and_documents_the_new_options() {
-    let output = output_within(Command::new(CARGO_VAL).arg("--help"), HELP_DEADLINE).await.unwrap_or_else(|failure| panic!("{failure}"));
+    let output = output_within(binary::command().arg("--help"), HELP_DEADLINE).await.unwrap_or_else(|failure| panic!("{failure}"));
     let banner = include_str!("fixtures/help-banner.txt");
 
     assert_eq!(output.status.code(), Some(0));

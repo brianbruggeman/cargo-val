@@ -19,15 +19,17 @@ use futures::FutureExt;
 use proxima_core::time::timeout;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 #[path = "common/fifo.rs"]
 mod fifo;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{EXIT_WITH_PARENT, FIXTURE_DEADLINE, drain, drain_until, fixture_output};
+use common::{FIXTURE_DEADLINE, drain, drain_until, fixture_output};
+use binary::EXIT_WITH_PARENT;
 use supervise::supervised;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const KIND: &str = "CARGO_VAL_PARENT_DEATH_KIND";
 const ARGUMENTS: &str = "CARGO_VAL_PARENT_DEATH_ARGUMENTS";
 const STDOUT_FILE: &str = "CARGO_VAL_PARENT_DEATH_STDOUT";
@@ -82,7 +84,7 @@ fn wait_readable(descriptor: libc::c_int) {
 fn intermediary() {
     let kind = std::env::var(KIND).expect("the parent-death tests name the arm");
     let arguments = std::env::var(ARGUMENTS).expect("the parent-death tests pass the cargo-val arguments");
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .args(arguments.split('\n'))
         .args(["--output", "plain"])
@@ -130,7 +132,7 @@ fn intermediary_command(kind: &str, arguments: &str, label: &str) -> Command {
 
 // builds the fixture once before the run under test, so the rendezvous waits on a test and not on a compile
 async fn warm_fixture(arguments: &str, label: &str) {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .args(arguments.split('\n'))
         .env("NO_COLOR", "1")

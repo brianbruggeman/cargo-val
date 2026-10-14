@@ -45,6 +45,8 @@ fn compare() -> Result<(), String> {
 
 fn observe(binary: &Path, target: &Path) -> Result<(), String> {
     let mut val_command = Command::new(binary);
+    #[cfg(unix)]
+    val_command.env("CARGO_VAL_EXIT_WITH_PARENT", "1");
     val_command.env("CARGO_VAL_OUTPUT", "rich");
     let val_output = run(val_command, target)?;
     let mut cargo = Command::new("cargo");

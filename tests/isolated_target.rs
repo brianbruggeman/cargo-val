@@ -9,6 +9,8 @@ use std::process::{Child, Stdio};
 use std::time::Duration;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 #[cfg(unix)]
@@ -23,7 +25,6 @@ mod supervise;
 #[cfg(unix)]
 use supervise::supervised;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 #[cfg(unix)]
 const WAIT_LINE: &str = "cargo-val: waiting for ";
 #[cfg(unix)]
@@ -113,7 +114,7 @@ fn fixture_manifest() -> PathBuf {
 
 // the package cache lock is global to CARGO_HOME and cannot be isolated, so the holder and cargo val each get a private CARGO_HOME: a held build lock is then the only contention under test
 fn cargo_val(scratch: &Path, shared_target: &Path, arguments: &[&str]) -> Command {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")

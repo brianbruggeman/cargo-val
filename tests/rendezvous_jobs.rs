@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const PEERS: usize = 12;
 
 #[proxima::test(timeout = "310s")]
@@ -15,7 +15,7 @@ async fn twelve_tests_alive_at_once_under_jobs_twelve_all_report_pass() {
     let _ = fs::remove_dir_all(&rendezvous);
     fs::create_dir_all(&rendezvous).expect("rendezvous directory is creatable under the target tmpdir");
 
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .arg("--manifest-path")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rendezvous/Cargo.toml"))

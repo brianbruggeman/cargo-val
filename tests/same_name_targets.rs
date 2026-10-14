@@ -3,13 +3,13 @@
 use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 fn target_directory() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map_or_else(
@@ -42,7 +42,7 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
     let manifest =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/same_name/Cargo.toml");
 
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")

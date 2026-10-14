@@ -9,12 +9,15 @@ use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 #[cfg(unix)]
-use common::{EXIT_WITH_PARENT, FIXTURE_DEADLINE, kill_group};
+use common::{FIXTURE_DEADLINE, kill_group};
+#[cfg(unix)]
+use binary::EXIT_WITH_PARENT;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const ESCAPE: u8 = 0x1b;
 const FAILING_TEST: &str = "fixture::fails_when_requested";
 const SOLO_MARK: &str = "  (solo rerun)";
@@ -24,7 +27,7 @@ fn manifest() -> PathBuf {
 }
 
 fn command(environment: &[(&str, &str)], arguments: &[&str]) -> Command {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .arg("--manifest-path")
         .arg(manifest())
@@ -302,7 +305,7 @@ async fn a_shard_run_settles_its_failure_on_the_solo_rerun_line_with_the_seconds
 }
 
 async fn build_error_run(mode: &str) -> Output {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .arg("--manifest-path")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/build_error/Cargo.toml"))

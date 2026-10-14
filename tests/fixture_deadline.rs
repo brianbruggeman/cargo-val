@@ -11,12 +11,13 @@ use std::process::Command;
 use cargo_val::edge_stream_unix::ChildStream;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 #[path = "common/fifo.rs"]
 mod fifo;
 
 use common::{fixture_output, output_until};
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 fn probe_directory() -> PathBuf {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -33,7 +34,7 @@ fn probe_directory() -> PathBuf {
 
 fn blocked_test_command(directory: Option<&Path>) -> Command {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/blocked_test/Cargo.toml");
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .arg("--manifest-path")
         .arg(manifest)
