@@ -88,6 +88,12 @@ use crate::test_environment::{
 };
 use crate::test_intent::ExactTestIntent;
 
+// failure blocks waiting for the screen; one beyond this prints its bounded window at once and the store keeps the rest
+const BLOCKS: usize = 32;
+// head, length and the ring of entries: (position in the status ring, ledger index, the attempt's store chains, the entry's own print cursor)
+type BlockFifo = (usize, usize, [(u64, usize, [edge_store::View; 2], [u64; 5]); BLOCKS]);
+pub(crate) const NO_BLOCKS: BlockFifo = (0, 0, [(0, 0, [(0, 0, 0, 0); 2], [0; 5]); BLOCKS]);
+
 pub(crate) const LIVE_CAPACITY: usize = 64;
 const _: () = assert!(LIVE_CAPACITY < SIGNAL_SLOTS, "jobs are capped at LIVE_CAPACITY, so the signal table needs one more slot for the doc test group");
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
@@ -1558,6 +1564,7 @@ pub(crate) struct ListingRun<'run> {
     probe_output: RefCell<(Vec<u8>, Option<bool>, bool)>,
     reads: RefCell<&'run mut [u8]>,
     cursor: Cell<[u64; 5]>,
+    blocks: RefCell<BlockFifo>,
     root: Signal,
     trip: Signal,
 }
@@ -1666,54 +1673,88 @@ impl ListingRun<'_> {
             return Ok(false);
         }
         self.render().1.borrow_mut().apply(&event);
-        let kept = {
+        let index = {
             let mut state = self.render().1.borrow_mut();
             state.keep_views(id, views);
-            state.queue_block(id)
+            state.block_index(id)
         };
-        if kept {
-            self.cursor.set([0; 5]);
+        if index.is_some_and(|index| self.push_block(index, views)) {
             return Ok(true);
         }
         show(self.render(), &event)?;
         Ok(false)
     }
 
-    /// Whether a failure block still waits for output queue room.
-    pub(crate) fn failures_pending(&self) -> bool {
-        self.render().1.borrow().pending_block().is_some()
+    // the entry carries this attempt's store chains and its own cursor, so a rerun that replaces the kept views never changes what a pending block prints
+    fn push_block(&self, index: usize, views: [edge_store::View; 2]) -> bool {
+        let mut blocks = self.blocks.borrow_mut();
+        let (head, length) = (blocks.0, blocks.1);
+        if length == BLOCKS {
+            return false;
+        }
+        let position = status_queue::mark();
+        blocks.2[(head + length) % BLOCKS] = (position, index, views, [0; 5]);
+        blocks.1 += 1;
+        if length == 0 {
+            status_queue::hold(Some(position));
+        }
+        true
     }
 
-    /// Prints the queued failure blocks, one frame at a time while the output queue has room; the pump resumes it when the queue drains.
+    // the next page of the oldest pending block, its ledger index, store chains and cursor
+    fn head_block(&self) -> Option<(usize, [edge_store::View; 2], [u64; 5])> {
+        let blocks = self.blocks.borrow();
+        (blocks.1 != 0).then(|| {
+            let (_, index, views, cursor) = blocks.2[blocks.0];
+            (index, views, cursor)
+        })
+    }
+
+    fn pop_block(&self) {
+        let mut blocks = self.blocks.borrow_mut();
+        blocks.0 = (blocks.0 + 1) % BLOCKS;
+        blocks.1 -= 1;
+        status_queue::hold((blocks.1 != 0).then(|| blocks.2[blocks.0].0));
+    }
+
+    /// Whether a failure block still waits to be printed.
+    pub(crate) fn failures_pending(&self) -> bool {
+        self.blocks.borrow().1 != 0
+    }
+
+    /// Prints the queued failure blocks in settle order, one frame at a time, while the status ring ahead of the block is delivered
+    /// and the inline lane has room; the pump calls it after every item and wakes it as the screen catches up.
     ///
     /// A block is the GitHub group line, each non-empty stream as a fenced run of its store pages, then the source excerpt.
-    /// Pages go through the run's one read page and the render frame, so a block of any size costs no allocation.
+    /// Pages go through the run's one read page and the render frame, so a block of any size costs no allocation. A full lane only
+    /// pauses the blocks: the pump keeps reading every producer lane, and the store keeps their output.
     ///
     /// # Errors
     ///
     /// The error of the output write.
     pub(crate) fn resume_failures(&self) -> Result<(), RunError> {
-        loop {
-            let Some(index) = self.render().1.borrow().pending_block() else {
+        while status_queue::block_ready() {
+            let Some((index, views, cursor)) = self.head_block() else {
                 return Ok(());
             };
-            if !status_queue::room_for(PAGE_BYTES + EVENT_RESERVE) {
-                status_queue::defer();
-                return Ok(());
-            }
-            if self.step_block(index)? {
-                self.render().1.borrow_mut().finish_block(index);
-                self.cursor.set([0; 5]);
+            self.cursor.set(cursor);
+            if status_queue::insert(|| self.step_block(index, views))? {
+                self.pop_block();
+            } else {
+                let mut blocks = self.blocks.borrow_mut();
+                let head = blocks.0;
+                blocks.2[head].3 = self.cursor.get();
             }
         }
+        Ok(())
     }
 
     // stage 0 opens the block, each stream is three stages (open, pages, close) from stage 1 and 4, and stage 7 closes the block
-    fn step_block(&self, index: usize) -> Result<bool, RunError> {
+    fn step_block(&self, index: usize, views: [edge_store::View; 2]) -> Result<bool, RunError> {
         let (_, state, frame, _) = self.render();
         let (state, mut frame) = (state.borrow(), frame.borrow_mut());
         let frame: &mut Line<FRAME_BYTES> = &mut frame;
-        let ((id, views), links, excerpt) = (state.block_at(index), state.block_links(index), state.block_excerpt(index));
+        let (id, links, excerpt) = (state.block_at(index), state.block_links(index), state.block_excerpt(index));
         frame.clear();
         let section = self.cursor.get()[0];
         match section {
@@ -3448,7 +3489,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let run = held(ListingRun {
         signals: &signals,
         store: Rc::clone(&store),
-        reads: RefCell::new(read_storage), cursor: Cell::new([0; 5]),
+        reads: RefCell::new(read_storage), cursor: Cell::new([0; 5]), blocks: RefCell::new(NO_BLOCKS),
         filter,
         exact: parser.exact(),
         targets: RefCell::new(TargetTable::new()),
@@ -4732,6 +4773,7 @@ mod tests {
 mod listing_allocation_tests {
     use core::cell::{Cell, RefCell};
     use std::vec::Vec;
+    use crate::driver::NO_BLOCKS;
 
     use proxima_core::signal::Signal;
 
@@ -4756,10 +4798,7 @@ mod listing_allocation_tests {
         crate::edge_exit::fixture::in_single_threaded_process(spawning_a_listing_child_allocates_zero_times_in_isolation);
     }
 
-    fn spawning_a_listing_child_allocates_zero_times_in_isolation() {
-        let executable = std::env::current_exe().expect("test executable path is available");
-        let executable = executable.to_str().expect("test executable path is UTF-8");
-        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+    fn with_run<Output>(body: impl FnOnce(&ListingRun<'_>) -> Output) -> Output {
         let inherited_storage = std::env::vars()
             .map(|(key, value)| std::format!("{key}={value}"))
             .collect::<std::vec::Vec<_>>();
@@ -4795,7 +4834,7 @@ mod listing_allocation_tests {
             signals: &signals,
             store: std::rc::Rc::new(crate::edge_store::unavailable()),
             reads: RefCell::new(&mut []),
-            cursor: Cell::new([0; 5]),
+            cursor: Cell::new([0; 5]), blocks: RefCell::new(NO_BLOCKS),
             filter: "",
             exact: false,
             targets: RefCell::new(TargetTable::new()),
@@ -4824,6 +4863,13 @@ mod listing_allocation_tests {
             trip: root.child(),
             root,
         };
+        body(&run)
+    }
+
+    fn spawning_a_listing_child_allocates_zero_times_in_isolation() {
+        let executable = std::env::current_exe().expect("test executable path is available");
+        let executable = executable.to_str().expect("test executable path is UTF-8");
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         let artifact = TestArtifact {
             executable,
             package_id: "path+file:///repo/parser#0.3.1",
@@ -4831,16 +4877,50 @@ mod listing_allocation_tests {
             target_name: "cargo_val",
             target_kind: "lib",
         };
-
         let mut environments = super::zeroed(ENVIRONMENT_CAPACITY * LISTING_SLOTS);
 
-        let (listing, allocations) =
-            crate::test_alloc::measure_allocations(|| spawn_listing(&artifact, &run, "", None, 1, &mut environments));
+        let (listing, allocations) = with_run(|run| crate::test_alloc::measure_allocations(|| spawn_listing(&artifact, run, "", None, 1, &mut environments)));
 
         let mut listing = listing.expect("the listing child starts");
         reap(&mut listing);
         std::println!("{{\"listing_spawn_allocations\":{allocations}}}");
         assert_eq!(allocations, 0);
+    }
+
+    const FIRST_ATTEMPT: [crate::edge_store::View; 2] = [(7, 100, 900, 4_194_304), (8, 200, 800, 4_194_304)];
+    const RERUN_ATTEMPT: [crate::edge_store::View; 2] = [(9, 300, 700, 5), (10, 400, 600, 5)];
+
+    #[test]
+    fn a_rerun_of_a_pending_failure_queues_its_own_entry_and_the_pending_block_keeps_the_first_attempts_chains() {
+        with_run(|run| {
+            assert!(run.push_block(3, FIRST_ATTEMPT), "the first attempt queues");
+            assert!(run.push_block(3, RERUN_ATTEMPT), "the rerun of the same failure queues behind it");
+
+            let pending = run.head_block().expect("a block is pending");
+            run.pop_block();
+            let rerun = run.head_block().expect("the rerun's block is pending");
+
+            assert_eq!((pending.0, pending.1), (3, FIRST_ATTEMPT), "the pending block still prints the first attempt's bytes");
+            assert_eq!((rerun.0, rerun.1), (3, RERUN_ATTEMPT), "the rerun's block prints the rerun's bytes");
+        });
+    }
+
+    #[test]
+    fn each_pending_block_owns_its_cursor_so_a_cut_block_resumes_instead_of_restarting() {
+        with_run(|run| {
+            assert!(run.push_block(0, FIRST_ATTEMPT) && run.push_block(1, RERUN_ATTEMPT));
+            run.blocks.borrow_mut().2[0].3 = [2, 11, 22, 33, 1];
+
+            let cut = run.head_block().expect("the first block is pending");
+            run.pop_block();
+            let next = run.head_block().expect("the second block is pending");
+
+            assert_eq!(cut.2, [2, 11, 22, 33, 1], "a block cut mid-print keeps its place");
+            assert_eq!(next.2, [0; 5], "the next block starts at its own beginning");
+            assert!(run.failures_pending());
+            run.pop_block();
+            assert!(!run.failures_pending());
+        });
     }
 }
 

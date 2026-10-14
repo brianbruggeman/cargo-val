@@ -324,6 +324,7 @@ pub(crate) async fn pump(
     let _capture = Capture::enter();
     let mut sinks = Sinks::new();
     let mut parks = 0;
+    let mut block_turn = false;
     loop {
         let mut drained = Ok(());
         let polled = poll_fn(|context| {
@@ -332,12 +333,20 @@ pub(crate) async fn pump(
                 drained = Err(error);
                 return Poll::Ready(Err(Exhausted));
             }
-            let polled = if status_queue::resume_due() {
+            // a failure block's next page and the lanes alternate, so neither the screen nor a hot producer starves the other
+            block_turn = !block_turn;
+            let block_ready = status_queue::block_ready();
+            let polled = if (block_ready && block_turn) || status_queue::resume_due() {
                 Poll::Ready(Ok(Item::Signal(Ok(()))))
             } else if status_queue::has_room() {
-                step(&merged, context)
+                match step(&merged, context) {
+                    Poll::Pending if block_ready => Poll::Ready(Ok(Item::Signal(Ok(())))),
+                    other => other,
+                }
             } else if editing {
                 step_unproducing(lanes, port, beat, context)
+            } else if block_ready {
+                Poll::Ready(Ok(Item::Signal(Ok(()))))
             } else {
                 Poll::Pending
             };

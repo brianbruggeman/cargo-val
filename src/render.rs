@@ -79,7 +79,6 @@ const PAYLOAD_HEAD: usize = RECORD_AT + 23;
 const CLASS_NONE: u8 = 255;
 const WHICH_STDERR: u8 = 1;
 const REASON_FLAG: u8 = 2;
-const BLOCK_PENDING: u8 = 4;
 const FILE_KEEP: usize = 512;
 const MESSAGE_KEEP: usize = 2048;
 const SIDE_KEEP: usize = 1024;
@@ -871,39 +870,18 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.window_of = usize::MAX;
     }
 
-    /// Queues the stored failure `id` as a block the driver prints page by page, because its output lives in the run store and the output queue cannot hold it at once.
+    /// The ledger index of the stored failure `id` when it was kept in full, the one a block prints its name, links and excerpt from.
     ///
-    /// Returns whether the failure was kept in full; when it was not (the arena had no room) nothing is queued and the caller prints the block from the event.
-    pub fn queue_block(&mut self, id: Identity<'_>) -> bool {
-        let Some(index) = self.find_failure(id) else {
-            return false;
-        };
-        let start = self.failure_tail_start(index) + entry::TAIL;
-        if entry::payload(self.failure_tail(index)) < PAYLOAD_HEAD {
-            return false;
-        }
-        self.arena[start + VIEWS_AT - 1] |= BLOCK_PENDING;
-        true
-    }
-
-    /// The oldest failure whose block still waits to be printed.
+    /// `None` means the arena had no room for the failure; the caller prints the block from the event instead.
     #[must_use]
-    pub fn pending_block(&self) -> Option<usize> {
-        (0..self.stored).find(|index| {
-            let start = self.failure_tail_start(*index) + entry::TAIL;
-            entry::payload(self.failure_tail(*index)) >= PAYLOAD_HEAD && self.arena[start + VIEWS_AT - 1] & BLOCK_PENDING != 0
-        })
+    pub fn block_index(&self, id: Identity<'_>) -> Option<usize> {
+        let index = self.find_failure(id)?;
+        (entry::payload(self.failure_tail(index)) >= PAYLOAD_HEAD).then_some(index)
     }
 
-    /// Marks the block of the failure at `index` printed.
-    pub fn finish_block(&mut self, index: usize) {
-        let start = self.failure_tail_start(index) + entry::TAIL;
-        self.arena[start + VIEWS_AT - 1] &= !BLOCK_PENDING;
-    }
-
-    /// The name and the two store chains of the queued failure at `index`.
-    pub(crate) fn block_at(&self, index: usize) -> (Identity<'_>, [(u32, u64, u64, u64); 2]) {
-        (self.resolve(self.failures[index]).0, self.views_at(index).1)
+    /// The name of the queued failure at `index`; its store chains travel with the queue entry, so a rerun that replaces the kept views leaves a pending block's output alone.
+    pub(crate) fn block_at(&self, index: usize) -> Identity<'_> {
+        self.resolve(self.failures[index]).0
     }
 
     /// The editor template, its directory and the panic site the queued failure's pages are linked with.
