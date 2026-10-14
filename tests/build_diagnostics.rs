@@ -67,6 +67,27 @@ fn a_type_error_shows_rustcs_diagnostic_before_the_build_failed_line() {
 }
 
 #[test]
+fn rustcs_diagnostics_precede_cargos_summary_which_precedes_cargo_vals_line() {
+    let result = run_build_error();
+
+    let diagnostic = result
+        .text
+        .find("error[E0308]: mismatched types")
+        .unwrap_or_else(|| panic!("rustc's E0308 line is missing:\n{}", result.text));
+    let summary = result
+        .text
+        .find("error: could not compile")
+        .unwrap_or_else(|| panic!("cargo's summary line is missing:\n{}", result.text));
+    let failed = result
+        .text
+        .find("cargo-val: cargo test build failed")
+        .unwrap_or_else(|| panic!("the build-failed line is missing:\n{}", result.text));
+
+    assert!(diagnostic < summary, "{}", result.text);
+    assert!(summary < failed, "{}", result.text);
+}
+
+#[test]
 fn a_failed_build_also_shows_the_warnings_cargo_reported() {
     let result = run_build_error();
 

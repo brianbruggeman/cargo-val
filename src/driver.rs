@@ -81,6 +81,7 @@ const ENV_CAPACITY: usize = 1024;
 const PATH_CAPACITY: usize = 4096;
 const SCRATCH_CAPACITY: usize = 131_072;
 const DIAGNOSTIC_CAPACITY: usize = 1_048_576;
+const BUILD_FAILURE_PREFIX: &[u8] = b"error: could not compile";
 const LINKED_CAPACITY: usize = 32768;
 const BUILD_SCRIPT_CAPACITY: usize = 65536;
 const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
@@ -1492,6 +1493,8 @@ pub(crate) struct CargoDriver<'buffer> {
     dropped: usize,
     lock_watch: LockWatch,
     diagnostics: Vec<u8>,
+    stderr_held: Vec<u8>,
+    diagnostics_reported: bool,
 }
 
 fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
@@ -1837,19 +1840,48 @@ impl CargoDriver<'_> {
 
     fn report_diagnostics(&mut self, success: bool) -> Result<(), RunError> {
         let held = core::mem::take(&mut self.diagnostics);
-        if success || held.is_empty() {
-            return Ok(());
+        if !success && !held.is_empty() {
+            write_fd(2, &held)?;
+            if held.len() >= DIAGNOSTIC_CAPACITY {
+                write_fd(2, b"cargo-val: compiler diagnostics were truncated\n")?;
+            }
         }
-        write_fd(2, &held)?;
-        if held.len() >= DIAGNOSTIC_CAPACITY {
-            write_fd(2, b"cargo-val: compiler diagnostics were truncated\n")?;
-        }
-        Ok(())
+        self.diagnostics_reported = true;
+        let withheld = core::mem::take(&mut self.stderr_held);
+        self.emit_stderr(&withheld)
+    }
+
+    fn emit_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+        write_fd(2, bytes)?;
+        announce_lock_wait(&mut self.lock_watch, bytes)
     }
 
     pub(crate) fn forward_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
-        write_fd(2, bytes)?;
-        announce_lock_wait(&mut self.lock_watch, bytes)
+        if self.diagnostics_reported {
+            return self.emit_stderr(bytes);
+        }
+        self.stderr_held.extend_from_slice(bytes);
+        if self.stderr_held.starts_with(BUILD_FAILURE_PREFIX) {
+            return Ok(());
+        }
+        self.release_ahead_of_failure()
+    }
+
+    // cargo's failure summary must follow rustc's rendered diagnostics, which arrive on the other pipe; lines before it stream through.
+    fn release_ahead_of_failure(&mut self) -> Result<(), RunError> {
+        let pending = core::mem::take(&mut self.stderr_held);
+        let mut start = 0;
+        while let Some(newline) = memchr::memchr(b'\n', &pending[start..]) {
+            let end = start + newline + 1;
+            if pending[start..end].starts_with(BUILD_FAILURE_PREFIX) {
+                break;
+            }
+            self.emit_stderr(&pending[start..end])?;
+            start = end;
+        }
+        self.stderr_held = pending;
+        self.stderr_held.drain(..start);
+        Ok(())
     }
 
     pub(crate) fn cargo_exited(&mut self, code: i32) {
@@ -2311,6 +2343,8 @@ fn new_driver(
         dropped: 0,
         lock_watch,
         diagnostics: Vec::new(),
+        stderr_held: Vec::new(),
+        diagnostics_reported: false,
     }))
 }
 
