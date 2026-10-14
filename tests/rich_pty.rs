@@ -28,7 +28,7 @@ mod group;
 #[path = "common/pty.rs"]
 mod pty;
 
-use pty::{Pty, open_pty};
+use pty::{Pty, open_pty, open_pty_at};
 
 const FRAME_START: &str = "\x1b[?25l";
 static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
@@ -169,11 +169,18 @@ async fn run_targeting<Drive>(fixture: &str, mode: &str, environment: &[(&str, &
 where
     Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
 {
+    run_sized(fixture, mode, environment, (tty_stdin, target_run, pty::COLUMNS), drive).await
+}
+
+async fn run_sized<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], (tty_stdin, target_run, columns): (bool, &str, u16), drive: Drive) -> (String, ExitStatus)
+where
+    Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
+{
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{mode}-{run}"));
     std::fs::create_dir_all(&directory).expect("the release directory is creatable");
     let release = directory.join("release");
-    let Pty { master, slave } = open_pty();
+    let Pty { master, slave } = open_pty_at(columns);
     let keys = master.try_clone().expect("the master descriptor duplicates for writing keys");
     let probe = master.try_clone().expect("the master descriptor duplicates for the termios query");
     let stdin = if tty_stdin { Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")) } else { Stdio::piped() };
@@ -212,7 +219,12 @@ async fn release_then_quit(master: &ChildStream, mut keys: File, release: PathBu
 }
 
 async fn run_failing_on_pty(environment: &[(&str, &str)]) -> (String, ExitStatus) {
-    run_driven("rich_pty", "rich", environment, async |master, keys, release, _leader| release_then_quit(master, keys, release).await).await
+    run_failing_at_width(pty::COLUMNS, environment).await
+}
+
+async fn run_failing_at_width(columns: u16, environment: &[(&str, &str)]) -> (String, ExitStatus) {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    run_sized("rich_pty", "rich", environment, (true, &target_run, columns), async |master, keys, release, _leader| release_then_quit(master, keys, release).await).await
 }
 
 async fn quit_from_review(master: &ChildStream, mut keys: File) -> String {
@@ -300,9 +312,9 @@ const KEYWORD_SGR: &str = "\x1b[35mif\x1b[0m";
 const FENCE_TEXT: [&str; 4] = ["------ stdout:", "------ stderr:", "------ source:", "panicked at"];
 const TRIO_CLOSING_START: &str = "cargo_val_rich_pty_fail_trio_fixture: discovered";
 
-fn screens_before_each_erase(output: &str) -> Vec<Vec<String>> {
+fn screens_before_each_erase(output: &str, columns: usize) -> Vec<Vec<String>> {
     let starts = output.match_indices("\r\x1b[J").filter_map(|(at, _)| output[..at].rfind("\x1b["));
-    starts.map(|start| final_scrollback(&output[..start])).collect()
+    starts.map(|start| emulate(&output[..start], columns).0).collect()
 }
 
 fn header_rows(screen: &[String]) -> Vec<usize> {
@@ -310,13 +322,31 @@ fn header_rows(screen: &[String]) -> Vec<usize> {
 }
 
 fn assert_each_frame_replaces_the_last(output: &str) -> Vec<Vec<String>> {
-    let screens = screens_before_each_erase(output);
+    assert_no_row_fills_the_terminal(output, usize::from(pty::COLUMNS));
+    assert_frames_replace_the_last(output, usize::from(pty::COLUMNS))
+}
+
+fn assert_no_row_fills_the_terminal(output: &str, columns: usize) {
+    for (index, screen) in screens_before_each_erase(output, usize::MAX).iter().enumerate() {
+        let wide: Vec<&String> = screen.iter().filter(|line| line.chars().count() >= columns).collect();
+        assert!(wide.is_empty(), "frame {index} has rows that fill all {columns} columns: {wide:?}");
+    }
+}
+
+// the header is padded to one column short of the terminal, so a first frame drawn before the size is known shows as a short header
+fn assert_every_header_spans_the_terminal(output: &str, columns: usize) {
+    for (index, screen) in screens_before_each_erase(output, columns).iter().enumerate() {
+        let drawn = screen[0].chars().count();
+        assert_eq!(drawn, columns - 1, "frame {index} header is {drawn} columns on a {columns} column terminal:\n{}", screen[0]);
+    }
+}
+
+fn assert_frames_replace_the_last(output: &str, columns: usize) -> Vec<Vec<String>> {
+    let screens = screens_before_each_erase(output, columns);
     assert!(screens.len() >= 2, "at least a live frame and a review frame were erased, got {}:\n{}", screens.len(), shown(output));
     for (index, screen) in screens.iter().enumerate() {
         let headers = header_rows(screen);
-        assert_eq!(headers, [0], "frame {index} must hold exactly one header, on screen row 0, with nothing above it:\n{}", screen.join("\n"));
-        let wide: Vec<&String> = screen.iter().filter(|line| line.chars().count() >= usize::from(pty::COLUMNS)).collect();
-        assert!(wide.is_empty(), "frame {index} has rows that wrap at {} columns: {wide:?}", pty::COLUMNS);
+        assert_eq!(headers, [0], "frame {index} at {columns} columns must hold exactly one header, on screen row 0, with nothing above it:\n{}", screen.join("\n"));
         let rows = screen.iter().rposition(|line| !line.is_empty()).map_or(0, |last| last + 1);
         assert!(rows < usize::from(pty::ROWS), "frame {index} is {rows} rows on a {} row screen:\n{}", pty::ROWS, screen.join("\n"));
     }
@@ -601,32 +631,134 @@ fn csi_final(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) -> (Stri
 }
 
 fn final_scrollback(output: &str) -> Vec<String> {
-    let (mut lines, mut row) = (vec![String::new()], 0_usize);
+    emulate(output, usize::MAX).0
+}
+
+// where the cursor sits: row, column, and xterm's last-column flag, which a character in the final column sets and any cursor move or the next character resolves
+type Cursor = (usize, usize, bool);
+
+fn put(lines: &mut Vec<Vec<char>>, cursor: &mut Cursor, (character, columns): (char, usize)) {
+    if cursor.2 {
+        *cursor = (cursor.0 + 1, 0, false);
+    }
+    if cursor.0 == lines.len() {
+        lines.push(Vec::new());
+    }
+    let line = &mut lines[cursor.0];
+    line.resize(line.len().max(cursor.1 + 1), ' ');
+    line[cursor.1] = character;
+    *cursor = if cursor.1 + 1 == columns { (cursor.0, cursor.1, true) } else { (cursor.0, cursor.1 + 1, false) };
+}
+
+fn erase_below(lines: &mut Vec<Vec<char>>, cursor: Cursor) {
+    lines.truncate(cursor.0 + 1);
+    lines[cursor.0].truncate(cursor.1);
+}
+
+// `ESC [ 8 ; rows ; columns t` is xterm's resize report: the harness splices it into the stream where it changed the pty size
+fn control(lines: &mut Vec<Vec<char>>, (cursor, columns): (&mut Cursor, &mut usize), (parameters, final_byte): (&str, char)) {
+    match final_byte {
+        'A' => *cursor = (cursor.0.saturating_sub(parameters.parse().unwrap_or(1)), cursor.1, false),
+        'J' => erase_below(lines, *cursor),
+        't' => *columns = parameters.rsplit(';').next().and_then(|width| width.parse().ok()).unwrap_or(*columns),
+        _ => {}
+    }
+}
+
+// lines as a terminal `columns` wide shows them; the closing-block tests pass usize::MAX because they compare logical lines
+fn emulate(output: &str, mut columns: usize) -> (Vec<String>, Cursor) {
+    let (mut lines, mut cursor) = (vec![Vec::new()], (0, 0, false));
     let mut characters = output.chars().peekable();
     while let Some(character) = characters.next() {
         match character {
             '\x1b' if characters.peek() == Some(&'[') => {
                 characters.next();
-                match csi_final(&mut characters) {
-                    (count, 'A') => row = row.saturating_sub(count.parse().unwrap_or(1)),
-                    (_, 'J') => {
-                        lines[row].clear();
-                        lines.truncate(row + 1);
-                    }
-                    _ => {}
-                }
+                let (parameters, final_byte) = csi_final(&mut characters);
+                control(&mut lines, (&mut cursor, &mut columns), (&parameters, final_byte));
             }
             '\n' => {
-                row += 1;
-                if row == lines.len() {
-                    lines.push(String::new());
+                cursor = (cursor.0 + 1, cursor.1, false);
+                if cursor.0 == lines.len() {
+                    lines.push(Vec::new());
                 }
             }
-            '\r' | '\x1b' => {}
-            other => lines[row].push(other),
+            '\r' => cursor = (cursor.0, 0, false),
+            '\x1b' => {}
+            other => put(&mut lines, &mut cursor, (other, columns)),
         }
     }
-    lines
+    (lines.iter().map(|line| line.iter().collect()).collect(), cursor)
+}
+
+fn resize_pty(master: &File, columns: u16, leader: u32) -> Vec<u8> {
+    let size = libc::winsize { ws_row: pty::ROWS, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
+    let changed = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) };
+    assert_eq!(changed, 0, "TIOCSWINSZ: {}", std::io::Error::last_os_error());
+    let signalled = unsafe { libc::kill(leader.cast_signed(), libc::SIGWINCH) };
+    assert_eq!(signalled, 0, "SIGWINCH to {leader}: {}", std::io::Error::last_os_error());
+    format!("\x1b[8;{};{columns}t", pty::ROWS).into_bytes()
+}
+
+async fn resize_after_first_frame(master: &ChildStream, keys: File, release: PathBuf, (leader, columns): (u32, u16)) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| !live_frames(&String::from_utf8_lossy(bytes)).is_empty()).await;
+    output.extend_from_slice(&resize_pty(&keys, columns, leader));
+    let (resized, _) = drain::drain_until(master, |bytes| {
+        let screen = without_sgr(&String::from_utf8_lossy(bytes));
+        live_frames(&screen).iter().any(|frame| released_frame(frame))
+    }).await;
+    output.extend_from_slice(&resized);
+    File::create(release).expect("the release file is creatable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn run_at_width(columns: u16) -> (String, ExitStatus) {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    run_sized("rich_pty", "rich", &NO_COLOR, (true, &target_run, columns), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await
+}
+
+#[proxima::test]
+#[case::eighty(80)]
+#[case::one_twenty(120)]
+#[case::one_ninety(190)]
+#[case::one_ninety_one(191)]
+async fn every_live_frame_at_each_terminal_width_leaves_exactly_one_header_on_screen_row_zero(#[case] columns: u16) {
+    let (output, status) = run_at_width(columns).await;
+
+    assert!(status.success(), "cargo-val exited {status} at {columns} columns");
+    assert_no_row_fills_the_terminal(&output, usize::from(columns));
+    assert_every_header_spans_the_terminal(&output, usize::from(columns));
+    let screens = assert_frames_replace_the_last(&output, usize::from(columns));
+    println!("{columns} columns: {} frames, header rows {:?}", screens.len(), screens.iter().map(|screen| header_rows(screen)).collect::<Vec<_>>());
+}
+
+#[proxima::test]
+#[case::eighty(80)]
+#[case::one_twenty(120)]
+#[case::one_ninety(190)]
+#[case::one_ninety_one(191)]
+async fn every_pinned_and_review_frame_at_each_terminal_width_leaves_exactly_one_header_on_screen_row_zero(#[case] columns: u16) {
+    let (output, status) = run_failing_at_width(columns, &[FAILING_RUN, ("NO_COLOR", "1")]).await;
+
+    assert!(!status.success(), "a failing test must fail the run");
+    assert_no_row_fills_the_terminal(&output, usize::from(columns));
+    assert_every_header_spans_the_terminal(&output, usize::from(columns));
+    let screens = assert_frames_replace_the_last(&output, usize::from(columns));
+    println!("{columns} columns: {} frames, header rows {:?}", screens.len(), screens.iter().map(|screen| header_rows(screen)).collect::<Vec<_>>());
+}
+
+#[proxima::test]
+#[case::eighty_to_one_ninety(80, 190)]
+#[case::one_twenty_to_one_ninety_one(120, 191)]
+#[case::one_ninety_to_one_ninety_one(190, 191)]
+async fn a_terminal_widened_mid_run_leaves_exactly_one_header_on_screen_row_zero_in_every_frame(#[case] from: u16, #[case] to: u16) {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let (output, status) = run_sized("rich_pty", "rich", &NO_COLOR, (true, &target_run, from), async |master, keys, release, leader| resize_after_first_frame(master, keys, release, (leader, to)).await).await;
+
+    assert!(status.success(), "cargo-val exited {status} after widening {from} to {to} columns");
+    let screens = assert_frames_replace_the_last(&output, usize::from(from));
+    println!("{from} to {to} columns: {} frames, header rows {:?}", screens.len(), screens.iter().map(|screen| header_rows(screen)).collect::<Vec<_>>());
 }
 
 #[proxima::test]

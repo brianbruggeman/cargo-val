@@ -3434,10 +3434,11 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let link_directory = absolute_directory(&settings.source_root);
     let link_template = settings.link_template.as_deref().unwrap_or("");
     let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_timeline(timeline_slots).with_window(review_window).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color).with_links(link_template.as_bytes(), link_directory.as_bytes())), RefCell::new(frame_line), RefCell::new(None));
-    emit_begin(&render, &settings, &environment, started_millis)?;
+    // the size must be known before the Begin frame, or that frame is drawn at the 80 column default
     if settings.output == OutputMode::Rich {
         begin_rich(&render, settings.mouse == Some(true))?;
     }
+    emit_begin(&render, &settings, &environment, started_millis)?;
     let inherited_count = environment.collect(inherited).map_err(|_| RunError::Environment)?;
     let inherited = &inherited[..inherited_count];
     let configured_target = utf8_variable(&environment, b"CARGO_VAL_TARGET_DIR")?;
