@@ -1,14 +1,12 @@
 use std::process::{Command, Output};
 
 mod common;
-#[path = "common/group.rs"]
-mod group;
-#[path = "common/output.rs"]
-mod output;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 
-use common::fixture_output;
+use fixture::fixture_output;
 
 
 fn echo_command() -> Command {
@@ -50,7 +48,7 @@ fn describe(output: &Output) -> String {
 }
 
 async fn capture_equals_std(mut command: Command) {
-    let reference = output::output_bounded(&mut command, group::SYNC_DEADLINE).expect("the reference child finishes within its deadline");
+    let reference = command.output().expect("the std reference child runs");
     let captured = fixture_output(&mut command).await;
 
     assert_eq!(captured.stdout, reference.stdout, "stdout differs\ncaptured: {}\nreference: {}", describe(&captured), describe(&reference));

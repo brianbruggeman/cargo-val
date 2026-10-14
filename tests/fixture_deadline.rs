@@ -1,22 +1,46 @@
 #![cfg(unix)]
 
+use core::future::Future;
+use core::pin::pin;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+
+use futures::future::{Either, join3, select};
+use proxima_primitives::pipe::Pipe;
 
 use cargo_val::edge_stream_unix::ChildStream;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
 mod fifo;
 
-use common::{fixture_output, output_until};
+use common::{ExitSource, Finished, drain, finish, group, launch, release_group};
+use fixture::fixture_output;
+
+// the expiry is driven by the test, not by a clock, so the blocked child is killed only once it has announced itself
+async fn output_until(command: &mut Command, expire: impl Future<Output = ()>) -> Result<Output, String> {
+    let (leader, stdout, stderr, exit): (u32, _, _, ExitSource) = launch(command)?;
+    let mut collect = pin!(join3(drain(&stdout), drain(&stderr), exit.call(())));
+    let mut expire = pin!(expire);
+    let (finished, report): (Finished, Option<String>) = match select(collect.as_mut(), expire.as_mut()).await {
+        Either::Left((finished, _)) => (finished, None),
+        Either::Right(((), _)) => {
+            let (finished, failures) = group::interrupt_then_kill(leader, collect.as_mut()).await;
+            (finished, Some(format!("signal failures: {failures:?}")))
+        }
+    };
+    release_group(leader);
+    finish(command, leader, finished, report)
+}
 
 
 fn probe_directory() -> PathBuf {

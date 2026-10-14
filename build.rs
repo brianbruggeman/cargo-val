@@ -142,6 +142,54 @@ impl Validate for ViewDefaults {
     }
 }
 
+#[derive(Settings, ConfigCodegen)]
+#[settings(prefix = "CARGO_VAL_TESTBUILD")]
+struct TestDefaults {
+    #[setting(default = 240)]
+    fixture_deadline: u64,
+    #[setting(default = 240)]
+    sync_deadline: u64,
+    #[setting(default = 240)]
+    fifo_deadline: u64,
+    #[setting(default = 240)]
+    wait_line_deadline: u64,
+    #[setting(default = 60)]
+    interrupt_grace: u64,
+    #[setting(default = 60)]
+    gone_deadline: u64,
+    #[setting(default = 30)]
+    taskkill_deadline: u64,
+    #[setting(default = 30)]
+    help_deadline: u64,
+    #[setting(default = 3)]
+    bounded_wait: u64,
+    #[setting(default = 3600)]
+    example_deadline: u64,
+}
+
+impl Validate for TestDefaults {
+    fn validate(&self) -> conflaguration::Result<()> {
+        let bounds = [
+            ("fixture_deadline", self.fixture_deadline),
+            ("sync_deadline", self.sync_deadline),
+            ("fifo_deadline", self.fifo_deadline),
+            ("wait_line_deadline", self.wait_line_deadline),
+            ("interrupt_grace", self.interrupt_grace),
+            ("gone_deadline", self.gone_deadline),
+            ("taskkill_deadline", self.taskkill_deadline),
+            ("help_deadline", self.help_deadline),
+            ("bounded_wait", self.bounded_wait),
+            ("example_deadline", self.example_deadline),
+        ];
+        let errors: Vec<_> = bounds.iter().filter(|(_, secs)| *secs == 0).map(|(name, _)| ValidationMessage::new(*name, "must be greater than zero")).collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Validation { errors })
+        }
+    }
+}
+
 fn main() -> conflaguration::Result<()> {
     let mut settings = conflaguration::init::<BuildDefaults>()?;
     if env::var_os("CARGO_VAL_BUILD_JOBS").is_none() && env::var_os("HOST") == env::var_os("TARGET")
@@ -153,5 +201,8 @@ fn main() -> conflaguration::Result<()> {
     let view = conflaguration::init::<ViewDefaults>()?;
     codegen::write_consts(&view, "cargo_val_view.rs")?;
     codegen::rerun_for::<ViewDefaults>();
+    let test_bounds = conflaguration::init::<TestDefaults>()?;
+    codegen::write_consts(&test_bounds, "cargo_val_test.rs")?;
+    codegen::rerun_for::<TestDefaults>();
     Ok(())
 }

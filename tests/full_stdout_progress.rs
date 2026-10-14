@@ -18,6 +18,8 @@ mod binary;
 
 #[path = "common/group.rs"]
 mod group;
+#[path = "common/lead.rs"]
+mod lead;
 
 #[cfg(target_os = "linux")]
 use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
@@ -71,7 +73,7 @@ impl Drop for Running {
         if Pipe::call(&self.exit, ()).now_or_never().is_some() {
             return;
         }
-        let _ = group::kill_process_group(self.child.id());
+        let _ = group::kill_process_group(self.child.id()).now_or_never();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -141,7 +143,7 @@ fn spawn_cargo_val(directory: &Path, fixture: &str, stdout: PipeWriter) -> Child
         .join("Cargo.toml");
     let stderr = fs::File::create(directory.join("stderr.log")).expect("stderr log is creatable");
     let mut command = binary::command();
-    group::lead_group(&mut command);
+    lead::lead_group(&mut command);
     command
         .env("CARGO_VAL_OUTPUT", "plain")
         .arg("--manifest-path")
@@ -290,11 +292,12 @@ async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_
     assert_eq!(skipped.len(), IGNORED_FLOOD_COUNT, "one skip line per ignored test");
     assert!(skipped.iter().zip(&expected).all(|(printed, name)| printed == name), "skip lines arrive in listing order");
 }
-// the test-level timeout only fails the test; the watchdog kills cargo-val's whole group at the bound, which ends the drain and the exit wait
+// the test-level timeout only fails the test; bounded kills cargo-val's whole group at the bound, which ends the drain and the exit wait
 async fn drain_and_exit(stdout: &ChildStream, running: &Running) -> (Vec<u8>, std::process::ExitStatus) {
-    let (cancel, fired) = group::watchdog(running.child.id(), group::SYNC_DEADLINE);
-    let (output, exited) = join(drain_stdout(stdout), Pipe::call(&running.exit, ())).await;
-    drop(cancel);
-    assert!(!fired.join().unwrap_or(false), "cargo-val (pid {}) outlived {:?} while its stdout drained and its group was killed", running.child.id(), group::SYNC_DEADLINE);
+    let waiting = join(drain_stdout(stdout), Pipe::call(&running.exit, ()));
+    let (output, exited) = match group::bounded(running.child.id(), group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
+        Ok(finished) => finished,
+        Err((report, _)) => panic!("cargo-val (pid {}) did not finish while its stdout drained: {report}", running.child.id()),
+    };
     (output, exited.expect("the exit source is unspent").expect("cargo-val exit status reads"))
 }

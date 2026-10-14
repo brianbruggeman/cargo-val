@@ -1,14 +1,16 @@
 use std::path::PathBuf;
-use std::time::Duration;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
 
 use cargo_val::render::Outcome;
-use common::{fixture_output, output_within};
+use common::output_within;
+use fixture::fixture_output;
 
 #[cfg(unix)]
 #[path = "common/supervise.rs"]
@@ -16,7 +18,6 @@ mod supervise;
 
 
 // the help screen is printed by the already-built binary with no build and no wait; 30 s stays inside the 60 s body timeout
-const HELP_DEADLINE: Duration = Duration::from_secs(30);
 
 struct Run {
     status: Option<i32>,
@@ -319,7 +320,8 @@ mod bin_gate_hold {
     use proxima_primitives::pipe::Pipe;
 
     use super::{Run, TEST_NAME, manifest, target_directory};
-    use crate::common::{ChildStream, FIXTURE_DEADLINE, drain, drain_until};
+    use crate::common::{ChildStream, drain, drain_until};
+    use crate::fixture::fixture_deadline;
     use crate::supervise::supervised;
 
     const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
@@ -385,7 +387,7 @@ mod bin_gate_hold {
         for (key, value) in environment {
             command.env(key, value);
         }
-        let (status, stdout, stderr) = supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+        let (status, stdout, stderr) = supervised(&mut command, fixture_deadline(), async |_, stdout, stderr, exit| {
             let settled: fn(&str) -> bool = test_settled;
             let parked: fn(&str) -> bool = |text| text.contains(GATE_PARKED_LINE) || text.contains("cargo test build failed");
             let (stdout_proof, stderr_proof) = match release {
@@ -460,7 +462,7 @@ async fn the_same_fixture_fails_with_the_bin_gate_off() {
 
 #[proxima::test]
 async fn help_prints_the_banner_file_and_documents_the_new_options() {
-    let output = output_within(binary::command().arg("--help"), HELP_DEADLINE).await.unwrap_or_else(|failure| panic!("{failure}"));
+    let output = output_within(binary::command().arg("--help"), common::settings::bound("HELP_DEADLINE"), "HELP_DEADLINE").await.unwrap_or_else(|failure| panic!("{failure}"));
     let banner = include_str!("fixtures/help-banner.txt");
 
     assert_eq!(output.status.code(), Some(0));
