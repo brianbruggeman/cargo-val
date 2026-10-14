@@ -40,6 +40,11 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
 }
 
+// the noisy fixture is the one run that keeps the default selection, which launches the doc cargo beside the test binaries
+fn selection_of(fixture: &str) -> &'static [&'static str] {
+    if fixture == "rich_pty_noisy" { &[] } else { &["--tests"] }
+}
+
 fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
     let stream = || Stdio::from(slave.try_clone().expect("the slave descriptor duplicates"));
     let mut command = binary::command();
@@ -54,7 +59,8 @@ fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, 
     command
         .arg("--manifest-path")
         .arg(fixture_manifest(fixture))
-        .args(["--tests", "--no-fail-fast", "--output", mode])
+        .args(selection_of(fixture))
+        .args(["--no-fail-fast", "--output", mode])
         .env_remove("CI")
         .env_remove("GITHUB_ACTIONS")
         .env_remove("CARGO_VAL_OUTPUT")
@@ -746,6 +752,25 @@ async fn every_pinned_and_review_frame_at_each_terminal_width_leaves_exactly_one
     assert_every_header_spans_the_terminal(&output, usize::from(columns));
     let screens = assert_frames_replace_the_last(&output, usize::from(columns));
     println!("{columns} columns: {} frames, header rows {:?}", screens.len(), screens.iter().map(|screen| header_rows(screen)).collect::<Vec<_>>());
+}
+
+#[proxima::test]
+#[case::eighty(80)]
+#[case::one_ninety(190)]
+async fn cargo_warnings_and_build_script_stderr_never_reach_the_terminal_between_frames(#[case] columns: u16) {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let (output, status) = run_sized("rich_pty_noisy", "rich", &NO_COLOR, (true, &target_run, columns), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
+
+    assert!(status.success(), "cargo-val exited {status} at {columns} columns");
+    let scrollback = final_scrollback(&output).join("\n");
+    for routed in ["unused manifest key", "build script warning"] {
+        assert!(scrollback.contains(routed), "`{routed}` was not routed into scrollback:\n{}", shown(&output));
+    }
+    let screens = screens_before_each_erase(&output, usize::from(columns));
+    assert!(screens.len() >= 4, "at least four frames were erased, got {}:\n{}", screens.len(), shown(&output));
+    for (index, screen) in screens.iter().enumerate() {
+        assert_eq!(header_rows(screen).len(), 1, "frame {index} at {columns} columns must hold exactly one header:\n{}\nbytes:\n{}", screen.join("\n"), shown(&output));
+    }
 }
 
 #[proxima::test]
