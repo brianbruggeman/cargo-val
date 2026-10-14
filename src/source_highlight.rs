@@ -135,7 +135,7 @@ mod tests {
 
     fn real_excerpt_rows(colour: bool) -> (Vec<u8>, usize) {
         let source = read_source(Path::new(ROOT), b"tests/shard_process.rs").expect("real file");
-        let at = memchr::memmem::find(&source, b"let full = format!(").expect("the line is in the real file");
+        let at = memchr::memmem::find(&source, b"let full = format!(\"stdout:\\n").expect("the line is in the real file");
         let line = 1 + u32::try_from(memchr::memchr_iter(b'\n', &source[..at]).count()).expect("fewer than 2^32 lines");
         let excerpt = Excerpt::new(&source, line, 5).expect("inside the file");
         let mut out = Vec::new();
