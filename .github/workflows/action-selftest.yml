@@ -31,10 +31,8 @@ jobs:
           - source: registry
             version: 0.1.0
           # windows edge tests assert process-wide handle counts, which parallel tests perturb
-          # the *_probe tests are child halves that edge_spawn_windows tests spawn with a parent-set environment; launched on their own they panic by design
           - os: windows-latest
             args: "-- --test-threads=1"
-            filterset: "not test(child_environment_probe) and not test(child_working_directory_probe)"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
