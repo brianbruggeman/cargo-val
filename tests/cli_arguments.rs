@@ -1,7 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
 use core::hint::black_box;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::System;
 use std::vec::Vec;
 
@@ -11,6 +10,7 @@ struct CountingAllocator;
 
 thread_local! {
     static TRACKING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 fn tracking_enabled() -> bool {
@@ -21,15 +21,13 @@ fn set_tracking(enabled: bool) {
     TRACKING.with(|tracking| tracking.set(enabled));
 }
 
-static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if tracking_enabled() {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
         }
         unsafe { System.alloc(layout) }
     }
@@ -40,7 +38,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         if tracking_enabled() {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
         }
         unsafe { System.realloc(pointer, layout, size) }
     }
@@ -99,7 +97,7 @@ async fn missing_or_empty_manifest_path_is_rejected() {
 
 #[proxima::test]
 async fn argv_parsing_allocates_nothing_and_probe_detects_allocation() {
-    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    ALLOCATION_COUNT.with(|count| count.set(0));
     set_tracking(true);
     let mut parser = CliParser::new();
     parser.push(b"--manifest-path");
@@ -108,13 +106,13 @@ async fn argv_parsing_allocates_nothing_and_probe_detects_allocation() {
     parser.push(b"--exact");
     let parsed = parser.manifest_path().is_some() && parser.filter().is_some() && parser.exact();
     set_tracking(false);
-    let parser_allocations = ALLOCATION_COUNT.load(Ordering::Relaxed);
+    let parser_allocations = ALLOCATION_COUNT.with(Cell::get);
 
-    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    ALLOCATION_COUNT.with(|count| count.set(0));
     set_tracking(true);
     let allocation_control = Vec::<u8>::with_capacity(1);
     set_tracking(false);
-    let positive_control_allocations = ALLOCATION_COUNT.load(Ordering::Relaxed);
+    let positive_control_allocations = ALLOCATION_COUNT.with(Cell::get);
     black_box(allocation_control);
 
     assert!(parsed);
