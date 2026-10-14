@@ -22,6 +22,11 @@ fn unreaped_children() -> bool {
     reaped >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ECHILD)
 }
 
+// darwin returns ENOENT from posix_spawn while the doomed child is still a process; its teardown outlives the call and is visible to the next test's probe
+fn await_every_child_gone() {
+    while unsafe { libc::waitpid(-1, core::ptr::null_mut(), 0) } >= 0 {}
+}
+
 fn spawn_true() -> Result<Child, RunError> {
     spawn(b"true", &[], &[], &[], None).map_err(|_| RunError::Spawn)
 }
@@ -62,6 +67,7 @@ async fn a_failed_spawn_returns_its_reservation_to_the_table() {
     hold_slots(SIGNAL_SLOTS - 1);
 
     let failed = spawn_reserved(|| spawn(b"cargo-val-no-such-program", &[], &[], &[], None).map_err(|_| RunError::Spawn));
+    await_every_child_gone();
     let reusable = reserve_slot();
     let exhausted = reserve_slot();
     empty_table();
