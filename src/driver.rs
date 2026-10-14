@@ -3566,6 +3566,7 @@ fn run_storage<'environment>(process: ProcessMode, timeline_bytes: usize) -> Run
         (
             zeroed(FRAME_CAPACITY),
             zeroed(SCRATCH_CAPACITY),
+    status_queue::spill_into(Rc::clone(&store));
             zeroed(LINKED_CAPACITY),
             zeroed(BUILD_SCRIPT_CAPACITY),
             zeroed(SOURCE_CAPACITY + 1),

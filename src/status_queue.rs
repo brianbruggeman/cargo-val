@@ -4,6 +4,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll, Waker, ready};
 use core::time::Duration;
 use std::io;
+use std::rc::Rc;
 
 use proxima_core::time::timeout;
 use proxima_primitives::pipe::{BoundedQueue, EnqueueOutcome, FailMode, UnpinPipe};
@@ -12,6 +13,7 @@ use crate::build_defaults::STATUS_QUEUE_BYTES;
 use crate::driver::window::SYNC_WINDOW_BYTES;
 use crate::driver::{NAME_CAPACITY, RunError};
 use crate::edge_output::{self, OutputSink};
+use crate::edge_store::{self, HEADER_BYTES, Store, View};
 use crate::edge_stream::CAPTURE_BYTES;
 use crate::line::Line;
 use crate::summary::ID_CAPACITY;
@@ -94,6 +96,14 @@ struct Queue {
     capturing: Cell<bool>,
     deferred: Cell<bool>,
     abandoned: Cell<usize>,
+    // the overflow: scrollback the ring has no room for is sealed into this chain of the run store and read back in order
+    spill: RefCell<Option<Rc<Store>>>,
+    spilled: Cell<View>,
+    spill_read: Cell<(u64, u64)>,
+    unread: Cell<u64>,
+    spill_ok: Cell<bool>,
+    paused_noticed: Cell<bool>,
+    skipped: Cell<u64>,
 }
 
 std::thread_local! {
@@ -109,7 +119,68 @@ std::thread_local! {
         capturing: Cell::new(false),
         deferred: Cell::new(false),
         abandoned: Cell::new(0),
+        spill: RefCell::new(None),
+        spilled: Cell::new((SCROLLBACK_STREAM, 0, 0, 0)),
+        spill_read: Cell::new((0, 0)),
+        unread: Cell::new(0),
+        spill_ok: Cell::new(false),
+        paused_noticed: Cell::new(false),
+        skipped: Cell::new(0),
     };
+}
+
+/// The store stream key the scrollback overflow is sealed under; session streams count up from zero, so this never meets one.
+pub(crate) const SCROLLBACK_STREAM: u32 = u32::MAX;
+
+// one overflow page is the descriptor byte then up to this many bytes of one record
+const PAGE_TEXT_BYTES: usize = RECORD_BYTES - 1;
+const PAUSE_NOTICE: &[u8] = b"cargo-val: warn: the screen is behind and the run store is unavailable, so tests pause until it catches up\n";
+
+/// Makes `store` the overflow of the scrollback: from now on a write the ring has no room for is sealed into it instead of pausing the
+/// lanes. A memory-only store keeps the ring's pause, which says so once.
+pub(crate) fn spill_into(store: Rc<Store>) {
+    QUEUE.with(|queue| {
+        queue.spill_ok.set(store.0.is_some());
+        *queue.spill.borrow_mut() = Some(store);
+        queue.spilled.set((SCROLLBACK_STREAM, 0, 0, 0));
+        queue.spill_read.set((0, 0));
+        queue.unread.set(0);
+    });
+}
+
+/// How many scrollback pages the overflow holds that the screen has not been given yet.
+#[cfg(test)]
+pub(crate) fn unread_pages() -> u64 {
+    QUEUE.with(|queue| queue.unread.get())
+}
+
+/// Pump turns that skipped the lanes because the queue had no room; zero whenever the store holds the overflow.
+pub(crate) fn skipped_turns() -> u64 {
+    QUEUE.with(|queue| queue.skipped.get())
+}
+
+/// Counts a pump turn that did not read the lanes.
+pub(crate) fn note_skipped() {
+    QUEUE.with(|queue| queue.skipped.set(queue.skipped.get() + 1));
+}
+
+fn spill_usable(queue: &Queue) -> bool {
+    queue.spill_ok.get() && queue.spill.borrow().as_ref().is_some_and(|store| store.0.is_some())
+}
+
+// a memory-only run can only pause; it says so once, straight to stderr, because the ring is full and an unread screen would hold a queued notice back
+fn note_pause(queue: &Queue) {
+    if queue.paused_noticed.get() {
+        return;
+    }
+    let mut line = Line::<RECORD_BYTES>::new();
+    line.text(PAUSE_NOTICE);
+    queue.paused_noticed.set(try_stderr(line));
+}
+
+#[cfg(test)]
+pub(crate) fn pause_noticed() -> bool {
+    QUEUE.with(|queue| queue.paused_noticed.get())
 }
 
 fn records_for(bytes: usize) -> usize {
@@ -145,13 +216,45 @@ fn next_record(queue: &Queue) -> Option<Record> {
     if at_barrier(queue) {
         return None;
     }
-    let record = queue.records.dequeue().or_else(|| {
-        let packed = queue.tail.borrow_mut().take();
-        queue.pushed.set(queue.pushed.get() + u64::from(packed.is_some()));
-        packed
-    })?;
+    let record = queue
+        .records
+        .dequeue()
+        .or_else(|| {
+            let packed = queue.tail.borrow_mut().take();
+            queue.pushed.set(queue.pushed.get() + u64::from(packed.is_some()));
+            packed
+        })
+        .or_else(|| read_spill(queue))?;
     queue.taken.set(queue.taken.get() + 1);
     Some(record)
+}
+
+// the overflow is older than nothing in the ring and newer than all of it, so it is read only once the ring and its tail are empty;
+// a page the store cannot give back is counted abandoned and stands for the rest of the chain, so the barrier arithmetic still closes
+fn read_spill(queue: &Queue) -> Option<Record> {
+    let owed = queue.unread.get();
+    if owed == 0 {
+        return None;
+    }
+    let store = queue.spill.borrow().clone()?;
+    let (previous, cursor) = queue.spill_read.get();
+    let start = if previous == 0 { queue.spilled.get().1 } else { cursor };
+    let mut page = [0_u8; RECORD_BYTES];
+    match edge_store::next_page(&store, (previous, start), &mut page) {
+        Ok((offset, length)) if length > 0 => {
+            queue.unread.set(owed - 1);
+            queue.spill_read.set((offset, offset + (HEADER_BYTES + length) as u64));
+            let mut record = Record::empty(page[0]);
+            record.fill(&page[1..length]);
+            Some(record)
+        }
+        _ => {
+            queue.unread.set(0);
+            queue.taken.set(queue.taken.get() + owed);
+            queue.abandoned.set(queue.abandoned.get() + 1);
+            None
+        }
+    }
 }
 
 /// Scope inside which [`write`] queues instead of writing; the whole run holds one, the pump drains through [`Sinks`] after every
@@ -191,20 +294,39 @@ fn notify_abandoned(records: usize) {
     line.text(b"cargo-val: abandoned ");
     line.number(records);
     line.text(b" status records: the output reader stopped reading\n");
-    if let Ok(sink) = edge_output::standard(2) {
-        let mut call = UnpinPipe::call(&sink, line);
-        let _ = Pin::new(&mut call).poll(&mut Context::from_waker(Waker::noop()));
-    }
+    let _ = try_stderr(line);
+}
+
+fn try_stderr(line: Line<RECORD_BYTES>) -> bool {
+    let Ok(sink) = edge_output::standard(2) else {
+        return false;
+    };
+    let mut call = UnpinPipe::call(&sink, line);
+    Pin::new(&mut call).poll(&mut Context::from_waker(Waker::noop())).is_ready()
 }
 
 /// Whether the queue can take `bytes` more as records; the per-event gate of every writer that can emit an unbounded amount.
+///
+/// Always true while the run store holds the overflow: a writer the ring cannot take is never asked to wait for the screen.
 pub(crate) fn room_for(bytes: usize) -> bool {
-    QUEUE.with(|queue| can_take(queue, bytes))
+    QUEUE.with(|queue| {
+        let room = spill_usable(queue) || can_take(queue, bytes);
+        if !room {
+            note_pause(queue);
+        }
+        room
+    })
 }
 
-/// Whether the queue can take the worst-case output of the next handled item.
+/// Whether the queue can take the worst-case output of the next handled item; true whenever the run store holds the overflow.
 pub(crate) fn has_room() -> bool {
-    QUEUE.with(|queue| free_slots(queue) >= ITEM_RECORDS)
+    QUEUE.with(|queue| {
+        let room = spill_usable(queue) || free_slots(queue) >= ITEM_RECORDS;
+        if !room {
+            note_pause(queue);
+        }
+        room
+    })
 }
 
 /// Seals the packed tail and returns the position every later append queues behind; the position a block holds the ring at.
@@ -308,11 +430,44 @@ fn append_inline(queue: &Queue, descriptor: i32, bytes: &[u8]) -> bool {
     })
 }
 
+// once anything is in the overflow every later write joins it until the screen has been given all of it, so append order is delivery order
+fn append_spill(queue: &Queue, tag: u8, bytes: &[u8]) -> bool {
+    if !seal(queue, &mut queue.tail.borrow_mut()) {
+        return false;
+    }
+    let Some(store) = queue.spill.borrow().clone() else {
+        return false;
+    };
+    bytes.chunks(PAGE_TEXT_BYTES).all(|chunk| {
+        let mut page = [0_u8; RECORD_BYTES];
+        page[0] = tag;
+        page[1..=chunk.len()].copy_from_slice(chunk);
+        match edge_store::append(&store, queue.spilled.get(), &page[..=chunk.len()]) {
+            Ok(view) => {
+                queue.spilled.set(view);
+                queue.pushed.set(queue.pushed.get() + 1);
+                queue.unread.set(queue.unread.get() + 1);
+                true
+            }
+            Err(error) => {
+                edge_store::lose(&store, chunk.len(), &error);
+                queue.spill_ok.set(false);
+                false
+            }
+        }
+    })
+}
+
 fn append(queue: &Queue, descriptor: i32, bytes: &[u8]) -> bool {
     let Ok(tag) = u8::try_from(descriptor) else {
         return false;
     };
-    if !can_take(queue, bytes.len()) {
+    if spill_usable(queue) {
+        // the ring keeps one slot beyond the fragments so sealing the packed tail when the overflow begins cannot fail
+        if queue.unread.get() != 0 || free_slots(queue) <= records_for(bytes.len()) + 1 {
+            return append_spill(queue, tag, bytes);
+        }
+    } else if queue.unread.get() != 0 || !can_take(queue, bytes.len()) {
         queue.records.note_drop();
         return false;
     }
@@ -384,7 +539,10 @@ mod tests {
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
 
+    use std::rc::Rc;
+
     use super::{Capture, Sinks, write};
+    use crate::edge_store::{self, Store};
     use crate::edge_exit::fixture::in_single_threaded_process;
 
     const STATUS_LINE: &[u8] = b"cargo-val: 12 passed; 0 failed; 3 ignored; finished in 4.21s\n";
@@ -489,5 +647,85 @@ mod tests {
         assert_eq!(page.as_deref(), Some("page 1\n"), "the page comes before the later line");
         assert_eq!(still_held, None, "the later line still waits for the rest of the block");
         assert_eq!(behind.as_deref(), Some("settle b\n"), "the later line prints once the block releases the ring");
+    }
+
+    fn settle_line(index: usize) -> std::string::String {
+        std::format!("PASS     views_pair  fixture::settle_{index:04}  0.003s\n")
+    }
+
+    fn remaining() -> std::string::String {
+        core::iter::from_fn(delivered).collect()
+    }
+
+    fn store_in(directory: &tempfile::TempDir) -> Rc<Store> {
+        Rc::new(edge_store::open(Some(directory.path())))
+    }
+
+    #[test]
+    fn two_thousand_settle_lines_behind_a_held_block_overflow_to_the_store_and_print_in_order_after_the_block() {
+        let directory = tempfile::tempdir().expect("temporary target");
+        super::spill_into(store_in(&directory));
+        let _capture = Capture::enter();
+        write(1, b"START    views_pair  fixture::fails_big\n").expect("the line ahead of the block queues");
+        super::hold(Some(super::mark()));
+
+        let always_room = (0..2000).all(|index| {
+            write(1, settle_line(index).as_bytes()).expect("a settle line queues behind the block");
+            super::has_room() && super::room_for(super::EVENT_RESERVE)
+        });
+        let ahead = delivered();
+        let held = delivered();
+        super::insert(|| write(1, b"block page\n")).expect("the block page queues inline");
+        let page = delivered();
+        let overflow = super::unread_pages();
+        super::hold(None);
+        let behind = remaining();
+
+        assert!(always_room, "no writer was ever told to wait for the screen");
+        assert!(overflow > 0, "the ring held 64 KiB and the lines are more than that, so the store holds the rest: {overflow} pages");
+        assert_eq!(ahead.as_deref(), Some("START    views_pair  fixture::fails_big\n"));
+        assert_eq!(held, None, "nothing behind the barrier is delivered while the block waits");
+        assert_eq!(page.as_deref(), Some("block page\n"), "the block page comes before every settle line");
+        assert_eq!(behind, (0..2000).map(settle_line).collect::<std::string::String>(), "every settle line prints once, in the order it settled");
+        assert_eq!(super::unread_pages(), 0, "the overflow was handed over whole");
+        assert_eq!(super::skipped_turns(), 0, "no pump turn was recorded as skipping the lanes");
+    }
+
+    #[test]
+    fn writes_return_to_the_ring_once_the_overflow_has_been_delivered() {
+        let directory = tempfile::tempdir().expect("temporary target");
+        super::spill_into(store_in(&directory));
+        let _capture = Capture::enter();
+        super::hold(Some(super::mark()));
+        (0..1500).for_each(|index| write(1, settle_line(index).as_bytes()).expect("queues"));
+        super::hold(None);
+        assert!(super::unread_pages() > 0, "the overflow holds pages");
+        let first_pass = remaining();
+
+        write(1, b"after the overflow\n").expect("queues");
+
+        assert_eq!(first_pass, (0..1500).map(settle_line).collect::<std::string::String>());
+        assert_eq!(super::unread_pages(), 0, "a line after the drain joins the ring, not the store");
+        assert_eq!(delivered().as_deref(), Some("after the overflow\n"));
+    }
+
+    #[test]
+    fn a_memory_only_run_pauses_with_one_notice_and_loses_no_line() {
+        super::spill_into(Rc::new(edge_store::unavailable()));
+        let _capture = Capture::enter();
+        super::hold(Some(super::mark()));
+        let mut written = 0;
+        while super::has_room() {
+            write(1, settle_line(written).as_bytes()).expect("a line the gate admitted queues");
+            written += 1;
+        }
+        let paused = (super::has_room(), super::has_room());
+        super::hold(None);
+
+        let text = remaining();
+
+        assert_eq!(paused, (false, false), "with nowhere to put the lines the lanes pause");
+        assert!(super::pause_noticed(), "the pause was said once on stderr, however many turns it lasts");
+        assert_eq!(text, (0..written).map(settle_line).collect::<std::string::String>(), "every admitted line printed, in order, with the notice kept out of the scrollback");
     }
 }
