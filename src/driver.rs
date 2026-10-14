@@ -2414,9 +2414,9 @@ fn spawn_metadata(parser: &CliParser<'_>, environment: &[&[u8]]) -> Result<Child
 }
 
 // the short-lived metadata child is awaited alone; none of the run's own children are polled meanwhile
-async fn read_metadata(child: Child) -> Option<Box<MetadataFacts>> {
+async fn read_metadata(child: Child, parser: &CliParser<'_>) -> Option<Box<MetadataFacts>> {
     // the scanner's tens of KiB of text storage would otherwise sit in every enclosing future
-    let mut scan = Box::new(MetadataScan::new());
+    let mut scan = Box::new(MetadataScan::selecting(parser.cargo_arguments()));
     let mut usable = true;
     let code = collect_child(child, |bytes| {
         usable = usable && scan.feed(bytes).is_ok();
@@ -2544,6 +2544,21 @@ fn gate_debug(enabled: bool, describe: impl FnOnce(&mut Line<1024>)) {
     let mut line = Line::<1024>::new();
     line.text(b"cargo-val: debug: gate");
     describe(&mut line);
+    line.text(b"\n");
+    let _ = line.write(2);
+}
+
+// the up-front count of test binaries the run's flags select, which the end-to-end tests compare with the binaries actually listed
+fn test_binaries_debug(enabled: bool, test_targets: Option<usize>) {
+    if !enabled {
+        return;
+    }
+    let mut line = Line::<64>::new();
+    line.text(b"cargo-val: debug: metadata test-binaries=");
+    match test_targets {
+        Some(found) => line.number(found),
+        None => line.text(b"unavailable"),
+    }
     line.text(b"\n");
     let _ = line.write(2);
 }
@@ -3688,13 +3703,13 @@ async fn start_children(
     let spawned = metadata_child.is_some();
     let mut facts = None;
     if isolating && let Some(child) = metadata_child.take() {
-        facts = read_metadata(child).await;
+        facts = read_metadata(child, parser).await;
     }
     let directories = build_directories(target_mode, facts.as_deref())?;
     let cargo = spawn_reserved(|| spawn_cargo(parser, settings.color, environment, directories.as_ref().map(|chosen| &chosen.test)))?;
     track(cargo.process_id())?;
     if let Some(child) = metadata_child {
-        facts = read_metadata(child).await;
+        facts = read_metadata(child, parser).await;
     }
     let mut lock_watch = LockWatch::new();
     match (&directories, facts.as_deref().and_then(MetadataFacts::target_directory)) {
@@ -3705,7 +3720,8 @@ async fn start_children(
         (None, None) => {}
     }
     let workspace_root = facts.as_deref().and_then(MetadataFacts::workspace_root).and_then(|bytes| core::str::from_utf8(bytes).ok()).map_or_else(|| settings.source_root.clone(), PathBuf::from);
-    let test_targets = facts.as_deref().map(|found| found.test_targets);
+    let test_targets = facts.as_deref().and_then(|found| found.test_targets);
+    test_binaries_debug(settings.debug, test_targets);
     let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory).map(Box::from);
     let (bins, gate) = resolve_bin_gate(settings, spawned, facts);
     Ok(StartedChildren {
@@ -4414,7 +4430,7 @@ async fn run_doc_only<'run>(
         .then(|| spawn_metadata(parser, environment))
         .and_then(Result::ok);
     let facts = match metadata_child {
-        Some(child) => read_metadata(child).await,
+        Some(child) => read_metadata(child, parser).await,
         None => None,
     };
     let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory);

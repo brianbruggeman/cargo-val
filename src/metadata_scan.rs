@@ -27,8 +27,42 @@ enum Key {
     Id,
     Targets,
     Kind,
+    Name,
+    Test,
+    DefaultMembers,
     TargetDirectory,
     WorkspaceRoot,
+}
+
+const LIB: u8 = 1;
+const BIN: u8 = 2;
+const TEST: u8 = 4;
+const EXAMPLE: u8 = 8;
+const BENCH: u8 = 16;
+const UNTESTED: u8 = 32;
+const LIBRARY_KINDS: [&[u8]; 6] = [b"lib", b"rlib", b"dylib", b"cdylib", b"staticlib", b"proc-macro"];
+const TARGET_SELECTORS: [&[u8]; 10] = [
+    b"--lib", b"--bins", b"--bin", b"--tests", b"--test", b"--examples", b"--example", b"--benches", b"--bench", b"--all-targets",
+];
+
+fn has_flag(arguments: &[&[u8]], flag: &[u8]) -> bool {
+    arguments.contains(&flag)
+}
+
+// the values given to a repeatable cargo option, in `--long value`, `--long=value` and `-s value` forms
+fn option_values<'a>(arguments: &'a [&'a [u8]], long: &[u8], short: &[u8]) -> impl Iterator<Item = &'a [u8]> {
+    arguments.iter().enumerate().filter_map(move |(index, argument)| {
+        if *argument == long || (!short.is_empty() && *argument == short) {
+            arguments.get(index + 1).copied()
+        } else {
+            argument.strip_prefix(long).and_then(|rest| rest.strip_prefix(b"="))
+        }
+    })
+}
+
+// a package spec is a name, optionally followed by `@version`
+fn spec_names(spec: &[u8], name: &[u8]) -> bool {
+    spec.split(|byte| *byte == b'@').next() == Some(name)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,12 +78,18 @@ struct Entry {
     id_length: usize,
     bins: usize,
     built: usize,
+    tests: usize,
+    named: bool,
+    excluded: bool,
+    default: bool,
 }
 
-/// Per package with at least one `bin` target: how many it has and how many were built so far.
+/// Per workspace package: how many `bin` targets it has and how many were built so far, plus the test executables the run's flags select in it.
 pub struct BinCounts {
     entries: Box<[Entry]>,
     count: usize,
+    unselectable: bool,
+    default_members_seen: bool,
 }
 
 impl BinCounts {
@@ -61,8 +101,14 @@ impl BinCounts {
                 id_length: 0,
                 bins: 0,
                 built: 0,
+                tests: 0,
+                named: false,
+                excluded: false,
+                default: false,
             }; MAX_PACKAGES].into_boxed_slice(),
             count: 0,
+            unselectable: false,
+            default_members_seen: false,
         }
     }
 
@@ -88,8 +134,8 @@ impl BinCounts {
 
     /// Number of packages with at least one `bin` target.
     #[must_use]
-    pub const fn packages(&self) -> usize {
-        self.count
+    pub fn packages(&self) -> usize {
+        self.entries[..self.count].iter().filter(|entry| entry.bins > 0).count()
     }
 
     fn add(&mut self, id: &[u8], bins: usize) -> Result<(), ScanFault> {
@@ -103,6 +149,12 @@ impl BinCounts {
         entry.built = 0;
         self.count += 1;
         Ok(())
+    }
+
+    fn mark_default(&mut self, package_id: &[u8]) {
+        if let Some(index) = self.find(package_id) {
+            self.entries[index].default = true;
+        }
     }
 }
 
@@ -145,8 +197,8 @@ impl PathText {
 pub struct MetadataFacts {
     /// Per package with at least one `bin` target.
     pub bins: BinCounts,
-    /// Targets that build a test executable: every `lib`, `proc-macro` and `bin` unit-test harness plus every `test`-kind target.
-    pub test_targets: usize,
+    /// Test executables the run builds: the targets with `test = true` that the package and target flags select. `None` when the packages overflowed the fixed table.
+    pub test_targets: Option<usize>,
     target_directory: PathText,
     workspace_root: PathText,
 }
@@ -166,7 +218,8 @@ impl MetadataFacts {
 }
 
 /// Byte-fed scanner; feed the whole metadata document, then read [`Self::finish`].
-pub struct MetadataScan {
+pub struct MetadataScan<'a> {
+    arguments: &'a [&'a [u8]],
     stack: [Frame; MAX_DEPTH],
     depth: usize,
     lexing: Lexing,
@@ -177,8 +230,12 @@ pub struct MetadataScan {
     package_id_length: usize,
     package_id_overflow: bool,
     package_bins: usize,
-    test_targets: usize,
-    target_counted: bool,
+    package_tests: usize,
+    package_name: [u8; ID_CAPACITY],
+    package_name_length: Option<usize>,
+    target_kinds: u8,
+    target_name: [u8; ID_CAPACITY],
+    target_name_length: Option<usize>,
     counts: BinCounts,
     target_directory: PathText,
     workspace_root: PathText,
@@ -197,10 +254,21 @@ const FRAME: Frame = Frame {
     key: Key::Other,
 };
 
-impl MetadataScan {
+impl MetadataScan<'static> {
+    /// A scan with no cargo flags: every workspace package, every target with `test = true`.
     #[must_use]
     pub fn new() -> Self {
+        Self::selecting(&[])
+    }
+}
+
+impl<'a> MetadataScan<'a> {
+    /// A scan whose test count follows the cargo flags the run forwards: `-p`/`--package`, `--workspace`/`--all`, `--exclude`, and the target selectors (`--lib`, `--bins`, `--bin`, `--tests`, `--test`, `--examples`, `--example`, `--benches`, `--bench`, `--all-targets`).
+    /// Doc tests are a separate lane and are never counted here.
+    #[must_use]
+    pub fn selecting(arguments: &'a [&'a [u8]]) -> Self {
         Self {
+            arguments,
             stack: [FRAME; MAX_DEPTH],
             depth: 0,
             lexing: Lexing::Outside,
@@ -211,8 +279,12 @@ impl MetadataScan {
             package_id_length: 0,
             package_id_overflow: false,
             package_bins: 0,
-            test_targets: 0,
-            target_counted: false,
+            package_tests: 0,
+            package_name: [0; ID_CAPACITY],
+            package_name_length: Some(0),
+            target_kinds: 0,
+            target_name: [0; ID_CAPACITY],
+            target_name_length: Some(0),
             counts: BinCounts::new(),
             target_directory: PathText::new(),
             workspace_root: PathText::new(),
@@ -239,11 +311,54 @@ impl MetadataScan {
     #[must_use]
     pub fn finish(self) -> MetadataFacts {
         MetadataFacts {
+            test_targets: self.selected_test_targets(),
             bins: self.counts,
-            test_targets: self.test_targets,
             target_directory: self.target_directory,
             workspace_root: self.workspace_root,
         }
+    }
+
+    // `--workspace` takes every member (less `--exclude`), else `-p` takes the named ones, else cargo's default members
+    fn selected_test_targets(&self) -> Option<usize> {
+        if self.counts.unselectable {
+            return None;
+        }
+        let workspace = has_flag(self.arguments, b"--workspace") || has_flag(self.arguments, b"--all");
+        let named = option_values(self.arguments, b"--package", b"-p").next().is_some();
+        let chosen = |entry: &Entry| match (workspace, named) {
+            (true, _) => !entry.excluded,
+            (false, true) => entry.named,
+            (false, false) => !self.counts.default_members_seen || entry.default,
+        };
+        let entries = &self.counts.entries[..self.counts.count];
+        Some(entries.iter().filter(|entry| chosen(entry)).map(|entry| entry.tests).sum())
+    }
+
+    fn target_selected(&self) -> bool {
+        let kinds = self.target_kinds & !UNTESTED;
+        let tested = self.target_kinds & UNTESTED == 0;
+        let Some(name_length) = self.target_name_length else {
+            return false;
+        };
+        if kinds == 0 {
+            return false;
+        }
+        let arguments = self.arguments;
+        let name = &self.target_name[..name_length];
+        let flagged = |selector: &[u8]| arguments.iter().any(|argument| *argument == selector || argument.strip_prefix(selector).is_some_and(|rest| rest.first() == Some(&b'=')));
+        if !TARGET_SELECTORS.iter().any(|selector| flagged(selector)) {
+            return tested;
+        }
+        let named = |long: &[u8], kind: u8| kinds & kind != 0 && option_values(arguments, long, b"").any(|value| value == name);
+        let by_kind = |flag: &[u8], mask: u8| tested && kinds & mask != 0 && has_flag(arguments, flag);
+        by_kind(b"--lib", LIB)
+            || by_kind(b"--bins", BIN)
+            || by_kind(b"--tests", u8::MAX)
+            || by_kind(b"--all-targets", u8::MAX)
+            || by_kind(b"--examples", EXAMPLE)
+            || by_kind(b"--benches", BENCH)
+            || (tested && (named(b"--bin", BIN) || named(b"--example", EXAMPLE) || named(b"--bench", BENCH)))
+            || named(b"--test", TEST)
     }
 
     fn string_byte(&mut self, byte: u8) {
@@ -280,10 +395,14 @@ impl MetadataScan {
                 b"id" => Key::Id,
                 b"targets" => Key::Targets,
                 b"kind" => Key::Kind,
+                b"name" => Key::Name,
+                b"test" => Key::Test,
+                b"workspace_default_members" => Key::DefaultMembers,
                 b"target_directory" => Key::TargetDirectory,
                 b"workspace_root" => Key::WorkspaceRoot,
                 _ => Key::Other,
             };
+            self.counts.default_members_seen |= key == Key::DefaultMembers && depth == 1;
             if let Some(frame) = self.top() {
                 frame.key = key;
                 frame.expect_key = false;
@@ -298,6 +417,21 @@ impl MetadataScan {
                 self.package_id_length = text_length;
                 self.package_id[..text_length].copy_from_slice(&self.text[..text_length]);
             }
+        } else if depth == 3 && self.stack[2].key == Key::Name && self.in_package() {
+            let fits = !overflow && text_length <= ID_CAPACITY;
+            self.package_name_length = fits.then_some(text_length);
+            if fits {
+                self.package_name[..text_length].copy_from_slice(&self.text[..text_length]);
+            }
+        } else if depth == 5 && self.stack[4].key == Key::Name && self.in_target() {
+            let fits = !overflow && text_length <= ID_CAPACITY;
+            self.target_name_length = fits.then_some(text_length);
+            if fits {
+                self.target_name[..text_length].copy_from_slice(&self.text[..text_length]);
+            }
+        } else if depth == 2 && self.stack[0].object && self.stack[0].key == Key::DefaultMembers && !self.stack[1].object {
+            let member = &self.text[..text_length];
+            self.counts.mark_default(member);
         } else if depth == 6 && self.in_kind_list() {
             self.count_kind(text_length);
         }
@@ -310,11 +444,19 @@ impl MetadataScan {
         if kind == b"bin" {
             self.package_bins += 1;
         }
-        let builds_tests = matches!(kind, b"lib" | b"proc-macro" | b"bin" | b"test");
-        if builds_tests && !self.target_counted {
-            self.target_counted = true;
-            self.test_targets += 1;
-        }
+        self.target_kinds |= match kind {
+            b"bin" => BIN,
+            b"test" => TEST,
+            b"example" => EXAMPLE,
+            b"bench" => BENCH,
+            library if LIBRARY_KINDS.contains(&library) => LIB,
+            _ => 0,
+        };
+    }
+
+    // package -> targets array -> target object
+    fn in_target(&self) -> bool {
+        self.in_package() && self.depth >= 5 && self.stack[2].key == Key::Targets && !self.stack[3].object && self.stack[4].object
     }
 
     // root object, its `packages` array, one package object
@@ -347,27 +489,47 @@ impl MetadataScan {
             key: Key::Other,
         };
         self.depth += 1;
-        if object && self.depth == 5 && self.in_package() && self.stack[2].key == Key::Targets {
-            self.target_counted = false;
+        if object && self.depth == 5 && self.in_target() {
+            self.target_kinds = 0;
+            self.target_name_length = Some(0);
         }
         if object && self.depth == 3 && self.in_package() {
             self.package_id_length = 0;
             self.package_id_overflow = false;
             self.package_bins = 0;
+            self.package_tests = 0;
+            self.package_name_length = Some(0);
         }
         Ok(())
     }
 
     fn close(&mut self) -> Result<(), ScanFault> {
         let closing_package = self.depth == 3 && self.in_package();
-        self.depth = self.depth.saturating_sub(1);
-        if closing_package && self.package_bins > 0 {
-            if self.package_id_overflow {
-                return Err(ScanFault::TooLarge);
-            }
-            let id = self.package_id;
-            self.counts.add(&id[..self.package_id_length], self.package_bins)?;
+        if self.depth == 5 && self.in_target() && self.target_selected() {
+            self.package_tests += 1;
         }
+        self.depth = self.depth.saturating_sub(1);
+        if closing_package {
+            self.record_package()?;
+        }
+        Ok(())
+    }
+
+    // a package with bins that cannot be stored refuses the document; one without only costs the test count
+    fn record_package(&mut self) -> Result<(), ScanFault> {
+        let id = self.package_id;
+        let stored = if self.package_id_overflow { Err(ScanFault::TooLarge) } else { self.counts.add(&id[..self.package_id_length], self.package_bins) };
+        if let Err(fault) = stored {
+            self.counts.unselectable = true;
+            return if self.package_bins > 0 { Err(fault) } else { Ok(()) };
+        }
+        let name = &self.package_name[..self.package_name_length.unwrap_or(0)];
+        let matches = |long: &[u8], short: &[u8]| self.package_name_length.is_some() && option_values(self.arguments, long, short).any(|spec| spec_names(spec, name));
+        let (named, excluded) = (matches(b"--package", b"-p"), matches(b"--exclude", b""));
+        let entry = &mut self.counts.entries[self.counts.count - 1];
+        entry.tests = self.package_tests;
+        entry.named = named;
+        entry.excluded = excluded;
         Ok(())
     }
 
@@ -379,6 +541,11 @@ impl MetadataScan {
             b'{' => self.open(true)?,
             b'[' => self.open(false)?,
             b'}' | b']' => self.close()?,
+            b't' | b'f' if self.depth == 5 && self.in_target() && self.stack[4].key == Key::Test => {
+                if byte == b'f' {
+                    self.target_kinds |= UNTESTED;
+                }
+            }
             b':' => {
                 if let Some(frame) = self.top() {
                     frame.expect_key = false;
@@ -395,7 +562,7 @@ impl MetadataScan {
     }
 }
 
-impl Default for MetadataScan {
+impl Default for MetadataScan<'static> {
     fn default() -> Self {
         Self::new()
     }
@@ -408,6 +575,8 @@ mod tests {
     use super::{MetadataScan, ScanFault};
 
     const TWO_PACKAGES: &str = r#"{"packages":[{"name":"parser","version":"0.3.1","id":"path+file:///repo/parser#0.3.1","dependencies":[{"name":"x","kind":null}],"targets":[{"kind":["lib"],"crate_types":["lib"],"name":"parser"},{"kind":["bin"],"crate_types":["bin"],"name":"parse"},{"kind":["bin"],"crate_types":["bin"],"name":"lint"},{"kind":["test"],"crate_types":["bin"],"name":"cli"}],"manifest_path":"/repo/parser/Cargo.toml"},{"name":"plain","version":"0.1.0","id":"path+file:///repo/plain#0.1.0","targets":[{"kind":["lib"],"crate_types":["lib"],"name":"plain"},{"kind":["test"],"crate_types":["bin"],"name":"it"}]}],"workspace_members":["path+file:///repo/parser#0.3.1","path+file:///repo/plain#0.1.0"],"resolve":null,"target_directory":"/repo/target","version":1}"#;
+
+    const WORKSPACE: &str = r#"{"packages":[{"name":"core","version":"0.2.0","id":"path+file:///w/core#0.2.0","targets":[{"kind":["lib","cdylib"],"crate_types":["lib","cdylib"],"name":"core","test":true},{"kind":["example"],"crate_types":["bin"],"name":"demo","test":false},{"kind":["test"],"crate_types":["bin"],"name":"it","test":true}]},{"name":"cli","version":"0.2.0","id":"path+file:///w/cli#0.2.0","dependencies":[{"name":"core","kind":null}],"targets":[{"kind":["lib"],"crate_types":["lib"],"name":"cli","test":true},{"kind":["bin"],"crate_types":["bin"],"name":"cli-main","test":true},{"kind":["bench"],"crate_types":["bin"],"name":"speed","test":false}]},{"name":"extra","version":"0.1.0","id":"path+file:///w/extra#0.1.0","targets":[{"kind":["lib"],"crate_types":["lib"],"name":"extra","test":true}]}],"workspace_members":[],"workspace_default_members":["path+file:///w/core#0.2.0","path+file:///w/extra#0.1.0"],"resolve":null,"target_directory":"/w/target","version":1}"#;
 
     #[proxima::test]
     async fn counts_bin_targets_per_package_and_ignores_every_other_kind() {
@@ -428,12 +597,11 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn counts_every_target_that_builds_a_test_executable_once() {
-        let document = r#"{"packages":[{"id":"path+file:///w#0.1.0","targets":[{"kind":["lib","cdylib"],"name":"w"},{"kind":["bin"],"name":"w-cli"},{"kind":["example"],"name":"demo"},{"kind":["bench"],"name":"speed"},{"kind":["test"],"name":"it"}]}],"version":1}"#;
+    async fn with_no_flags_the_default_members_test_executables_are_counted_once() {
         let mut scan = Box::new(MetadataScan::new());
-        scan.feed(document.as_bytes()).expect("document fits");
+        scan.feed(WORKSPACE.as_bytes()).expect("document fits");
 
-        assert_eq!(scan.finish().test_targets, 3);
+        assert_eq!(scan.finish().test_targets, Some(3));
     }
 
     #[proxima::test]
@@ -441,7 +609,43 @@ mod tests {
         let mut scan = Box::new(MetadataScan::new());
         scan.feed(TWO_PACKAGES.as_bytes()).expect("document fits");
 
-        assert_eq!(scan.finish().test_targets, 6);
+        assert_eq!(scan.finish().test_targets, Some(6));
+    }
+
+    fn counted(arguments: &[&[u8]]) -> Option<usize> {
+        let mut scan = Box::new(MetadataScan::selecting(arguments));
+        for chunk in WORKSPACE.as_bytes().chunks(11) {
+            scan.feed(chunk).expect("document fits");
+        }
+        scan.finish().test_targets
+    }
+
+    #[proxima::test]
+    async fn the_count_follows_the_forwarded_selection() {
+        let table: [(&[&[u8]], usize); 10] = [
+            (&[], 3),
+            (&[b"--workspace"], 5),
+            (&[b"--workspace", b"--exclude", b"cli"], 3),
+            (&[b"-p", b"cli"], 2),
+            (&[b"--package=cli@0.2.0"], 2),
+            (&[b"--workspace", b"--lib"], 3),
+            (&[b"--workspace", b"--bins"], 1),
+            (&[b"--workspace", b"--test", b"it"], 1),
+            (&[b"-p", b"cli", b"--bin", b"cli-main"], 1),
+            (&[b"--workspace", b"--tests"], 5),
+        ];
+        for (arguments, expected) in table {
+            assert_eq!(counted(arguments), Some(expected), "arguments {arguments:?}");
+        }
+    }
+
+    #[proxima::test]
+    async fn a_target_with_test_false_builds_no_harness() {
+        let document = r#"{"packages":[{"name":"w","id":"path+file:///w#0.1.0","targets":[{"kind":["lib"],"name":"w","test":false},{"kind":["bin"],"name":"w","test":true}]}],"workspace_default_members":["path+file:///w#0.1.0"],"version":1}"#;
+        let mut scan = Box::new(MetadataScan::new());
+        scan.feed(document.as_bytes()).expect("document fits");
+
+        assert_eq!(scan.finish().test_targets, Some(1));
     }
 
     #[proxima::test]
