@@ -41,7 +41,7 @@ use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::status_queue::{self, EVENT_RESERVE};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
 use crate::edge_signal::{
-    SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group, TABLE_FULL,
+    SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group, abandon_slot, reserve_slot, TABLE_FULL,
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
 use crate::edge_spawn::{
@@ -71,6 +71,7 @@ use crate::test_environment::{
 use crate::test_intent::ExactTestIntent;
 
 pub(crate) const LIVE_CAPACITY: usize = 64;
+const _: () = assert!(LIVE_CAPACITY < SIGNAL_SLOTS, "jobs are capped at LIVE_CAPACITY, so the signal table needs one more slot for the doc test group");
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
 const INCLUDE_ARGUMENTS: [&[u8]; 1] = [b"--include-ignored"];
 const SHARD_ARGUMENTS: [&[u8]; 1] = [b"--test-threads=1"];
@@ -634,6 +635,16 @@ fn track(target: u32) -> Result<(), RunError> {
     track_child(target).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })
 }
 
+/// Runs `spawn` only after claiming a signal-table slot, so a full table refuses while no child exists, and hands the slot back if the spawn fails.
+///
+/// # Errors
+///
+/// Returns [`RunError::SignalSlots`] when the table is full, otherwise the error `spawn` returned.
+pub fn spawn_reserved<Output>(spawn: impl FnOnce() -> Result<Output, RunError>) -> Result<Output, RunError> {
+    reserve_slot().map_err(|_| RunError::SignalSlots)?;
+    spawn().inspect_err(|_| abandon_slot())
+}
+
 // a session's child runs on its own prime lane; its streams and exit arrive as items shaped like the events the outcome ledger already takes
 fn start_session(
     ledger: &Ledger<'_>,
@@ -1002,15 +1013,17 @@ fn spawn_list(
     overrides: &[&[u8]],
     directory: &str,
 ) -> Result<Child, RunError> {
-    let child = spawn_listed(
-        storage,
-        executable.as_bytes(),
-        ignored,
-        run.environment,
-        overrides,
-        directory.as_bytes(),
-    )
-    .map_err(|_| RunError::Spawn)?;
+    let child = spawn_reserved(|| {
+        spawn_listed(
+            storage,
+            executable.as_bytes(),
+            ignored,
+            run.environment,
+            overrides,
+            directory.as_bytes(),
+        )
+        .map_err(|_| RunError::Spawn)
+    })?;
     track(child.process_id())?;
     Ok(child)
 }
@@ -1103,23 +1116,25 @@ fn launch_listed(
     }
     let mut storage = run.launch_storage.borrow_mut();
     let park = run.parks_next(ledger);
-    let slot = LaunchInput {
-        target,
-        owner: LaunchOwner::Ledger(ledger),
-        intent,
-        inherited_environment: run.environment,
-        child_overrides: &overrides[..override_count],
-        storage: &mut storage,
-        harness_arguments: run.harness_arguments,
-        current_directory: layout.current_directory(environment).as_bytes(),
-    }
-    .launch_as(park)
-    .map_err(|error| {
-        report_launch_failure(
-            LaunchCause::from(&error),
-            intent.test_name(),
-            executable_text(intent.executable()),
-        )
+    let slot = spawn_reserved(|| {
+        LaunchInput {
+            target,
+            owner: LaunchOwner::Ledger(&mut *ledger),
+            intent,
+            inherited_environment: run.environment,
+            child_overrides: &overrides[..override_count],
+            storage: &mut storage,
+            harness_arguments: run.harness_arguments,
+            current_directory: layout.current_directory(environment).as_bytes(),
+        }
+        .launch_as(park)
+        .map_err(|error| {
+            report_launch_failure(
+                LaunchCause::from(&error),
+                intent.test_name(),
+                executable_text(intent.executable()),
+            )
+        })
     })?;
     if park {
         run.ready.set(Some(slot));
@@ -2407,7 +2422,7 @@ async fn start_children(
         facts = read_metadata(child).await;
     }
     let directories = build_directories(target_mode, facts.as_deref())?;
-    let cargo = spawn_cargo(parser, settings.color, environment, directories.as_ref().map(|chosen| &chosen.test))?;
+    let cargo = spawn_reserved(|| spawn_cargo(parser, settings.color, environment, directories.as_ref().map(|chosen| &chosen.test)))?;
     track(cargo.process_id())?;
     let mut doc_tests = match parser.doc_selection() {
         DocSelection::Excluded | DocSelection::Only => None,
@@ -2707,8 +2722,10 @@ fn spawn_doc_tests(
         IgnoreMode::Only => arguments.push(b"--ignored"),
         IgnoreMode::Include => arguments.push(b"--include-ignored"),
     }
-    let child = spawn_in_group(b"cargo", &arguments, environment, &[], None).map_err(|error| {
-        if error.os_code == TABLE_FULL { RunError::SignalSlots } else { RunError::Spawn }
+    let child = spawn_reserved(|| {
+        spawn_in_group(b"cargo", &arguments, environment, &[], None).map_err(|error| {
+            if error.os_code == TABLE_FULL { RunError::SignalSlots } else { RunError::Spawn }
+        })
     })?;
     let process_id = child.process_id();
     track_group(process_id).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })?;
