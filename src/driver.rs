@@ -30,6 +30,7 @@ use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWat
 use crate::line::Line;
 use crate::failure_class::Exit;
 use crate::source_excerpt::{colour_allowed, for_failure, for_span, splice_excerpt};
+use crate::render::review::{Action, Key};
 use crate::render::{Event, Outcome, State, Stream, located};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
@@ -1044,11 +1045,22 @@ pub(crate) fn emit_live(render: &Render<'_>, event: &Event<'_>) -> Result<(), Ru
 /// Set once the live frame hides the cursor; [`restore_cursor`] shows it again exactly once on any exit path.
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 
+/// Set once the terminal is in key-at-a-time mode and a key lane reads it; [`restore_cursor`] puts the mode back.
+static KEYS_RAW: AtomicBool = AtomicBool::new(false);
+
+/// Whether the run put the terminal in key-at-a-time mode, so the key lane should read it.
+pub(crate) fn keys_raw() -> bool {
+    KEYS_RAW.load(Ordering::SeqCst)
+}
+
 const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 
 /// Shows the cursor if the live frame hid it, writing directly: the fallback for the panic hook and for exits that never reached the queued close.
 /// The normal close queues its show-cursor through `close_cursor` so it lands behind the erase and the closing block, never ahead of them.
 pub fn restore_cursor() {
+    if KEYS_RAW.swap(false, Ordering::SeqCst) {
+        crate::edge_output::leave_raw_mode(0);
+    }
     if CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
         let _ = crate::edge_output::write(1, SHOW_CURSOR);
     }
@@ -1518,6 +1530,18 @@ impl ListingRun<'_> {
 
     pub(crate) fn session_scope(&self, rerun: Option<Rerun>) -> Signal {
         scope_for(rerun, (&self.root, &self.trip))
+    }
+
+    // a key is an event like any other: the state moves, the screen redraws, and the action it asked for runs here
+    pub(crate) fn key(&self, key: Key) -> Result<(), RunError> {
+        let state = self.render().1.borrow();
+        let leaving = matches!(state.action(key, |id| state.detail(id)), Action::Quit | Action::Interrupt);
+        drop(state);
+        emit(self.render(), &Event::Key(key))?;
+        if leaving {
+            self.root.fire();
+        }
+        Ok(())
     }
 
     // a forwarded signal only reaches children that honor it, so receiving one fires the root every session scope descends from
@@ -2753,6 +2777,9 @@ fn persist_last_run(location: Option<&Path>, wall_ms: u64, outcome: &Result<RunS
 fn begin_rich(render: &Render<'_>) -> Result<(), RunError> {
     if !crate::edge_output::enable_virtual_terminal(1) {
         return Err(RunError::Settings);
+    }
+    if crate::edge_output::is_terminal(0) && crate::edge_output::enter_raw_mode(0) {
+        KEYS_RAW.store(true, Ordering::SeqCst);
     }
     emit(render, &Event::Resize { cols: crate::edge_output::columns(1).unwrap_or(80) })
 }

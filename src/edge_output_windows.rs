@@ -445,6 +445,24 @@ fn post_notice() {
     let _ = Pin::new(&mut call).poll(&mut Context::from_waker(Waker::noop()));
 }
 
+/// Key input is not read on a Windows console yet: the review screen is unreachable there, so raw mode never engages.
+#[must_use]
+pub const fn enter_raw_mode(_descriptor: i32) -> bool {
+    false
+}
+
+/// Nothing to restore: [`enter_raw_mode`] never changed the console.
+pub const fn leave_raw_mode(_descriptor: i32) {}
+
+/// A readable key source over the console input; unsupported on Windows, so the review screen never opens.
+///
+/// # Errors
+///
+/// Always returns [`io::ErrorKind::Unsupported`].
+pub fn key_stream(_descriptor: i32) -> io::Result<crate::edge_stream::ChildStream> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
 #[cfg(test)]
 mod tests {
     use core::future::poll_fn;

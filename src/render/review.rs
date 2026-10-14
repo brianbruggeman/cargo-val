@@ -129,6 +129,30 @@ const fn opening(byte: u8, back: Back) -> Option<Mode> {
     }
 }
 
+impl Key {
+    /// Turns the bytes one terminal read returned into keys, in order, handing each to `sink`.
+    ///
+    /// `Enter` is `\r` or `\n`, `Esc` is a lone `0x1b`, the arrows are `0x1b [ A|B` or `0x1b O A|B`, `Ctrl-C` is `0x03`
+    /// and printable ASCII is itself. Anything else (other escape sequences, control bytes, UTF-8) is dropped whole.
+    pub fn decode(bytes: &[u8], mut sink: impl FnMut(Self)) {
+        let mut at = 0;
+        while at < bytes.len() {
+            let (key, used) = match bytes[at..] {
+                [0x1b, b'[' | b'O', b'A', ..] => (Some(Self::Up), 3),
+                [0x1b, b'[' | b'O', b'B', ..] => (Some(Self::Down), 3),
+                [0x1b, b'[' | b'O', ..] => (None, bytes.len() - at),
+                [0x1b, ..] => (Some(Self::Esc), 1),
+                [b'\r' | b'\n', ..] => (Some(Self::Enter), 1),
+                [0x03, ..] => (Some(Self::CtrlC), 1),
+                [byte @ 0x20..=0x7e, ..] => (Some(Self::Char(byte)), 1),
+                _ => (None, 1),
+            };
+            key.into_iter().for_each(&mut sink);
+            at += used;
+        }
+    }
+}
+
 impl Back {
     const fn restore(self) -> Mode {
         match self {
