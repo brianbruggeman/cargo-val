@@ -22,6 +22,8 @@ use proxima_core::time::timeout;
 mod common;
 #[path = "common/exit_wait.rs"]
 mod exit_wait;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -31,7 +33,8 @@ mod hangup;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{FIXTURE_DEADLINE, drain, drain_until, fixture_output};
+use common::{drain, drain_until};
+use fixture::{fixture_deadline, fixture_output};
 use exit_wait::{ExitSource, until_exit};
 use hangup::on_hangup_runtime;
 use binary::EXIT_WITH_PARENT;
@@ -44,7 +47,10 @@ const PTY: &str = "pty";
 const DETACHED: &str = "detached";
 const BLOCKED: &str = "blocked";
 const ARMED: &str = "armed";
-const GONE_DEADLINE: Duration = Duration::from_secs(60);
+fn gone_deadline() -> Duration {
+    common::settings::bound("GONE_DEADLINE")
+}
+
 const GONE_PROMPT: Duration = Duration::from_secs(10);
 
 fn fixture_manifest(fixture: &str) -> PathBuf {
@@ -172,7 +178,7 @@ async fn reaping_on_panic(cargo_val: &Cell<libc::pid_t>, body: impl Future<Outpu
 // the lifeline is the intermediary's stderr, which cargo-val inherits: once the intermediary is dead only cargo-val holds its write end, so EOF means cargo-val is gone
 async fn await_cargo_val_gone(lifeline: &ChildStream, what: &str) {
     let started = Instant::now();
-    let (_, fault) = timeout(GONE_DEADLINE, drain(lifeline)).await.unwrap_or_else(|elapsed| panic!("{what}: still running after {GONE_DEADLINE:?} ({elapsed:?})"));
+    let (_, fault) = timeout(gone_deadline(), drain(lifeline)).await.unwrap_or_else(|elapsed| panic!("{what}: still running after {:?} ({elapsed:?})", gone_deadline()));
     assert!(fault.is_none(), "{what}: the lifeline failed to read: {fault:?}");
     assert!(started.elapsed() < GONE_PROMPT, "{what}: gone only after {:?}, not within {GONE_PROMPT:?} of its parent dying", started.elapsed());
 }
@@ -186,7 +192,7 @@ fn await_fifo_eof(held: &File, what: &str) {
         libc::FD_ZERO(&raw mut readable);
         libc::FD_SET(descriptor, &raw mut readable);
     }
-    let mut limit = libc::timeval { tv_sec: libc::time_t::try_from(GONE_DEADLINE.as_secs()).expect("the deadline fits time_t"), tv_usec: 0 };
+    let mut limit = libc::timeval { tv_sec: libc::time_t::try_from(gone_deadline().as_secs()).expect("the deadline fits time_t"), tv_usec: 0 };
     let ready = unsafe { libc::select(descriptor + 1, &raw mut readable, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut limit) };
     assert_eq!(ready, 1, "{what}: the held fifo never reached EOF");
     let mut byte = [0_u8; 1];
@@ -228,7 +234,7 @@ fn a_run_waiting_on_a_blocked_test_exits_and_kills_it_when_its_parent_is_sigkill
         command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory);
 
         let cargo_val = Cell::new(0);
-        supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
+        supervised(&mut command, fixture_deadline(), async |leader, announcements, lifeline, exit| {
             reaping_on_panic(&cargo_val, async {
                 armed_pid(announcements, &cargo_val, exit, lifeline).await;
                 let what = "the blocked test never reported it was blocked";
@@ -254,7 +260,7 @@ fn a_run_blocked_writing_to_an_unread_terminal_exits_when_its_parent_is_sigkille
         let mut command = intermediary_command(PTY, &arguments, PTY);
 
         let cargo_val = Cell::new(0);
-        supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
+        supervised(&mut command, fixture_deadline(), async |leader, announcements, lifeline, exit| {
             reaping_on_panic(&cargo_val, async {
                 armed_pid(announcements, &cargo_val, exit, lifeline).await;
                 assert_eq!(thread_count(cargo_val.get()), PRIME_ROOT_THREADS, "cargo-val runs only on the prime root thread: no watcher thread exists");
@@ -282,7 +288,7 @@ fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finishes() 
         command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory).env(STDOUT_FILE, &stdout_file);
 
         let cargo_val = Cell::new(0);
-        supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
+        supervised(&mut command, fixture_deadline(), async |leader, announcements, lifeline, exit| {
             reaping_on_panic(&cargo_val, async {
                 armed_pid(announcements, &cargo_val, exit, lifeline).await;
                 let what = "the blocked test never reported it was blocked";
@@ -303,7 +309,7 @@ fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finishes() 
                 release.write_all(b"1").expect("the release byte fits the fifo the blocked test reads");
                 drop(release);
                 await_cargo_val_gone(lifeline, "the released run").await;
-                timeout(GONE_DEADLINE, fifo::until_eof(&held, "the released test"))
+                timeout(gone_deadline(), fifo::until_eof(&held, "the released test"))
                     .await
                     .unwrap_or_else(|elapsed| panic!("the released test never closed the held fifo ({elapsed:?})"));
             })
@@ -344,8 +350,7 @@ fn signalling_a_group_whose_only_member_is_an_unreaped_zombie_is_not_a_failure()
     let waited = unsafe { libc::waitid(libc::P_PID, libc::id_t::from(pid), &raw mut exited, libc::WEXITED | libc::WNOWAIT) };
     assert_eq!(waited, 0, "waitid reports the leader dead without reaping it");
 
-    let interrupted = common::interrupt(pid);
-    let killed = common::kill_group(pid);
+    let (interrupted, killed) = on_hangup_runtime(async move { (common::group::interrupt(pid).await, common::group::kill_process_group(pid).await) });
     leader.wait().expect("the zombie leader is reaped");
 
     assert_eq!(interrupted, Ok(()), "SIGINT to a zombie-only group");

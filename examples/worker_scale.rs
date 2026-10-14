@@ -13,17 +13,20 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[path = "../tests/common/group.rs"]
-mod group;
-#[path = "../tests/common/output.rs"]
-mod output;
+#[path = "../tests/common/mod.rs"]
+mod common;
+#[path = "../tests/common/block_on.rs"]
+mod block_on;
+#[path = "../tests/common/lead.rs"]
+mod lead;
 
 const PLANTED: usize = 8;
-const WORKER_DEADLINE: Duration = Duration::from_secs(3600);
+fn worker_deadline() -> Duration {
+    common::settings::bound("EXAMPLE_DEADLINE")
+}
 const ROUNDS: usize = 3;
 const CHUNK: usize = 64;
 const END_TO_END: &str = "proxima worker pool (end to end)";
@@ -172,8 +175,6 @@ struct Worker {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     stderr: JoinHandle<io::Result<String>>,
-    cancel: Sender<()>,
-    fired: JoinHandle<bool>,
     chunks: usize,
     round_trip: Duration,
 }
@@ -308,7 +309,7 @@ fn build(context: &Context) -> Result<(), String> {
         .arg(&context.target)
         .current_dir(&context.fixture)
         .env_remove("CARGO_TARGET_DIR");
-    let output = output::output_bounded(&mut build, WORKER_DEADLINE)?;
+    let output = block_on::output_blocking(build, worker_deadline(), "EXAMPLE_DEADLINE")?;
     if output.status.success() {
         return Ok(());
     }
@@ -333,14 +334,14 @@ fn find_binary(context: &Context, binary: usize) -> Result<PathBuf, String> {
 fn list_names(executable: &Path) -> Result<Vec<String>, String> {
     let mut listing = Command::new(executable);
     listing.arg("--list");
-    let output = output::output_bounded(&mut listing, group::SYNC_DEADLINE).map_err(|failure| format!("list {}: {failure}", executable.display()))?;
+    let output = block_on::output_blocking(listing, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE").map_err(|failure| format!("list {}: {failure}", executable.display()))?;
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text.lines().filter_map(|line| line.strip_suffix(": test")).map(str::to_string).collect())
 }
 
 fn spawn_worker(executable: &Path, directory: &Path) -> Result<Worker, String> {
     let mut command = Command::new(executable);
-    group::lead_group(&mut command);
+    lead::lead_group(&mut command);
     let mut child = command
         .current_dir(directory)
         .stdin(Stdio::piped())
@@ -351,13 +352,12 @@ fn spawn_worker(executable: &Path, directory: &Path) -> Result<Worker, String> {
     let stdin = child.stdin.take().ok_or("worker stdin not piped")?;
     let stdout = child.stdout.take().ok_or("worker stdout not piped")?;
     let mut stderr = child.stderr.take().ok_or("worker stderr not piped")?;
-    let (cancel, fired) = group::watchdog(child.id(), WORKER_DEADLINE);
     // stderr is drained as the worker writes it, so a full stderr pipe can never block the worker while this side waits on its stdout
     let stderr = thread::spawn(move || {
         let mut report = String::new();
         stderr.read_to_string(&mut report).map(|_| report)
     });
-    Ok(Worker { child, stdin, reader: BufReader::new(stdout), stderr, cancel, fired, chunks: 0, round_trip: Duration::ZERO })
+    Ok(Worker { child, stdin, reader: BufReader::new(stdout), stderr, chunks: 0, round_trip: Duration::ZERO })
 }
 
 fn run_chunk(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)>, String> {
@@ -430,15 +430,11 @@ fn shut_down(workers: Vec<Worker>) -> Result<Vec<WorkerPhases>, String> {
     workers
         .into_iter()
         .map(|worker| {
-            let Worker { mut child, stdin, reader, stderr, cancel, fired, chunks, round_trip } = worker;
+            let Worker { mut child, stdin, reader, stderr, chunks, round_trip } = worker;
             drop(stdin);
             drop(reader);
             let report = stderr.join().map_err(|_| String::from("worker stderr reader panicked"))?;
             let waited = child.wait();
-            drop(cancel);
-            if fired.join().unwrap_or(false) {
-                return Err(format!("worker outlived {WORKER_DEADLINE:?} and its process group was killed"));
-            }
             waited.map_err(|error| format!("wait for worker: {error}"))?;
             let report = report.map_err(|error| format!("read worker stderr: {error}"))?;
             let round_trip_micros = u64::try_from(round_trip.as_micros()).unwrap_or(u64::MAX);

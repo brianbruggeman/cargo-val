@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::process::Output;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 
-use common::fixture_output;
+use fixture::fixture_output;
 
 const ESCAPE: u8 = 0x1b;
 const GREEN_BUDGET_BYTES: usize = 200;

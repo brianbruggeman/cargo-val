@@ -1,7 +1,6 @@
 #![cfg(unix)]
 
 use core::num::NonZeroI32;
-use core::time::Duration;
 use std::fs;
 use std::io::PipeWriter;
 use std::os::fd::AsRawFd;
@@ -11,16 +10,16 @@ use std::process::Stdio;
 
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/group.rs"]
+mod group;
 
 #[cfg(target_os = "linux")]
 use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
 #[cfg(target_os = "macos")]
 use cargo_val::edge_exit_macos::MacosExit as ExitSource;
-use proxima_core::time::timeout;
 use proxima_primitives::pipe::Pipe;
 
 const FILL_CHUNK: [u8; 4096] = [b'x'; 4096];
-const EXIT_BOUND: Duration = Duration::from_secs(60);
 
 fn target_directory() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
@@ -64,12 +63,9 @@ async fn an_error_exit_with_stdout_on_an_unread_pipe_exits_within_the_bound_and_
     let leader = libc::pid_t::try_from(spawned).expect("a pid fits pid_t");
     let exit = ExitSource::new(NonZeroI32::new(leader).expect("a spawned child has a nonzero pid"));
 
-    let exited = timeout(EXIT_BOUND, Pipe::call(&exit, ())).await;
-    if exited.is_err() {
-        unsafe { libc::killpg(leader, libc::SIGKILL) };
-    }
-    let status = exited
-        .unwrap_or_else(|_| panic!("cargo-val still ran {EXIT_BOUND:?} after an error exit with stdout on an unread pipe"))
+    let status = group::bounded(spawned, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", Pipe::call(&exit, ()))
+        .await
+        .unwrap_or_else(|(report, _)| panic!("cargo-val still ran after an error exit with stdout on an unread pipe: {report}"))
         .expect("the exit source is unspent")
         .expect("the exit status is readable");
     assert_eq!(status.code(), Some(cargo_val::driver::BUILD_FAILED_EXIT_CODE), "the build failure ends the run");

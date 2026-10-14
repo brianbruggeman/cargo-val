@@ -5,13 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
 
 use cargo_val::render::Outcome;
-use common::fixture_output;
+use fixture::fixture_output;
 
 const LOADER_VARIABLES: [&str; 3] = [
     "DYLD_FALLBACK_LIBRARY_PATH",

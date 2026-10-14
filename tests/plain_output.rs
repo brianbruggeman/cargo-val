@@ -11,16 +11,25 @@ use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
 #[path = "common/plain_summary.rs"]
 mod plain_summary;
-
-use common::fixture_output;
 #[cfg(unix)]
-use common::{FIXTURE_DEADLINE, kill_group};
+#[path = "common/wait.rs"]
+mod wait;
+
+use fixture::fixture_output;
+#[cfg(unix)]
+use common::group;
+#[cfg(unix)]
+use common::group::kill_process_group;
+#[cfg(unix)]
+use fixture::fixture_deadline;
 #[cfg(unix)]
 use binary::EXIT_WITH_PARENT;
 
@@ -287,12 +296,12 @@ fn spawn_on_pty(invocation: &mut Command) -> (OwnedFd, std::process::Child) {
 }
 
 #[cfg(unix)]
-fn on_a_pty(environment: &[(&str, &str)], arguments: &[&str]) -> Vec<u8> {
+async fn on_a_pty(environment: &[(&str, &str)], arguments: &[&str]) -> Vec<u8> {
     let mut invocation = command(environment, arguments);
-    let (master, mut child) = spawn_on_pty(&mut invocation);
+    let (master, child) = spawn_on_pty(&mut invocation);
     drop(invocation);
-    let received = read_until_hangup(&master, child.id());
-    child.wait().expect("cargo-val ends");
+    let received = read_until_hangup(&master, child.id()).await;
+    wait::wait_within(&child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not end after its pty hung up: {failure}"));
     received
 }
 
@@ -331,19 +340,19 @@ fn open_fifo(path: &std::path::Path, writable: bool) -> std::fs::File {
 
 // the blocked test announces its pid on `ready` once it is running; the pty is drained meanwhile so the frame never stalls on a full buffer
 #[cfg(unix)]
-fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, screen: &mut Vec<u8>) {
+async fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, screen: &mut Vec<u8>) {
     let started = std::time::Instant::now();
     let mut chunk = [0_u8; 4096];
     loop {
-        let remaining = FIXTURE_DEADLINE.saturating_sub(started.elapsed());
+        let remaining = fixture_deadline().saturating_sub(started.elapsed());
         let mut watched = [
             libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(master), events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(ready), events: libc::POLLIN, revents: 0 },
         ];
         let timeout = i32::try_from(remaining.as_millis()).expect("the deadline fits poll");
         if unsafe { libc::poll(watched.as_mut_ptr(), 2, timeout) } == 0 {
-            let failures = kill_group(leader).err();
-            panic!("the blocked test never reached the rendezvous within {FIXTURE_DEADLINE:?}; group kill: {failures:?}\n{}", String::from_utf8_lossy(screen));
+            let failures = kill_process_group(leader).await.err();
+            panic!("the blocked test never reached the rendezvous within {:?}; group kill: {failures:?}\n{}", fixture_deadline(), String::from_utf8_lossy(screen));
         }
         if watched[1].revents & libc::POLLIN != 0 {
             return;
@@ -356,19 +365,19 @@ fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, screen: &mu
     }
 }
 
-// the master reads to the hangup that follows the last slave end closing; a run that outlives FIXTURE_DEADLINE is killed with its group
+// the master reads to the hangup that follows the last slave end closing; a run that outlives fixture_deadline() is killed with its group
 #[cfg(unix)]
-fn read_until_hangup(master: &OwnedFd, leader: u32) -> Vec<u8> {
+async fn read_until_hangup(master: &OwnedFd, leader: u32) -> Vec<u8> {
     let started = std::time::Instant::now();
     let mut received = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
-        let remaining = FIXTURE_DEADLINE.saturating_sub(started.elapsed());
+        let remaining = fixture_deadline().saturating_sub(started.elapsed());
         let mut watched = libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(master), events: libc::POLLIN, revents: 0 };
         let timeout = i32::try_from(remaining.as_millis()).expect("the deadline fits poll");
         if unsafe { libc::poll(&raw mut watched, 1, timeout) } == 0 {
-            let failures = kill_group(leader).err();
-            panic!("cargo-val (pid {leader}) outlived {FIXTURE_DEADLINE:?} on a pty; group kill: {failures:?}\nreceived so far:\n{}", String::from_utf8_lossy(&received));
+            let failures = kill_process_group(leader).await.err();
+            panic!("cargo-val (pid {leader}) outlived {:?} on a pty; group kill: {failures:?}\nreceived so far:\n{}", fixture_deadline(), String::from_utf8_lossy(&received));
         }
         let count = unsafe { libc::read(std::os::fd::AsRawFd::as_raw_fd(master), chunk.as_mut_ptr().cast(), chunk.len()) };
         match usize::try_from(count) {
@@ -381,7 +390,7 @@ fn read_until_hangup(master: &OwnedFd, leader: u32) -> Vec<u8> {
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn output_plain_forces_plain_lines_even_when_stdout_is_a_terminal() {
-    let screen = on_a_pty(&[], &["--output", "plain"]);
+    let screen = on_a_pty(&[], &["--output", "plain"]).await;
 
     assert!(!screen.contains(&ESCAPE), "no ANSI on a pty with --output plain");
     assert!(String::from_utf8_lossy(&screen).contains("SUMMARY  passed=1 failed=1"));
@@ -390,8 +399,8 @@ async fn output_plain_forces_plain_lines_even_when_stdout_is_a_terminal() {
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn auto_on_a_terminal_is_rich_unless_ci_is_set() {
-    let rich = on_a_pty(&[], &[]);
-    let in_ci = on_a_pty(&[("CI", "true")], &[]);
+    let rich = on_a_pty(&[], &[]).await;
+    let in_ci = on_a_pty(&[("CI", "true")], &[]).await;
 
     assert!(contains(&rich, HIDE_CURSOR) && contains(&rich, "\u{2588}".as_bytes()), "a terminal gets the frame");
     assert!(!in_ci.contains(&ESCAPE) && String::from_utf8_lossy(&in_ci).contains("SUMMARY  "), "CI gets plain even on a terminal");
@@ -400,7 +409,7 @@ async fn auto_on_a_terminal_is_rich_unless_ci_is_set() {
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn rich_on_a_pty_draws_the_frame_ends_with_the_closing_block_and_shows_the_cursor_after_the_last_frame() {
-    let screen = on_a_pty(&[], &["--output", "rich"]);
+    let screen = on_a_pty(&[], &["--output", "rich"]).await;
     let text = String::from_utf8_lossy(&screen);
 
     assert!(contains(&screen, "\u{2588}".as_bytes()) && last_cursor_up(&screen).is_some(), "bar glyphs and a cursor-up redraw:\n{text:?}");
@@ -415,7 +424,7 @@ async fn rich_on_a_pty_draws_the_frame_ends_with_the_closing_block_and_shows_the
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn shard_mode_rich_on_a_pty_prints_no_per_test_lines_between_frames() {
-    let screen = on_a_pty(&[], &["--output", "rich", "--process", "shard"]);
+    let screen = on_a_pty(&[], &["--output", "rich", "--process", "shard"]).await;
     let text = String::from_utf8_lossy(&screen);
 
     assert!(contains(&screen, HIDE_CURSOR) && last_cursor_up(&screen).is_some(), "the shard run draws the frame:\n{text:?}");
@@ -437,14 +446,14 @@ async fn sigint_during_a_rich_run_on_a_pty_still_shows_the_cursor_and_exits_130(
     let ready = open_fifo(&directory.join("ready"), true);
     let _held = open_fifo(&directory.join("held"), false);
     let mut invocation = blocked_command(&directory);
-    let (master, mut child) = spawn_on_pty(&mut invocation);
+    let (master, child) = spawn_on_pty(&mut invocation);
     drop(invocation);
     let mut screen = Vec::new();
-    await_ready(&master, &ready, child.id(), &mut screen);
+    await_ready(&master, &ready, child.id(), &mut screen).await;
 
     assert_eq!(unsafe { libc::kill(libc::pid_t::try_from(child.id()).expect("pid fits pid_t"), libc::SIGINT) }, 0, "SIGINT lands on cargo-val alone");
-    screen.extend(read_until_hangup(&master, child.id()));
-    let status = child.wait().expect("cargo-val ends after the signal");
+    screen.extend(read_until_hangup(&master, child.id()).await);
+    let status = wait::wait_within(&child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not end after the signal: {failure}"));
 
     assert_eq!(status.code(), Some(130), "{:?}", String::from_utf8_lossy(&screen));
     assert!(contains(&screen, HIDE_CURSOR), "the frame had hidden the cursor:\n{:?}", String::from_utf8_lossy(&screen));

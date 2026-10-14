@@ -15,13 +15,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::path::Path;
-#[cfg(unix)]
-use std::time::Duration;
-
 mod common;
 #[cfg(unix)]
 #[path = "common/exit_wait.rs"]
 mod exit_wait;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
@@ -30,7 +29,9 @@ mod plain;
 mod plain_summary;
 
 use cargo_val::render::Outcome;
-use common::fixture_output;
+use fixture::fixture_output;
+#[cfg(unix)]
+use fixture::fixture_deadline;
 #[cfg(unix)]
 use common::{ChildStream, drain, drain_until};
 #[cfg(unix)]
@@ -48,7 +49,6 @@ use supervise::supervised;
 const SHARD: &str = "shard";
 const SHARD_LONG: &str = "shard_long";
 #[cfg(unix)]
-const DEADLINE: Duration = Duration::from_secs(120);
 #[cfg(unix)]
 const INTERRUPT_STATUS: i32 = 130;
 
@@ -583,7 +583,7 @@ async fn interrupt_ends_blocked_child(process: &str, label: &str) {
         .env("CARGO_VAL_SHARD_HOLD", &hold)
         .env("CARGO_VAL_SHARD_IGNORE_INT", "1")
         .env("CARGO_TARGET_DIR", &interrupt_target);
-    let (shard_pid, signalled, exit, stderr) = supervised(&mut command, DEADLINE * 2, async |leader, stdout, stderr, exit| {
+    let (shard_pid, signalled, exit, stderr) = supervised(&mut command, fixture_deadline() * 2, async |leader, stdout, stderr, exit| {
         let cargo_val = libc::pid_t::try_from(leader).expect("pid fits pid_t");
         let reporting = drain_until(&ready_stream, |bytes| bytes.contains(&b'\n'));
         let (reported, _) = until_exit(reporting, "the shard child never reported its pid", exit, &[("stdout", stdout), ("stderr", stderr)]).await;
