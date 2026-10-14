@@ -235,6 +235,11 @@ impl SignalPipe {
         self.resized.replace(false)
     }
 
+    /// Records SIGINT as received the way the handler would, for a key that asks for the same interrupt.
+    pub fn raise_interrupt(&self) {
+        self.forward(libc::SIGINT);
+    }
+
     fn forward(&self, signal: c_int) {
         if self.received.get().is_none() {
             self.received.set(Some(signal));

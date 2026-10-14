@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::num::NonZeroI32;
 use std::process::{ExitStatus, Stdio};
@@ -50,7 +50,7 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
 }
 
-fn spawn_on(slave: &OwnedFd, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
+fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
     let stream = || Stdio::from(slave.try_clone().expect("the slave descriptor duplicates"));
     let mut command = binary::command();
     lead::lead_group(&mut command);
@@ -67,7 +67,7 @@ fn spawn_on(slave: &OwnedFd, fixture: &str, mode: &str, (release, run): (&Path, 
         .envs(environment.iter().copied())
         .env("CARGO_VAL_FIXTURE_RELEASE_FILE", release)
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-{fixture}-{run}")))
-        .stdin(stream())
+        .stdin(stdin)
         .stdout(stream())
         .stderr(stream())
         .spawn()
@@ -132,18 +132,33 @@ async fn read_until_exit(master: &ChildStream, release: &Path) -> String {
 }
 
 async fn run_on_pty(fixture: &str) -> (String, ExitStatus) {
-    run_on_pty_with(fixture, &[("NO_COLOR", "1")]).await
+    run_on_pty_with(fixture, &NO_COLOR).await
 }
 
 async fn run_on_pty_with(fixture: &str, environment: &[(&str, &str)]) -> (String, ExitStatus) {
-    run_driven(fixture, "rich", environment, async |master, _keys, release| read_until_exit(master, &release).await).await
+    run_driven(fixture, "rich", environment, async |master, _keys, release, _leader| read_until_exit(master, &release).await).await
 }
 
 const NO_COLOR: [(&str, &str); 1] = [("NO_COLOR", "1")];
 
 async fn run_driven<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], drive: Drive) -> (String, ExitStatus)
 where
-    Drive: AsyncFnOnce(&ChildStream, File, PathBuf) -> String,
+    Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
+{
+    run_with(fixture, mode, environment, true, drive).await
+}
+
+fn assert_line_discipline_restored(pty: &File, fixture: &str, mode: &str) {
+    let mut attributes: libc::termios = unsafe { core::mem::zeroed() };
+    let queried = unsafe { libc::tcgetattr(pty.as_raw_fd(), &raw mut attributes) };
+    assert_eq!(queried, 0, "tcgetattr on the pty: {}", std::io::Error::last_os_error());
+    let wanted = libc::ICANON | libc::ECHO;
+    assert_eq!(attributes.c_lflag & wanted, wanted, "{fixture} {mode}: ICANON and ECHO must be set again after the run, c_lflag={:#x}", attributes.c_lflag);
+}
+
+async fn run_with<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], tty_stdin: bool, drive: Drive) -> (String, ExitStatus)
+where
+    Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
 {
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{mode}-{run}"));
@@ -151,24 +166,31 @@ where
     let release = directory.join("release");
     let Pty { master, slave } = open_pty();
     let keys = master.try_clone().expect("the master descriptor duplicates for writing keys");
-    let mut child = spawn_on(&slave, fixture, mode, (&release, &run), environment);
+    let probe = master.try_clone().expect("the master descriptor duplicates for the termios query");
+    let stdin = if tty_stdin { Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")) } else { Stdio::piped() };
+    let mut child = spawn_on(&slave, stdin, fixture, mode, (&release, &run), environment);
+    drop(child.stdin.take());
     drop(slave);
     let leader = child.id();
     let exit = ExitSource::new(NonZeroI32::new(leader.cast_signed()).expect("a spawned child has a nonzero pid"));
     // boxed: the stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
     let master = Box::new(ChildStream::new(OwnedFd::from(master)));
-    let waiting = join(drive(&master, keys, release), exit.call(()));
+    let waiting = join(drive(&master, keys, release, leader), exit.call(()));
     let (output, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("{report}"),
     };
     let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
     let _ = child.try_wait();
+    if tty_stdin {
+        assert_line_discipline_restored(&probe, fixture, mode);
+    }
     (output, status)
 }
 
 async fn quit_from_review(master: &ChildStream, mut keys: File) -> String {
     let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    assert!(!output.windows(7).any(|window| window == b"SUMMARY"), "the receipt printed before any key was sent:\n{}", shown(&String::from_utf8_lossy(&output)));
     keys.write_all(b"q").expect("the first quit key is writable");
     keys.write_all(b"q").expect("the confirming quit key is writable");
     let (rest, _) = drain::drain_until(master, |_| false).await;
@@ -181,10 +203,21 @@ async fn read_plain(master: &ChildStream) -> String {
     String::from_utf8_lossy(&output).into_owned()
 }
 
-fn closing_block(output: &str) -> String {
-    let start = output.find("SUMMARY").unwrap_or_else(|| panic!("no closing block in:\n{}", shown(output)));
-    output[start..].lines().map(|line| line.split_once("wall").map_or(line, |(head, _)| head)).collect::<Vec<_>>().join("\n")
+fn without_wall_values(text: &str) -> String {
+    let blanked = |line: &str| {
+        let marker = ["wall=", "wall "].iter().filter_map(|marker| line.find(marker).map(|at| at + marker.len())).min();
+        marker.map_or_else(
+            || line.to_owned(),
+            |value| {
+                let tail = &line[value..];
+                format!("{}{}", &line[..value], &tail[tail.find(char::is_whitespace).unwrap_or(tail.len())..])
+            },
+        )
+    };
+    text.replace('\r', "").lines().map(blanked).collect::<Vec<_>>().join("\n")
 }
+
+const LISTED_LINE: &str = "LISTED   binaries=1  tests=2\n";
 
 #[proxima::test]
 async fn a_later_live_frame_shows_nonzero_built_and_settled_counts() {
@@ -380,8 +413,8 @@ async fn with_highlight_and_colour_on_the_build_error_excerpt_colours_the_keywor
 
 #[proxima::test]
 async fn quitting_review_with_q_then_q_restores_the_terminal_and_prints_the_plain_closing_block() {
-    let (output, status) = run_driven("rich_pty_fail", "rich", &NO_COLOR, async |master, keys, _release| quit_from_review(master, keys).await).await;
-    let (plain, plain_status) = run_driven("rich_pty_fail", "plain", &NO_COLOR, async |master, _keys, _release| read_plain(master).await).await;
+    let (output, status) = run_driven("rich_pty_fail", "rich", &NO_COLOR, async |master, keys, _release, _leader| quit_from_review(master, keys).await).await;
+    let (plain, plain_status) = run_driven("rich_pty_fail", "plain", &NO_COLOR, async |master, _keys, _release, _leader| read_plain(master).await).await;
 
     let last_frame = output.rfind(REVIEW_HEADER).unwrap_or_else(|| panic!("no review frame was drawn:\n{}", shown(&output)));
     let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(&output)));
@@ -397,5 +430,61 @@ async fn quitting_review_with_q_then_q_restores_the_terminal_and_prints_the_plai
     let after_frame = output.rsplit_once("\x1b[J").map_or("", |(_, tail)| tail);
     let after_frame = after_frame.strip_suffix(SHOW_CURSOR).unwrap_or(after_frame);
     assert!(after_frame.starts_with(CLOSING_START), "the bytes after the last frame erase must open the closing block:\n{}", shown(after_frame));
-    assert_eq!(closing_block(after_frame), closing_block(&plain), "rich receipt differs from the plain closing block");
+    let plain_receipt = plain.replace('\r', "");
+    let plain_receipt = &plain_receipt[plain_receipt.find(CLOSING_START).expect("the plain run prints the closing block")..];
+    assert!(plain_receipt.contains(LISTED_LINE), "plain no longer prints the LISTED line:\n{plain_receipt}");
+    assert!(!after_frame.contains("LISTED"), "rich must not print the LISTED line:\n{}", shown(after_frame));
+    assert_eq!(without_wall_values(after_frame), without_wall_values(&plain_receipt.replacen(LISTED_LINE, "", 1)), "rich receipt differs from the plain closing block after the final erase");
+}
+
+async fn interrupt_in_review(master: &ChildStream, mut keys: File, leader: u32, via_key: bool) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    if via_key {
+        keys.write_all(b"c").expect("the interrupt key is writable");
+    } else {
+        group::interrupt(leader).await.expect("SIGINT reaches the process group");
+    }
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn assert_interrupted_exit(output: &str, status: ExitStatus) {
+    let last_frame = output.rfind(REVIEW_HEADER).unwrap_or_else(|| panic!("no review frame was drawn:\n{}", shown(output)));
+    let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(output)));
+    assert_eq!(status.code(), Some(130), "an interrupted review exits 130: {status}\n{}", shown(output));
+    assert!(shown_cursor > last_frame, "the cursor was shown at {shown_cursor}, before the last review frame at {last_frame}");
+    let block = output.rfind("INTERRUPTED  signal=2").unwrap_or_else(|| panic!("no interrupted block:\n{}", shown(output)));
+    assert!(block > last_frame, "the interrupted block at {block} must follow the last review frame at {last_frame}");
+}
+
+#[proxima::test]
+async fn a_green_rich_run_on_a_terminal_never_shows_review_and_exits_zero() {
+    let (output, status) = run_on_pty("rich_pty").await;
+
+    assert!(status.success(), "a green run exits 0: {status}");
+    assert!(!output.contains(REVIEW_HEADER), "a green run must not open review:\n{}", shown(&output));
+}
+
+#[proxima::test]
+async fn a_failing_rich_run_with_piped_stdin_prints_the_closing_block_without_review_and_exits_one() {
+    let (output, status) = run_with("rich_pty_fail", "rich", &NO_COLOR, false, async |master, _keys, _release, _leader| read_plain(master).await).await;
+
+    assert_eq!(status.code(), Some(1), "a failing run exits 1: {status}");
+    assert!(!output.contains(REVIEW_HEADER), "no review without a terminal on stdin:\n{}", shown(&output));
+    assert!(output.contains("SUMMARY"), "the closing block must print:\n{}", shown(&output));
+}
+
+#[proxima::test]
+async fn pressing_c_in_review_exits_130_with_the_interrupted_block_after_the_terminal_is_restored() {
+    let (output, status) = run_driven("rich_pty_fail", "rich", &NO_COLOR, async |master, keys, _release, leader| interrupt_in_review(master, keys, leader, true).await).await;
+
+    assert_interrupted_exit(&output, status);
+}
+
+#[proxima::test]
+async fn sigint_sent_to_the_process_group_during_review_exits_130_with_the_terminal_restored() {
+    let (output, status) = run_driven("rich_pty_fail", "rich", &NO_COLOR, async |master, keys, _release, leader| interrupt_in_review(master, keys, leader, false).await).await;
+
+    assert_interrupted_exit(&output, status);
 }

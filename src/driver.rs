@@ -1535,8 +1535,13 @@ impl ListingRun<'_> {
     // a key is an event like any other: the state moves, the screen redraws, and the action it asked for runs here
     pub(crate) fn key(&self, key: Key) -> Result<(), RunError> {
         let state = self.render().1.borrow();
-        let leaving = matches!(state.action(key, |id| state.detail(id)), Action::Quit | Action::Interrupt);
+        let action = state.action(key, |id| state.detail(id));
+        let interrupting = matches!(action, Action::Interrupt);
+        let leaving = interrupting || matches!(action, Action::Quit);
         drop(state);
+        if interrupting {
+            self.signals.raise_interrupt();
+        }
         emit(self.render(), &Event::Key(key))?;
         if leaving {
             self.root.fire();
@@ -3254,6 +3259,7 @@ fn finish_run(
 ) -> Result<RunSummary, RunError> {
     if let Err(error) = interrupted(run.signals) {
         agent_exit(run, error.exit_code())?;
+        rich_interrupted(run, &error)?;
         return Err(error);
     }
     if cargo_exit_code.is_some_and(|code| code != 0) {
@@ -3276,6 +3282,20 @@ fn finish_run(
         stop,
         doc_tests,
     )
+}
+
+// agent output names the interrupt as it happens; a rich run names it once, as it leaves
+fn rich_interrupted(run: &ListingRun<'_>, error: &RunError) -> Result<(), RunError> {
+    let RunError::Interrupted(signal) = *error else {
+        return Ok(());
+    };
+    if run.settings.output != OutputMode::Rich {
+        return Ok(());
+    }
+    let mut block = LineBuffer::new();
+    let event = Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups: 0 };
+    run.render().1.borrow().project(&event, &mut block).map_err(|_| RunError::Reactor)?;
+    emit_kept(run.render(), block.bytes())
 }
 
 // the closing EXIT line of an agent run that ends in an error; every other ending already printed its own
