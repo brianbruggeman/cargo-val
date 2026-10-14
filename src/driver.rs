@@ -36,6 +36,7 @@ use crate::run::{
 };
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
 use prime::os::readiness::Readiness;
+use proxima_core::signal::Signal;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
 use std::sync::OnceLock;
@@ -60,13 +61,13 @@ use crate::runner::{
 };
 use crate::schedule::{SessionSlotId, SessionSlots};
 use crate::sched_binary::{GROUP_CAPACITY, RECORD_BYTES};
-use crate::shard_arena::{DECLARED_BYTES, ShardArena};
+use crate::shard_arena::{DECLARED_BYTES, Rerun, ShardArena};
 use crate::shard_sched::{SchedTable, SpecialPlan};
 
 mod shard;
 use shard::ShardWatch;
 use crate::selection::{NameFilter, Selection};
-use crate::stop::{self, DocAtTrip, Observation, StopPolicy, StopReport};
+use crate::stop::{self, DocAtTrip, StopPolicy, StopReport};
 use crate::test_environment::{
     BuildScriptOutput, BuildScriptOutputs, LinkedDirectories, MAX_ENTRIES,
     TestEnvironmentInput, TestEnvironmentLayout,
@@ -183,6 +184,8 @@ pub enum RunError {
     CargoFailed,
     CargoRefused,
     Interrupted(i32),
+    Cancelled,
+    Tripped,
     ListingFailed,
     DeclaredCapacity,
 }
@@ -228,6 +231,8 @@ impl RunError {
             Self::CargoFailed => b"cargo-val: cargo test build failed\n",
             Self::CargoRefused => b"cargo-val: cargo refused the invocation before building; its error is above\n",
             Self::ListingFailed => b"cargo-val: libtest listing failed\n",
+            Self::Cancelled => b"cargo-val: a session was cancelled by its scope\n",
+            Self::Tripped => b"cargo-val: a launch was refused after the --max-fail trip\n",
             Self::DeclaredCapacity => {
                 b"cargo-val: declared test scheduling records exceed the build's capacity; raise CARGO_VAL_BUILD_SCHED_RECORD_BYTES\n"
             }
@@ -371,6 +376,7 @@ impl RunSummary {
 pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: u32,
+    scope: Signal,
     output: ChildOutput,
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
@@ -379,6 +385,11 @@ pub(crate) struct TestWatch {
 }
 
 impl TestWatch {
+    // a session its scope ended has no verdict of its own, so its exit status is replaced by the cancellation
+    fn exit(&self, code: i32) -> Result<i32, RunError> {
+        if self.scope.is_fired() { Err(RunError::Cancelled) } else { Ok(code) }
+    }
+
     fn in_group(&self, group: &[u8]) -> bool {
         self.group_length != 0 && &self.group[..self.group_length] == group
     }
@@ -671,7 +682,7 @@ fn start_session(
     watches: &mut Watches,
     lanes: &Lanes,
     slot: SessionSlotId,
-    shard: Option<ShardWatch>,
+    (shard, scope): (Option<ShardWatch>, Signal),
 ) -> Result<(), RunError> {
     let child = ledger
         .sessions()
@@ -681,9 +692,11 @@ fn start_session(
     let process_id = child.process_id();
     track(process_id)?;
     attach_session(&lanes[JOB_BASE + slot.index()], child)?;
+    *lanes[JOB_BASE + slot.index()].4.borrow_mut() = Some(SignalSource::new(&scope));
     watches[slot.index()] = Some(TestWatch {
         slot,
         process_id,
+        scope,
         output: ChildOutput::new(),
         shard,
         group: [0; GROUP_CAPACITY],
@@ -727,7 +740,7 @@ pub(crate) fn session_output(
         };
         let step = deliver(ledger, event, run.reporting(), watch)?;
         if shard_tripped {
-            shard::stop_all(run, ledger, watches);
+            run.trip.fire();
         }
         if settled(run, ledger, watches, index, step)? {
             return Ok(());
@@ -769,7 +782,7 @@ pub(crate) fn session_resume(
         shard::stall(watch, window, offset + observed.consumed);
     }
     if observed.stop {
-        shard::stop_all(run, ledger, watches);
+        run.trip.fire();
     }
     Ok(watches[index].as_ref().is_none_or(|watch| !shard::stalled(watch)))
 }
@@ -806,32 +819,28 @@ pub(crate) fn session_exited(
     };
     watch.status = Some(code);
     release_child(watch.process_id);
-    let stopped = run.stop_sent.get() && code == shard::STOP_STATUS;
-    let never_started = run.withdrawn_ready.get() == Some(watch.slot);
-    if run.settings.process == ProcessMode::Test && (stopped || never_started) {
-        return withdraw_terminated(run, ledger, watches, index);
+    let (slot, exit) = (watch.slot, watch.exit(code));
+    if run.settings.process == ProcessMode::Test && exit == Err(RunError::Cancelled) {
+        let target = ledger.sessions().get(slot).map(RunningChild::target);
+        watches[index] = None;
+        ledger.retire(slot).ok_or(RunError::Outcome)?;
+        return shard::withdraw_solo(run, ledger, target);
     }
     let event = HostEvent::Exit {
-        slot: watch.slot,
+        slot,
         status: code,
     };
     let step = deliver(ledger, event, run.reporting(), watch)?;
     settled(run, ledger, watches, index, step).map(|_| ())
 }
 
-// a child cargo-val killed on interrupt has no verdict of its own, so it leaves the ledger uncounted and its name is withdrawn once
-fn withdraw_terminated(
-    run: &ListingRun<'_>,
-    ledger: &mut Ledger<'_>,
-    watches: &mut Watches,
-    index: usize,
-) -> Result<(), RunError> {
-    let Some(watch) = watches[index].take() else {
-        return Ok(());
+pub(crate) fn session_cancelled(ledger: &Ledger<'_>, watches: &mut Watches, index: usize) {
+    let Some(watch) = watches[index].as_mut() else {
+        return;
     };
-    let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
-    ledger.retire(watch.slot).ok_or(RunError::Outcome)?;
-    shard::withdraw_solo(run, ledger, target)
+    if let Some(session) = ledger.sessions().get(watch.slot) {
+        session.child().terminate();
+    }
 }
 
 // an exact child retires with its one outcome; a shard child's tests were counted as they streamed, so the shard module settles its exit
@@ -1030,9 +1039,7 @@ struct Reporting<'run, 'storage> {
     color: bool,
     targets: &'run RefCell<TargetTable>,
     ready: &'run Cell<Option<SessionSlotId>>,
-    withdrawn_ready: &'run Cell<Option<SessionSlotId>>,
-    policy: &'run RefCell<StopPolicy>,
-    doc_failures: &'run Cell<usize>,
+    run: &'run ListingRun<'storage>,
     jobs: usize,
     interrupted: bool,
     render: &'run Render<'storage>,
@@ -1040,7 +1047,7 @@ struct Reporting<'run, 'storage> {
 
 impl Reporting<'_, '_> {
     // a frozen child counts as a live session but not as running, so it starts the moment a job slot frees
-    // once the stop policy has tripped it is terminated instead: resuming it would launch a test after the trip
+    // once the run is stopped its scope has fired and the cancel arm ends it: resuming it would launch a test after the stop
     fn settle_ready(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
@@ -1052,10 +1059,7 @@ impl Reporting<'_, '_> {
             self.ready.set(None);
             return;
         };
-        let failures = ledger.snapshot().failed + self.doc_failures.get();
-        if self.policy.borrow().observe_failures(failures) != Observation::Clear {
-            session.child().terminate();
-            self.withdrawn_ready.set(Some(slot));
+        if self.run.admit(ledger).is_err() {
             self.ready.set(None);
             return;
         }
@@ -1313,13 +1317,21 @@ fn launch_listed(
         run.ready.set(Some(slot));
     }
     run.targets.borrow_mut().tally(target, Tally::Launched);
-    start_session(ledger, watches, scan.lanes, slot, None)?;
+    start_session(ledger, watches, scan.lanes, slot, (None, run.session_scope(None)))?;
     let targets = run.targets.borrow();
     let id = (targets.id(target), intent.test_name().as_bytes());
     emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
     drop(targets);
     shard::note_group(run, watches, slot.index(), intent.test_name());
     Ok(())
+}
+
+// an output-only rerun is the only place a tripping test's block is printed, so only an interrupt scopes it
+pub(crate) fn scope_for(rerun: Option<Rerun>, (root, trip): (&Signal, &Signal)) -> Signal {
+    match rerun {
+        Some(Rerun::OutputOnly) => root.clone(),
+        _ => trip.clone(),
+    }
 }
 
 pub(crate) struct ListingRun<'run> {
@@ -1341,13 +1353,13 @@ pub(crate) struct ListingRun<'run> {
     doc_pending: Cell<bool>,
     launch_storage: RefCell<HeldLaunchStorage>,
     ready: Cell<Option<SessionSlotId>>,
-    withdrawn_ready: Cell<Option<SessionSlotId>>,
     shards: RefCell<ShardArena<'run>>,
     sched: RefCell<SchedTable<'run>>,
     specials: RefCell<SpecialPlan<'run>>,
     sched_target: Cell<Option<usize>>,
-    stop_sent: Cell<bool>,
     interrupt_reported: Cell<usize>,
+    root: Signal,
+    trip: Signal,
 }
 
 pub(crate) struct DocObservation<'run> {
@@ -1382,9 +1394,7 @@ impl<'run> ListingRun<'run> {
             color: self.settings.color,
             targets: &self.targets,
             ready: &self.ready,
-            withdrawn_ready: &self.withdrawn_ready,
-            policy: &self.policy,
-            doc_failures: &self.docs.failed,
+            run: self,
             jobs: self.settings.jobs,
             interrupted: self.interrupted(),
             render: self.docs.render,
@@ -1452,15 +1462,17 @@ impl ListingRun<'_> {
         Ok(())
     }
 
-    // a forwarded signal only reaches children that honor it, so a per-test child that ignores it is terminated here
-    pub(crate) fn interrupt_sessions(&self, ledger: &Ledger<'_>, watches: &Watches) {
-        if self.settings.process == ProcessMode::Test && self.interrupted() && !self.stop_sent.get() {
-            shard::stop_all(self, ledger, watches);
-        }
+    pub(crate) fn session_scope(&self, rerun: Option<Rerun>) -> Signal {
+        scope_for(rerun, (&self.root, &self.trip))
     }
 
-    fn interrupted(&self) -> bool {
-        self.signals.received().is_some()
+    // a forwarded signal only reaches children that honor it, so receiving one fires the root every session scope descends from
+    pub(crate) fn interrupted(&self) -> bool {
+        let received = self.signals.received().is_some();
+        if received {
+            self.root.fire();
+        }
+        received
     }
 
     // sessions admitted at once: the jobs that run plus the frozen children this platform creates ahead of a free slot
@@ -1474,28 +1486,60 @@ impl ListingRun<'_> {
             && ledger.sessions().len() >= self.settings.jobs
     }
 
+    // gate: In = a launch about to happen, Out = (), Err = Interrupted once a signal arrived, else Tripped once the failure budget is spent
+    pub(crate) fn admit(
+        &self,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ) -> Result<(), RunError> {
+        if let Some(signal) = self.signals.received() {
+            self.root.fire();
+            return Err(RunError::Interrupted(signal));
+        }
+        if self.tripped(ledger) { Err(RunError::Tripped) } else { Ok(()) }
+    }
+
+    // the one place a refused launch is counted: a tripped refusal puts its names in listed-not-run, an interrupt counts nothing
+    pub(crate) fn shed(
+        &self,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        names: usize,
+    ) -> bool {
+        match self.admit(ledger) {
+            Ok(()) => false,
+            Err(RunError::Tripped) => {
+                (0..names).for_each(|_| self.policy.borrow_mut().listed_test_skipped());
+                true
+            }
+            Err(_) => true,
+        }
+    }
+
+    pub(crate) fn budget_spent(&self, failures: usize) -> bool {
+        self.settings.max_fail.is_some_and(|max_fail| failures >= max_fail)
+    }
+
     fn tripped(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     ) -> bool {
         let failures = ledger.snapshot().failed + self.docs.failed.get();
-        let observation = self.policy.borrow().observe_failures(failures);
-        if observation == Observation::FirstTrip {
+        if self.budget_spent(failures) && self.policy.borrow().report().is_none() {
             let doc = self.interrupt_doc_tests();
             self.policy
                 .borrow_mut()
                 .record_trip(self.started_sessions(ledger), doc);
+            self.trip.fire();
         }
-        observation != Observation::Clear
+        self.trip.is_fired()
     }
 
-    // a child terminated while still frozen never ran, so it is not in flight even while its exit is pending
+    // a parked child is still frozen, so it never ran and is not in flight
     fn started_sessions(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     ) -> usize {
         let frozen = self
-            .withdrawn_ready
+            .ready
             .get()
             .is_some_and(|slot| ledger.sessions().get(slot).is_some());
         ledger.sessions().len() - usize::from(frozen)
@@ -1575,14 +1619,13 @@ impl ListingScan<'_, '_> {
     fn apply(
         &self,
         step: ListingSourceStep<'_, '_, '_>,
-        stopped: bool,
         ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut Watches,
     ) -> Result<Flow, RunError> {
         let run = self.run;
         match step {
             ListingSourceStep::Launch(intent) => {
-                if !run.policy.borrow_mut().admit_listed(run.interrupted(), stopped) {
+                if run.shed(ledger, 1) {
                     return Ok(Flow::Next);
                 }
                 if run.settings.process == ProcessMode::Shard {
@@ -2320,7 +2363,6 @@ impl CargoDriver<'_> {
         let mut context = Context::from_waker(Waker::noop());
         let mut offset = 0;
         loop {
-            let stopped = run.tripped(ledger);
             if !status_queue::room_for(EVENT_RESERVE) {
                 status_queue::defer();
                 return Ok(offset);
@@ -2338,7 +2380,7 @@ impl CargoDriver<'_> {
             };
             let (step, consumed) = polled.map_err(|_| RunError::ListingStream)?;
             offset += consumed;
-            if matches!(scan.apply(step, stopped, ledger, watches)?, Flow::Pause) {
+            if matches!(scan.apply(step, ledger, watches)?, Flow::Pause) {
                 return Ok(offset);
             }
             let ready = self.listing_framer.frame_ready().map_err(|_| RunError::ListingStream)?;
@@ -2381,7 +2423,6 @@ impl CargoDriver<'_> {
         shard::load_records(run, executable, active.target)?;
         let mut context = Context::from_waker(Waker::noop());
         loop {
-            let stopped = run.tripped(ledger);
             if !status_queue::room_for(EVENT_RESERVE) {
                 status_queue::defer();
                 return Ok(false);
@@ -2397,7 +2438,7 @@ impl CargoDriver<'_> {
                 return Ok(false);
             };
             let step = polled.map_err(|_| RunError::ListingStream)?;
-            match scan.apply(step, stopped, ledger, watches)? {
+            match scan.apply(step, ledger, watches)? {
                 Flow::Eof => {
                     shard::seal(run);
                     return Ok(true);
@@ -2636,6 +2677,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         .inspect_err(|_| cargo_child.terminate())?;
     let prepared = held(settings.filterset.as_ref().map(Filterset::prepare));
     let doc_wanted = parser.doc_selection() == DocSelection::Included;
+    let root = Signal::new();
     let run = held(ListingRun {
         signals: &signals,
         filter,
@@ -2658,13 +2700,13 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         doc_pending: Cell::new(doc_wanted),
         launch_storage: RefCell::new(held_launch_storage()),
         ready: Cell::new(None),
-        withdrawn_ready: Cell::new(None),
         shards: RefCell::new(ShardArena::with_declared(shard_names, DECLARED_BYTES)),
         sched: RefCell::new(SchedTable::new(sched_bytes)),
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
-            stop_sent: Cell::new(false),
             interrupt_reported: Cell::new(0),
+            trip: root.child(),
+            root,
     });
     let mut launch_doc = doc_wanted.then_some(|| {
         let mut doc = spawn_doc_tests(parser, (settings.ignore, settings.output), inherited, directories.as_ref().map(|chosen| &chosen.doc))?;
@@ -3743,6 +3785,8 @@ mod tests {
 mod listing_allocation_tests {
     use core::cell::{Cell, RefCell};
 
+    use proxima_core::signal::Signal;
+
     use super::{DocObservation, ENVIRONMENT_CAPACITY, LISTING_SLOTS, ListingRun, PendingListing, Settings, TargetTable, spawn_listing};
     use crate::edge_spawn::held_launch_storage;
     use crate::cargo_message::TestArtifact;
@@ -3793,6 +3837,7 @@ mod listing_allocation_tests {
         let mut ledger = [0_u32; 4];
         let mut frame = crate::line::Line::new();
         let render = (crate::config::OutputMode::Rich, RefCell::new(super::RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+        let root = Signal::new();
         let run = ListingRun {
             signals: &signals,
             filter: "",
@@ -3812,13 +3857,13 @@ mod listing_allocation_tests {
             doc_pending: Cell::new(false),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: core::cell::Cell::new(None),
-            withdrawn_ready: Cell::new(None),
-            shards: RefCell::new(crate::shard_arena::ShardArena::new(&mut [])),
+                shards: RefCell::new(crate::shard_arena::ShardArena::new(&mut [])),
             sched: RefCell::new(SchedTable::new(&mut [])),
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
-            stop_sent: Cell::new(false),
             interrupt_reported: Cell::new(0),
+            trip: root.child(),
+            root,
         };
         let artifact = TestArtifact {
             executable,
@@ -3837,5 +3882,51 @@ mod listing_allocation_tests {
         reap(&mut listing);
         std::println!("{{\"listing_spawn_allocations\":{allocations}}}");
         assert_eq!(allocations, 0);
+    }
+}
+
+#[cfg(test)]
+mod doc_trip_tests {
+    use super::{DOC_STDERR_CAPACITY, DocAtTrip, DocParser, DocPhase, DocRun, LockWatch};
+
+    const ABSENT_GROUP: u32 = 2_000_000_000;
+
+    fn doc_run(phase: DocPhase, exit_code: Option<i32>) -> DocRun {
+        DocRun {
+            child: None,
+            process_id: ABSENT_GROUP,
+            parser: DocParser::new(),
+            stdout_eof: false,
+            stderr_eof: false,
+            exit_code,
+            phase,
+            stderr_bytes: [0; DOC_STDERR_CAPACITY],
+            stderr_length: 0,
+            lock_watch: LockWatch::new(),
+            backlog: None,
+        }
+    }
+
+    #[proxima::test]
+    async fn each_doc_phase_reports_what_actually_happened_at_the_trip() {
+        let mut held = doc_run(DocPhase::Starting, None);
+        let mut executing = doc_run(DocPhase::Executing, None);
+        let mut completed = doc_run(DocPhase::Executing, Some(0));
+
+        assert_eq!(held.state_for_trip(), DocAtTrip::InterruptedBeforeExecuting);
+        assert_eq!(executing.state_for_trip(), DocAtTrip::ExecutingLeftToFinish);
+        assert_eq!(completed.state_for_trip(), DocAtTrip::AlreadyFinished);
+    }
+
+    #[proxima::test]
+    async fn only_the_held_doc_phase_is_interrupted_by_the_trip() {
+        let mut held = doc_run(DocPhase::Starting, None);
+        let mut completed = doc_run(DocPhase::Starting, Some(0));
+
+        held.state_for_trip();
+        completed.state_for_trip();
+
+        assert_eq!(held.phase, DocPhase::Interrupted);
+        assert_eq!(completed.phase, DocPhase::Starting);
     }
 }
