@@ -523,35 +523,42 @@ struct Settings {
     no_tests: NoTestsPolicy,
     process: ProcessMode,
     output: OutputMode,
+    output_why: &'static str,
     color: bool,
     exit_with_parent: ExitWithParent,
 }
+
+const SETTING_KEYS: [&str; 20] = [
+    "RUST_TEST_THREADS",
+    "CARGO_VAL_JOBS",
+    "CARGO_VAL_MAX_FAIL",
+    "CARGO_VAL_FAIL_FAST",
+    "CARGO_VAL_NO_TESTS",
+    "CARGO_VAL_PROCESS",
+    "CARGO_VAL_OUTPUT",
+    "CARGO_VAL_EXIT_WITH_PARENT",
+    "CI",
+    "TERM",
+    "CARGO_VAL_COLOR",
+    "NO_COLOR",
+    "CARGO_VAL_IGNORED",
+    "CARGO_VAL_FILTERSET",
+    "CARGO_VAL_BIN_GATE",
+    "CARGO_VAL_LOG",
+    "CLAUDECODE",
+    "CODEX_SANDBOX",
+    "CURSOR_TRACE_ID",
+    "GEMINI_CLI",
+];
 
 fn runtime_settings(
     environment: &Environment<'_>,
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
-    let mut pairs = [("", ""); 16];
+    let mut pairs = [("", ""); 24];
     let mut count = 0;
-    for key in [
-        "RUST_TEST_THREADS",
-        "CARGO_VAL_JOBS",
-        "CARGO_VAL_MAX_FAIL",
-        "CARGO_VAL_FAIL_FAST",
-        "CARGO_VAL_NO_TESTS",
-        "CARGO_VAL_PROCESS",
-        "CARGO_VAL_OUTPUT",
-        "CARGO_VAL_EXIT_WITH_PARENT",
-        "CI",
-        "TERM",
-        "CARGO_VAL_COLOR",
-        "NO_COLOR",
-        "CARGO_VAL_IGNORED",
-        "CARGO_VAL_FILTERSET",
-        "CARGO_VAL_BIN_GATE",
-        "CARGO_VAL_LOG",
-    ] {
+    for key in SETTING_KEYS {
         if let Some(value) = environment.get(key.as_bytes()) {
             pairs[count] = (
                 key,
@@ -568,7 +575,7 @@ fn runtime_settings(
         .map_err(RunError::Setting)?
         .0
         .mode(cfg!(windows));
-    let output = resolve_output(&source, parser)?;    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
+    let (output, output_why) = resolve_output(&source, parser)?;    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
     let default_jobs = match process {
         ProcessMode::Shard => {
             let cores = std::thread::available_parallelism().map_or(1, core::num::NonZero::get);
@@ -628,6 +635,7 @@ fn runtime_settings(
         no_tests,
         process,
         output,
+        output_why,
         color,
         exit_with_parent,
     })
@@ -846,7 +854,7 @@ fn settled(
             {
                 match run.settings.output {
                     OutputMode::Rich => watch.output.write_failure()?,
-                    OutputMode::Plain => {}
+                    OutputMode::Plain | OutputMode::Agent => {}
                 }
             }
             watches[index] = None;
@@ -1040,7 +1048,7 @@ fn deliver<'bytes>(
         } => {
             reporting.settle_ready(ledger);
             match reporting.render.0 {
-                OutputMode::Plain => {
+                OutputMode::Plain | OutputMode::Agent => {
                     let name = &report[..name_length.saturating_sub(1)];
                     let millis = monotonic_millis().saturating_sub(watch.started_millis);
                     let targets = reporting.targets.borrow();
@@ -1223,7 +1231,7 @@ fn launch_listed(
     run.targets.borrow_mut().tally(target, Tally::Launched);
     start_session(ledger, watches, scan.lanes, slot, None)?;
     match run.settings.output {
-        OutputMode::Plain => {
+        OutputMode::Plain | OutputMode::Agent => {
             let targets = run.targets.borrow();
             let id = (targets.id(target), intent.test_name().as_bytes());
             emit(run.render(), &Event::Started { id, solo: false })?;
@@ -1466,7 +1474,7 @@ impl ListingScan<'_, '_> {
             }
             ListingSourceStep::IgnoredTest(name) => {
                 match run.settings.output {
-                    OutputMode::Plain => {
+                    OutputMode::Plain | OutputMode::Agent => {
                         let targets = run.targets.borrow();
                         let id = (targets.id(self.target), name.as_bytes());
                         emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, millis: None, solo: false })?;
@@ -1660,6 +1668,7 @@ pub(crate) struct CargoDriver<'buffer> {
     diagnostics: Vec<u8>,
     stderr_held: Vec<u8>,
     diagnostics_reported: bool,
+    output: OutputMode,
 }
 
 // the byte count of `pending` that ends on a newline, or all of it once the stream has ended with no newline to come
@@ -1685,6 +1694,13 @@ fn begins_build_failure(line: &[u8]) -> bool {
         })
         .take(BUILD_FAILURE_PREFIX.len())
         .eq(BUILD_FAILURE_PREFIX.iter().copied())
+}
+
+const CARGO_PROGRESS: [&[u8]; 4] = [b"Compiling ", b"Finished ", b"Running ", b"Fresh "];
+
+fn is_cargo_progress(line: &[u8]) -> bool {
+    let trimmed = line.trim_ascii_start();
+    CARGO_PROGRESS.iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
@@ -2042,7 +2058,11 @@ impl CargoDriver<'_> {
     }
 
     fn emit_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
-        write_fd(2, bytes)?;
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if self.output != OutputMode::Agent || !is_cargo_progress(line) {
+                write_fd(2, line)?;
+            }
+        }
         announce_lock_wait(&mut self.lock_watch, bytes)
     }
 
@@ -2413,13 +2433,14 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line)) = storage;
     let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots)), RefCell::new(frame_line));
     match settings.output {
-        OutputMode::Plain => emit(
+        OutputMode::Plain | OutputMode::Agent => emit(
             &render,
             &Event::Begin {
                 version: env!("CARGO_PKG_VERSION").as_bytes(),
                 shard: settings.process == ProcessMode::Shard,
                 jobs: settings.jobs,
                 github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
+                why: (settings.output == OutputMode::Agent).then_some(settings.output_why.as_bytes()),
             },
         )?,
         OutputMode::Rich => {}
@@ -2450,7 +2471,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     } = start_children(parser, &settings, target_mode, inherited).await?;
     let cargo_process_id = cargo_child.process_id();
     let shared_directory = lock_watch.directory().to_vec();
-    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?;
+    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch, settings.output)?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .await
@@ -2573,6 +2594,7 @@ fn new_driver(
     bins: BinCounts,
     gate: BinGate,
     lock_watch: LockWatch,
+    output: OutputMode,
 ) -> Result<Box<CargoDriver<'_>>, RunError> {
     Ok(Box::new(CargoDriver {
         process_id,
@@ -2599,6 +2621,7 @@ fn new_driver(
         diagnostics: Vec::new(),
         stderr_held: Vec::new(),
         diagnostics_reported: false,
+        output,
     }))
 }
 
@@ -2694,12 +2717,15 @@ fn resolve_exit_with_parent(
 fn resolve_output(
     source: &BorrowedSettings<'_>,
     parser: &CliParser<'_>,
-) -> Result<OutputMode, RunError> {
+) -> Result<(OutputMode, &'static str), RunError> {
     OUTPUT
         .build_default(Some(crate::build_defaults::OUTPUT))
         .from_settings(source, parser.output())
         .resolve::<OutputSetting>()
-        .map(|(setting, _)| setting.mode(crate::edge_output::is_terminal(STDOUT), source))
+        .map(|(setting, origin)| {
+            let terminal = crate::edge_output::is_terminal(STDOUT);
+            (setting.mode(terminal, source), setting.why(origin, terminal, source))
+        })
         .map_err(RunError::Setting)
 }
 
@@ -2970,7 +2996,7 @@ fn spawn_doc_tests(
     }
     let plain_color = [cargo_term_color(false)];
     let doc_term_color: &[&[u8]] = match output {
-        OutputMode::Plain => &plain_color,
+        OutputMode::Plain | OutputMode::Agent => &plain_color,
         OutputMode::Rich => &[],
     };
     let child = spawn_reserved(|| {
@@ -3140,7 +3166,7 @@ fn report_doc_result(
         DocOutcome::Ignored => (TerminalOutcome::Ignored, &observation.ignored),
     };
     counter.set(counter.get() + 1);
-    if observation.render.0 == OutputMode::Plain {
+    if observation.render.0 != OutputMode::Rich {
         let id = (&b"doc-tests"[..], name);
         return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), millis: None, solo: false });
     }
@@ -3215,11 +3241,14 @@ fn write_summary(
     targets: &TargetTable,
     doc_tests: Option<&DocTotals>,
     started_millis: u64,
+    print: bool,
 ) -> Result<Counts, RunError> {
     let mut total = Counts::default();
     for target in 0..targets.len() {
         let counts = targets.counts(target);
-        write_fd(1, render_counts(targets.id(target), &counts, None).bytes())?;
+        if print {
+            write_fd(1, render_counts(targets.id(target), &counts, None).bytes())?;
+        }
         if !counts.balanced() {
             let mut line = Line::<CONTEXT_CAPACITY>::new();
             line.text(b"cargo-val: ");
@@ -3232,11 +3261,15 @@ fn write_summary(
     }
     if let Some(doc) = doc_tests {
         let counts = doc_counts(doc);
-        write_fd(1, render_counts(b"doc-tests", &counts, None).bytes())?;
+        if print {
+            write_fd(1, render_counts(b"doc-tests", &counts, None).bytes())?;
+        }
         total = total.plus(&counts);
     }
     let wall = monotonic_millis().saturating_sub(started_millis);
-    write_fd(1, render_counts(b"total", &total, Some(wall)).bytes())?;
+    if print {
+        write_fd(1, render_counts(b"total", &total, Some(wall)).bytes())?;
+    }
     Ok(total)
 }
 
@@ -3254,13 +3287,18 @@ fn conclude(
     if let Some(doc) = &doc_tests {
         write_doc_notice(doc)?;
     }
-    let total = write_summary(targets, doc_tests.as_ref(), started_millis)?;
+    let total = write_summary(targets, doc_tests.as_ref(), started_millis, settings.output != OutputMode::Agent)?;
+    let empty = total.passed + total.failed == 0;
+    let exit = match (total.failed, empty, settings.no_tests) {
+        (0, true, NoTestsPolicy::Fail) => NO_TESTS_EXIT_CODE,
+        (0, ..) => 0,
+        _ => 1,
+    };
     match settings.output {
-        OutputMode::Plain => close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path()))?,
+        OutputMode::Plain | OutputMode::Agent => close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path(), exit))?,
         OutputMode::Rich => {}
     }
-    let empty = total.passed + total.failed == 0;
-    if empty && settings.no_tests != NoTestsPolicy::Pass {
+    if empty && settings.no_tests != NoTestsPolicy::Pass && settings.output != OutputMode::Agent {
         write_no_tests(parser, settings.ignore)?;
     }
     Ok(RunSummary {
@@ -3276,7 +3314,7 @@ fn close_plain(
     render: &Render<'_>,
     (binaries, total): (usize, &Counts),
     stop: Option<StopReport>,
-    (started_millis, manifest): (u64, Option<&[u8]>),
+    (started_millis, manifest, exit): (u64, Option<&[u8]>, i32),
 ) -> Result<(), RunError> {
     emit(render, &Event::Listed { binaries, tests: total.discovered })?;
     emit(
@@ -3288,6 +3326,9 @@ fn close_plain(
             not_run: stop.map_or(0, |report| report.listed_not_run),
             wall_ms: monotonic_millis().saturating_sub(started_millis),
             manifest,
+            discovered: total.discovered,
+            filtered: total.filtered,
+            exit: u8::try_from(exit).unwrap_or(u8::MAX),
         },
     )
 }
@@ -3563,6 +3604,7 @@ mod listing_allocation_tests {
             no_tests: NoTestsPolicy::Pass,
             process: crate::config::ProcessMode::Test,
             output: crate::config::OutputMode::Rich,
+            output_why: "flag",
             color: false,
             exit_with_parent: crate::config::ExitWithParent::Off,
         };

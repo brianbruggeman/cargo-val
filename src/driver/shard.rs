@@ -89,7 +89,7 @@ impl ShardWatch {
     }
 
     fn flush_failures(&mut self, render: &Render<'_>) -> Result<(), RunError> {
-        if render.0 == OutputMode::Plain && self.keeping {
+        if render.0 != OutputMode::Rich && self.keeping {
             self.keeping = false;
             let closing = projected(render, &Event::BlockClosed);
             keep_failure_line(&mut self.failures, &mut self.failure_length, (render.0, closing.bytes().trim_ascii_end()))?;
@@ -100,7 +100,7 @@ impl ShardWatch {
 
 const fn descriptor(output: OutputMode) -> i32 {
     match output {
-        OutputMode::Plain => 1,
+        OutputMode::Plain | OutputMode::Agent => 1,
         OutputMode::Rich => 2,
     }
 }
@@ -189,7 +189,7 @@ fn count_reported(
         run.targets.borrow_mut().tally(target, tally);
     }
     match run.settings.output {
-        OutputMode::Plain => {
+        OutputMode::Plain | OutputMode::Agent => {
             let targets = run.targets.borrow();
             let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
             let millis = Some(monotonic_millis().saturating_sub(started_millis));
@@ -360,7 +360,7 @@ pub(super) fn observe(
                         blocked.mark(ordinal);
                         *keeping = true;
                     }
-                    if run.settings.output == OutputMode::Plain {
+                    if run.settings.output != OutputMode::Rich {
                         return keep_block_edge(run, (target, name), (was_open, *keeping), (failures, failure_length));
                     }
                 }
@@ -775,7 +775,7 @@ fn finish_rerun(
         }
         (Some(Rerun::Decides { .. }), false) => {
             match run.settings.output {
-                OutputMode::Plain => {
+                OutputMode::Plain | OutputMode::Agent => {
                     count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
                     failure_output(run, target, name, output)?;
                 }
@@ -798,7 +798,7 @@ fn finish_rerun(
 }
 
 fn warn_rerun(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], what: &[u8]) -> Result<(), RunError> {
-    if run.settings.output == OutputMode::Plain {
+    if run.settings.output != OutputMode::Rich {
         let targets = run.targets.borrow();
         let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
         return emit(run.render(), &Event::Warned { id, what });
@@ -812,7 +812,7 @@ fn warn_rerun(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], what: &[
 
 fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], output: &ChildOutput) -> Result<(), RunError> {
     match run.settings.output {
-        OutputMode::Plain => {
+        OutputMode::Plain | OutputMode::Agent => {
             let targets = run.targets.borrow();
             let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
             let (stdout, stderr) = output.captured();
@@ -985,6 +985,7 @@ mod pause_tests {
             no_tests: NoTestsPolicy::Pass,
             process: ProcessMode::Shard,
             output: crate::config::OutputMode::Rich,
+            output_why: "flag",
             color: false,
             exit_with_parent: crate::config::ExitWithParent::Off,
         }
