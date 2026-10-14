@@ -44,6 +44,12 @@ pub mod summary;
 pub mod test_environment;
 
 pub mod edge_args_windows;
+#[cfg(all(target_os = "macos", feature = "edge-os"))]
+pub mod edge_stack_macos;
+#[cfg(all(target_os = "linux", feature = "edge-os"))]
+pub mod edge_stack_linux;
+#[cfg(all(windows, feature = "edge-os"))]
+pub mod edge_stack_windows;
 #[cfg(not(windows))]
 pub mod edge_args_unix;
 
@@ -806,3 +812,10 @@ fn parse_nested_boolean(json: &mut Json<'_, '_>, field: &[u8]) -> Result<bool, P
     json.byte(b'}')?;
     Ok(value)
 }
+
+#[cfg(all(target_os = "macos", feature = "edge-os"))]
+pub use edge_stack_macos as edge_stack;
+#[cfg(all(target_os = "linux", feature = "edge-os"))]
+pub use edge_stack_linux as edge_stack;
+#[cfg(all(windows, feature = "edge-os"))]
+pub use edge_stack_windows as edge_stack;
