@@ -19,10 +19,20 @@ concurrency:
 
 jobs:
   selftest:
+    name: selftest (${{ matrix.source }}, ${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        source: [git, registry]
+        include:
+          - source: git
+            version: ${{ github.sha }}
+          - source: registry
+            version: 0.1.0
+          # windows edge tests assert process-wide handle counts, which parallel tests perturb
+          - os: windows-latest
+            args: "-- --test-threads=1"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +41,8 @@ jobs:
         id: val
         uses: ./
         with:
-          version: ${{ github.sha }}
+          version: ${{ matrix.version }}
+          args: ${{ matrix.args }}
           no-fail-fast: "true"
       - name: Assert the summary line ran tests and none failed
         shell: bash

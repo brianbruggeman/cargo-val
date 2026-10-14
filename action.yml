@@ -4,7 +4,7 @@ author: brianbruggeman
 
 inputs:
   version:
-    description: git ref (branch, tag or full commit sha) of cargo-val to install; falls back to main when empty
+    description: a semver version (0.1.0, v0.1.0, 0.1) installs that cargo-val release from crates.io; anything else is a git ref (branch, tag or full commit sha) installed from GitHub, falling back to main when empty
     required: false
     default: ${{ github.action_ref }}
   args:
@@ -29,7 +29,7 @@ outputs:
     description: the cargo val total line
     value: ${{ steps.run.outputs.total }}
   sha:
-    description: the cargo-val commit that was installed
+    description: the cargo-val commit that was installed, or empty when installed from crates.io
     value: ${{ steps.resolve.outputs.sha }}
 
 runs:
@@ -44,6 +44,13 @@ runs:
       run: |
         set -euo pipefail
         ref="${VERSION:-main}"
+        if [[ "$ref" =~ ^v?[0-9]+(\.[0-9]+){0,2}$ ]]; then
+          registry="${ref#v}"
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "key=crates-$registry" >> "$GITHUB_OUTPUT"
+          echo "root=$INSTALL_ROOT" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
           sha="$ref"
         else
@@ -54,6 +61,7 @@ runs:
           exit 1
         fi
         echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "key=$sha" >> "$GITHUB_OUTPUT"
         echo "root=$INSTALL_ROOT" >> "$GITHUB_OUTPUT"
 
     - name: restore cargo-val binary
@@ -61,21 +69,32 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ steps.resolve.outputs.root }}
-        key: cargo-val-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.sha }}
+        key: cargo-val-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.key }}
 
     - name: install cargo-val
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         SHA: ${{ steps.resolve.outputs.sha }}
+        REGISTRY_VERSION: ${{ steps.resolve.outputs.registry }}
         INSTALL_ROOT: ${{ steps.resolve.outputs.root }}
-      run: cargo install --locked --git https://github.com/brianbruggeman/cargo-val --rev "$SHA" --root "$INSTALL_ROOT" cargo-val
+      run: |
+        set -euo pipefail
+        if [ -n "$REGISTRY_VERSION" ]; then
+          cargo install --locked cargo-val --version "$REGISTRY_VERSION" --root "$INSTALL_ROOT"
+        else
+          cargo install --locked --git https://github.com/brianbruggeman/cargo-val --rev "$SHA" --root "$INSTALL_ROOT" cargo-val
+        fi
 
     - name: add cargo-val to PATH
       shell: bash
       env:
         INSTALL_ROOT: ${{ steps.resolve.outputs.root }}
-      run: echo "$INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+      run: |
+        set -euo pipefail
+        bin_dir="$INSTALL_ROOT/bin"
+        if command -v cygpath >/dev/null 2>&1; then bin_dir="$(cygpath -w "$bin_dir")"; fi
+        echo "$bin_dir" >> "$GITHUB_PATH"
 
     - name: cargo val
       id: run
