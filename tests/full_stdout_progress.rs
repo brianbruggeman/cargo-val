@@ -285,3 +285,67 @@ async fn drain_and_exit(stdout: &ChildStream, running: &Running) -> (Vec<u8>, st
     assert!(!fired.join().unwrap_or(false), "cargo-val (pid {}) outlived {:?} while its stdout drained and its group was killed", running.child.id(), group::SYNC_DEADLINE);
     (output, exited.expect("the exit source is unspent").expect("cargo-val exit status reads"))
 }
+
+const SHARD_MANY_NAMES: usize = 4096;
+
+fn spawn_shard_many(directory: &Path, stdout: PipeWriter) -> Child {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shard_many/Cargo.toml");
+    let stderr = fs::File::create(directory.join("stderr.log")).expect("stderr log is creatable");
+    let mut command = binary::command();
+    group::lead_group(&mut command);
+    command
+        .env("CARGO_VAL_OUTPUT", "plain")
+        .env("CARGO_VAL_JOBS", "1")
+        .env("NO_COLOR", "1")
+        .env_remove("RUST_TEST_THREADS")
+        .env_remove("CARGO_VAL_MAX_FAIL")
+        .env_remove("CARGO_VAL_FAIL_FAST")
+        .env_remove("CARGO_VAL_PROCESS")
+        .env("CARGO_TARGET_DIR", target_directory().join("shard-many-fixture"))
+        .arg("--manifest-path")
+        .arg(manifest)
+        .args(["--process", "shard", "--no-fail-fast"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("cargo-val binary is spawnable")
+}
+
+fn start_names(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("START "))
+        .filter_map(|rest| rest.split_whitespace().nth(1))
+        .collect()
+}
+
+#[proxima::test(timeout = "310s")]
+async fn a_start_burst_larger_than_the_status_queue_pauses_on_a_full_stdout_and_loses_no_start() {
+    let directory = target_directory()
+        .join("full-stdout")
+        .join(format!("starts-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).expect("run directory is creatable");
+    let (stdout, stdout_writer) = std::io::pipe().expect("stdout pipe is creatable");
+    set_nonblocking(stdout.as_raw_fd());
+    let stdout_descriptor = stdout.as_raw_fd();
+    let stdout = ChildStream::new(OwnedFd::from(stdout));
+    size_pipe(&stdout_writer, FLOOD_PIPE_BYTES);
+    let mut running = Running::start(spawn_shard_many(&directory, stdout_writer));
+
+    await_pending_bytes(stdout_descriptor, "stdout").await;
+    let alive = running.child.try_wait().expect("cargo-val status reads");
+    assert!(alive.is_none(), "cargo-val waits on a full stdout instead of exiting: {alive:?}");
+
+    let (output, status) = drain_and_exit(&stdout, &running).await;
+
+    let stderr = fs::read_to_string(directory.join("stderr.log")).expect("stderr log reads");
+    assert_eq!(status.code(), Some(0), "cargo-val exit status; stderr tail: {}", stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n"));
+    let text = String::from_utf8(output).expect("stdout is text");
+    let starts = start_names(&text);
+    let distinct: BTreeSet<&str> = starts.iter().copied().collect();
+    let passed = text.lines().filter(|line| line.starts_with("PASS ")).count();
+    assert_eq!(distinct.len(), SHARD_MANY_NAMES, "every name is announced");
+    assert_eq!(starts.len(), 2 * SHARD_MANY_NAMES, "one START from the shard child and one from the solo rerun per name");
+    assert_eq!(passed, SHARD_MANY_NAMES, "every name settles once");
+}
