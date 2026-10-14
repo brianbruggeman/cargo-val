@@ -41,6 +41,8 @@ pub mod sched_binary;
 #[cfg(feature = "edge-os")]
 pub mod sched_file;
 pub mod shard_sched;
+#[cfg(any(test, feature = "edge-os"))]
+pub mod source_excerpt;
 pub mod shard_arena;
 pub mod stack_capture;
 pub mod stack_frames;
