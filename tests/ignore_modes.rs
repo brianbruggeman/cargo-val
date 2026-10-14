@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
 
 mod common;
@@ -314,6 +316,7 @@ mod bin_gate_hold {
     use std::fs::OpenOptions;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
+    use std::process::Command;
     use std::thread;
     use std::time::Duration;
 
@@ -371,6 +374,27 @@ mod bin_gate_hold {
         [seen, drain(stream).await.0].concat()
     }
 
+    // the fixture has no dependencies, so a private CARGO_HOME costs nothing and takes it off the package-cache lock every other cargo on the box takes
+    pub fn command(target: &Path, fifo: &Path) -> Command {
+        let mut command = crate::binary::command();
+        command
+            .env("CARGO_VAL_OUTPUT", "plain")
+            .arg("--manifest-path")
+            .arg(manifest("bin_gate"))
+            .env_remove("CARGO_VAL_BIN_GATE")
+            .env("NO_COLOR", "1")
+            .env("CARGO_VAL_LOG", "debug")
+            .env("CARGO_TARGET_DIR", target)
+            .env("CARGO_HOME", target.join("cargo-home"))
+            .env("CARGO_VAL_TARGET_DIR", "shared")
+            .env("CARGO_VAL_BIN_GATE_HOLD", fifo)
+            .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS.to_string())
+            .env_remove("MAKEFLAGS")
+            .env_remove("CARGO_MAKEFLAGS")
+            .env_remove("MFLAGS");
+        command
+    }
+
     pub async fn cold_run(label: &str, environment: &[(&str, &str)], release: Release) -> Run {
         cold_run_within(label, environment, release, fixture_deadline()).await
     }
@@ -381,21 +405,7 @@ mod bin_gate_hold {
         std::fs::create_dir_all(&target).expect("target directory is creatable");
         let fifo = target.join("bin-hold");
         make_fifo(&fifo);
-        let mut command = crate::binary::command();
-        command
-            .env("CARGO_VAL_OUTPUT", "plain")
-            .arg("--manifest-path")
-            .arg(manifest("bin_gate"))
-            .env_remove("CARGO_VAL_BIN_GATE")
-            .env("NO_COLOR", "1")
-            .env("CARGO_VAL_LOG", "debug")
-            .env("CARGO_TARGET_DIR", &target)
-            .env("CARGO_VAL_TARGET_DIR", "shared")
-            .env("CARGO_VAL_BIN_GATE_HOLD", &fifo)
-            .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS.to_string())
-            .env_remove("MAKEFLAGS")
-            .env_remove("CARGO_MAKEFLAGS")
-            .env_remove("MFLAGS");
+        let mut command = command(&target, &fifo);
         for (key, value) in environment {
             command.env(key, value);
         }
@@ -415,6 +425,18 @@ mod bin_gate_hold {
         let _ = std::fs::remove_dir_all(&target);
         run
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_bin_gate_fixture_builds_with_a_private_cargo_home_and_target_dir() {
+    let target = Path::new("/scratch/bin-gate-on-4242");
+    let command = bin_gate_hold::command(target, &target.join("bin-hold"));
+
+    let variable = |name: &str| command.get_envs().find(|(key, _)| *key == name).and_then(|(_, value)| value).map(Path::new);
+
+    assert_eq!(variable("CARGO_TARGET_DIR"), Some(target));
+    assert_eq!(variable("CARGO_HOME"), Some(target.join("cargo-home").as_path()));
 }
 
 #[cfg(unix)]
