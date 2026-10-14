@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-#[path = "../tests/common/group.rs"]
-mod group;
-#[path = "../tests/common/output.rs"]
-mod output;
+#[path = "../tests/common/mod.rs"]
+mod common;
+#[path = "../tests/common/block_on.rs"]
+mod block_on;
 
 #[cfg(windows)]
 use cargo_val::edge_spawn_windows::{Child, HeldLaunchStorage, held_launch_storage, resume_ready, spawn_exact, spawn_exact_ready};
@@ -100,7 +100,7 @@ fn first_test_binary(fixture: &Path) -> Result<PathBuf, String> {
         .arg(fixture.join("target"))
         .current_dir(fixture)
         .env_remove("CARGO_TARGET_DIR");
-    let output = output::output_bounded(&mut build, group::SYNC_DEADLINE)?;
+    let output = block_on::output_blocking(build, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE")?;
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -169,7 +169,7 @@ impl Launcher {
     fn std_launch(&self, test: &str) -> Result<(), String> {
         let mut launch = Command::new(&self.executable);
         launch.args(["--exact", test]).current_dir(&self.directory);
-        let output = output::output_bounded(&mut launch, group::SYNC_DEADLINE)?;
+        let output = block_on::output_blocking(launch, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE")?;
         if output.status.success() {
             return Ok(());
         }

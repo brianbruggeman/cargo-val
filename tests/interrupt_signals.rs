@@ -16,6 +16,8 @@ mod binary;
 
 #[path = "common/group.rs"]
 mod group;
+#[path = "common/lead.rs"]
+mod lead;
 #[path = "common/wait.rs"]
 mod wait;
 
@@ -95,7 +97,7 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/{fixture}/Cargo.toml"));
     let mut command = binary::command();
-    group::lead_group(&mut command);
+    lead::lead_group(&mut command);
     let child = command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
@@ -145,7 +147,7 @@ macro_rules! interrupt {
         assert!(alive(fixture.holder), "the blocked process is alive before the signal");
 
         assert_eq!(unsafe { libc::kill(cargo_val, $signal) }, 0);
-        let status = wait::wait_bounded(&mut fixture.child, group::SYNC_DEADLINE).unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
+        let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
         let held = ChildStream::new(OwnedFd::from(fixture.held.try_clone().expect("the held fifo descriptor duplicates")));
         fifo::until_eof(&held, label).await;
 

@@ -15,6 +15,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use cargo_val::stack_frames::{Class, Frame, frames};
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/fifo.rs"]
 mod fifo;
 #[path = "common/supervise.rs"]
@@ -22,7 +24,7 @@ mod supervise;
 #[path = "../src/test_alloc.rs"]
 mod test_alloc;
 
-use common::{FIXTURE_DEADLINE, fixture_output};
+use fixture::{fixture_deadline, fixture_output};
 use supervise::supervised;
 
 const WORKSPACE: [&str; 1] = ["cargo_val_blocked_fixture"];
@@ -116,7 +118,7 @@ fn until_every_thread_is_named_asleep(pid: u32) {
         if tasks.len() >= 2 && tasks.iter().all(|task| sleeps_by_the_kernels_account(task)) {
             return;
         }
-        assert!(started.elapsed() < FIXTURE_DEADLINE, "threads of {pid} never all named a sleep: {tasks:?}");
+        assert!(started.elapsed() < fixture_deadline(), "threads of {pid} never all named a sleep: {tasks:?}");
         std::thread::yield_now();
     }
 }
@@ -134,7 +136,7 @@ fn sleeps_by_the_kernels_account(task: &Path) -> bool {
 async fn macos_sample_of_a_real_blocked_child_finds_the_user_frame_at_its_file_and_line() {
     let (mut command, ready, held) = blocked_command().await;
 
-    supervised(&mut command, FIXTURE_DEADLINE, async |_, _, _, _| {
+    supervised(&mut command, fixture_deadline(), async |_, _, _, _| {
         let pid = blocked_pid(&ready).await;
         let mut buffer = vec![0_u8; 32 * 1024];
 
@@ -166,7 +168,7 @@ async fn linux_proc_of_a_real_blocked_child_yields_a_kernel_frame_per_thread_or_
 
     let (mut command, ready, held) = blocked_command().await;
 
-    supervised(&mut command, FIXTURE_DEADLINE, async |_, _, _, _| {
+    supervised(&mut command, fixture_deadline(), async |_, _, _, _| {
         let pid = blocked_pid(&ready).await;
         until_every_thread_is_named_asleep(pid);
         let mut buffer = vec![0_u8; 32 * 1024];

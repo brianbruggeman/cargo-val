@@ -13,6 +13,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use futures::FutureExt;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -20,7 +22,7 @@ mod fifo;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{FIXTURE_DEADLINE, fixture_output};
+use fixture::{fixture_deadline, fixture_output};
 use supervise::supervised;
 
 const CALLER_PANIC: &str = "the caller panics while the blocked test is running";
@@ -94,7 +96,7 @@ async fn a_panicking_supervised_test_still_kills_its_group() {
     let mut command = blocked_test_command(Some(&directory));
     let mut leader: libc::pid_t = 0;
     let mut blocked: libc::pid_t = 0;
-    let unwound = AssertUnwindSafe(supervised(&mut command, FIXTURE_DEADLINE, async |leader_pid, _, _, _| {
+    let unwound = AssertUnwindSafe(supervised(&mut command, fixture_deadline(), async |leader_pid, _, _, _| {
         leader = libc::pid_t::try_from(leader_pid).expect("a pid fits pid_t");
         let text = fifo::first_line(&ready, "the blocked test never reported it was blocked").await;
         blocked = text.trim().parse().unwrap_or_else(|error| panic!("the ready fifo carries one pid, got {text:?}: {error}"));
