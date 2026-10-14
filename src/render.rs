@@ -104,9 +104,6 @@ pub enum Mode {
     Review { selected: u16, armed: bool, top: Option<u16> },
     /// `back` is where a list screen returns to: `None` is the running screen, `Some(selected)` review with its selection.
     Timeline { back: Option<u16> },
-    Find { back: Option<u16> },
-    Skipped { back: Option<u16> },
-    Warnings { back: Option<u16> },
     Receipt,
     BuildError,
     Interrupted { signal: u8 },
@@ -190,9 +187,6 @@ impl Mode {
             Self::Review { selected, top, .. } => Self::Review { selected, armed: false, top },
             Self::Running
             | Self::Timeline { .. }
-            | Self::Find { .. }
-            | Self::Skipped { .. }
-            | Self::Warnings { .. }
             | Self::Receipt
             | Self::BuildError
             | Self::Interrupted { .. }
@@ -207,10 +201,7 @@ impl Mode {
             Self::Running
             | Self::QuitArmed
             | Self::Review { .. }
-            | Self::Timeline { .. }
-            | Self::Find { .. }
-            | Self::Skipped { .. }
-            | Self::Warnings { .. } => true,
+            | Self::Timeline { .. } => true,
             Self::BuildError | Self::Interrupted { .. } | Self::Done { .. } | Self::Receipt => false,
         }
     }
@@ -225,9 +216,6 @@ impl Mode {
             Self::Running
             | Self::QuitArmed
             | Self::Timeline { .. }
-            | Self::Find { .. }
-            | Self::Skipped { .. }
-            | Self::Warnings { .. }
             | Self::BuildError
             | Self::Interrupted { .. }
             | Self::Done { .. }

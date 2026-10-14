@@ -17,4 +17,4 @@ NO-RETRY not retried alone: it failed after 71.660s, over the 30s retry budget.
  cargo val  process group killed after 71.66s
 find the commit  cargo val bisect sched_records
   the_host_binary_format_yields_every_declared_record_with_flags_and_group
- j/k move  r rerun  R all  e edit  / find  i skip  w warn  s timeline  q quit
+ j/k move  r rerun  R all  e edit  s timeline  q quit
