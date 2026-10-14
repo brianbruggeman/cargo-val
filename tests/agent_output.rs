@@ -150,3 +150,23 @@ async fn a_proxima_test_harness_timeout_is_a_timeout_enforced_by_the_harness() {
     assert!(classified.starts_with("         TIMEOUT enforced_by=harness  "), "{classified}");
     assert!(stdout_of(&output).contains("proxima::test: body did not complete within the timeout"), "the message line survives");
 }
+
+#[proxima::test(timeout = "310s")]
+async fn the_output_record_counts_every_byte_the_capture_buffer_dropped() {
+    let noise_lines = 200;
+    let noise_bytes = noise_lines * "worker 0000 flushed segment 0000 to disk\n".len();
+    let output = run("failure_class", &[("CLASSIFY_NOISE_LINES", "200")], &["--output", "agent", "-E", "test(=failing::plain_panic)"]).await;
+    let report = stdout_of(&output);
+
+    let record = report.lines().find(|line| line.starts_with("OUTPUT   ")).unwrap_or_else(|| panic!("an OUTPUT record:\n{report}"));
+    let field = |key: &str| -> usize {
+        let tail = record.split(&format!("{key}=")).nth(1).unwrap_or_else(|| panic!("{key} in {record}"));
+        tail.split(' ').next().expect("a value").parse().unwrap_or_else(|_| panic!("{key} is a number in {record}"))
+    };
+    let (total, shown, dropped, capture_dropped) = (field("bytes"), field("shown"), field("dropped"), field("capture_dropped"));
+
+    assert!(total >= noise_bytes, "the child wrote at least its noise: {record}");
+    assert_eq!(total, capture_dropped + 4096, "bytes is what the buffer kept plus what it dropped: {record}");
+    assert_eq!(dropped, total - shown, "{record}");
+    assert!(capture_dropped >= noise_bytes - 4096, "{record}");
+}

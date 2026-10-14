@@ -17,8 +17,8 @@ use crate::line::Line;
 /// A test id as two borrowed fields: the binary, then the test name.
 pub type Identity<'a> = (&'a [u8], &'a [u8]);
 
-/// One captured stream: its bytes, and whether the driver's buffer cut it short.
-pub type Stream<'a> = (&'a [u8], bool);
+/// One captured stream: its bytes, and how many bytes the driver's buffer discarded after it filled.
+pub type Stream<'a> = (&'a [u8], u64);
 
 const LABEL_WIDTH: usize = 9;
 const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
@@ -227,8 +227,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         &self,
         frame: &mut Line<FRAME>,
         id: Identity<'_>,
-        stdout: (&[u8], bool),
-        stderr: (&[u8], bool),
+        stdout: Stream<'_>,
+        stderr: Stream<'_>,
     ) {
         if self.github {
             frame.text(b"::group::");
@@ -428,7 +428,7 @@ fn block_close<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8]) {
     frame.text(b" ------\n");
 }
 
-fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, truncated): (&[u8], bool)) {
+fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, dropped): Stream<'_>) {
     if bytes.is_empty() {
         return;
     }
@@ -437,8 +437,10 @@ fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &
     if bytes.last() != Some(&b'\n') {
         frame.text(b"\n");
     }
-    if truncated {
-        frame.text(b"[output truncated]\n");
+    if dropped != 0 {
+        frame.text(b"[output truncated: ");
+        frame.number(usize::try_from(dropped).unwrap_or(usize::MAX));
+        frame.text(b" bytes dropped]\n");
     }
     block_close(frame, name);
 }
@@ -493,7 +495,7 @@ mod tests {
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true, why: None });
 
         let fail = settle(&mut state, FAILING, Outcome::Failed);
-        let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", false), stderr: (b"", false), exit: Exit::Code(101) };
+        let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", 0), stderr: (b"", 0), exit: Exit::Code(101) };
         let block = projected(&state, &captured);
 
         assert!(fail.ends_with("::error title=cargo val::cli_run::fixture::fails_when_requested failed\n"), "{fail}");
@@ -642,7 +644,7 @@ mod tests {
                 for event in [
                     Event::Started { id: PASSING, solo: false },
                     Event::Settled { id: FAILING, outcome, millis: Some(round), solo: false },
-                    Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", false), stderr: (b"", false), exit: Exit::Code(101) },
+                    Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", 0), stderr: (b"", 0), exit: Exit::Code(101) },
                     Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml"), discovered: 0, filtered: 0, exit: 0 },
                 ] {
                     frame.clear();
@@ -667,7 +669,7 @@ mod tests {
         let capture = b"\nthread 't' panicked at src/lib.rs:12:13:\nrequested \x1b[31mfixture\x1b[0m failure\n";
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: Some(b"flag") });
         state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, millis: None, solo: false });
-        let block = Event::Captured { id: FAILING, stdout: (capture, false), stderr: (b"", false), exit: Exit::Code(101) };
+        let block = Event::Captured { id: FAILING, stdout: (capture, 0), stderr: (b"", 0), exit: Exit::Code(101) };
         let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 9, manifest: None, discovered: 2, filtered: 0, exit: 1 };
         let mut projections = 0_usize;
 

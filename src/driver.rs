@@ -392,8 +392,8 @@ impl TestWatch {
 }
 
 struct Truncation {
-    stdout: bool,
-    stderr: bool,
+    stdout: u64,
+    stderr: u64,
 }
 
 struct ChildOutput {
@@ -416,8 +416,8 @@ impl ChildOutput {
             stdout_length: 0,
             stderr_length: 0,
             truncation: Truncation {
-                stdout: false,
-                stderr: false,
+                stdout: 0,
+                stderr: 0,
             },
             result_line: [0; RESULT_LINE_CAPACITY],
             result_line_length: 0,
@@ -432,7 +432,7 @@ impl ChildOutput {
         self.stdout[self.stdout_length..self.stdout_length + retained]
             .copy_from_slice(&bytes[..retained]);
         self.stdout_length += retained;
-        self.truncation.stdout |= retained < bytes.len();
+        self.truncation.stdout = self.truncation.stdout.saturating_add(u64::try_from(bytes.len() - retained).unwrap_or(u64::MAX));
 
         for &byte in bytes {
             if byte == b'\n' {
@@ -473,7 +473,7 @@ impl ChildOutput {
         self.stderr[self.stderr_length..self.stderr_length + retained]
             .copy_from_slice(&bytes[..retained]);
         self.stderr_length += retained;
-        self.truncation.stderr |= retained < bytes.len();
+        self.truncation.stderr = self.truncation.stderr.saturating_add(u64::try_from(bytes.len() - retained).unwrap_or(u64::MAX));
     }
 
     fn captured(&self) -> (Stream<'_>, Stream<'_>) {
@@ -487,14 +487,14 @@ impl ChildOutput {
         if self.stdout_length != 0 {
             write_fd(2, b"stdout:\n")?;
             write_fd(2, &self.stdout[..self.stdout_length])?;
-            if self.truncation.stdout {
+            if self.truncation.stdout != 0 {
                 write_fd(2, b"\n[stdout truncated]\n")?;
             }
         }
         if self.stderr_length != 0 {
             write_fd(2, b"stderr:\n")?;
             write_fd(2, &self.stderr[..self.stderr_length])?;
-            if self.truncation.stderr {
+            if self.truncation.stderr != 0 {
                 write_fd(2, b"\n[stderr truncated]\n")?;
             }
         }

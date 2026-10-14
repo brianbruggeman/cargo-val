@@ -73,8 +73,8 @@ fn failure_block<const FRAME: usize>(
     [stdout, stderr]: [Stream<'_>; 2],
     exit: Exit,
 ) {
-    let (capture, truncated) = if stdout.0.is_empty() { stderr } else { stdout };
-    let record = classify(capture, exit, u64::from(truncated)).or_else(|_| classify(stderr.0, exit, u64::from(stderr.1)));
+    let (capture, dropped) = if stdout.0.is_empty() { stderr } else { stdout };
+    let record = classify(capture, exit, dropped).or_else(|_| classify(stderr.0, exit, stderr.1));
     label(frame, b"FAIL");
     frame.text(id.0);
     frame.text(b"  ");
@@ -84,14 +84,14 @@ fn failure_block<const FRAME: usize>(
         Ok(found) => classified(frame, &found),
         Err(_) => unclassified(frame),
     }
-    output(frame, capture, truncated);
+    output(frame, capture, dropped);
     label(frame, b"END");
     frame.text(b"rerun: cargo val --no-fail-fast -E '(binary(=");
     frame.text(id.0);
     frame.text(b") & test(=");
     frame.text(id.1);
     frame.text(b"))'");
-    frame.text(if truncated { b"  full: cargo test -- --exact --nocapture\n" } else { b"\n" });
+    frame.text(if dropped != 0 { b"  full: cargo test -- --exact --nocapture\n" } else { b"\n" });
 }
 
 fn classified<const FRAME: usize>(frame: &mut Line<FRAME>, record: &Record<'_>) {
@@ -149,7 +149,7 @@ fn location<const FRAME: usize>(frame: &mut Line<FRAME>, prefix: &[u8], file: &[
     frame.number(col as usize);
 }
 
-fn output<const FRAME: usize>(frame: &mut Line<FRAME>, capture: &[u8], truncated: bool) {
+fn output<const FRAME: usize>(frame: &mut Line<FRAME>, capture: &[u8], dropped: u64) {
     let shown_cut = capture.len() > OUTPUT_BYTES;
     let (head, tail) = if shown_cut {
         (&capture[..OUTPUT_HEAD_BYTES], &capture[capture.len() - (OUTPUT_BYTES - OUTPUT_HEAD_BYTES)..])
@@ -157,16 +157,19 @@ fn output<const FRAME: usize>(frame: &mut Line<FRAME>, capture: &[u8], truncated
         (capture, &capture[capture.len()..])
     };
     label(frame, b"OUTPUT");
+    let shown = if shown_cut { OUTPUT_BYTES } else { capture.len() };
+    let total = capture.len().saturating_add(usize::try_from(dropped).unwrap_or(usize::MAX));
     frame.text(b"bytes=");
-    frame.number(capture.len());
+    frame.number(total);
     frame.text(b" shown=");
-    frame.number(if shown_cut { OUTPUT_BYTES } else { capture.len() });
+    frame.number(shown);
     frame.text(b" dropped=");
-    frame.number(capture.len().saturating_sub(OUTPUT_BYTES));
+    frame.number(total - shown);
     frame.text(b" esc_stripped=");
     frame.number(count_escapes(head) + count_escapes(tail));
-    if truncated {
-        frame.text(b" capture_truncated=yes");
+    if dropped != 0 {
+        frame.text(b" capture_dropped=");
+        frame.number(usize::try_from(dropped).unwrap_or(usize::MAX));
     }
     frame.text(b"\n");
     clean(frame, head);
