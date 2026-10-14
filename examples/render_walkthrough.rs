@@ -59,7 +59,7 @@ fn run_ended_early() -> Result<(), String> {
     let (mut build_arena, mut interrupted_arena) = ([0_u8; NAME_BYTES], [0_u8; NAME_BYTES]);
     let (mut build_ledger, mut interrupted_ledger) = ([0_u32; FAILURES], [0_u32; FAILURES]);
     let mut build = State::<RERUN_BYTES>::new(&mut build_arena, &mut build_ledger);
-    show(&mut build, Event::BuildFailed { diagnostic: b"error[E0308]: mismatched types", exit: 3 })?;
+    show(&mut build, Event::BuildFailed { diagnostic: b"error[E0308]: mismatched types", exit: 3, errors: 1, built: 5, of: Some(19) })?;
     show(&mut build, Event::Exited { code: 3 })?;
     let mut interrupted = State::<RERUN_BYTES>::new(&mut interrupted_arena, &mut interrupted_ledger);
     show(&mut interrupted, Event::Interrupted { signal: 2, groups: 1 })?;

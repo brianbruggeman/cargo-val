@@ -126,7 +126,10 @@ pub enum Event<'a> {
     Warned { id: Identity<'a>, what: &'a [u8] },
     BlockOpened { id: Identity<'a> },
     BlockClosed,
-    BuildFailed { diagnostic: &'a [u8], exit: u8 },
+    /// The build failed after `errors` distinct compiler errors with `built` of `of` test binaries linked; agent output prints `diagnostic`, plain and rich print the counts.
+    BuildFailed { diagnostic: &'a [u8], exit: u8, errors: u16, built: u16, of: Option<u16> },
+    /// A compiler error arrived while cargo is still building, so the live frame marks the build failing.
+    Failing { errors: u16 },
     Interrupted { signal: u8, groups: usize },
     Running { id: Identity<'a>, group: u32, age_ms: u64 },
     Exited { code: u8 },
@@ -164,6 +167,7 @@ impl Mode {
             | Event::BlockOpened { .. }
             | Event::BlockClosed
             | Event::BuildFailed { .. }
+            | Event::Failing { .. }
             | Event::Interrupted { .. }
             | Event::Running { .. }
             | Event::Exited { .. }
@@ -261,6 +265,7 @@ pub struct State<'storage, const RERUN: usize> {
     done: usize,
     built: u16,
     units: Option<u16>,
+    errors: u16,
     listed_binaries: usize,
     binaries_total: Option<usize>,
     listed_tests: usize,
@@ -326,6 +331,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             done: 0,
             built: 0,
             units: None,
+            errors: 0,
             listed_binaries: 0,
             binaries_total: None,
             listed_tests: 0,
@@ -525,6 +531,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                 (self.built, self.units) = (done, total);
                 self.lock_len = 0;
             }
+            Event::Failing { errors } => self.errors = errors,
             Event::Resize { cols } => self.cols = cols,
             Event::Captured { id, stdout, stderr, exit, excerpt } => {
                 self.remember_reason(id, stdout.0, stderr.0);
@@ -588,6 +595,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.done = 0;
         self.built = 0;
         self.units = None;
+        self.errors = 0;
         self.listed_binaries = 0;
         self.binaries_total = None;
         self.listed_tests = 0;
@@ -1214,7 +1222,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
-            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Notice { .. } => {}
+            Event::Exited { code } if self.mode == Mode::BuildError => agent::exit_line(frame, code),
+            Event::Built { .. } | Event::Failing { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Notice { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
@@ -1222,11 +1231,11 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Warned { id, what } => warned(frame, id, what),
             Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
-            Event::BuildFailed { diagnostic, .. } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
+            Event::BuildFailed { errors, built, of, .. } => build_failed(frame, errors, (built, of)),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
             Event::Running { id, group, age_ms } => killed(frame, id, group, age_ms),
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, discovered, filtered, .. } => {
-                let extras = matches!(self.mode, Mode::Interrupted { .. }).then_some([discovered, filtered]);
+                let extras = matches!(self.mode, Mode::Interrupted { .. } | Mode::BuildError).then_some([discovered, filtered]);
                 self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, extras);
             }
         }
@@ -1514,10 +1523,16 @@ fn warned<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, what: &
     frame.text(b"\n");
 }
 
-fn text_line<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], prefix: &[u8], text: &[u8]) {
-    label(frame, name);
-    frame.text(prefix);
-    frame.text(text);
+fn build_failed<const FRAME: usize>(frame: &mut Line<FRAME>, errors: u16, (built, of): (u16, Option<u16>)) {
+    label(frame, b"BUILD");
+    frame.text(b"FAILED  errors=");
+    frame.number(usize::from(errors));
+    frame.text(b"  built=");
+    frame.number(usize::from(built));
+    if let Some(of) = of {
+        frame.text(b"/");
+        frame.number(usize::from(of));
+    }
     frame.text(b"\n");
 }
 
@@ -1751,6 +1766,37 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_build_closes_with_build_failed_the_summary_with_discovery_counts_and_exit_three() {
+        let mut arena = [0_u8; 512];
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
+        let failed = Event::BuildFailed { diagnostic: b"", exit: 3, errors: 1, built: 5, of: Some(19) };
+        let unknown_total = Event::BuildFailed { diagnostic: b"", exit: 3, errors: 2, built: 5, of: None };
+        let finished = Event::Finished { passed: 0, failed: 0, ignored: 0, not_run: 57, wall_ms: 14_200, manifest: None, discovered: 341, filtered: 0, exit: 3 };
+        state.apply(&failed);
+
+        let build = projected(&state, &failed);
+        let build_without_total = projected(&state, &unknown_total);
+        let summary = projected(&state, &finished);
+        let exit = projected(&state, &Event::Exited { code: 3 });
+
+        assert_eq!(build, "BUILD    FAILED  errors=1  built=5/19\n");
+        assert_eq!(build_without_total, "BUILD    FAILED  errors=2  built=5\n");
+        assert_eq!(summary, "SUMMARY  passed=0 failed=0 ignored=0 not_run=57  wall=14.200s discovered=341 run=0 filtered=0\n");
+        assert_eq!(exit, "EXIT     3  build_failed\n");
+        assert_eq!(state.mode(), Mode::BuildError);
+    }
+
+    #[test]
+    fn exited_prints_nothing_outside_a_failed_build() {
+        let mut arena = [0_u8; 512];
+        let mut ledger = [0_u32; 2];
+        let state = Small::new(&mut arena, &mut ledger);
+
+        assert_eq!(projected(&state, &Event::Exited { code: 0 }), "");
+    }
+
+    #[test]
     fn failures_past_the_ledger_are_counted_and_named_in_the_closing_block() {
         let mut arena = [0_u8; 512];
         let mut ledger = [0_u32; 2];
@@ -1818,7 +1864,8 @@ mod tests {
     fn every_mode_event_pair_lands_where_the_transition_table_says() {
         let finished = |failed| Event::Finished { passed: 1, failed, ignored: 0, not_run: 0, wall_ms: 5, manifest: None, discovered: 0, filtered: 0, exit: 0 };
         let rows = [
-            (Mode::Running, Event::BuildFailed { diagnostic: b"E0308", exit: 3 }, Mode::BuildError),
+            (Mode::Running, Event::BuildFailed { diagnostic: b"E0308", exit: 3, errors: 1, built: 5, of: Some(19) }, Mode::BuildError),
+            (Mode::Running, Event::Failing { errors: 1 }, Mode::Running),
             (Mode::Running, Event::Interrupted { signal: 2, groups: 0 }, Mode::Interrupted { signal: 2 }),
             (Mode::Running, finished(0), Mode::Done { wall_ms: 5 }),
             (Mode::Running, finished(1), Mode::Done { wall_ms: 5 }),

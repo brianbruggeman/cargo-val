@@ -548,30 +548,32 @@ async fn build_error_run(mode: &str) -> Output {
     fixture_output(&mut command).await
 }
 
-fn assert_diagnostics_then_summary_then_cargo_val_line(text: &str) {
-    let diagnostic = text.find("E0308").unwrap_or_else(|| panic!("no E0308:\n{text}"));
-    let summary = text.find(": could not compile").unwrap_or_else(|| panic!("no cargo summary:\n{text}"));
-    let failed = text.find("cargo-val: cargo test build failed").unwrap_or_else(|| panic!("no cargo-val line:\n{text}"));
-    assert!(diagnostic < summary && summary < failed, "order is rustc, cargo, cargo-val:\n{text}");
+fn assert_build_failed_then_one_diagnostic_then_summary_and_exit(output: &Output) {
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let failed = stdout.find("BUILD    FAILED  errors=1  built=0/1\n").unwrap_or_else(|| panic!("no BUILD FAILED line:\n{stdout}"));
+    let summary = stdout.find("SUMMARY  passed=0 failed=0").unwrap_or_else(|| panic!("no SUMMARY line:\n{stdout}"));
+    assert!(failed < summary, "BUILD FAILED precedes SUMMARY:\n{stdout}");
+    assert!(stdout.trim_end_matches("\x1b[?25h").ends_with("EXIT     3  build_failed\n"), "EXIT 3 is the last line:\n{stdout}");
+    assert_eq!(stderr.matches("mismatched types").count(), 1, "the diagnostic prints once:\n{stderr}");
+    assert!(!stderr.contains(": could not compile") && !stderr.contains("build failed, waiting"), "cargo's restatements are dropped:\n{stderr}");
+    assert!(!stderr.contains("cargo-val: cargo test build failed"), "no cargo-val trailer line:\n{stderr}");
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_failed_build_in_plain_mode_orders_rustc_then_cargo_then_cargo_val_with_no_escape_bytes() {
+async fn a_failed_build_in_plain_mode_ends_on_build_failed_diagnostic_summary_and_exit_with_no_escape_bytes() {
     let output = build_error_run("plain").await;
-    let text = String::from_utf8_lossy(&output.stderr);
 
-    assert_diagnostics_then_summary_then_cargo_val_line(&text);
-    assert!(!output.stderr.contains(&ESCAPE), "0 ESC bytes expected:\n{text}");
-    assert_eq!(output.status.code(), Some(3), "{text}");
+    assert_build_failed_then_one_diagnostic_then_summary_and_exit(&output);
+    assert!(!output.stderr.contains(&ESCAPE) && !output.stdout.contains(&ESCAPE), "0 ESC bytes expected");
+    assert_eq!(output.status.code(), Some(3));
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_failed_build_in_rich_mode_keeps_the_same_order() {
+async fn a_failed_build_in_rich_mode_off_a_terminal_ends_the_same_way() {
     let output = build_error_run("rich").await;
-    let text = String::from_utf8_lossy(&output.stderr);
 
-    assert_diagnostics_then_summary_then_cargo_val_line(&text);
-    assert_eq!(output.status.code(), Some(3), "{text}");
+    assert_build_failed_then_one_diagnostic_then_summary_and_exit(&output);
+    assert_eq!(output.status.code(), Some(3));
 }
 
 mod plain_grammar {

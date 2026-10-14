@@ -45,6 +45,7 @@ use prime::os::readiness::Readiness;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
+use std::collections::HashSet;
 use std::format;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -102,6 +103,7 @@ const PATH_CAPACITY: usize = 4096;
 const SCRATCH_CAPACITY: usize = 131_072;
 const DIAGNOSTIC_CAPACITY: usize = 1_048_576;
 const BUILD_FAILURE_PREFIX: &[u8] = b"error: could not compile";
+const BUILD_WAITING_PREFIX: &[u8] = b"warning: build failed, waiting for other jobs to finish";
 const LINKED_CAPACITY: usize = 32768;
 const BUILD_SCRIPT_CAPACITY: usize = 65536;
 const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
@@ -243,7 +245,6 @@ impl RunError {
             Self::ListingStream => b"cargo-val: libtest listing could not be parsed\n",
             Self::Launch(_) => b"cargo-val: exact test launch failed\n",
             Self::Outcome => b"cargo-val: child completion failed\n",
-            Self::CargoFailed => b"cargo-val: cargo test build failed\n",
             Self::CargoRefused => b"cargo-val: cargo refused the invocation before building; its error is above\n",
             Self::ListingFailed => b"cargo-val: libtest listing failed\n",
             Self::Cancelled => b"cargo-val: a session was cancelled by its scope\n",
@@ -251,7 +252,7 @@ impl RunError {
             Self::DeclaredCapacity => {
                 b"cargo-val: declared test scheduling records exceed the build's capacity; raise CARGO_VAL_BUILD_SCHED_RECORD_BYTES\n"
             }
-            Self::Filterset(_) | Self::Interrupted(_) => b"",
+            Self::CargoFailed | Self::Filterset(_) | Self::Interrupted(_) => b"",
         }
     }
 }
@@ -375,6 +376,7 @@ pub struct RunSummary {
 /// Exit status when the selection ran no tests and the policy is `fail`.
 pub const NO_TESTS_EXIT_CODE: i32 = 4;
 pub const BUILD_FAILED_EXIT_CODE: i32 = 3;
+const CARGO_FAILED_LINE: &[u8] = b"cargo-val: cargo test build failed\n";
 
 impl RunSummary {
     /// 1 when any test failed, `NO_TESTS_EXIT_CODE` when nothing ran under the `fail` policy, else 0.
@@ -2459,6 +2461,9 @@ pub(crate) struct CargoDriver<'buffer> {
     diagnostics_reported: bool,
     output: OutputMode,
     built: u16,
+    test_binaries: u16,
+    errors: u16,
+    seen_diagnostics: HashSet<String>,
     listed_binaries: usize,
     test_targets: Option<usize>,
 }
@@ -2484,10 +2489,48 @@ fn visible(line: &[u8]) -> impl Iterator<Item = u8> {
     })
 }
 
+fn begins_with_visible(line: &[u8], prefix: &[u8]) -> bool {
+    visible(line).take(prefix.len()).eq(prefix.iter().copied())
+}
+
 fn begins_build_failure(line: &[u8]) -> bool {
-    visible(line)
-        .take(BUILD_FAILURE_PREFIX.len())
-        .eq(BUILD_FAILURE_PREFIX.iter().copied())
+    begins_with_visible(line, BUILD_FAILURE_PREFIX)
+}
+
+// both lines restate what the BUILD FAILED line and the diagnostics above it already say
+fn is_failure_restatement(line: &[u8]) -> bool {
+    begins_build_failure(line) || begins_with_visible(line, BUILD_WAITING_PREFIX)
+}
+
+// the lib and lib-test targets compile the same source, so rustc reports one error or warning once per target
+fn diagnostic_key((level, rendered): (&str, &str), (file, line, column): (&str, u32, u32)) -> String {
+    let headline = rendered.lines().next().unwrap_or_default();
+    format!("{level}\u{0}{headline}\u{0}{file}:{line}:{column}")
+}
+
+// agent output has never carried rustc's failure-note, so only the other modes admit it
+fn admit_diagnostic(seen: &mut HashSet<String>, agent_like: bool, message: (&str, &str), position: (&str, u32, u32)) -> bool {
+    if message.0 == "failure-note" && agent_like {
+        return false;
+    }
+    seen.insert(diagnostic_key(message, position))
+}
+
+// the live frame learns of the first error while cargo is still building, so its build bar can turn red
+fn count_error(errors: &mut u16, level: &str, run: &ListingRun<'_>) -> Result<(), RunError> {
+    if level != "error" {
+        return Ok(());
+    }
+    *errors = errors.saturating_add(1);
+    emit_live(run.render(), &Event::Failing { errors: *errors })
+}
+
+fn keep_reported(held: &mut Vec<u8>, (settings, root): (&Settings, &Path), (level, rendered): (&str, &str), span: Option<(&str, u32, u32, u32, Option<&str>)>) {
+    if level == "error" && settings.output == OutputMode::Rich {
+        keep_rich_error(held, settings, root, rendered, span);
+    } else {
+        keep_diagnostic(held, level, rendered);
+    }
 }
 
 const CARGO_PROGRESS: [&[u8]; 4] = [b"Compiling ", b"Finished ", b"Running ", b"Fresh "];
@@ -2499,7 +2542,7 @@ fn is_cargo_progress(line: &[u8]) -> bool {
 
 fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
     let kept = match level {
-        "error" => true,
+        "error" | "failure-note" => true,
         "warning" => held.len() < DIAGNOSTIC_CAPACITY,
         _ => false,
     };
@@ -2817,10 +2860,29 @@ impl CargoDriver<'_> {
         };
         debug_build_end(run.settings.debug, event, self.parked.len());
         self.discovery.build_finished(success);
+        if !success && !self.output.is_agent_like() {
+            self.announce_failure(run.render())?;
+        }
         self.report_diagnostics(success, run.render())?;
         self.finishing = true;
         self.reason = reason;
         self.release_parked(run, ledger, lanes)
+    }
+
+    // erases the live frame once and ends it: the BUILD FAILED line is what the diagnostics, SUMMARY and EXIT follow
+    fn announce_failure(&self, render: &Render<'_>) -> Result<(), RunError> {
+        let of = self.test_targets.map(|found| found.max(usize::from(self.test_binaries)));
+        let exit = u8::try_from(BUILD_FAILED_EXIT_CODE).unwrap_or(u8::MAX);
+        emit(
+            render,
+            &Event::BuildFailed {
+                diagnostic: b"",
+                exit,
+                errors: self.errors,
+                built: self.test_binaries,
+                of: of.and_then(|total| u16::try_from(total).ok()),
+            },
+        )
     }
 
     fn note_listed(&mut self, run: &ListingRun<'_>) -> Result<(), RunError> {
@@ -2870,6 +2932,7 @@ impl CargoDriver<'_> {
             match step {
                 CargoSourceStep::Artifact(artifact) => {
                     note_built(&mut self.built, run)?;
+                    self.test_binaries = self.test_binaries.saturating_add(1);
                     let gated = matches!(artifact.target_kind, "test" | "bench")
                         && self.discovery.waits(artifact.package_id);
                     debug_artifact(run.settings.debug, gated, self.discovery.gate(), &artifact);
@@ -2901,10 +2964,10 @@ impl CargoDriver<'_> {
                     self.release_parked(run, ledger, lanes)?;
                 }
                 CargoSourceStep::Diagnostic { level, rendered, span } => {
-                    if level == "error" && run.settings.output == OutputMode::Rich {
-                        keep_rich_error(&mut self.diagnostics, run.settings, &self.workspace_root, rendered, span);
-                    } else {
-                        keep_diagnostic(&mut self.diagnostics, level, rendered);
+                    let position = span.map_or(("", 0, 0), |(file, line, column, ..)| (file, line, column));
+                    if admit_diagnostic(&mut self.seen_diagnostics, self.output.is_agent_like(), (level, rendered), position) {
+                        keep_reported(&mut self.diagnostics, (run.settings, &self.workspace_root), (level, rendered), span);
+                        count_error(&mut self.errors, level, run)?;
                     }
                 }
                 CargoSourceStep::BuildFinished { success } => self.build_finished(success, (run, ledger, lanes))?,
@@ -2976,11 +3039,11 @@ impl CargoDriver<'_> {
     }
 
     fn emit_stderr(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
-        if render.0 == OutputMode::Rich {
-            return summarize_status_lines(bytes, render);
-        }
-        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-            if !self.output.is_agent_like() || !is_cargo_progress(line) {
+        let restated = self.errors != 0 && !self.output.is_agent_like();
+        for line in bytes.split_inclusive(|byte| *byte == b'\n').filter(|line| !(restated && is_failure_restatement(line))) {
+            if render.0 == OutputMode::Rich {
+                summarize_status_lines(line, render)?;
+            } else if !self.output.is_agent_like() || !is_cargo_progress(line) {
                 write_fd(2, line)?;
             }
         }
@@ -3655,6 +3718,9 @@ fn new_driver(
         diagnostics_reported: false,
         output,
         built: 0,
+        test_binaries: 0,
+        errors: 0,
+        seen_diagnostics: HashSet::new(),
         listed_binaries: 0,
         test_targets,
     }))
@@ -3898,11 +3964,16 @@ fn finish_run(
     if cargo_exit_code.is_some_and(|code| code != 0) {
         run.interrupt_doc_tests();
         let error = if build_reported { RunError::CargoFailed } else { RunError::CargoRefused };
-        if build_reported && run.settings.output.is_agent_like() {
-            let exit = u8::try_from(error.exit_code()).unwrap_or(u8::MAX);
-            emit(run.render(), &Event::BuildFailed { diagnostic: b"diagnostics on stderr", exit })?;
+        match (build_reported, run.settings.output.is_agent_like()) {
+            (true, true) => {
+                let exit = u8::try_from(error.exit_code()).unwrap_or(u8::MAX);
+                emit(run.render(), &Event::BuildFailed { diagnostic: b"diagnostics on stderr", exit, errors: 0, built: 0, of: None })?;
+                agent_exit(run, error.exit_code())?;
+                write_fd(2, CARGO_FAILED_LINE)?;
+            }
+            (true, false) => close_failed_build(parser, run, error.exit_code())?,
+            (false, _) => agent_exit(run, error.exit_code())?,
         }
-        agent_exit(run, error.exit_code())?;
         return Err(error);
     }
     let doc_tests = run.finish_doc_tests(parser.doc_selection() == DocSelection::Included)?;
@@ -4396,6 +4467,18 @@ fn close_interrupted(parser: &CliParser<'_>, run: &ListingRun<'_>, exit: i32) ->
     close_cursor()
 }
 
+// a failed rich or plain build already printed BUILD FAILED and the diagnostics; this closes with the SUMMARY and EXIT lines the mockup ends on
+fn close_failed_build(parser: &CliParser<'_>, run: &ListingRun<'_>, exit: i32) -> Result<(), RunError> {
+    let settled = {
+        let targets = run.targets.borrow();
+        (0..targets.len()).fold(Counts::default(), |sum, target| sum.plus(&targets.counts(target)))
+    };
+    let not_run = settled.discovered.saturating_sub(settled.passed + settled.failed + settled.ignored);
+    emit_finished(run.render(), &settled, not_run, (run.started_millis, parser.manifest_path(), exit))?;
+    emit(run.render(), &Event::Exited { code: u8::try_from(exit).unwrap_or(u8::MAX) })?;
+    close_cursor()
+}
+
 // a signal that arrived after the run loop stopped listening (post-run review, the last instant) is named here with no live groups
 fn name_interrupt(run: &ListingRun<'_>) -> Result<(), RunError> {
     let Some(signal) = run.signals.received() else {
@@ -4487,7 +4570,8 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, Environment, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, RunSummary, is_status_line, last_run, last_run_record, persist_last_run, runtime_settings, validated_harness, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, Environment, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, RunSummary, admit_diagnostic, is_failure_restatement, is_status_line, last_run, last_run_record, persist_last_run, runtime_settings, validated_harness, whole_lines_len};
+    use std::collections::HashSet;
     use std::string::String;
     use std::vec::Vec;
 
@@ -4649,6 +4733,53 @@ mod tests {
 
         assert_eq!(whole_lines_len(pending, true), pending.len());
         assert_eq!(whole_lines_len(b"", true), 0);
+    }
+
+    const E0308: &str = "error[E0308]: mismatched types\n --> src/lib.rs:4:5\n  |\n4 |     \"forty-two\"\n  |     ^^^^^^^^^^^ expected `u32`, found `&str`\n\n";
+    const E0308_SPAN: (&str, u32, u32) = ("src/lib.rs", 4, 5);
+    const NO_SPAN: (&str, u32, u32) = ("", 0, 0);
+    const EXPLAIN: &str = "For more information about this error, try `rustc --explain E0308`.\n";
+
+    #[test]
+    fn the_same_error_from_the_lib_and_the_lib_test_target_is_admitted_once() {
+        let mut seen = HashSet::new();
+
+        let lib = admit_diagnostic(&mut seen, false, ("error", E0308), E0308_SPAN);
+        let lib_test = admit_diagnostic(&mut seen, false, ("error", E0308), E0308_SPAN);
+
+        assert_eq!((lib, lib_test), (true, false));
+    }
+
+    #[test]
+    fn the_same_message_at_another_span_or_another_message_at_the_same_span_is_a_different_diagnostic() {
+        let mut seen = HashSet::new();
+        let elsewhere = ("src/other.rs", 4, 5);
+        let other_message = "error[E0599]: no method named `answer` found\n --> src/lib.rs:4:5\n";
+
+        let first = admit_diagnostic(&mut seen, false, ("error", E0308), E0308_SPAN);
+        let moved = admit_diagnostic(&mut seen, false, ("error", E0308), elsewhere);
+        let renamed = admit_diagnostic(&mut seen, false, ("error", other_message), E0308_SPAN);
+
+        assert_eq!((first, moved, renamed), (true, true, true));
+    }
+
+    #[test]
+    fn rustcs_failure_note_is_admitted_once_outside_agent_output_and_never_in_it() {
+        let mut seen = HashSet::new();
+
+        let first = admit_diagnostic(&mut seen, false, ("failure-note", EXPLAIN), NO_SPAN);
+        let repeated = admit_diagnostic(&mut seen, false, ("failure-note", EXPLAIN), NO_SPAN);
+        let agent = admit_diagnostic(&mut HashSet::new(), true, ("failure-note", EXPLAIN), NO_SPAN);
+
+        assert_eq!((first, repeated, agent), (true, false, false));
+    }
+
+    #[test]
+    fn cargos_two_restating_lines_are_recognised_with_or_without_colour_and_other_errors_are_not() {
+        assert!(is_failure_restatement(b"error: could not compile `build_error` (lib) due to 1 previous error; 1 warning emitted\n"));
+        assert!(is_failure_restatement(b"\x1b[1m\x1b[33mwarning\x1b[0m\x1b[1m: build failed, waiting for other jobs to finish...\x1b[0m\n"));
+        assert!(!is_failure_restatement(b"error: failed to run custom build command for `ring v0.17.8`\n"));
+        assert!(!is_failure_restatement(b"warning: unused manifest key: package.foo\n"));
     }
 
     #[proxima::test]

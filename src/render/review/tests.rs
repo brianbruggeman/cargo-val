@@ -345,7 +345,7 @@ fn enter_toggles_between_list_focus_and_detail_scroll_and_j_k_scroll_the_detail_
 #[test]
 fn the_run_events_move_the_screens_the_way_the_spec_table_says() {
     let finished = |failed| Event::Finished { passed: 1, failed, ignored: 0, not_run: 0, wall_ms: 5, manifest: None, discovered: 0, filtered: 0, exit: 0 };
-    let build = Event::BuildFailed { diagnostic: b"E0308", exit: 3 };
+    let build = Event::BuildFailed { diagnostic: b"E0308", exit: 3, errors: 1, built: 5, of: Some(19) };
     let signal = Event::Interrupted { signal: 15, groups: 0 };
     let tick = Event::Tick { now_ms: 9 };
     let review_mode = Mode::Review { selected: 1, armed: false, top: None };
