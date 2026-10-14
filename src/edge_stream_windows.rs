@@ -89,6 +89,11 @@ impl ChildStream {
         .ok()
     }
 
+    /// Every byte read so far that fit the capture window.
+    pub fn retained(&self) -> Ref<'_, [u8]> {
+        Ref::map(self.window.borrow(), |bytes| &bytes[..self.length.get() as usize])
+    }
+
     /// Whether any bytes went past the retained window into the scratch tail.
     pub fn truncated(&self) -> bool {
         self.length.get() >= CAPTURE_BYTES && self.scratch_length.get() > 0

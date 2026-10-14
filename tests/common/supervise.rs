@@ -26,7 +26,11 @@ pub async fn supervised<Outcome>(
             value
         }
         Ok(Err(payload)) => panic::resume_unwind(payload),
-        Err(elapsed) => panic!("{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}"),
+        Err(elapsed) => panic!(
+            "{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}\nstdout so far:\n{}\nstderr so far:\n{}",
+            String::from_utf8_lossy(&stdout.retained()),
+            String::from_utf8_lossy(&stderr.retained()),
+        ),
     }
 }
 
