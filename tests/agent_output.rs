@@ -170,3 +170,36 @@ async fn the_output_record_counts_every_byte_the_capture_buffer_dropped() {
     assert_eq!(dropped, total - shown, "{record}");
     assert!(capture_dropped >= noise_bytes - 4096, "{record}");
 }
+
+fn output_section(report: &str) -> Vec<&str> {
+    let lines: Vec<&str> = report.lines().collect();
+    let begin = lines.iter().position(|line| line.starts_with("OUTPUT   ")).unwrap_or_else(|| panic!("an OUTPUT record:\n{report}"));
+    let end = lines.iter().position(|line| line.starts_with("END      ")).unwrap_or_else(|| panic!("an END record:\n{report}"));
+    lines[begin + 1..end].to_vec()
+}
+
+#[proxima::test(timeout = "310s")]
+async fn the_output_section_keeps_the_panic_text_and_drops_libtest_framing() {
+    let output = run("cli_run", &[("CARGO_VAL_C52D_FAIL", "1")], &["--output", "agent"]).await;
+    let report = stdout_of(&output);
+
+    let section = output_section(&report);
+
+    assert!(section.iter().any(|line| line.replace('\\', "/").contains("panicked at src/lib.rs:12:13")), "{section:?}");
+    assert!(section.contains(&"requested fixture failure"), "{section:?}");
+    for framing in ["running 1 test", "failures:", "test result:"] {
+        assert!(!section.iter().any(|line| line.starts_with(framing)), "{framing} leaked into {section:?}");
+    }
+    assert!(!section.iter().any(|line| line.starts_with("---- ") || line.starts_with("test ")), "{section:?}");
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
+async fn a_crash_that_died_before_printing_a_result_leaves_an_empty_output_section() {
+    let output = run("failure_class", &[], &["--output", "agent", "-E", "test(=failing::segfault_crash)"]).await;
+    let report = stdout_of(&output);
+
+    let section = output_section(&report);
+
+    assert!(section.is_empty(), "{section:?}");
+}

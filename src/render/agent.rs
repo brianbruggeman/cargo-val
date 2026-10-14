@@ -3,6 +3,8 @@
 //! Composes [`Line`] and [`crate::failure_class::classify`]; it reads the same [`State`] plain reads and holds nothing of
 //! its own. Every field of a failure block is a borrowed view of the captured bytes the driver already owns.
 
+use memchr::{memchr, memmem};
+
 use super::{Event, Identity, State, Stream, label};
 use crate::failure_class::{Absent, Class, Enforcer, Exit, Record, classify};
 use crate::line::Line;
@@ -12,6 +14,9 @@ const ESCAPE: u8 = 0x1b;
 const CARRIAGE_RETURN: u8 = b'\r';
 const CONTINUATION: &[u8] = b"         ";
 const TRUNCATION_MARK: &[u8] = b"...\n";
+const SECTION_OPEN: &[u8] = b"---- ";
+const SECTION_CLOSE: &[u8] = b" stdout ----";
+const FAILURES_LIST: &[u8] = b"\nfailures:\n";
 
 impl<const RERUN: usize> State<'_, RERUN> {
     pub(super) fn project_agent<const FRAME: usize>(&self, event: &Event<'_>, frame: &mut Line<FRAME>) {
@@ -150,14 +155,15 @@ fn location<const FRAME: usize>(frame: &mut Line<FRAME>, prefix: &[u8], file: &[
 }
 
 fn output<const FRAME: usize>(frame: &mut Line<FRAME>, capture: &[u8], dropped: u64) {
-    let shown_cut = capture.len() > OUTPUT_BYTES;
+    let body = libtest_body(capture);
+    let shown_cut = body.len() > OUTPUT_BYTES;
     let (head, tail) = if shown_cut {
-        (&capture[..OUTPUT_HEAD_BYTES], &capture[capture.len() - (OUTPUT_BYTES - OUTPUT_HEAD_BYTES)..])
+        (&body[..OUTPUT_HEAD_BYTES], &body[body.len() - (OUTPUT_BYTES - OUTPUT_HEAD_BYTES)..])
     } else {
-        (capture, &capture[capture.len()..])
+        (body, &body[body.len()..])
     };
     label(frame, b"OUTPUT");
-    let shown = if shown_cut { OUTPUT_BYTES } else { capture.len() };
+    let shown = if shown_cut { OUTPUT_BYTES } else { body.len() };
     let total = capture.len().saturating_add(usize::try_from(dropped).unwrap_or(usize::MAX));
     frame.text(b"bytes=");
     frame.number(total);
@@ -181,6 +187,47 @@ fn output<const FRAME: usize>(frame: &mut Line<FRAME>, capture: &[u8], dropped: 
     if frame_open(frame) {
         frame.text(b"\n");
     }
+}
+
+// the verbatim test output sits between libtest's `---- name stdout ----` header and the closing `failures:` list; a run
+// that died before printing either keeps only what follows the leading `running` and `test ... ` lines
+fn libtest_body(capture: &[u8]) -> &[u8] {
+    let Some(start) = section_start(capture) else {
+        return unframed(capture);
+    };
+    let body = &capture[start..];
+    let end = memmem::rfind(body, FAILURES_LIST).unwrap_or(body.len());
+    body[..end].trim_ascii_end()
+}
+
+fn section_start(capture: &[u8]) -> Option<usize> {
+    let mut from = 0;
+    while let Some(relative) = memmem::find(&capture[from..], SECTION_OPEN) {
+        let at = from + relative;
+        let line_end = memchr(b'\n', &capture[at..]).map(|index| at + index)?;
+        if (at == 0 || capture[at - 1] == b'\n') && capture[at..line_end].ends_with(SECTION_CLOSE) {
+            return Some(line_end + 1);
+        }
+        from = at + SECTION_OPEN.len();
+    }
+    None
+}
+
+fn unframed(capture: &[u8]) -> &[u8] {
+    let mut rest = capture;
+    loop {
+        let line_end = memchr(b'\n', rest).unwrap_or(rest.len());
+        if !is_framing(&rest[..line_end]) || rest.is_empty() {
+            return rest;
+        }
+        rest = &rest[(line_end + 1).min(rest.len())..];
+    }
+}
+
+fn is_framing(line: &[u8]) -> bool {
+    let counted = line.strip_prefix(b"running ").is_some_and(|tail| tail.ends_with(b" test") || tail.ends_with(b" tests"));
+    let progress = line.starts_with(b"test ") && memmem::find(line, b" ... ").is_some();
+    line.trim_ascii().is_empty() || counted || progress || line.starts_with(b"test result: ")
 }
 
 fn frame_open<const FRAME: usize>(frame: &Line<FRAME>) -> bool {
