@@ -104,13 +104,13 @@ fn fixture_command(
     command
 }
 
-fn run_fixture(
+async fn run_fixture(
     fixture: &str,
     arguments: &[&str],
     environment: &[(&str, &str)],
     probe: Option<&PathBuf>,
 ) -> Run {
-    fixture_output(&mut fixture_command(fixture, arguments, environment, probe)).into()
+    fixture_output(&mut fixture_command(fixture, arguments, environment, probe)).await.into()
 }
 
 // mkfifo
@@ -139,7 +139,7 @@ fn open_fifo_both_ends(path: &Path) -> fs::File {
 
 // fifo rendezvous with the fixture
 #[cfg(unix)]
-fn run_fixture_holding_doc_child(
+async fn run_fixture_holding_doc_child(
     fixture: &str,
     arguments: &[&str],
     environment: &[(&str, &str)],
@@ -153,7 +153,7 @@ fn run_fixture_holding_doc_child(
     fixture_output(
         fixture_command(fixture, arguments, environment, None)
             .env("CARGO_VAL_FIXTURE_BLOCK_DIR", &directory),
-    )
+    ).await
     .into()
 }
 
@@ -174,7 +174,7 @@ fn observed_overlaps(probe: &PathBuf) -> Vec<usize> {
 #[proxima::test(timeout = "310s")]
 async fn c68_harness_argument_serializes_children_to_one_live_at_a_time() {
     let probe = probe_directory("harness-one");
-    let run = run_stop_policy_fixture(&["--", "--test-threads=1"], &[], &probe);
+    let run = run_stop_policy_fixture(&["--", "--test-threads=1"], &[], &probe).await;
 
     let (observations, maximum) = max_live(&run, &probe);
 
@@ -188,7 +188,7 @@ async fn c68_harness_argument_serializes_children_to_one_live_at_a_time() {
 #[proxima::test(timeout = "310s")]
 async fn c68_space_separated_harness_argument_is_consumed_not_forwarded() {
     let probe = probe_directory("harness-space");
-    let run = run_stop_policy_fixture(&["--", "--test-threads", "1"], &[], &probe);
+    let run = run_stop_policy_fixture(&["--", "--test-threads", "1"], &[], &probe).await;
 
     let (observations, maximum) = max_live(&run, &probe);
 
@@ -199,7 +199,7 @@ async fn c68_space_separated_harness_argument_is_consumed_not_forwarded() {
 #[proxima::test(timeout = "310s")]
 async fn c68_rust_test_threads_environment_serializes_children() {
     let probe = probe_directory("env-one");
-    let run = run_stop_policy_fixture(&[], &[("RUST_TEST_THREADS", "1")], &probe);
+    let run = run_stop_policy_fixture(&[], &[("RUST_TEST_THREADS", "1")], &probe).await;
 
     let (observations, maximum) = max_live(&run, &probe);
 
@@ -213,7 +213,7 @@ async fn c68_rust_test_threads_environment_serializes_children() {
 #[proxima::test(timeout = "310s")]
 async fn c68_control_four_threads_overlap_children() {
     let probe = probe_directory("control-four");
-    let run = run_stop_policy_fixture(&["--", "--test-threads=4"], &[], &probe);
+    let run = run_stop_policy_fixture(&["--", "--test-threads=4"], &[], &probe).await;
 
     let (observations, maximum) = max_live(&run, &probe);
 
@@ -234,7 +234,7 @@ async fn c68_harness_argument_beats_environment() {
         &["--", "--test-threads=4"],
         &[("RUST_TEST_THREADS", "1")],
         &probe,
-    );
+    ).await;
 
     let (_, maximum) = max_live(&run, &probe);
 
@@ -251,7 +251,7 @@ async fn c68_environment_beats_configured_jobs() {
         &[],
         &[("RUST_TEST_THREADS", "1"), ("CARGO_VAL_JOBS", "4")],
         &probe,
-    );
+    ).await;
 
     let (_, maximum) = max_live(&run, &probe);
 
@@ -295,7 +295,7 @@ async fn c68_invalid_values_name_the_supplying_source_and_exit_2() {
     ];
     for (arguments, environment, message) in cases {
         let probe = probe_directory("invalid");
-        let run = run_stop_policy_fixture(arguments, environment, &probe);
+        let run = run_stop_policy_fixture(arguments, environment, &probe).await;
 
         assert_eq!(run.status, Some(2), "{arguments:?} {environment:?}");
         assert!(
@@ -310,7 +310,7 @@ async fn c68_invalid_values_name_the_supplying_source_and_exit_2() {
 #[proxima::test(timeout = "310s")]
 async fn c68_other_libtest_flags_are_still_rejected() {
     let probe = probe_directory("rejected");
-    let run = run_stop_policy_fixture(&["--", "--nocapture"], &[], &probe);
+    let run = run_stop_policy_fixture(&["--", "--nocapture"], &[], &probe).await;
 
     assert_eq!(run.status, Some(2));
     assert!(run.stderr.contains("invalid arguments"));
@@ -319,12 +319,12 @@ async fn c68_other_libtest_flags_are_still_rejected() {
 const TEST_COUNT: usize = 17;
 const STOP_POLICY: &str = "stop_policy";
 
-fn run_stop_policy_fixture(
+async fn run_stop_policy_fixture(
     arguments: &[&str],
     environment: &[(&str, &str)],
     probe: &PathBuf,
 ) -> Run {
-    run_fixture(STOP_POLICY, &per_test(arguments), environment, Some(probe))
+    run_fixture(STOP_POLICY, &per_test(arguments), environment, Some(probe)).await
 }
 
 fn per_test<'a>(arguments: &[&'a str]) -> Vec<&'a str> {
@@ -346,8 +346,8 @@ fn max_live(run: &Run, probe: &PathBuf) -> (usize, usize) {
     (overlaps.len(), overlaps.into_iter().max().unwrap_or(0))
 }
 
-fn run_stopping(arguments: &[&str], environment: &[(&str, &str)]) -> Run {
-    run_fixture(STOP_POLICY, &per_test(arguments), environment, None)
+async fn run_stopping(arguments: &[&str], environment: &[(&str, &str)]) -> Run {
+    run_fixture(STOP_POLICY, &per_test(arguments), environment, None).await
 }
 
 const THREE_FAILING: (&str, &str) = ("CARGO_VAL_FIXTURE_FAILING", "case_01,case_02,case_03");
@@ -355,7 +355,7 @@ const ONE_FAILING: (&str, &str) = ("CARGO_VAL_FIXTURE_FAILING", "case_01");
 
 #[proxima::test(timeout = "310s")]
 async fn c68_default_fails_fast_launching_nothing_after_the_first_failure() {
-    let run = run_stopping(&["--", "--test-threads=1"], &[ONE_FAILING]);
+    let run = run_stopping(&["--", "--test-threads=1"], &[ONE_FAILING]).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
     assert_eq!(run.count("FAIL"), 1);
@@ -377,7 +377,7 @@ async fn c68_no_fail_fast_runs_every_selected_test() {
     let run = run_stopping(
         &["--no-fail-fast", "--", "--test-threads=1"],
         &[ONE_FAILING],
-    );
+    ).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
     assert_eq!(run.count("PASS") + run.count("FAIL"), TEST_COUNT);
@@ -390,7 +390,7 @@ async fn c68_max_fail_two_stops_after_the_second_of_three_failures() {
     let run = run_stopping(
         &["--max-fail", "2", "--", "--test-threads=1"],
         &[THREE_FAILING],
-    );
+    ).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
     assert_eq!(run.count("FAIL"), 2);
@@ -404,7 +404,7 @@ async fn c68_max_fail_two_stops_after_the_second_of_three_failures() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_in_flight_children_finish_and_every_listed_test_is_accounted_for() {
-    let run = run_stopping(&["--", "--test-threads=4"], &[THREE_FAILING]);
+    let run = run_stopping(&["--", "--test-threads=4"], &[THREE_FAILING]).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
     let finished = run.count("PASS") + run.count("FAIL");
@@ -421,19 +421,19 @@ async fn c68_stop_policy_sources_follow_precedence() {
     let environment_max_fail = run_stopping(
         &["--", "--test-threads=1"],
         &[THREE_FAILING, ("CARGO_VAL_MAX_FAIL", "2")],
-    );
+    ).await;
     let cli_beats_environment = run_stopping(
         &["--no-fail-fast", "--", "--test-threads=1"],
         &[THREE_FAILING, ("CARGO_VAL_MAX_FAIL", "1")],
-    );
+    ).await;
     let environment_disables = run_stopping(
         &["--", "--test-threads=1"],
         &[THREE_FAILING, ("CARGO_VAL_FAIL_FAST", "false")],
-    );
+    ).await;
     let explicit_flag = run_stopping(
         &["--fail-fast", "--", "--test-threads=1"],
         &[THREE_FAILING, ("CARGO_VAL_FAIL_FAST", "false")],
-    );
+    ).await;
 
     assert_eq!(environment_max_fail.count("FAIL"), 2);
     assert_eq!(cli_beats_environment.count("FAIL"), 3);
@@ -444,10 +444,10 @@ async fn c68_stop_policy_sources_follow_precedence() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_invalid_max_fail_values_name_the_supplying_source() {
-    let zero = run_stopping(&["--max-fail", "0"], &[]);
-    let joined = run_stopping(&["--max-fail=x"], &[]);
-    let dangling = run_stopping(&["--max-fail"], &[]);
-    let configured = run_stopping(&[], &[("CARGO_VAL_MAX_FAIL", "0")]);
+    let zero = run_stopping(&["--max-fail", "0"], &[]).await;
+    let joined = run_stopping(&["--max-fail=x"], &[]).await;
+    let dangling = run_stopping(&["--max-fail"], &[]).await;
+    let configured = run_stopping(&[], &[("CARGO_VAL_MAX_FAIL", "0")]).await;
 
     for run in [&zero, &joined, &dangling] {
         assert_eq!(run.status, Some(2));
@@ -466,9 +466,9 @@ fn passing_count(run: &Run) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_short_feature_option_builds_with_the_feature_and_runs_the_full_set() {
-    let without = run_stopping(&["--no-fail-fast"], &[]);
-    let short = run_stopping(&["-F", "extra", "--no-fail-fast"], &[]);
-    let long = run_stopping(&["--features=extra", "--no-fail-fast"], &[]);
+    let without = run_stopping(&["--no-fail-fast"], &[]).await;
+    let short = run_stopping(&["-F", "extra", "--no-fail-fast"], &[]).await;
+    let long = run_stopping(&["--features=extra", "--no-fail-fast"], &[]).await;
 
     assert_eq!(
         passing_count(&without),
@@ -503,7 +503,7 @@ async fn c68_short_manifest_path_is_forwarded_and_not_taken_as_the_filter() {
         .args(["-m", manifest, "--no-fail-fast"])
         .env("NO_COLOR", "1")
         .env("CARGO_TARGET_DIR", target_directory().join("c68-fixture"));
-    let output = fixture_output(&mut command);
+    let output = fixture_output(&mut command).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert_eq!(output.status.code(), Some(0), "{stdout}");
@@ -526,13 +526,13 @@ const ZERO_RUN_PROBES: [&[&str]; 4] = [
 #[proxima::test(timeout = "310s")]
 async fn c68_zero_test_runs_exit_four_by_default_and_zero_with_no_tests_pass() {
     for arguments in ZERO_RUN_PROBES {
-        let default = run_fixture("workspace", arguments, &[], None);
+        let default = run_fixture("workspace", arguments, &[], None).await;
         let mut passing = vec!["--no-tests=pass"];
         passing.extend_from_slice(arguments);
-        let pass = run_fixture("workspace", &passing, &[], None);
+        let pass = run_fixture("workspace", &passing, &[], None).await;
         let mut warning = vec!["--no-tests", "warn"];
         warning.extend_from_slice(arguments);
-        let warn = run_fixture("workspace", &warning, &[], None);
+        let warn = run_fixture("workspace", &warning, &[], None).await;
 
         let context = format!("{arguments:?}: {}{}", default.stdout, default.stderr);
         assert_eq!(
@@ -559,14 +559,14 @@ async fn c68_no_tests_setting_applies_and_the_command_line_beats_it() {
         &["--lib"],
         &[("CARGO_VAL_NO_TESTS", "pass")],
         None,
-    );
+    ).await;
     let overridden = run_fixture(
         "workspace",
         &["--no-tests=fail", "--lib"],
         &[("CARGO_VAL_NO_TESTS", "pass")],
         None,
-    );
-    let invalid = run_fixture("workspace", &["--no-tests=ignore", "--lib"], &[], None);
+    ).await;
+    let invalid = run_fixture("workspace", &["--no-tests=ignore", "--lib"], &[], None).await;
 
     assert_eq!(configured.status, Some(0));
     assert_eq!(overridden.status, Some(4));
@@ -590,7 +590,7 @@ async fn c68_a_selection_that_matches_tests_is_not_reported_as_empty() {
         ],
         &[],
         None,
-    );
+    ).await;
 
     assert_eq!(run.count("PASS"), 1, "{}{}", run.stdout, run.stderr);
     assert_eq!(run.status, Some(0));
@@ -605,13 +605,14 @@ struct DocReference {
     ignored: usize,
 }
 
-fn cargo_test_doc_reference() -> DocReference {
-    let output = Command::new("cargo")
-        .args(["test", "--doc", "--manifest-path"])
-        .arg(fixture_manifest(DOC_FIXTURE))
-        .env("CARGO_TARGET_DIR", target_directory().join("c68-reference"))
-        .output()
-        .expect("cargo is spawnable");
+async fn cargo_test_doc_reference() -> DocReference {
+    let output = fixture_output(
+        Command::new("cargo")
+            .args(["test", "--doc", "--manifest-path"])
+            .arg(fixture_manifest(DOC_FIXTURE))
+            .env("CARGO_TARGET_DIR", target_directory().join("c68-reference")),
+    )
+    .await;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let summary = stdout
         .lines()
@@ -641,8 +642,8 @@ fn doc_lines(run: &Run, label: &str) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_doc_test_counts_equal_cargo_test_doc_for_the_same_fixture() {
-    let reference = cargo_test_doc_reference();
-    let only_docs = run_fixture(DOC_FIXTURE, &["--doc"], &[], None);
+    let reference = cargo_test_doc_reference().await;
+    let only_docs = run_fixture(DOC_FIXTURE, &["--doc"], &[], None).await;
 
     assert_eq!(
         doc_lines(&only_docs, "PASS"),
@@ -671,7 +672,7 @@ async fn c68_doc_test_counts_equal_cargo_test_doc_for_the_same_fixture() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_failing_doc_test_output_is_shown_like_other_failures() {
-    let run = run_fixture(DOC_FIXTURE, &["--doc"], &[], None);
+    let run = run_fixture(DOC_FIXTURE, &["--doc"], &[], None).await;
 
     let stderr = run.stderr.replace('\\', "/");
     assert!(
@@ -685,7 +686,7 @@ async fn c68_failing_doc_test_output_is_shown_like_other_failures() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_default_selection_runs_unit_tests_and_doc_tests_together_and_counts_both() {
-    let run = run_fixture(DOC_FIXTURE, &["--no-fail-fast"], &[], None);
+    let run = run_fixture(DOC_FIXTURE, &["--no-fail-fast"], &[], None).await;
 
     assert_eq!(run.count("PASS"), 3, "{}{}", run.stdout, run.stderr);
     assert_eq!(run.count("FAIL"), 1);
@@ -696,7 +697,7 @@ async fn c68_default_selection_runs_unit_tests_and_doc_tests_together_and_counts
 
 #[proxima::test(timeout = "310s")]
 async fn c68_default_fail_fast_still_reports_the_doc_failure_and_exits_one() {
-    let run = run_fixture(DOC_FIXTURE, &[], &[], None);
+    let run = run_fixture(DOC_FIXTURE, &[], &[], None).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
     assert_eq!(doc_lines(&run, "FAIL"), 1);
@@ -704,7 +705,7 @@ async fn c68_default_fail_fast_still_reports_the_doc_failure_and_exits_one() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_target_selection_flags_exclude_doc_tests_as_cargo_does() {
-    let library_only = run_fixture(DOC_FIXTURE, &["--lib"], &[], None);
+    let library_only = run_fixture(DOC_FIXTURE, &["--lib"], &[], None).await;
 
     assert_eq!(
         library_only.count("PASS"),
@@ -723,8 +724,8 @@ async fn c68_target_selection_flags_exclude_doc_tests_as_cargo_does() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_a_library_with_no_doctests_is_reported_not_passed_silently() {
-    let default_policy = run_fixture("workspace", &["--doc"], &[], None);
-    let passing = run_fixture("workspace", &["--doc", "--no-tests=pass"], &[], None);
+    let default_policy = run_fixture("workspace", &["--doc"], &[], None).await;
+    let passing = run_fixture("workspace", &["--doc", "--no-tests=pass"], &[], None).await;
 
     assert!(
         default_policy
@@ -741,7 +742,7 @@ async fn c68_a_library_with_no_doctests_is_reported_not_passed_silently() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_package_without_a_library_skips_doc_tests_and_says_so() {
-    let run = run_fixture(STOP_POLICY, &[], &[], None);
+    let run = run_fixture(STOP_POLICY, &[], &[], None).await;
 
     assert_eq!(
         run.count("PASS"),
@@ -760,7 +761,7 @@ async fn c68_package_without_a_library_skips_doc_tests_and_says_so() {
 
 #[proxima::test(timeout = "310s")]
 async fn c68_explicit_doc_selection_on_a_package_without_a_library_fails_loudly() {
-    let run = run_fixture(STOP_POLICY, &["--doc"], &[], None);
+    let run = run_fixture(STOP_POLICY, &["--doc"], &[], None).await;
 
     assert_eq!(run.status, Some(2), "{}{}", run.stdout, run.stderr);
     assert!(run.stderr.contains("no library targets found"));
@@ -774,7 +775,7 @@ async fn c68_a_trip_before_doc_tests_execute_interrupts_the_doc_child_and_says_s
         DOC_FIXTURE,
         &["--", "--test-threads=1"],
         &[("CARGO_VAL_FIXTURE_FAILING", "unit_adds")],
-    );
+    ).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
     assert!(
@@ -796,7 +797,7 @@ async fn c68_a_trip_before_doc_tests_execute_interrupts_the_doc_child_and_says_s
 
 #[proxima::test(timeout = "310s")]
 async fn c97_one_live_child_drains_every_listed_test_and_ends_the_listing() {
-    let run = run_stopping(&["--no-fail-fast", "--", "--test-threads=1"], &[]);
+    let run = run_stopping(&["--no-fail-fast", "--", "--test-threads=1"], &[]).await;
 
     assert_eq!(run.status, Some(0), "{}{}", run.stdout, run.stderr);
     assert_eq!(run.count("PASS"), TEST_COUNT, "{}", run.stdout);
@@ -816,7 +817,7 @@ async fn c97_one_live_child_still_drains_the_listing_and_the_doc_group_together(
         &["--no-fail-fast", "--", "--test-threads=1"],
         &[],
         None,
-    );
+    ).await;
 
     assert_eq!(run.count("PASS"), 3, "{}{}", run.stdout, run.stderr);
     assert_eq!(run.count("FAIL"), 1);

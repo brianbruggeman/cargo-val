@@ -31,8 +31,8 @@ fn scrubbed(mut command: Command) -> Command {
     command
 }
 
-fn run(mut command: Command) -> Output {
-    let output = fixture_output(&mut command);
+async fn run(mut command: Command) -> Output {
+    let output = fixture_output(&mut command).await;
     assert!(
         output.status.success(),
         "{command:?} failed: {}\n{}",
@@ -67,8 +67,8 @@ async fn proc_macro_test_binary_runs_under_cargo_val_with_the_environment_cargo_
     cargo_val.arg("--lib").arg("--manifest-path");
     cargo_val.arg(fixture_manifest());
 
-    let expected = cargo_test_names(&run(cargo_test));
-    let observed = cargo_val_names(&run(cargo_val));
+    let expected = cargo_test_names(&run(cargo_test).await);
+    let observed = cargo_val_names(&run(cargo_val).await);
 
     assert_eq!(expected.len(), 4, "cargo test names: {expected:?}");
     assert_eq!(observed.len(), 4, "cargo val names: {observed:?}");

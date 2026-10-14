@@ -1,20 +1,22 @@
 use std::fs::{self};
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
-#[cfg(unix)]
-use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::process::{Child, Stdio};
 #[cfg(unix)]
-use std::sync::mpsc::{self, RecvTimeoutError};
-#[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod common;
 
 use common::fixture_output;
+#[cfg(unix)]
+use common::{drain, drain_until};
+#[cfg(unix)]
+use futures::future::join3;
+#[cfg(unix)]
+use proxima_primitives::pipe::Pipe;
 #[cfg(unix)]
 #[path = "common/supervise.rs"]
 mod supervise;
@@ -150,7 +152,7 @@ async fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lo
     let shared = scratch.join("shared-target");
     let mut holder = hold_build_lock(&scratch, &shared);
 
-    let output = fixture_output(&mut cargo_val(&scratch, &shared, &["--target-dir", "isolated"]));
+    let output = fixture_output(&mut cargo_val(&scratch, &shared, &["--target-dir", "isolated"])).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -175,51 +177,20 @@ async fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
     let holder = hold_build_lock(&scratch, &shared);
 
     let mut command = cargo_val(&scratch, &shared, &["--target-dir", "shared"]);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let (status, stdout, lines) = supervised(&mut command, |_, stdout, stderr, exit| {
-        let deadline = Instant::now() + WAIT_LINE_DEADLINE;
-        let remaining = || deadline.saturating_duration_since(Instant::now());
-        let stderr = stderr.expect("stderr is piped");
-        let mut stdout_pipe = stdout.expect("stdout is piped");
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                if sender.send(line.expect("stderr is utf-8")).is_err() {
-                    break;
-                }
-            }
-        });
-        let (stdout_sender, stdout_receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            let read = stdout_pipe.read_to_string(&mut text);
-            let _ = stdout_sender.send(read.map(|_| text));
-        });
-        let mut lines = Vec::new();
-        while !lines.iter().any(|seen: &String| directory_wait(seen)) {
-            let line = receiver
-                .recv_timeout(remaining())
-                .unwrap_or_else(|fault| panic!("no wait line arrived ({fault}); stderr so far: {lines:?}"));
-            lines.push(line);
-        }
-        holder.release();
-        loop {
-            match receiver.recv_timeout(remaining()) {
-                Ok(line) => lines.push(line),
-                Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => panic!("stderr did not reach EOF in time; stderr so far: {lines:?}"),
-            }
-        }
-        let stdout = stdout_receiver
-            .recv_timeout(remaining())
-            .unwrap_or_else(|fault| panic!("stdout did not drain in time ({fault}); stderr: {lines:?}"))
-            .expect("stdout drains");
-        let status = exit
-            .recv_timeout(remaining())
-            .unwrap_or_else(|fault| panic!("cargo-val did not exit in time ({fault}); stderr: {lines:?}"))
-            .expect("cargo-val is waitable");
-        (status, stdout, lines)
-    });
+    let (status, stdout, lines) = supervised(&mut command, WAIT_LINE_DEADLINE, async |_, stdout, stderr, exit| {
+        let watched_stderr = async {
+            let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).lines().any(directory_wait)).await;
+            assert!(fault.is_none(), "stderr failed to read before a wait line: {fault:?}");
+            holder.release();
+            let (rest, _) = drain(stderr).await;
+            [seen, rest].concat()
+        };
+        let ((stdout, _), stderr_bytes, exit) = join3(drain(stdout), watched_stderr, exit.call(())).await;
+        let status = exit.expect("cargo-val exit is observed once").expect("cargo-val is waitable");
+        let lines = String::from_utf8_lossy(&stderr_bytes).lines().map(String::from).collect::<Vec<_>>();
+        (status, String::from_utf8_lossy(&stdout).into_owned(), lines)
+    })
+    .await;
 
     let waits: Vec<&str> = lines
         .iter()
@@ -242,8 +213,8 @@ async fn a_named_target_dir_holds_a_test_and_a_doc_subdirectory() {
     let named = scratch.join("named-target");
     let named_text = named.to_str().expect("utf-8 path");
 
-    let by_flag = fixture_output(&mut cargo_val(&scratch, &shared, &["--target-dir", named_text]));
-    let by_setting = fixture_output(cargo_val(&scratch, &shared, &[]).env("CARGO_VAL_TARGET_DIR", named_text));
+    let by_flag = fixture_output(&mut cargo_val(&scratch, &shared, &["--target-dir", named_text])).await;
+    let by_setting = fixture_output(cargo_val(&scratch, &shared, &[]).env("CARGO_VAL_TARGET_DIR", named_text)).await;
 
     for output in [&by_flag, &by_setting] {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -260,7 +231,7 @@ async fn an_empty_target_dir_setting_is_refused_before_any_build() {
     let scratch = scratch("empty-target");
     let shared = scratch.join("shared-target");
 
-    let output = fixture_output(cargo_val(&scratch, &shared, &[]).env("CARGO_VAL_TARGET_DIR", ""));
+    let output = fixture_output(cargo_val(&scratch, &shared, &[]).env("CARGO_VAL_TARGET_DIR", "")).await;
 
     assert_eq!(output.status.code(), Some(2));
     assert!(

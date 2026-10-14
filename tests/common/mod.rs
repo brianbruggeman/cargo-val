@@ -1,11 +1,31 @@
-use std::io::{self, Read};
-use std::process::{Command, ExitStatus, Output, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use core::future::Future;
+use core::pin::pin;
+use core::time::Duration;
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::io;
+use std::process::{Command, Output};
+
+use futures::future::{Either, join3, select};
+use proxima_core::time::{sleep, timeout};
+use proxima_primitives::pipe::{Exhausted, Pipe};
 
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use cargo_val::edge_spawn_unix::spawn_in_group;
+#[cfg(windows)]
+use cargo_val::edge_spawn_windows::spawn_in_group;
+
+#[cfg(unix)]
+pub use cargo_val::edge_stream_unix::ChildStream;
+#[cfg(windows)]
+pub use cargo_val::edge_stream_windows::ChildStream;
+
+#[cfg(target_os = "linux")]
+pub use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
+#[cfg(target_os = "macos")]
+pub use cargo_val::edge_exit_macos::MacosExit as ExitSource;
+#[cfg(windows)]
+pub use cargo_val::edge_exit_windows::WindowsExit as ExitSource;
 
 // a cold fixture build under load 85-96 took up to ~63 s in shard_process; 240 s leaves ~3.8x headroom and matches isolated_target's WAIT_LINE_DEADLINE
 pub const FIXTURE_DEADLINE: Duration = Duration::from_secs(240);
@@ -14,8 +34,8 @@ pub const FIXTURE_DEADLINE: Duration = Duration::from_secs(240);
 pub(crate) const INTERRUPT_GRACE: Duration = Duration::from_secs(60);
 
 /// Runs a fixture command to completion, failing the test with the captured output if it outlives [`FIXTURE_DEADLINE`].
-pub fn fixture_output(command: &mut Command) -> Output {
-    output_within(command, FIXTURE_DEADLINE).unwrap_or_else(|failure| panic!("{failure}"))
+pub async fn fixture_output(command: &mut Command) -> Output {
+    output_within(command, FIXTURE_DEADLINE).await.unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 /// Like `Command::output`, but the child leads its own process group and a missed `deadline` interrupts it, then kills the whole group.
@@ -23,50 +43,38 @@ pub fn fixture_output(command: &mut Command) -> Output {
 /// # Errors
 ///
 /// Returns the spawn failure, or the deadline report carrying everything the child printed.
-pub fn output_within(command: &mut Command, deadline: Duration) -> Result<Output, String> {
-    output_until(command, |receiver| receiver.recv_timeout(deadline))
+pub async fn output_within(command: &mut Command, deadline: Duration) -> Result<Output, String> {
+    output_until(command, sleep(deadline)).await
 }
 
-/// The deadline path of [`output_within`] with the clock replaced by `expire`: it runs on the calling thread once the child is spawned and returns the child's exit if it finished, or `Timeout` to interrupt then kill the group.
+/// The deadline path of [`output_within`] with the clock replaced by `expire`: the child's exit and both its streams are read on the calling prime worker, and once `expire` resolves first the group is interrupted, given [`INTERRUPT_GRACE`], then killed.
 ///
 /// # Errors
 ///
 /// Returns the spawn failure, or the expiry report carrying everything the child printed and any signal that failed to land.
-pub fn output_until<Expire>(command: &mut Command, expire: Expire) -> Result<Output, String>
-where
-    Expire: FnOnce(&Receiver<io::Result<ExitStatus>>) -> Result<io::Result<ExitStatus>, RecvTimeoutError>,
-{
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("{command:?} did not spawn: {error}"))?;
-    let leader = child.id();
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || sender.send(child.wait()));
-    let on_time = expire(&receiver);
-    let timed_out = on_time.is_err();
-    let mut signal_failures = Vec::new();
-    let waited = on_time.or_else(|_| {
-        signal_failures.extend(interrupt(leader).err());
-        let graceful = receiver.recv_timeout(INTERRUPT_GRACE);
-        signal_failures.extend(kill_group(leader).err());
-        graceful.or_else(|_| receiver.recv())
-    });
-    let (stdout, stdout_fault) = joined(stdout, "stdout");
-    let (stderr, stderr_fault) = joined(stderr, "stderr");
-    let read_faults: Vec<String> = stdout_fault.into_iter().chain(stderr_fault).collect();
+pub async fn output_until(command: &mut Command, expire: impl Future<Output = ()>) -> Result<Output, String> {
+    let (leader, stdout, stderr, exit) = launch(command)?;
+    let mut collect = pin!(join3(drain(&stdout), drain(&stderr), exit.call(())));
+    let mut expire = pin!(expire);
+    let raced = select(collect.as_mut(), expire.as_mut()).await;
+    let (finished, signal_failures) = match raced {
+        Either::Left((finished, _)) => (finished, None),
+        Either::Right(((), _)) => {
+            let (finished, failures) = interrupt_then_kill(leader, collect.as_mut()).await;
+            (finished, Some(failures))
+        }
+    };
+    let ((stdout, stdout_fault), (stderr, stderr_fault), waited) = finished;
+    let read_faults: Vec<String> = [("stdout", stdout_fault), ("stderr", stderr_fault)]
+        .into_iter()
+        .filter_map(|(stream, fault)| fault.map(|error| format!("{stream} read failed: {error}")))
+        .collect();
     let status = waited
-        .map_err(|error| format!("{command:?}: the wait thread vanished: {error}"))?
+        .map_err(|Exhausted| format!("{command:?}: the exit source was already spent"))?
         .map_err(|error| format!("{command:?}: wait failed: {error}"))?;
-    if timed_out {
+    if let Some(failures) = signal_failures {
         return Err(format!(
-            "{command:?} (pid {leader}) outlived its deadline and its process group was killed\nsignal failures: {signal_failures:?}\nread faults: {read_faults:?}\nstdout:\n{}\nstderr:\n{}",
+            "{command:?} (pid {leader}) outlived its deadline and its process group was killed\nsignal failures: {failures:?}\nread faults: {read_faults:?}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr),
         ));
@@ -77,18 +85,65 @@ where
     Ok(Output { status, stdout, stderr })
 }
 
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<(Vec<u8>, Option<io::Error>)> {
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let fault = pipe.and_then(|mut pipe| pipe.read_to_end(&mut bytes).err());
-        (bytes, fault)
-    })
+/// Spawns `command` as the leader of its own process group through cargo-val's own spawn, and returns the pid with the child's stdout and stderr streams and its exit source.
+pub(crate) fn launch(command: &Command) -> Result<(u32, Box<ChildStream>, Box<ChildStream>, ExitSource), String> {
+    let changes: BTreeMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
+    let inherited: Vec<Vec<u8>> = std::env::vars_os()
+        .filter(|(key, _)| !changes.contains_key(key.as_os_str()))
+        .map(|(key, value)| environment_entry(&key, &value))
+        .collect();
+    let overrides: Vec<Vec<u8>> = changes
+        .iter()
+        .filter_map(|(key, value)| value.map(|value| environment_entry(key, value)))
+        .collect();
+    let arguments: Vec<&[u8]> = command.get_args().map(OsStr::as_encoded_bytes).collect();
+    let inherited: Vec<&[u8]> = inherited.iter().map(Vec::as_slice).collect();
+    let overrides: Vec<&[u8]> = overrides.iter().map(Vec::as_slice).collect();
+    let directory = command.get_current_dir().map(|path| path.as_os_str().as_encoded_bytes());
+    let child = spawn_in_group(command.get_program().as_encoded_bytes(), &arguments, &inherited, &overrides, directory)
+        .map_err(|error| format!("{command:?} did not spawn: {error:?}"))?;
+    let exit = child.exit_source().map_err(|error| format!("{command:?} has no exit source: {error}"))?;
+    let (leader, stdout, stderr) = child.into_parts();
+    // boxed: each stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
+    Ok((leader, Box::new(ChildStream::new(stdout)), Box::new(ChildStream::new(stderr)), exit))
 }
 
-fn joined(handle: JoinHandle<(Vec<u8>, Option<io::Error>)>, stream: &str) -> (Vec<u8>, Option<String>) {
-    match handle.join() {
-        Ok((bytes, fault)) => (bytes, fault.map(|error| format!("{stream} read failed: {error}"))),
-        Err(_) => (Vec::new(), Some(format!("{stream} reader thread panicked"))),
+fn environment_entry(key: &OsStr, value: &OsStr) -> Vec<u8> {
+    [key.as_encoded_bytes(), b"=", value.as_encoded_bytes()].concat()
+}
+
+/// Reads `stream` to EOF.
+pub async fn drain(stream: &ChildStream) -> (Vec<u8>, Option<io::Error>) {
+    drain_until(stream, |_| false).await
+}
+
+/// Reads `stream` until `done` accepts everything read so far, or to EOF.
+pub async fn drain_until(stream: &ChildStream, done: impl Fn(&[u8]) -> bool) -> (Vec<u8>, Option<io::Error>) {
+    let mut bytes = Vec::new();
+    while !done(&bytes) {
+        match stream.call(()).await {
+            Ok(Ok(range)) => match stream.window(range) {
+                Some(window) => bytes.extend_from_slice(&window),
+                None => return (bytes, Some(io::Error::other("a yielded range reached past the capture window"))),
+            },
+            Ok(Err(fault)) => return (bytes, Some(fault)),
+            Err(Exhausted) => break,
+        }
+    }
+    (bytes, None)
+}
+
+/// SIGINT to the group, [`INTERRUPT_GRACE`] for `collect` to finish on its own, then SIGKILL to the group and the rest of `collect`.
+pub(crate) async fn interrupt_then_kill<Collect>(leader: u32, mut collect: Collect) -> (Collect::Output, Vec<String>)
+where
+    Collect: Future + Unpin,
+{
+    let mut failures: Vec<String> = interrupt(leader).err().into_iter().collect();
+    let graceful = timeout(INTERRUPT_GRACE, &mut collect).await;
+    failures.extend(kill_group(leader).err());
+    match graceful {
+        Ok(finished) => (finished, failures),
+        Err(_) => (collect.await, failures),
     }
 }
 

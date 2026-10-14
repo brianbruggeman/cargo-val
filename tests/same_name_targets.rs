@@ -57,7 +57,7 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
             "CARGO_TARGET_DIR",
             target_directory().join("same-name-fixture"),
         );
-    let output = fixture_output(&mut command);
+    let output = fixture_output(&mut command).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let passed = stdout

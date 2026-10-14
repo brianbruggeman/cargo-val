@@ -7,8 +7,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
 
 use cargo_val::edge_stream_unix::ChildStream;
 
@@ -80,23 +78,16 @@ fn group_gone(group: libc::pid_t) -> bool {
 
 #[proxima::test(timeout = "310s")]
 async fn a_fixture_run_that_misses_its_deadline_fails_and_leaves_no_process_behind() {
-    let warm = fixture_output(&mut blocked_test_command(None));
+    let warm = fixture_output(&mut blocked_test_command(None)).await;
     assert_eq!(warm.status.code(), Some(0), "the fixture builds and its unblocked test passes");
     let directory = probe_directory();
     let ready = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
     let held = ChildStream::new(OwnedFd::from(open_reader(&directory.join("held"))));
-    let (reported, expiry) = mpsc::channel::<()>();
     let mut command = blocked_test_command(Some(&directory));
 
-    let run = thread::spawn(move || {
-        output_until(&mut command, |_| {
-            expiry.recv().expect("the test body reports the blocked pid");
-            Err(RecvTimeoutError::Timeout)
-        })
-    });
-    let line = fifo::first_line(&ready, "the blocked test never reported it was blocked").await;
-    reported.send(()).expect("the run is waiting for the blocked pid");
-    let failure = run.join().expect("the run thread finishes").expect_err("the blocked test never returns, so the driven expiry fires");
+    let mut line = String::new();
+    let expiry = async { line = fifo::first_line(&ready, "the blocked test never reported it was blocked").await };
+    let failure = output_until(&mut command, expiry).await.expect_err("the blocked test never returns, so the driven expiry fires");
 
     let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
     assert!(failure.contains("outlived"), "{failure}");

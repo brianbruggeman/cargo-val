@@ -884,7 +884,7 @@ mod tests {
         assert!(matches!(super::step(&alone, &mut context), Poll::Pending), "an exhausted source parks the merge");
     }
 
-    #[proxima::test]
+    #[proxima::test(timeout = "490s")]
     async fn cargo_build_child_discovery_over_prime_sources_matches_blocking_capture() {
         let target = tempdir().expect("target directory");
         let arguments = cargo_arguments(target.path().to_str().expect("utf8 temp path"));
