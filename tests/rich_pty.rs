@@ -643,7 +643,8 @@ async fn the_final_scrollback_holds_no_excerpt_and_no_pinned_row_only_the_closin
     assert!(scrollback.iter().any(|line| line.starts_with("SUMMARY")), "no closing block in:\n{}", shown(&output));
 }
 
-const TIMELINE_HEADER: &str = "cargo val  timeline";
+const TIMELINE_HEADER: &str = "where the time went";
+const TIMELINE_AXIS: &str = " seconds ";
 
 async fn leave_a_sub_screen_with_a_lone_escape(master: &ChildStream, mut keys: File) -> String {
     let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
@@ -1703,7 +1704,7 @@ async fn f_opens_review_while_a_test_is_held_escape_returns_to_the_live_frame_an
 
 async fn timeline_and_a_cancelled_quit_mid_run(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
     let (mut output, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(KEY_ROW)).await;
-    for (key, wanted) in [(&b"s"[..], TIMELINE_HEADER), (b"\x1b", KEY_ROW), (b"q", "q again to confirm, any key cancels")] {
+    for (key, wanted) in [(&b"s"[..], TIMELINE_AXIS), (b"\x1b", KEY_ROW), (b"q", "q again to confirm, any key cancels")] {
         keys.write_all(key).expect("the key is writable");
         let (seen, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(wanted)).await;
         output.extend_from_slice(&seen);
@@ -1724,6 +1725,8 @@ async fn s_opens_the_timeline_mid_run_and_a_q_then_any_other_key_leaves_the_run_
 
     let screen = without_sgr(&output);
     let timeline = screen.find(TIMELINE_HEADER).unwrap_or_else(|| panic!("the timeline never opened mid-run:\n{}", shown(&screen)));
+    assert!(screen[timeline..].contains(TIMELINE_AXIS) && screen[timeline..].contains('\u{252c}'), "the timeline drew its axis ticks:\n{}", shown(&screen[timeline..]));
+    assert!(!screen.contains("view is drawn by a later slice"), "no stub screen is reachable:\n{}", shown(&screen));
     assert!(screen[timeline..].contains("q again to confirm, any key cancels"), "q armed after the timeline closed:\n{}", shown(&screen[timeline..]));
     assert!(screen.contains(REVIEW_HEADER), "the run was not cancelled, so it reached its own end-of-run review:\n{}", shown(&screen));
     assert_eq!(status.code(), Some(1), "the run finished its failing test and exited 1: {status}");
