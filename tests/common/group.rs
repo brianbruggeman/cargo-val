@@ -45,9 +45,10 @@ pub fn kill_process_group(leader: u32) -> Result<(), String> {
         return Ok(());
     }
     let error = io::Error::last_os_error();
-    // ESRCH means the group already exited, which is the goal
+    // ESRCH means the group already exited, which is the goal; macOS answers EPERM for a group whose members are all unreaped zombies
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(()),
+        Some(libc::EPERM) if cfg!(target_os = "macos") => Ok(()),
         _ => Err(format!("killpg({leader}) failed: {error}")),
     }
 }
