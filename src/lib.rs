@@ -1,6 +1,6 @@
 #![no_std]
 
-#[cfg(any(test, feature = "edge-os"))]
+#[cfg(any(test, feature = "edge-os", feature = "highlight"))]
 extern crate std;
 
 #[cfg(test)]
@@ -41,8 +41,10 @@ pub mod sched_binary;
 #[cfg(feature = "edge-os")]
 pub mod sched_file;
 pub mod shard_sched;
-#[cfg(any(test, feature = "edge-os"))]
+#[cfg(any(test, feature = "edge-os", feature = "highlight"))]
 pub mod source_excerpt;
+#[cfg(feature = "highlight")]
+pub mod source_highlight;
 pub mod shard_arena;
 pub mod stack_capture;
 pub mod stack_frames;
