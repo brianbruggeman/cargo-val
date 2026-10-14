@@ -4,9 +4,9 @@
 //! [`Mode`] (`impl Mode` below, one exhaustive match per mode) and, separately, an [`Action`] the driver executes later
 //! (rerun these, open the editor, write the receipt, interrupt). The list is not a second copy of what failed: it is the
 //! [`State`] ledger filtered to the rows still listed, so a rerun that passed is an `Event::Reran` and the list, its length
-//! and the cursor bounds follow from the ledger. The class, location and output of a failure stay in the driver's capture
-//! buffers; [`State::screen`] and [`State::action`] take a lookup from an id to them, so nothing here copies an output byte
-//! except into the frame.
+//! and the cursor bounds follow from the ledger. The class, location and output of a failure are retained by the [`State`]
+//! (`State::retain`, read back by `State::detail`); [`State::screen`] and [`State::action`] take a lookup from an id to
+//! them, so nothing here copies an output byte except into the frame.
 //!
 //! The quit receipt is not drawn here: after `q q` the mode is [`Mode::Receipt`] and the driver projects
 //! `Event::Finished` through `State::project`, so the bytes are the plain closing block by construction.
@@ -23,6 +23,7 @@ const CLASS_FIELD: usize = 8;
 const SECONDS_FIELD: usize = 10;
 const MINI_BAR: usize = 6;
 const INTERRUPT_SIGNAL: u8 = 2;
+const ESCAPE: u8 = 0x1b;
 const RESET: &[u8] = b"\x1b[0m";
 const BOLD: &[u8] = b"1";
 const FAINT: &[u8] = b"2";
@@ -62,12 +63,6 @@ pub enum Key {
     CtrlC,
 }
 
-/// Where a list screen returns to; review remembers its selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Back {
-    Running,
-    Review { selected: u16 },
-}
 
 /// What the driver should do for a key. The renderer never executes any of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,7 +118,7 @@ const fn interrupted() -> Mode {
     Mode::Interrupted { signal: INTERRUPT_SIGNAL }
 }
 
-const fn opening(byte: u8, back: Back) -> Option<Mode> {
+const fn opening(byte: u8, back: Option<u16>) -> Option<Mode> {
     match byte {
         b's' => Some(Mode::Timeline { back }),
         b'i' => Some(Mode::Skipped { back }),
@@ -134,35 +129,65 @@ const fn opening(byte: u8, back: Back) -> Option<Mode> {
 }
 
 impl Key {
-    /// Turns the bytes one terminal read returned into keys, in order, handing each to `sink`.
+    /// Turns the bytes one terminal read returned into keys, in order, handing each to `sink`; the first error it
+    /// returns stops the decode and is returned.
     ///
-    /// `Enter` is `\r` or `\n`, `Esc` is a lone `0x1b`, the arrows are `0x1b [ A|B` or `0x1b O A|B`, `Ctrl-C` is `0x03`
-    /// and printable ASCII is itself. Anything else (other escape sequences, control bytes, UTF-8) is dropped whole.
-    pub fn decode(bytes: &[u8], mut sink: impl FnMut(Self)) {
-        let mut at = 0;
-        while at < bytes.len() {
-            let (key, used) = match bytes[at..] {
-                [0x1b, b'[' | b'O', b'A', ..] => (Some(Self::Up), 3),
-                [0x1b, b'[' | b'O', b'B', ..] => (Some(Self::Down), 3),
-                [0x1b, b'[' | b'O', ..] => (None, bytes.len() - at),
-                [0x1b, ..] => (Some(Self::Esc), 1),
-                [b'\r' | b'\n', ..] => (Some(Self::Enter), 1),
-                [0x03, ..] => (Some(Self::CtrlC), 1),
-                [byte @ 0x20..=0x7e, ..] => (Some(Self::Char(byte)), 1),
-                _ => (None, 1),
-            };
-            key.into_iter().for_each(&mut sink);
-            at += used;
+    /// `carry` is the decoder's only memory: `0` between keys, `0x1b` after an escape, `[` or `O` after `0x1b [` or
+    /// `0x1b O`. The caller keeps it in the [`State`] across reads, so `0x1b` in one read and `[A` in the next is one
+    /// `Up`. A lone `0x1b` is `Esc` once the next byte is not `[` or `O`, or when [`Key::flush`] runs on a tick; no timer
+    /// thread is involved. `Enter` is `\r` or `\n`, `Ctrl-C` is `0x03`, printable ASCII is itself, the arrows end `A` or
+    /// `B`, and every other escape sequence, control byte or UTF-8 byte is dropped, whichever read it arrives in.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error `sink` returns.
+    pub fn decode<E>(carry: &mut u8, bytes: &[u8], mut sink: impl FnMut(Self) -> Result<(), E>) -> Result<(), E> {
+        bytes.iter().try_for_each(|byte| Self::step(carry, *byte, &mut sink))
+    }
+
+    /// Resolves a held lone `0x1b` as `Esc`; a held `0x1b [` or `0x1b O` is an unfinished sequence and is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error `sink` returns.
+    pub fn flush<E>(carry: &mut u8, mut sink: impl FnMut(Self) -> Result<(), E>) -> Result<(), E> {
+        let held = std::mem::take(carry);
+        if held == ESCAPE { sink(Self::Esc) } else { Ok(()) }
+    }
+
+    fn step<E>(carry: &mut u8, byte: u8, sink: &mut impl FnMut(Self) -> Result<(), E>) -> Result<(), E> {
+        match (*carry, byte) {
+            (ESCAPE, b'[' | b'O') => *carry = byte,
+            (ESCAPE, _) => {
+                *carry = 0;
+                sink(Self::Esc)?;
+                return Self::step(carry, byte, sink);
+            }
+            (b'[' | b'O', b'A') => {
+                *carry = 0;
+                return sink(Self::Up);
+            }
+            (b'[' | b'O', b'B') => {
+                *carry = 0;
+                return sink(Self::Down);
+            }
+            (b'[', 0x20..=0x3f) => {}
+            (b'[' | b'O', ESCAPE) => *carry = ESCAPE,
+            (b'[' | b'O', _) => *carry = 0,
+            (_, ESCAPE) => *carry = ESCAPE,
+            (_, b'\r' | b'\n') => return sink(Self::Enter),
+            (_, 0x03) => return sink(Self::CtrlC),
+            (_, 0x20..=0x7e) => return sink(Self::Char(byte)),
+            _ => {}
         }
+        Ok(())
     }
 }
 
-impl Back {
-    const fn restore(self) -> Mode {
-        match self {
-            Self::Running => Mode::Running,
-            Self::Review { selected } => Mode::Review { selected, armed: false, top: None },
-        }
+const fn restore(back: Option<u16>) -> Mode {
+    match back {
+        None => Mode::Running,
+        Some(selected) => Mode::Review { selected, armed: false, top: None },
     }
 }
 
@@ -202,7 +227,7 @@ fn running_key(key: Key, open: usize) -> Mode {
         Key::Char(b'f') if open > 0 => Mode::Review { selected: 0, armed: false, top: None },
         Key::Char(b'q') => Mode::QuitArmed,
         Key::Char(b'c') | Key::CtrlC => interrupted(),
-        Key::Char(byte) => opening(byte, Back::Running).unwrap_or(Mode::Running),
+        Key::Char(byte) => opening(byte, None).unwrap_or(Mode::Running),
         Key::Enter | Key::Esc | Key::Up | Key::Down => Mode::Running,
     }
 }
@@ -227,16 +252,16 @@ fn review_key(selected: u16, armed: bool, top: Option<u16>, key: Key, (open, lin
         (Key::Char(b'q'), _) if armed => Mode::Receipt,
         (Key::Char(b'q'), _) => Mode::Review { selected, armed: true, top },
         (Key::Char(b'c') | Key::CtrlC, _) => interrupted(),
-        (Key::Char(byte), _) => opening(byte, Back::Review { selected }).unwrap_or(stay),
+        (Key::Char(byte), _) => opening(byte, Some(selected)).unwrap_or(stay),
         (Key::Enter | Key::Esc, _) => stay,
     }
 }
 
-fn screen_key(own: Mode, back: Back, key: Key) -> Mode {
+fn screen_key(own: Mode, back: Option<u16>, key: Key) -> Mode {
     match key {
-        Key::Esc => back.restore(),
+        Key::Esc => restore(back),
         Key::Char(b'c') | Key::CtrlC => interrupted(),
-        Key::Char(byte) if byte == own.own_key() => back.restore(),
+        Key::Char(byte) if byte == own.own_key() => restore(back),
         Key::Char(byte) => opening(byte, back).unwrap_or(own),
         Key::Enter | Key::Up | Key::Down => own,
     }

@@ -448,7 +448,8 @@ fn handle(
         Item::Tick => {
             #[cfg(windows)]
             run.refresh_width()?;
-            emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })
+            emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })?;
+            flush_keys(run)
         }
     }
 }
@@ -468,12 +469,19 @@ fn keys_chunk(lanes: &Lanes, range: io::Result<Range<u32>>, run: &ListingRun<'_>
     let slot = lanes[KEY_LANE].0.borrow();
     let stream = slot.as_deref().ok_or(RunError::Reactor)?;
     let bytes = stream.window(range).ok_or(RunError::Reactor)?;
-    let mut outcome = Ok(());
-    Key::decode(&bytes, |key| {
-        if outcome.is_ok() {
-            outcome = run.key(key);
-        }
-    });
+    with_key_carry(run, |carry| Key::decode(carry, &bytes, |key| run.key(key)))
+}
+
+// a lone escape waits in the state for the next read; a tick is the only other thing that resolves it
+fn flush_keys(run: &ListingRun<'_>) -> Result<(), RunError> {
+    with_key_carry(run, |carry| Key::flush(carry, |key| run.key(key)))
+}
+
+// the borrow is released before `run.key` runs, because applying a key borrows the state again
+fn with_key_carry(run: &ListingRun<'_>, decode: impl FnOnce(&mut u8) -> Result<(), RunError>) -> Result<(), RunError> {
+    let mut carry = run.render().1.borrow().key_carry();
+    let outcome = decode(&mut carry);
+    run.render().1.borrow_mut().set_key_carry(carry);
     outcome
 }
 

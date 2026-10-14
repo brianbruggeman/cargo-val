@@ -19,7 +19,7 @@ use memchr::memchr;
 use crate::line::Line;
 use crate::failure_class::{Absent, Class, Exit, Record, Reject, classify};
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
-use review::{Back, Key, Rerun, Verdict};
+use review::{Key, Rerun, Verdict};
 
 mod rich;
 mod timeline;
@@ -77,10 +77,11 @@ pub enum Mode {
     QuitArmed,
     /// `top` is `None` while the list has focus and the first visible output line while the detail is being scrolled.
     Review { selected: u16, armed: bool, top: Option<u16> },
-    Timeline { back: Back },
-    Find { back: Back },
-    Skipped { back: Back },
-    Warnings { back: Back },
+    /// `back` is where a list screen returns to: `None` is the running screen, `Some(selected)` review with its selection.
+    Timeline { back: Option<u16> },
+    Find { back: Option<u16> },
+    Skipped { back: Option<u16> },
+    Warnings { back: Option<u16> },
     Receipt,
     BuildError,
     Interrupted { signal: u8 },
@@ -259,6 +260,7 @@ pub struct State<'storage, const RERUN: usize> {
     passed: usize,
     skipped: usize,
     warnings: usize,
+    key_carry: u8,
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
@@ -310,6 +312,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             passed: 0,
             skipped: 0,
             warnings: 0,
+            key_carry: 0,
         }
     }
 
@@ -343,6 +346,16 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
     pub const fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The key decoder's memory between terminal reads; see [`Key::decode`].
+    #[must_use]
+    pub const fn key_carry(&self) -> u8 {
+        self.key_carry
+    }
+
+    pub const fn set_key_carry(&mut self, carry: u8) {
+        self.key_carry = carry;
     }
 
     /// The ledger as borrowed views into the arena, in settle order.

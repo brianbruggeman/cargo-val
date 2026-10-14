@@ -4,7 +4,7 @@ use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
-use super::{Action, Back, Detail, Key, Rerun, Verdict};
+use super::{Action, Detail, Key, Rerun, Verdict};
 use crate::failure_class::{Class, Enforcer, Exit, Location};
 use crate::line::Line;
 use crate::render::{Event, Identity, Mode, Outcome, State, UNREAD};
@@ -255,7 +255,7 @@ fn q_once_arms_and_does_not_quit_while_q_twice_quits_and_esc_stays_in_review() {
 #[test]
 fn every_transition_of_the_spec_table_lands_where_it_says() {
     let review_at = |selected, armed| Mode::Review { selected, armed, top: None };
-    let (running, back_review) = (Back::Running, Back::Review { selected: 1 });
+    let (running, back_review) = (None, Some(1));
     let interrupted = Mode::Interrupted { signal: 2 };
     let rows: [(Mode, Key, usize, Mode); 39] = [
         (Mode::Running, Key::Char(b'f'), 2, review_at(0, false)),
@@ -346,12 +346,12 @@ fn the_run_events_move_the_screens_the_way_the_spec_table_says() {
         (Mode::Running, build, Mode::BuildError),
         (review_mode, build, review_mode),
         (review_mode, signal, Mode::Interrupted { signal: 15 }),
-        (Mode::Timeline { back: Back::Running }, signal, Mode::Interrupted { signal: 15 }),
+        (Mode::Timeline { back: None }, signal, Mode::Interrupted { signal: 15 }),
         (Mode::QuitArmed, signal, Mode::Interrupted { signal: 15 }),
         (Mode::Receipt, signal, Mode::Receipt),
         (Mode::Done { wall_ms: 5 }, signal, Mode::Done { wall_ms: 5 }),
         (review_mode, tick, review_mode),
-        (Mode::Find { back: Back::Running }, tick, Mode::Find { back: Back::Running }),
+        (Mode::Find { back: None }, tick, Mode::Find { back: None }),
     ];
 
     for (from, event, to) in rows {
@@ -497,12 +497,14 @@ fn the_quit_receipt_is_the_plain_closing_block_whatever_the_width_or_colour() {
 }
 
 #[test]
-fn ten_thousand_review_frames_and_ten_thousand_key_events_allocate_nothing() {
+fn ten_thousand_decodes_lane_chunks_projections_and_details_allocate_nothing() {
     let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
     let mut state = scenario("rerun_running", &mut arena, &mut ledger);
     let mut frame = Line::<8192>::new();
     let pressed = [Key::Char(b'j'), Key::Char(b'k'), Key::Char(b'q'), Key::Esc, Key::Down, Key::Up, Key::Enter, Key::Char(b'j'), Key::Char(b'r'), Key::Enter];
-    let (mut frames, mut events) = (0_usize, 0_usize);
+    let reads: [&[u8]; 5] = [b"\x1b", b"[A", b"\x1b", b"q", b"j\x1b[B"];
+    let (mut frames, mut events, mut decodes, mut keys_seen, mut projections, mut details, mut detail_bytes) = (0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
+    let mut carry = 0_u8;
 
     let ((), allocations) = measure_allocations(|| {
         for round in 0..10_000_usize {
@@ -514,32 +516,133 @@ fn ten_thousand_review_frames_and_ten_thousand_key_events_allocate_nothing() {
             state.apply(&Event::Key(key));
             state.apply(&Event::Tick { now_ms: CLOCK_MS + round as u64 });
             events += 1;
+
+            let outcome = Key::decode(&mut carry, reads[round % reads.len()], |key| {
+                keys_seen += 1;
+                _ = state.action(key, detail);
+                state.apply(&Event::Key(key));
+                Ok::<(), ()>(())
+            });
+            assert_eq!(outcome, Ok(()));
+            decodes += 1;
+
+            frame.clear();
+            state.project_live(&Event::Key(key), &mut frame).expect("the frame holds a review projection");
+            projections += 1;
+
+            let (_, _, _, output) = state.detail(if round % 2 == 0 { SCHED } else { SHARD });
+            detail_bytes += output.len();
+            details += 1;
         }
     });
 
-    assert_eq!((frames, events), (10_000, 10_000), "the loops ran, so a zero is not an empty loop");
+    assert_eq!((frames, events, decodes, projections, details), (10_000, 10_000, 10_000, 10_000, 10_000), "every loop ran, so a zero is not an empty loop");
+    assert_eq!(keys_seen, 10_000, "five split reads yield five keys, so 10k rounds yield 10k keys through the carry");
+    assert_eq!(detail_bytes, 5_000 * SCHED_OUTPUT.len() + 5_000 * SHARD_OUTPUT.len(), "the real detail returned the retained capture each time");
     assert_eq!(allocations, 0);
-    assert!(frame.bytes().len() > 200, "the last frame is a drawn screen");
+    assert!(frame.bytes().len() > 200, "the last projection is a drawn screen");
 }
+
+fn decoded(carry: &mut u8, bytes: &[u8], keys: &mut Vec<Key>) {
+    Key::decode(carry, bytes, |key| {
+        keys.push(key);
+        Ok::<(), ()>(())
+    })
+    .expect("collecting keys cannot fail");
+}
+
+fn read_in_two(bytes: &[u8], at: usize) -> Vec<Key> {
+    let (mut carry, mut keys) = (0_u8, Vec::new());
+    decoded(&mut carry, &bytes[..at], &mut keys);
+    decoded(&mut carry, &bytes[at..], &mut keys);
+    Key::flush(&mut carry, |key| {
+        keys.push(key);
+        Ok::<(), ()>(())
+    })
+    .expect("collecting keys cannot fail");
+    keys
+}
+
+const KEY_TABLE: [(&[u8], &[Key]); 9] = [
+    (b"j", &[Key::Char(b'j')]),
+    (b"qq", &[Key::Char(b'q'), Key::Char(b'q')]),
+    (b"\r", &[Key::Enter]),
+    (b"\x1b", &[Key::Esc]),
+    (b"\x1b[A\x1b[B", &[Key::Up, Key::Down]),
+    (b"\x1bOB", &[Key::Down]),
+    (b"\x03", &[Key::CtrlC]),
+    (b"\x1b[1;5C\xc3\xa9\x00", &[]),
+    (b"R/\x1b[Br\n", &[Key::Char(b'R'), Key::Char(b'/'), Key::Down, Key::Char(b'r'), Key::Enter]),
+];
 
 #[test]
 fn terminal_reads_decode_to_the_keys_the_review_table_names() {
-    let reads: [(&[u8], &[Key]); 8] = [
-        (b"j", &[Key::Char(b'j')]),
-        (b"qq", &[Key::Char(b'q'), Key::Char(b'q')]),
-        (b"\r", &[Key::Enter]),
-        (b"\x1b", &[Key::Esc]),
-        (b"\x1b[A\x1b[B", &[Key::Up, Key::Down]),
-        (b"\x1bOB", &[Key::Down]),
-        (b"\x03", &[Key::CtrlC]),
-        (b"\x1b[1;5C\xc3\xa9\x00", &[]),
-    ];
-
-    for (bytes, expected) in reads {
-        let mut decoded = Vec::new();
-        Key::decode(bytes, |key| decoded.push(key));
-        assert_eq!(decoded, expected, "read {bytes:?}");
+    for (bytes, expected) in KEY_TABLE {
+        assert_eq!(read_in_two(bytes, bytes.len()), expected, "read {bytes:?}");
     }
+}
+
+#[test]
+fn every_key_of_the_spec_table_decodes_the_same_split_at_every_byte_boundary() {
+    let mut splits = 0;
+    for (bytes, expected) in KEY_TABLE {
+        for at in 0..=bytes.len() {
+            assert_eq!(read_in_two(bytes, at), expected, "read {bytes:?} split at {at}");
+            splits += 1;
+        }
+    }
+    assert_eq!(splits, KEY_TABLE.iter().map(|(bytes, _)| bytes.len() + 1).sum::<usize>(), "every boundary of every row ran");
+    assert_eq!(splits, 40, "the table has 40 split points");
+}
+
+#[test]
+fn an_escape_alone_then_bracket_a_in_the_next_read_is_one_up_and_no_esc() {
+    let (mut carry, mut keys) = (0_u8, Vec::new());
+    decoded(&mut carry, b"\x1b", &mut keys);
+    assert_eq!((keys.len(), carry), (0, 0x1b), "a lone escape is held, not decided");
+    decoded(&mut carry, b"[A", &mut keys);
+    assert_eq!((keys, carry), (vec![Key::Up], 0));
+}
+
+#[test]
+fn an_escape_followed_by_q_is_esc_then_q_and_a_held_escape_is_esc_on_the_next_tick() {
+    let (mut carry, mut keys) = (0_u8, Vec::new());
+    decoded(&mut carry, b"\x1b", &mut keys);
+    decoded(&mut carry, b"q", &mut keys);
+    assert_eq!(keys, vec![Key::Esc, Key::Char(b'q')]);
+
+    let (mut carry, mut keys) = (0_u8, Vec::new());
+    decoded(&mut carry, b"\x1b", &mut keys);
+    Key::flush(&mut carry, |key| {
+        keys.push(key);
+        Ok::<(), ()>(())
+    })
+    .expect("collecting keys cannot fail");
+    assert_eq!((keys, carry), (vec![Key::Esc], 0), "the tick resolves the held escape");
+}
+
+#[test]
+fn a_three_byte_utf8_character_split_across_reads_decodes_to_no_keys() {
+    let euro = "\u{20ac}".as_bytes();
+    assert_eq!(euro.len(), 3);
+    for at in 0..=euro.len() {
+        assert_eq!(read_in_two(euro, at), Vec::<Key>::new(), "euro split at {at}");
+    }
+    let (mut carry, mut keys) = (0_u8, Vec::new());
+    decoded(&mut carry, &euro[..2], &mut keys);
+    decoded(&mut carry, &[&euro[2..], b"j"].concat(), &mut keys);
+    assert_eq!(keys, vec![Key::Char(b'j')], "the key after the split character still decodes");
+}
+
+#[test]
+fn a_sink_error_stops_the_decode_and_is_returned() {
+    let mut carry = 0_u8;
+    let mut seen = 0;
+    let outcome = Key::decode(&mut carry, b"jkl", |_| {
+        seen += 1;
+        if seen == 2 { Err("stop") } else { Ok(()) }
+    });
+    assert_eq!((outcome, seen), (Err("stop"), 2));
 }
 
 #[test]
