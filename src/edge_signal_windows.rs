@@ -198,6 +198,12 @@ impl SignalPipe {
         self.received.get()
     }
 
+    /// Windows re-reads the console width on each tick instead of taking a resize signal, so no resize is ever pending here.
+    #[must_use]
+    pub const fn take_resized(&self) -> bool {
+        false
+    }
+
     /// Takes the pending control event and ends every child of the run.
     ///
     /// # Errors

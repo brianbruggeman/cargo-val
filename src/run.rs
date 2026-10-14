@@ -22,7 +22,7 @@ use crate::edge_signal::SignalPipe;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, emit, monotonic_millis, run_body, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, emit, monotonic_millis, restore_cursor, run_body, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
@@ -355,8 +355,8 @@ fn handle(
             | Item::ErrEnd(DOC_LANE)
             | Item::Exit(DOC_LANE, _)
     ) {
-        return run.with_doc(|doc, color, observation| {
-            handle_doc(item, lanes, doc, color, observation)
+        return run.with_doc(|doc, observation| {
+            handle_doc(item, lanes, doc, observation)
         });
     }
     match item {
@@ -378,7 +378,7 @@ fn handle(
             let stream = slot.as_deref().ok_or(RunError::Reactor)?;
             let bytes = stream.window(range).ok_or(RunError::Reactor)?;
             if lane == CARGO_LANE {
-                driver.forward_stderr(&bytes)
+                driver.forward_stderr(&bytes, run.render())
             } else {
                 write_fd(2, &bytes)
             }
@@ -392,7 +392,7 @@ fn handle(
             Ok(())
         }
         Item::OutEnd(lane) => session_ended(run, ledger, watches, lane - JOB_BASE, true),
-        Item::ErrEnd(CARGO_LANE) => driver.stderr_ended(),
+        Item::ErrEnd(CARGO_LANE) => driver.stderr_ended(run.render()),
         Item::ErrEnd(LISTING_LANE) => {
             driver.listing_stderr_ended();
             Ok(())
@@ -417,7 +417,11 @@ fn handle(
             Ok(())
         }
         Item::Interrupt => Ok(()),
-        Item::Tick => emit(run.render(), &Event::Tick { now_ms: monotonic_millis() }),
+        Item::Tick => {
+            #[cfg(windows)]
+            run.refresh_width()?;
+            emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })
+        }
     }
 }
 
@@ -427,31 +431,29 @@ fn feed_doc(
     doc: &mut DocRun,
     bytes: &[u8],
     (range, offset): (Range<u32>, usize),
-    color: bool,
     observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
-    let consumed = doc.stdout_lines(bytes, offset, color, observation)?;
+    let consumed = doc.stdout_lines(bytes, offset, observation)?;
     let stalled = consumed < bytes.len();
     doc.set_backlog(stalled.then_some((range, consumed)));
     lanes[DOC_LANE].3.set(!stalled);
     Ok(())
 }
 
-fn resume_doc(lanes: &Lanes, doc: &mut DocRun, color: bool, observation: &DocObservation<'_>) -> Result<(), RunError> {
+fn resume_doc(lanes: &Lanes, doc: &mut DocRun, observation: &DocObservation<'_>) -> Result<(), RunError> {
     let Some((range, offset)) = doc.backlog() else {
         return Ok(());
     };
     let slot = lanes[DOC_LANE].0.borrow();
     let stream = slot.as_deref().ok_or(RunError::Reactor)?;
     let bytes = stream.window(range.clone()).ok_or(RunError::Reactor)?;
-    feed_doc(lanes, doc, &bytes, (range, offset), color, observation)
+    feed_doc(lanes, doc, &bytes, (range, offset), observation)
 }
 
 fn handle_doc(
     item: Item,
     lanes: &Lanes,
     doc: &mut DocRun,
-    color: bool,
     observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     match item {
@@ -460,7 +462,7 @@ fn handle_doc(
             let slot = lanes[DOC_LANE].0.borrow();
             let stream = slot.as_deref().ok_or(RunError::Reactor)?;
             let bytes = stream.window(range.clone()).ok_or(RunError::Reactor)?;
-            feed_doc(lanes, doc, &bytes, (range, 0), color, observation)
+            feed_doc(lanes, doc, &bytes, (range, 0), observation)
         }
         Item::Err(_, range) => {
             let range = range.map_err(|_| RunError::Reactor)?;
@@ -493,7 +495,6 @@ fn handle_doc(
 pub(crate) async fn observe_doc(
     doc: &mut DocRun,
     signals: &SignalPipe,
-    color: bool,
     observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     let lanes = Box::new(empty_lanes());
@@ -508,9 +509,9 @@ pub(crate) async fn observe_doc(
             Item::Signal(ready) => {
                 ready.map_err(|_| RunError::Reactor)?;
                 signals.drain().map_err(|_| RunError::Reactor)?;
-                resume_doc(&lanes, doc, color, observation)?;
+                resume_doc(&lanes, doc, observation)?;
             }
-            other => handle_doc(other, &lanes, doc, color, observation)?,
+            other => handle_doc(other, &lanes, doc, observation)?,
         }
         Ok(if doc.finished() {
             ControlFlow::Break(())
@@ -644,7 +645,7 @@ pub(crate) async fn observe_cargo(
         }
         handle(item, &lanes, driver, run, ledger, watches)?;
         driver.resume(&lanes, run, ledger, watches)?;
-        run.with_doc(|doc, color, observation| resume_doc(&lanes, doc, color, observation))?;
+        run.with_doc(|doc, observation| resume_doc(&lanes, doc, observation))?;
         resume_sessions(&lanes, run, ledger, watches)?;
         lanes[CARGO_LANE].3.set(driver.cargo_open());
         lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
@@ -669,8 +670,15 @@ pub async fn drive(arguments: Vec<Vec<u8>>) -> Result<RunSummary, RunError> {
         parser.push(argument);
     }
     let _scope = Capture::enter();
+    let previous = std::panic::take_hook();
+    // std::panic::set_hook only accepts a boxed hook
+    std::panic::set_hook(std::boxed::Box::new(move |info| {
+        restore_cursor();
+        previous(info);
+    }));
     let outcome = run_body(&parser).await;
     status_queue::flush_bounded().await;
+    restore_cursor();
     outcome
 }
 

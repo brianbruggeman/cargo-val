@@ -145,6 +145,8 @@ impl PathText {
 pub struct MetadataFacts {
     /// Per package with at least one `bin` target.
     pub bins: BinCounts,
+    /// Targets that build a test executable: every `lib`, `proc-macro` and `bin` unit-test harness plus every `test`-kind target.
+    pub test_targets: usize,
     target_directory: PathText,
     workspace_root: PathText,
 }
@@ -175,6 +177,8 @@ pub struct MetadataScan {
     package_id_length: usize,
     package_id_overflow: bool,
     package_bins: usize,
+    test_targets: usize,
+    target_counted: bool,
     counts: BinCounts,
     target_directory: PathText,
     workspace_root: PathText,
@@ -207,6 +211,8 @@ impl MetadataScan {
             package_id_length: 0,
             package_id_overflow: false,
             package_bins: 0,
+            test_targets: 0,
+            target_counted: false,
             counts: BinCounts::new(),
             target_directory: PathText::new(),
             workspace_root: PathText::new(),
@@ -234,6 +240,7 @@ impl MetadataScan {
     pub fn finish(self) -> MetadataFacts {
         MetadataFacts {
             bins: self.counts,
+            test_targets: self.test_targets,
             target_directory: self.target_directory,
             workspace_root: self.workspace_root,
         }
@@ -291,11 +298,23 @@ impl MetadataScan {
                 self.package_id_length = text_length;
                 self.package_id[..text_length].copy_from_slice(&self.text[..text_length]);
             }
-        } else if depth == 6 && self.in_kind_list() && &self.text[..text_length] == b"bin" {
-            self.package_bins += 1;
+        } else if depth == 6 && self.in_kind_list() {
+            self.count_kind(text_length);
         }
         self.text_length = 0;
         self.text_overflow = false;
+    }
+
+    fn count_kind(&mut self, text_length: usize) {
+        let kind = &self.text[..text_length];
+        if kind == b"bin" {
+            self.package_bins += 1;
+        }
+        let builds_tests = matches!(kind, b"lib" | b"proc-macro" | b"bin" | b"test");
+        if builds_tests && !self.target_counted {
+            self.target_counted = true;
+            self.test_targets += 1;
+        }
     }
 
     // root object, its `packages` array, one package object
@@ -328,6 +347,9 @@ impl MetadataScan {
             key: Key::Other,
         };
         self.depth += 1;
+        if object && self.depth == 5 && self.in_package() && self.stack[2].key == Key::Targets {
+            self.target_counted = false;
+        }
         if object && self.depth == 3 && self.in_package() {
             self.package_id_length = 0;
             self.package_id_overflow = false;
@@ -403,6 +425,23 @@ mod tests {
         assert!(counts.awaiting("path+file:///repo/parser#0.3.1"));
         counts.note_built("path+file:///repo/parser#0.3.1");
         assert!(!counts.awaiting("path+file:///repo/parser#0.3.1"));
+    }
+
+    #[proxima::test]
+    async fn counts_every_target_that_builds_a_test_executable_once() {
+        let document = r#"{"packages":[{"id":"path+file:///w#0.1.0","targets":[{"kind":["lib","cdylib"],"name":"w"},{"kind":["bin"],"name":"w-cli"},{"kind":["example"],"name":"demo"},{"kind":["bench"],"name":"speed"},{"kind":["test"],"name":"it"}]}],"version":1}"#;
+        let mut scan = Box::new(MetadataScan::new());
+        scan.feed(document.as_bytes()).expect("document fits");
+
+        assert_eq!(scan.finish().test_targets, 3);
+    }
+
+    #[proxima::test]
+    async fn the_two_package_document_has_six_test_targets() {
+        let mut scan = Box::new(MetadataScan::new());
+        scan.feed(TWO_PACKAGES.as_bytes()).expect("document fits");
+
+        assert_eq!(scan.finish().test_targets, 6);
     }
 
     #[proxima::test]

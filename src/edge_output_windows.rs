@@ -3,7 +3,7 @@ use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 use std::boxed::Box;
-use std::io;
+use std::io::{self, Write};
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::string::String;
 use std::sync::Once;
@@ -20,7 +20,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_TYPE_PIPE, GetFileType, ReOpenFile, WriteFile,
 };
 use windows_sys::Win32::System::Console::{
-    GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, WriteConsoleW,
+    CONSOLE_SCREEN_BUFFER_INFO, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode, WriteConsoleW,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
@@ -289,6 +289,50 @@ fn standard_with(descriptor: i32, announce: bool) -> io::Result<OutputSink> {
     }
     let borrowed = unsafe { BorrowedHandle::borrow_raw(handle) };
     OutputSink::classified(borrowed.try_clone_to_owned()?, announce)
+}
+
+/// Writes `bytes` to standard output (`1`) or standard error (`2`) at once, outside the status queue, for the exit paths that must not wait on it.
+///
+/// # Errors
+/// Returns the OS error of a failed write, or `InvalidInput` for any other descriptor.
+pub fn write(descriptor: i32, bytes: &[u8]) -> io::Result<()> {
+    match descriptor {
+        STANDARD_OUTPUT => io::stdout().lock().write_all(bytes),
+        STANDARD_ERROR => io::stderr().lock().write_all(bytes),
+        _ => Err(io::ErrorKind::InvalidInput.into()),
+    }
+}
+
+/// The console window width in columns from `GetConsoleScreenBufferInfo`, re-read on each tick; `None` off a console.
+#[must_use]
+pub fn columns(descriptor: i32) -> Option<u16> {
+    let handle = console_handle(descriptor)?;
+    let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { core::mem::zeroed() };
+    // safety: the call fills a local struct and the handle came from GetStdHandle.
+    let filled = unsafe { GetConsoleScreenBufferInfo(handle, &raw mut info) } != 0;
+    let width = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
+    filled.then(|| u16::try_from(width).ok()).flatten().filter(|columns| *columns != 0)
+}
+
+/// Turns on virtual-terminal processing so `WriteConsoleW` interprets escape sequences; `false` when the console refuses, and then no sequence may be written.
+#[must_use]
+pub fn enable_virtual_terminal(descriptor: i32) -> bool {
+    let Some(handle) = console_handle(descriptor) else {
+        return false;
+    };
+    let mut mode = 0;
+    // safety: both calls take a console handle from GetStdHandle and a local mode word.
+    unsafe { GetConsoleMode(handle, &raw mut mode) != 0 && SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0 }
+}
+
+fn console_handle(descriptor: i32) -> Option<HANDLE> {
+    let slot = match descriptor {
+        STANDARD_OUTPUT => STD_OUTPUT_HANDLE,
+        STANDARD_ERROR => STD_ERROR_HANDLE,
+        _ => return None,
+    };
+    let handle = unsafe { GetStdHandle(slot) };
+    (!handle.is_null() && handle != INVALID_HANDLE_VALUE && is_console(handle)).then_some(handle)
 }
 
 /// Whether `descriptor` (standard output `1` or standard error `2`) is a console: `GetConsoleMode` fails on a pipe or a file.

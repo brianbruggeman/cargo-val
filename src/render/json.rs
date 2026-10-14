@@ -19,7 +19,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
     pub(super) fn project_json<const FRAME: usize>(&self, event: &Event<'_>, frame: &mut Line<FRAME>) {
         match *event {
             Event::Begin { version, shard, jobs, why: Some(why), .. } => run(frame, version, shard, jobs, why),
-            Event::Listed { binaries, tests } => listed(frame, binaries, tests),
+            Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
             Event::Started { id, at_ms, limit_ms, .. } => started(frame, id, at_ms, limit_ms),
             Event::Settled { id, outcome, solo, .. } => settled(frame, id, outcome, self.settled_ms, solo),
             Event::Captured { id, stdout, stderr, exit } => failure(frame, id, [stdout, stderr], exit),
@@ -32,7 +32,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 self.rerun_record(frame, manifest);
                 exit(frame, code);
             }
-            _ => {}
+            Event::Begin { .. } | Event::Waiting { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Tick { .. } | Event::Warned { .. } | Event::BlockOpened { .. } | Event::BlockClosed => {}
         }
     }
 
