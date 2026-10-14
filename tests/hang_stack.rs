@@ -58,6 +58,7 @@ fn open_held(path: &Path) -> ChildStream {
 }
 
 // the sampled frame must point at the statement that blocks, found in the fixture source so editing the fixture cannot silently stale a hardcoded line
+#[cfg(target_os = "macos")]
 fn blocking_line_of_fixture() -> u32 {
     let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/blocked_test/src/lib.rs")).expect("the fixture source is readable");
     let index = source.lines().position(|line| line.contains("block.read(")).expect("the fixture blocks on a read of the block fifo");
