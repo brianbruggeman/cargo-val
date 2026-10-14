@@ -10,13 +10,16 @@ use crate::driver::{CAPTURE_CAPACITY, NAME_CAPACITY, RunError};
 use crate::edge_output::{self, OutputSink};
 use crate::edge_stream::CAPTURE_BYTES;
 use crate::line::Line;
+use crate::summary::ID_CAPACITY;
 
 const RECORD_BYTES: usize = 512;
 const SLOTS: usize = STATUS_QUEUE_BYTES / RECORD_BYTES;
 // worst case one handled item queues: stdout and stderr captures with their headers and truncation markers.
-const HANDLER_FRAMING_BYTES: usize = 256;
+const HANDLER_FRAMING_BYTES: usize = 256 + 2 * PLAIN_BLOCK_FRAMING_BYTES;
+// plain mode frames each captured stream with delimiter lines that carry the binary id and the test name.
+const PLAIN_BLOCK_FRAMING_BYTES: usize = NAME_CAPACITY + ID_CAPACITY + 128;
 // one gated event: a result line is a name, a label and its header; a failure line travels with its headers.
-const REPORT_FRAMING_BYTES: usize = 64;
+const REPORT_FRAMING_BYTES: usize = 64 + ID_CAPACITY + 16;
 pub(crate) const EVENT_RESERVE: usize = NAME_CAPACITY + REPORT_FRAMING_BYTES;
 const LANE_CHUNK: usize = CAPTURE_BYTES as usize;
 const CAPTURE_PAIR: usize = 2 * CAPTURE_CAPACITY + HANDLER_FRAMING_BYTES;

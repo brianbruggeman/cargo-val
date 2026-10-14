@@ -26,6 +26,8 @@ use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
+use crate::render::{Event, Outcome, State, Stream};
+use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
     CARGO_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
     observe_cargo, observe_doc,
@@ -370,6 +372,7 @@ pub(crate) struct TestWatch {
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
     group_length: usize,
+    started_millis: u64,
 }
 
 impl TestWatch {
@@ -471,6 +474,13 @@ impl ChildOutput {
         self.truncation.stderr |= retained < bytes.len();
     }
 
+    fn captured(&self) -> (Stream<'_>, Stream<'_>) {
+        (
+            (&self.stdout[..self.stdout_length], self.truncation.stdout),
+            (&self.stderr[..self.stderr_length], self.truncation.stderr),
+        )
+    }
+
     fn write_failure(&self) -> Result<(), RunError> {
         if self.stdout_length != 0 {
             write_fd(2, b"stdout:\n")?;
@@ -512,6 +522,7 @@ struct Settings {
     max_fail: Option<usize>,
     no_tests: NoTestsPolicy,
     process: ProcessMode,
+    output: OutputMode,
     color: bool,
 }
 
@@ -520,7 +531,7 @@ fn runtime_settings(
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
-    let mut pairs = [("", ""); 16];
+    let mut pairs = [("", ""); 15];
     let mut count = 0;
     for key in [
         "RUST_TEST_THREADS",
@@ -532,7 +543,6 @@ fn runtime_settings(
         "CARGO_VAL_OUTPUT",
         "CI",
         "TERM",
-        "GITHUB_ACTIONS",
         "CARGO_VAL_COLOR",
         "NO_COLOR",
         "CARGO_VAL_IGNORED",
@@ -614,6 +624,7 @@ fn runtime_settings(
         max_fail,
         no_tests,
         process,
+        output,
         color,
     })
 }
@@ -674,6 +685,7 @@ fn start_session(
         shard,
         group: [0; GROUP_CAPACITY],
         group_length: 0,
+        started_millis: monotonic_millis(),
     });
     Ok(())
 }
@@ -710,7 +722,7 @@ pub(crate) fn session_output(
             watch.output.observe_stderr(piece);
             HostEvent::Stderr { slot, bytes: piece }
         };
-        let step = deliver(ledger, event, run.reporting(), watch.verdict())?;
+        let step = deliver(ledger, event, run.reporting(), watch)?;
         if shard_tripped {
             shard::stop_all(run, ledger, watches);
         }
@@ -772,7 +784,7 @@ pub(crate) fn session_ended(
     } else {
         HostEvent::StderrEof { slot }
     };
-    let step = deliver(ledger, event, run.reporting(), watch.verdict())?;
+    let step = deliver(ledger, event, run.reporting(), watch)?;
     settled(run, ledger, watches, index, step).map(|_| ())
 }
 
@@ -796,7 +808,7 @@ pub(crate) fn session_exited(
         slot: watch.slot,
         status: code,
     };
-    let step = deliver(ledger, event, run.reporting(), watch.verdict())?;
+    let step = deliver(ledger, event, run.reporting(), watch)?;
     settled(run, ledger, watches, index, step).map(|_| ())
 }
 
@@ -828,7 +840,10 @@ fn settled(
             if outcome == TerminalOutcome::Failed
                 && let Some(watch) = watches[index].as_ref()
             {
-                watch.output.write_failure()?;
+                match run.settings.output {
+                    OutputMode::Rich => watch.output.write_failure()?,
+                    OutputMode::Plain => {}
+                }
             }
             watches[index] = None;
             Ok(true)
@@ -869,9 +884,55 @@ fn announce_lock_wait(watch: &mut LockWatch, bytes: &[u8]) -> Result<(), RunErro
     write_fd(2, line.bytes())
 }
 
+pub(crate) type RenderState<'storage> = State<'storage, FAILURES, RERUN_BYTES>;
+
+/// The run's output mode with the one render state and the frame its projection fills; plain output is `emit` into this.
+pub(crate) type Render<'storage> = (OutputMode, RefCell<RenderState<'storage>>, RefCell<Line<FRAME_BYTES>>);
+
+const PROJECTED_LINE: usize = NAME_CAPACITY + 2 * 128 + 64;
+
+const fn rendered(outcome: TerminalOutcome) -> Outcome {
+    match outcome {
+        TerminalOutcome::Passed => Outcome::Passed,
+        TerminalOutcome::Failed => Outcome::Failed,
+        TerminalOutcome::Ignored => Outcome::Ignored,
+    }
+}
+
+// built in its own frame so the frame buffer's temporaries leave the stack before the run starts
+#[inline(never)]
+fn held_render(output: OutputMode, arena: &mut [u8]) -> std::boxed::Box<Render<'_>> {
+    held((output, RefCell::new(RenderState::new(arena)), RefCell::new(Line::new())))
+}
+
+/// Projects one block-edge event without touching the state, for lines a shard child's buffer keeps.
+pub(crate) fn projected(render: &Render<'_>, event: &Event<'_>) -> Line<PROJECTED_LINE> {
+    let mut line = Line::new();
+    _ = render.1.borrow().project(event, &mut line);
+    line
+}
+
+/// Applies `event` to the render state and writes its projection to standard output; a frame that was too small says so on stderr.
+pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
+    let (_, state, frame) = render;
+    let (mut state, mut frame) = (state.borrow_mut(), frame.borrow_mut());
+    state.apply(event);
+    frame.clear();
+    let projected = state.project(event, &mut frame);
+    write_fd(1, frame.bytes())?;
+    let Err(lost) = projected else {
+        return Ok(());
+    };
+    let mut notice = Line::<96>::new();
+    notice.text(b"cargo-val: output frame cut ");
+    notice.number(lost);
+    notice.text(b" bytes\n");
+    write_fd(2, notice.bytes())
+}
+
 /// Where a finished test's counters and color choice live.
 #[derive(Clone, Copy)]
-struct Reporting<'run> {
+struct Reporting<'run, 'storage> {
     color: bool,
     targets: &'run RefCell<TargetTable>,
     ready: &'run Cell<Option<SessionSlotId>>,
@@ -879,9 +940,10 @@ struct Reporting<'run> {
     policy: &'run RefCell<StopPolicy>,
     doc_failures: &'run Cell<usize>,
     jobs: usize,
+    render: &'run Render<'storage>,
 }
 
-impl Reporting<'_> {
+impl Reporting<'_, '_> {
     // a frozen child counts as a live session but not as running, so it starts the moment a job slot frees
     // once the stop policy has tripped it is terminated instead: resuming it would launch a test after the trip
     fn settle_ready(
@@ -936,9 +998,10 @@ fn report_nothing_ran(targets: &RefCell<TargetTable>, target: Option<usize>, nam
 fn deliver<'bytes>(
     ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     event: HostEvent<'bytes>,
-    reporting: Reporting<'_>,
-    verdict: LibtestVerdict,
+    reporting: Reporting<'_, '_>,
+    watch: &TestWatch,
 ) -> Result<OutcomeStep<'bytes>, RunError> {
+    let verdict = watch.verdict();
     let mut report = [0; NAME_CAPACITY + 34];
     let name_length = match event {
         HostEvent::Stdout { .. } | HostEvent::Stderr { .. } => 0,
@@ -977,7 +1040,20 @@ fn deliver<'bytes>(
             report_bytes,
         } => {
             reporting.settle_ready(ledger);
-            write_fd(1, &report[..name_length + report_bytes])?;
+            match reporting.render.0 {
+                OutputMode::Plain => {
+                    let name = &report[..name_length.saturating_sub(1)];
+                    let millis = monotonic_millis().saturating_sub(watch.started_millis);
+                    let targets = reporting.targets.borrow();
+                    let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+                    emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), millis: Some(millis), solo: false })?;
+                    if outcome == TerminalOutcome::Failed {
+                        let (stdout, stderr) = watch.output.captured();
+                        emit(reporting.render, &Event::Captured { id, stdout, stderr })?;
+                    }
+                }
+                OutputMode::Rich => write_fd(1, &report[..name_length + report_bytes])?,
+            }
             if let Some(target) = target {
                 reporting.targets.borrow_mut().tally(
                     target,
@@ -1147,6 +1223,14 @@ fn launch_listed(
     }
     run.targets.borrow_mut().tally(target, Tally::Launched);
     start_session(ledger, watches, scan.lanes, slot, None)?;
+    match run.settings.output {
+        OutputMode::Plain => {
+            let targets = run.targets.borrow();
+            let id = (targets.id(target), intent.test_name().as_bytes());
+            emit(run.render(), &Event::Started { id, solo: false })?;
+        }
+        OutputMode::Rich => {}
+    }
     shard::note_group(run, watches, slot.index(), intent.test_name());
     Ok(())
 }
@@ -1164,7 +1248,7 @@ pub(crate) struct ListingRun<'run> {
     home: Option<&'run str>,
     settings: &'run Settings,
     prepared: Option<&'run Prepared<'run>>,
-    docs: DocObservation,
+    docs: DocObservation<'run>,
     policy: RefCell<StopPolicy>,
     doc: RefCell<Option<Box<DocRun>>>,
     launch_storage: RefCell<HeldLaunchStorage>,
@@ -1177,13 +1261,45 @@ pub(crate) struct ListingRun<'run> {
     stop_sent: Cell<bool>,
 }
 
-#[derive(Default)]
-pub(crate) struct DocObservation {
+pub(crate) struct DocObservation<'run> {
+    render: &'run Render<'run>,
     passed: Cell<usize>,
     failed: Cell<usize>,
     ignored: Cell<usize>,
     blocks: Cell<usize>,
     empty_blocks: Cell<usize>,
+}
+
+impl<'run> DocObservation<'run> {
+    pub(crate) fn new(render: &'run Render<'run>) -> Self {
+        Self {
+            render,
+            passed: Cell::new(0),
+            failed: Cell::new(0),
+            ignored: Cell::new(0),
+            blocks: Cell::new(0),
+            empty_blocks: Cell::new(0),
+        }
+    }
+}
+
+impl<'run> ListingRun<'run> {
+    fn render(&self) -> &'run Render<'run> {
+        self.docs.render
+    }
+
+    fn reporting(&self) -> Reporting<'_, 'run> {
+        Reporting {
+            color: self.settings.color,
+            targets: &self.targets,
+            ready: &self.ready,
+            withdrawn_ready: &self.withdrawn_ready,
+            policy: &self.policy,
+            doc_failures: &self.docs.failed,
+            jobs: self.settings.jobs,
+            render: self.docs.render,
+        }
+    }
 }
 
 impl ListingRun<'_> {
@@ -1208,18 +1324,6 @@ impl ListingRun<'_> {
 
     fn interrupted(&self) -> bool {
         self.signals.received().is_some()
-    }
-
-    fn reporting(&self) -> Reporting<'_> {
-        Reporting {
-            color: self.settings.color,
-            targets: &self.targets,
-            ready: &self.ready,
-            withdrawn_ready: &self.withdrawn_ready,
-            policy: &self.policy,
-            doc_failures: &self.docs.failed,
-            jobs: self.settings.jobs,
-        }
     }
 
     // sessions admitted at once: the jobs that run plus the frozen children this platform creates ahead of a free slot
@@ -1274,7 +1378,7 @@ impl ListingRun<'_> {
 
     pub(crate) fn with_doc(
         &self,
-        act: impl FnOnce(&mut DocRun, bool, &DocObservation) -> Result<(), RunError>,
+        act: impl FnOnce(&mut DocRun, bool, &DocObservation<'_>) -> Result<(), RunError>,
     ) -> Result<(), RunError> {
         match self.doc.borrow_mut().as_mut() {
             Some(doc) => act(doc, self.settings.color, &self.docs),
@@ -1340,7 +1444,14 @@ impl ListingScan<'_, '_> {
                 run.targets.borrow_mut().tally(self.target, Tally::Filtered);
             }
             ListingSourceStep::IgnoredTest(name) => {
-                report_skipped(name, run.settings.color)?;
+                match run.settings.output {
+                    OutputMode::Plain => {
+                        let targets = run.targets.borrow();
+                        let id = (targets.id(self.target), name.as_bytes());
+                        emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, millis: None, solo: false })?;
+                    }
+                    OutputMode::Rich => report_skipped(name, run.settings.color)?,
+                }
                 ledger.record_ignored().map_err(|_| RunError::Outcome)?;
                 run.targets.borrow_mut().tally(self.target, Tally::Ignored);
             }
@@ -1419,6 +1530,10 @@ fn validated_harness<'argument>(
     Ok(request)
 }
 
+const fn cargo_term_color(color: bool) -> &'static [u8] {
+    if color { b"CARGO_TERM_COLOR=always" } else { b"CARGO_TERM_COLOR=never" }
+}
+
 fn spawn_cargo(
     parser: &CliParser<'_>,
     color: bool,
@@ -1443,7 +1558,7 @@ fn spawn_cargo(
     }
     arguments.extend_from_slice(forwarded);
     // cargo's stderr is a pipe, so its own colour choice follows CARGO_TERM_COLOR from the caller's environment, not ours
-    let term_color: &[u8] = if color { b"CARGO_TERM_COLOR=always" } else { b"CARGO_TERM_COLOR=never" };
+    let term_color = cargo_term_color(color);
     spawn(b"cargo", &arguments, environment, &[term_color], None).map_err(|_| RunError::Spawn)
 }
 
@@ -2232,6 +2347,20 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
+    let mut name_arena = zeroed(crate::view_defaults::NAME_BYTES);
+    let render = held_render(settings.output, &mut name_arena);
+    match settings.output {
+        OutputMode::Plain => emit(
+            &render,
+            &Event::Begin {
+                version: env!("CARGO_PKG_VERSION").as_bytes(),
+                shard: settings.process == ProcessMode::Shard,
+                jobs: settings.jobs,
+                github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
+            },
+        )?,
+        OutputMode::Rich => {}
+    }
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked)) = storage;
@@ -2244,7 +2373,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let target_source = BorrowedSettings::new(&target_pairs[..usize::from(configured_target.is_some())]);
     let target_mode = resolve_target_dir(&target_source, parser)?;
     if parser.doc_selection() == DocSelection::Only {
-        return run_doc_only(parser, &settings, target_mode, started_millis, inherited).await;
+        return run_doc_only(parser, &settings, &render, target_mode, started_millis, inherited).await;
     }
     let queries = start_libdir_queries(&environment, parser, inherited)?;
     let inherited_dylib_path = utf8_variable(&environment, DYLIB_PATH_KEY.as_bytes())?;
@@ -2281,7 +2410,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         home,
         settings: &settings,
         prepared: (*prepared).as_ref(),
-        docs: DocObservation::default(),
+        docs: DocObservation::new(&render),
         policy: RefCell::new(StopPolicy::new(settings.max_fail)),
         doc: RefCell::new(doc_tests),
         launch_storage: RefCell::new(held_launch_storage()),
@@ -2451,7 +2580,7 @@ async fn start_children(
         DocSelection::Excluded | DocSelection::Only => None,
         DocSelection::Included => Some(spawn_doc_tests(
             parser,
-            settings.ignore,
+            (settings.ignore, settings.output),
             environment,
             directories.as_ref().map(|chosen| &chosen.doc),
         )?),
@@ -2609,7 +2738,7 @@ fn finish_run(
     conclude(
         parser,
         run.settings,
-        &run.targets.borrow(),
+        (&run.targets.borrow(), run.render()),
         run.started_millis,
         stop,
         doc_tests,
@@ -2727,7 +2856,7 @@ pub(crate) struct DocRun {
 
 fn spawn_doc_tests(
     parser: &CliParser<'_>,
-    ignore: IgnoreMode,
+    (ignore, output): (IgnoreMode, OutputMode),
     environment: &[&[u8]],
     directory: Option<&ChildDirectory>,
 ) -> Result<Box<DocRun>, RunError> {
@@ -2757,8 +2886,13 @@ fn spawn_doc_tests(
         IgnoreMode::Only => arguments.push(b"--ignored"),
         IgnoreMode::Include => arguments.push(b"--include-ignored"),
     }
+    let plain_color = [cargo_term_color(false)];
+    let doc_term_color: &[&[u8]] = match output {
+        OutputMode::Plain => &plain_color,
+        OutputMode::Rich => &[],
+    };
     let child = spawn_reserved(|| {
-        spawn_in_group(b"cargo", &arguments, environment, &[], None).map_err(|error| {
+        spawn_in_group(b"cargo", &arguments, environment, doc_term_color, None).map_err(|error| {
             if error.os_code == TABLE_FULL { RunError::SignalSlots } else { RunError::Spawn }
         })
     })?;
@@ -2801,7 +2935,7 @@ impl DocRun {
         bytes: &[u8],
         mut offset: usize,
         color: bool,
-        observation: &DocObservation,
+        observation: &DocObservation<'_>,
     ) -> Result<usize, RunError> {
         while offset < bytes.len() {
             if !status_queue::has_room() {
@@ -2888,7 +3022,7 @@ fn record_doc_event(
     event: DocEvent<'_>,
     phase: &mut DocPhase,
     color: bool,
-    observation: &DocObservation,
+    observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     match event {
         DocEvent::Running { count } => {
@@ -2916,7 +3050,7 @@ fn report_doc_result(
     name: &[u8],
     outcome: DocOutcome,
     color: bool,
-    observation: &DocObservation,
+    observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     let (terminal, counter) = match outcome {
         DocOutcome::Passed => (TerminalOutcome::Passed, &observation.passed),
@@ -2924,6 +3058,10 @@ fn report_doc_result(
         DocOutcome::Ignored => (TerminalOutcome::Ignored, &observation.ignored),
     };
     counter.set(counter.get() + 1);
+    if observation.render.0 == OutputMode::Plain {
+        let id = (&b"doc-tests"[..], name);
+        return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), millis: None, solo: false });
+    }
     let mut report = [0; NAME_CAPACITY + 34];
     let name_length = name.len().min(NAME_CAPACITY);
     report[..name_length].copy_from_slice(&name[..name_length]);
@@ -2964,7 +3102,7 @@ impl ListingRun<'_> {
 fn close_doc_tests(
     doc: &DocRun,
     implicit: bool,
-    observation: &DocObservation,
+    observation: &DocObservation<'_>,
 ) -> Result<DocTotals, RunError> {
     let finish = doc.conclude(implicit)?;
     let failed = observation.failed.get();
@@ -3023,7 +3161,7 @@ fn write_summary(
 fn conclude(
     parser: &CliParser<'_>,
     settings: &Settings,
-    targets: &TargetTable,
+    (targets, render): (&TargetTable, &Render<'_>),
     started_millis: u64,
     stop: Option<StopReport>,
     doc_tests: Option<DocTotals>,
@@ -3035,6 +3173,10 @@ fn conclude(
         write_doc_notice(doc)?;
     }
     let total = write_summary(targets, doc_tests.as_ref(), started_millis)?;
+    match settings.output {
+        OutputMode::Plain => close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path()))?,
+        OutputMode::Rich => {}
+    }
     let empty = total.passed + total.failed == 0;
     if empty && settings.no_tests != NoTestsPolicy::Pass {
         write_no_tests(parser, settings.ignore)?;
@@ -3048,9 +3190,30 @@ fn conclude(
     })
 }
 
-async fn run_doc_only(
+fn close_plain(
+    render: &Render<'_>,
+    (binaries, total): (usize, &Counts),
+    stop: Option<StopReport>,
+    (started_millis, manifest): (u64, Option<&[u8]>),
+) -> Result<(), RunError> {
+    emit(render, &Event::Listed { binaries, tests: total.discovered })?;
+    emit(
+        render,
+        &Event::Finished {
+            passed: total.passed,
+            failed: total.failed,
+            ignored: total.ignored,
+            not_run: stop.map_or(0, |report| report.listed_not_run),
+            wall_ms: monotonic_millis().saturating_sub(started_millis),
+            manifest,
+        },
+    )
+}
+
+async fn run_doc_only<'run>(
     parser: &CliParser<'_>,
     settings: &Settings,
+    render: &'run Render<'run>,
     target_mode: TargetDirMode<'_>,
     started_millis: u64,
     environment: &[&[u8]],
@@ -3066,7 +3229,7 @@ async fn run_doc_only(
     let directories = build_directories(target_mode, facts.as_deref())?;
     let mut doc = spawn_doc_tests(
         parser,
-        settings.ignore,
+        (settings.ignore, settings.output),
         environment,
         directories.as_ref().map(|chosen| &chosen.doc),
     )?;
@@ -3075,14 +3238,14 @@ async fn run_doc_only(
     {
         doc.lock_watch.set_directory(shared);
     }
-    let observation = DocObservation::default();
+    let observation = DocObservation::new(render);
     observe_doc(&mut doc, &signals, settings.color, &observation).await?;
     interrupted(&signals)?;
     let totals = close_doc_tests(&doc, false, &observation)?;
     conclude(
         parser,
         settings,
-        &TargetTable::new(),
+        (&TargetTable::new(), render),
         started_millis,
         None,
         Some(totals),
@@ -3274,9 +3437,12 @@ mod listing_allocation_tests {
             max_fail: None,
             no_tests: NoTestsPolicy::Pass,
             process: crate::config::ProcessMode::Test,
+            output: crate::config::OutputMode::Rich,
             color: false,
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
+        let mut arena = [0_u8; 64];
+        let render = (crate::config::OutputMode::Rich, RefCell::new(super::RenderState::new(&mut arena)), RefCell::new(crate::line::Line::new()));
         let run = ListingRun {
             signals: &signals,
             filter: "",
@@ -3290,7 +3456,7 @@ mod listing_allocation_tests {
             home: None,
             settings: &settings,
             prepared: None,
-            docs: DocObservation::default(),
+            docs: DocObservation::new(&render),
             policy: RefCell::new(StopPolicy::new(None)),
             doc: RefCell::new(None),
             launch_storage: RefCell::new(held_launch_storage()),

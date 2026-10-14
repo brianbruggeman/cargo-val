@@ -52,6 +52,12 @@ impl<const CAPACITY: usize> Line<CAPACITY> {
         self.lost
     }
 
+    /// Bytes still free before text is cut.
+    #[must_use]
+    pub const fn room(&self) -> usize {
+        CAPACITY - self.length
+    }
+
     /// The assembled bytes.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {

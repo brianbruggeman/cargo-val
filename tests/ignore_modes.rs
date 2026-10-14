@@ -46,6 +46,7 @@ fn manifest(fixture: &str) -> PathBuf {
 fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
     let mut command = Command::new(CARGO_VAL);
     command
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest_path)
         .args(arguments)
@@ -357,6 +358,7 @@ mod bin_gate_hold {
         let (stderr_path, stderr_file) = output_file(&outputs, "stderr");
         let mut command = Command::new(CARGO_VAL);
         command
+            .env("CARGO_VAL_OUTPUT", "rich")
             .arg("--manifest-path")
             .arg(manifest("bin_gate"))
             .env_remove("CARGO_VAL_BIN_GATE")

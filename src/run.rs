@@ -390,7 +390,7 @@ fn feed_doc(
     bytes: &[u8],
     (range, offset): (Range<u32>, usize),
     color: bool,
-    observation: &DocObservation,
+    observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     let consumed = doc.stdout_lines(bytes, offset, color, observation)?;
     let stalled = consumed < bytes.len();
@@ -399,7 +399,7 @@ fn feed_doc(
     Ok(())
 }
 
-fn resume_doc(lanes: &Lanes, doc: &mut DocRun, color: bool, observation: &DocObservation) -> Result<(), RunError> {
+fn resume_doc(lanes: &Lanes, doc: &mut DocRun, color: bool, observation: &DocObservation<'_>) -> Result<(), RunError> {
     let Some((range, offset)) = doc.backlog() else {
         return Ok(());
     };
@@ -414,7 +414,7 @@ fn handle_doc(
     lanes: &Lanes,
     doc: &mut DocRun,
     color: bool,
-    observation: &DocObservation,
+    observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     match item {
         Item::Out(_, range) => {
@@ -456,7 +456,7 @@ pub(crate) async fn observe_doc(
     doc: &mut DocRun,
     signals: &SignalPipe,
     color: bool,
-    observation: &DocObservation,
+    observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     let lanes = Box::new(empty_lanes());
     if let Some(child) = doc.take_child() {
