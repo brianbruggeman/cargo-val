@@ -1250,14 +1250,14 @@ async fn open_detached_editor(master: &ChildStream, mut keys: File, (log, count,
 
 async fn detached_edit(editor: &Path, extra: &[(&str, &str)], count: usize, hold: bool) -> (String, ExitStatus, Vec<String>) {
     let log = editor_log();
-    let held = log.with_extension("hold");
+    let release = log.with_extension("hold");
     let visual = editor.display().to_string();
     let mut environment = vec![("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8"))];
     environment.extend_from_slice(extra);
     if hold {
-        environment.push(("FAKE_EDITOR_HOLD_FILE", held.to_str().expect("the hold path is UTF-8")));
+        environment.push(("FAKE_EDITOR_HOLD_FILE", release.to_str().expect("the hold path is UTF-8")));
     }
-    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| open_detached_editor(master, keys, (&log, count, hold.then_some(held.clone()))).await).await;
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| open_detached_editor(master, keys, (&log, count, hold.then_some(release.clone()))).await).await;
     let lines = wait_for_invocations(&log, count);
     (output, status, lines)
 }
