@@ -3,8 +3,8 @@
  2 failed  381 passed  0 skipped
  0 warnings
 
-›RERUN        1.2s ▒░░░░░ sched_…_group
- PANIC     120.03s   shard_pro…promptly
+›RERUN        1.2s ▒░░░░░ NO-RETRY sc…p
+ PANIC     120.03s   NO-RETRY shar…ptly
  ──────────────────────────────────────
  sched_records::the_host_binary_format_
  yields_every_declared_record_with_flag

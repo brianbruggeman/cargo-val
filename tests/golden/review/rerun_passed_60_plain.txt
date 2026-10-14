@@ -2,8 +2,8 @@
 
  1 failed  382 passed  0 skipped  0 warnings
 
-›PASS        8.40s   sched_records::the_…th_flags_and_group
- PANIC     120.03s   shard_process::a_pe…val_exits_promptly
+›PASS        8.40s   NO-RETRY sched_records:…lags_and_group
+ PANIC     120.03s   NO-RETRY shard_process:…exits_promptly
  ──────────────────────────────────────────────────────────
  sched_records::the_host_binary_format_yields_every_declare
  d_record_with_flags_and_group

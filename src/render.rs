@@ -11,9 +11,10 @@
 
 use crate::line::Line;
 
+mod entry;
 pub mod review;
 
-use review::{Back, Key};
+use review::{Back, Key, Rerun, Verdict};
 
 /// A test id as two borrowed fields: the binary, then the test name.
 pub type Identity<'a> = (&'a [u8], &'a [u8]);
@@ -26,6 +27,8 @@ const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
 const STDERR_STREAM: &[u8] = b"stderr";
+const QUIT_WINDOW_MS: u64 = 2_000;
+const PASS_SHOWN_MS: u64 = 1_500;
 
 /// How one test ended, as the settle event reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +43,8 @@ pub enum Outcome {
 pub enum Mode {
     Running,
     QuitArmed,
-    Review { selected: u16, armed: bool },
+    /// `top` is `None` while the list has focus and the first visible output line while the detail is being scrolled.
+    Review { selected: u16, armed: bool, top: Option<u16> },
     Timeline { back: Back },
     Find { back: Back },
     Skipped { back: Back },
@@ -65,16 +69,23 @@ pub enum Event<'a> {
     BuildFailed { diagnostic: &'a [u8] },
     Interrupted { signal: u8 },
     Key(Key),
+    /// The clock, read at the edge and passed as data; the quit window and the PASS row's lifetime run on it.
+    Tick { now_ms: u64 },
+    /// What retrying a failure alone concluded, or why it was not tried.
+    Retried { id: Identity<'a>, verdict: Verdict },
+    /// How a failure's rerun stands: running, passed, or idle again after it failed.
+    Reran { id: Identity<'a>, rerun: Rerun },
     Finished { passed: usize, failed: usize, ignored: usize, not_run: usize, wall_ms: u64, manifest: Option<&'a [u8]> },
 }
 
 impl Mode {
     /// The transition table: every (mode, event) pair is named, so a new mode or event is a compile error here.
-    /// `open` is the number of failures the review list holds; keys read it for `f` and for clamping the selection.
+    /// `open` is the number of failures the review list holds and `lines` the output lines of the selected one; keys read
+    /// them for `f`, for clamping the selection and for bounding the detail scroll.
     #[must_use]
-    pub fn next(self, event: &Event<'_>, open: usize) -> Self {
+    pub fn next(self, event: &Event<'_>, open: usize, lines: usize) -> Self {
         match *event {
-            Event::Key(key) => self.keyed(key, open),
+            Event::Key(key) => self.keyed(key, open, lines),
             Event::Interrupted { signal } if self.is_live() => Self::Interrupted { signal },
             Event::BuildFailed { .. } if self == Self::Running => Self::BuildError,
             Event::Finished { failed: 0, wall_ms, .. } if self == Self::Running => Self::Done { wall_ms },
@@ -88,7 +99,32 @@ impl Mode {
             | Event::BlockClosed
             | Event::BuildFailed { .. }
             | Event::Interrupted { .. }
-            | Event::Finished { .. } => self.clamped(open),
+            | Event::Tick { .. }
+            | Event::Retried { .. }
+            | Event::Reran { .. }
+            | Event::Finished { .. } => self.clamped(open, lines),
+        }
+    }
+
+    /// A `q` is waiting for its second press.
+    #[must_use]
+    pub const fn is_armed(self) -> bool {
+        matches!(self, Self::QuitArmed | Self::Review { armed: true, .. })
+    }
+
+    const fn disarmed(self) -> Self {
+        match self {
+            Self::QuitArmed => Self::Running,
+            Self::Review { selected, top, .. } => Self::Review { selected, armed: false, top },
+            Self::Running
+            | Self::Timeline { .. }
+            | Self::Find { .. }
+            | Self::Skipped { .. }
+            | Self::Warnings { .. }
+            | Self::Receipt
+            | Self::BuildError
+            | Self::Interrupted { .. }
+            | Self::Done { .. } => self,
         }
     }
 
@@ -107,9 +143,13 @@ impl Mode {
         }
     }
 
-    fn clamped(self, open: usize) -> Self {
+    fn clamped(self, open: usize, lines: usize) -> Self {
         match self {
-            Self::Review { selected, armed } => Self::Review { selected: review::clamp(selected, open), armed },
+            Self::Review { selected, armed, top } => Self::Review {
+                selected: review::clamp(selected, open),
+                armed,
+                top: top.filter(|_| open != 0).map(|line| review::clamp(line, lines)),
+            },
             Self::Running
             | Self::QuitArmed
             | Self::Timeline { .. }
@@ -128,7 +168,9 @@ impl Mode {
 ///
 /// A failure's binary and name are copied once, on its settle event, into `arena` as `binary NUL name NUL`; the ledger
 /// (a caller-owned `[u32]`, its length the capacity) holds the record's start offset. The arena is the caller's storage for the whole run, so nothing in the state borrows
-/// from an event, and a full arena counts the failure instead of storing it.
+/// from an event, and a full arena counts the failure instead of storing it. After the names each record carries the fixed
+/// tail of `entry`: the failure's seconds, its verdict, its rerun and its output line count. The review list, its length
+/// and the cursor bounds are projections of this ledger and of the clock the `Tick` events set; nothing else holds a row.
 #[derive(Debug)]
 pub struct State<'storage, const RERUN: usize> {
     mode: Mode,
@@ -138,12 +180,30 @@ pub struct State<'storage, const RERUN: usize> {
     failures: &'storage mut [u32],
     stored: usize,
     unstored: usize,
+    now_ms: u64,
+    armed_until_ms: u64,
+    passed: usize,
+    skipped: usize,
+    warnings: usize,
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
     pub const fn new(arena: &'storage mut [u8], failures: &'storage mut [u32]) -> Self {
-        Self { mode: Mode::Running, github: false, arena, used: 0, failures, stored: 0, unstored: 0 }
+        Self {
+            mode: Mode::Running,
+            github: false,
+            arena,
+            used: 0,
+            failures,
+            stored: 0,
+            unstored: 0,
+            now_ms: 0,
+            armed_until_ms: 0,
+            passed: 0,
+            skipped: 0,
+            warnings: 0,
+        }
     }
 
     #[must_use]
@@ -163,10 +223,34 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     }
 
     pub fn apply(&mut self, event: &Event<'_>) {
-        self.mode = self.mode.next(event, self.stored);
+        let armed_before = self.mode.is_armed();
+        self.update(event);
+        let (open, lines) = self.extent();
+        self.mode = self.mode.next(event, open, lines);
+        if self.mode.is_armed() && !armed_before {
+            self.armed_until_ms = self.now_ms.saturating_add(QUIT_WINDOW_MS);
+        }
+        if matches!(event, Event::Tick { .. }) && self.mode.is_armed() && self.now_ms >= self.armed_until_ms {
+            self.mode = self.mode.disarmed();
+        }
+    }
+
+    fn update(&mut self, event: &Event<'_>) {
         match *event {
             Event::Begin { github, .. } => self.begin(github),
-            Event::Settled { id, outcome: Outcome::Failed, .. } => self.record(id),
+            Event::Settled { id, outcome: Outcome::Failed, millis, .. } => self.record(id, millis.unwrap_or(0)),
+            Event::Settled { outcome: Outcome::Passed, .. } => self.passed += 1,
+            Event::Settled { outcome: Outcome::Ignored, .. } => self.skipped += 1,
+            Event::Warned { .. } => self.warnings += 1,
+            Event::Tick { now_ms } => self.now_ms = now_ms,
+            Event::Captured { id, stdout, stderr } => {
+                _ = self.edit(id, |tail| entry::set_lines(tail, review::output_lines(stdout.0) + review::output_lines(stderr.0)));
+            }
+            Event::Retried { id, verdict } => _ = self.edit(id, |tail| entry::set_verdict(tail, verdict)),
+            Event::Reran { id, rerun } => {
+                let now_ms = self.now_ms;
+                _ = self.edit(id, |tail| entry::set_rerun(tail, rerun, now_ms));
+            }
             _ => {}
         }
     }
@@ -177,24 +261,84 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.used = 0;
         self.stored = 0;
         self.unstored = 0;
+        (self.passed, self.skipped, self.warnings) = (0, 0, 0);
     }
 
-    fn record(&mut self, (binary, name): Identity<'_>) {
-        let end = self.used + binary.len() + name.len() + 2;
+    fn record(&mut self, id: Identity<'_>, millis: u64) {
+        if self.edit(id, |tail| entry::set_millis(tail, millis)) {
+            return;
+        }
+        let (binary, name) = id;
+        let end = self.used + binary.len() + name.len() + 2 + entry::TAIL;
         let offset = u32::try_from(self.used);
         match offset {
             Ok(offset) if self.stored < self.failures.len() && end <= self.arena.len() => {
-                let (binary_end, name_end) = (self.used + binary.len(), end - 1);
+                let (binary_end, name_end) = (self.used + binary.len(), self.used + binary.len() + name.len() + 1);
                 self.arena[self.used..binary_end].copy_from_slice(binary);
                 self.arena[binary_end] = 0;
                 self.arena[binary_end + 1..name_end].copy_from_slice(name);
                 self.arena[name_end] = 0;
+                self.arena[name_end + 1..end].fill(0);
                 self.used = end;
                 self.failures[self.stored] = offset;
                 self.stored += 1;
+                _ = self.edit(id, |tail| entry::set_millis(tail, millis));
             }
             _ => self.unstored += 1,
         }
+    }
+
+    fn find(&self, id: Identity<'_>) -> Option<usize> {
+        self.failures().position(|stored| stored == id)
+    }
+
+    fn edit(&mut self, id: Identity<'_>, change: impl FnOnce(&mut [u8])) -> bool {
+        let Some(index) = self.find(id) else {
+            return false;
+        };
+        let start = self.tail_start(index);
+        change(&mut self.arena[start..start + entry::TAIL]);
+        true
+    }
+
+    fn tail_start(&self, index: usize) -> usize {
+        let (binary, name) = self.resolve(self.failures[index]);
+        self.failures[index] as usize + binary.len() + name.len() + 2
+    }
+
+    fn tail(&self, index: usize) -> &[u8] {
+        let start = self.tail_start(index);
+        &self.arena[start..start + entry::TAIL]
+    }
+
+    fn extent(&self) -> (usize, usize) {
+        let open = self.open();
+        let lines = match self.mode {
+            Mode::Review { selected, .. } => self.listed(selected).map_or(0, |index| entry::lines(self.tail(index))),
+            _ => 0,
+        };
+        (open, lines)
+    }
+
+    pub(super) fn is_listed(&self, index: usize) -> bool {
+        match entry::rerun(self.tail(index)) {
+            Rerun::Passed { .. } => self.now_ms < entry::cleared_at(self.tail(index)).saturating_add(PASS_SHOWN_MS),
+            Rerun::Idle | Rerun::Running { .. } => true,
+        }
+    }
+
+    pub(super) fn open(&self) -> usize {
+        (0..self.stored).filter(|index| self.is_listed(*index)).count()
+    }
+
+    pub(super) fn listed(&self, position: u16) -> Option<usize> {
+        let last = self.open().checked_sub(1)?;
+        (0..self.stored).filter(|index| self.is_listed(*index)).nth(usize::from(position).min(last))
+    }
+
+    pub(super) fn ledger_entry(&self, index: usize) -> (Identity<'_>, u64, Option<Verdict>, Rerun) {
+        let tail = self.tail(index);
+        (self.resolve(self.failures[index]), entry::millis(tail), entry::verdict(tail), entry::rerun(tail))
     }
 
     fn resolve(&self, offset: u32) -> Identity<'_> {
@@ -220,7 +364,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
             Event::BuildFailed { diagnostic } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
             Event::Interrupted { signal } => interrupted(frame, signal),
-            Event::Key(_) => {}
+            Event::Key(_) | Event::Tick { .. } | Event::Retried { .. } | Event::Reran { .. } => {}
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest } => {
                 self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest);
             }
@@ -565,7 +709,7 @@ mod tests {
 
     #[test]
     fn a_failure_whose_names_do_not_fit_the_arena_is_counted_not_stored() {
-        let mut arena = [0_u8; 40];
+        let mut arena = [0_u8; 96];
         let mut ledger = [0_u32; 8];
         let mut state = State::<200>::new(&mut arena, &mut ledger);
         let long: Identity<'static> = (b"cli_run", b"fixture::a_test_name_longer_than_the_arena_has_room_for");
@@ -624,7 +768,7 @@ mod tests {
         ];
 
         for (from, event, to) in rows {
-            assert_eq!(from.next(&event, 0), to, "{from:?} on {event:?}");
+            assert_eq!(from.next(&event, 0, 0), to, "{from:?} on {event:?}");
         }
     }
 
@@ -652,7 +796,7 @@ mod tests {
     #[test]
     fn a_hundred_thousand_events_update_and_project_with_zero_allocations() {
         let mut arena = [0_u8; 4096];
-        let mut ledger = [0_u32; 64];
+        let mut ledger = [0_u32; 1];
         let mut state = State::<8192>::new(&mut arena, &mut ledger);
         let mut frame = Line::<32_768>::new();
         let mut events_applied = 0_usize;
@@ -661,7 +805,7 @@ mod tests {
             for round in 0..25_000_u64 {
                 let outcome = if round % 7 == 0 { Outcome::Failed } else { Outcome::Passed };
                 for event in [
-                    Event::Started { id: PASSING, solo: false },
+                    Event::Settled { id: PASSING, outcome: Outcome::Failed, millis: Some(round), solo: false },
                     Event::Settled { id: FAILING, outcome, millis: Some(round), solo: false },
                     Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", false), stderr: (b"", false) },
                     Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml") },

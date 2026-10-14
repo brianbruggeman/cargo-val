@@ -2,8 +2,8 @@
 
  [1;31m2 failed[0m  [32m381 passed[0m  [2m0 skipped[0m  [2m0 warnings[0m
 
- [1;31mTIMEOUT[0m    [2m71.66s[0m   sched_records::the_…th_flags_and_group
-[1;36m›[0m[1;31mPANIC[0m     [2m120.03s[0m   shard_process::a_pe…val_exits_promptly
+ [1;31mTIMEOUT[0m    [2m71.66s[0m   [1;33mNO-RETRY[0m sched_records:…lags_and_group
+[1;36m›[0m[1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shard_process:…exits_promptly
  ──────────────────────────────────────────────────────────
  [1mshard_process::a_per_test_interrupt_ends_a_blocked_child_a[0m
  [1mnd_cargo_val_exits_promptly[0m

@@ -1,15 +1,17 @@
-//! The review screen: decoded keys in, a mode and an action out; failure rows in, a frame out.
+//! The review screen: decoded keys in, a mode and an action out; the state's failure ledger in, a frame out.
 //!
 //! Sans-IO, like [`crate::render`]: no terminal, no clock, no allocation. Keys are data ([`Key`]); each is a transition of
 //! [`Mode`] (`impl Mode` below, one exhaustive match per mode) and, separately, an [`Action`] the driver executes later
-//! (rerun these, open the editor, write the receipt, interrupt). The frame is `(rows, mode, width, colour) -> bytes in a
-//! caller-provided [`Line`]`. Rows are caller-owned records that borrow the driver's capture buffers; nothing here copies
-//! a name or an output byte except into the frame.
+//! (rerun these, open the editor, write the receipt, interrupt). The list is not a second copy of what failed: it is the
+//! [`State`] ledger filtered to the rows still listed, so a rerun that passed is an `Event::Reran` and the list, its length
+//! and the cursor bounds follow from the ledger. The class, location and output of a failure stay in the driver's capture
+//! buffers; [`State::screen`] and [`State::action`] take a lookup from an id to them, so nothing here copies an output byte
+//! except into the frame.
 //!
 //! The quit receipt is not drawn here: after `q q` the mode is [`Mode::Receipt`] and the driver projects
 //! `Event::Finished` through `State::project`, so the bytes are the plain closing block by construction.
 
-use super::{Identity, Mode, seconds};
+use super::{Identity, Mode, State, seconds};
 use crate::failure_class::{Class, Enforcer, Location};
 use crate::line::Line;
 
@@ -42,6 +44,7 @@ const KEYS: [(&[u8], &[u8]); 9] = [
     (b"q", b"quit"),
 ];
 const EMPTY_KEYS: [(&[u8], &[u8]); 5] = [(b"/", b"find"), (b"s", b"timeline"), (b"i", b"skip"), (b"w", b"warn"), (b"q", b"quit")];
+const SCROLL_KEYS: [(&[u8], &[u8]); 5] = [(b"j/k", b"scroll"), (b"enter", b"list"), (b"r", b"rerun"), (b"e", b"edit"), (b"q", b"quit")];
 const STUB_KEYS: [(&[u8], &[u8]); 2] = [(b"esc", b"back"), (b"q", b"quit")];
 
 /// Width in columns, and whether the frame may carry colour.
@@ -94,32 +97,22 @@ pub enum Rerun {
     Passed { millis: u64 },
 }
 
-/// One failure as the review list shows it. A row whose rerun passed is dropped by the caller after its PASS frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Row<'a> {
-    pub id: Identity<'a>,
-    pub class: Class,
-    pub millis: u64,
-    pub location: Option<Location<'a>>,
-    /// The child's captured bytes, shown verbatim.
-    pub output: &'a [u8],
-    pub verdict: Option<Verdict>,
-    pub rerun: Rerun,
-}
+/// What the driver's capture buffers hold for one failure: its class, its source location and the child's bytes, shown
+/// verbatim.
+pub type Detail<'a> = (Class, Option<Location<'a>>, &'a [u8]);
 
-/// The review screen's data: the failure rows and the other header counts.
-#[derive(Clone, Copy, Debug)]
-pub struct Review<'a> {
-    pub rows: &'a [Row<'a>],
-    pub passed: usize,
-    pub skipped: usize,
-    pub warnings: usize,
-    pub clock_ms: u64,
-}
+type Shown<'a> = (Identity<'a>, u64, Option<Verdict>, Rerun, Detail<'a>);
 
 pub(super) fn clamp(selected: u16, open: usize) -> u16 {
     let last = u16::try_from(open.saturating_sub(1)).unwrap_or(u16::MAX);
     selected.min(last)
+}
+
+/// The lines of one captured stream as the review detail counts them: none for an empty stream.
+#[must_use]
+pub fn output_lines(bytes: &[u8]) -> usize {
+    let body = bytes.trim_ascii_end();
+    if body.is_empty() { 0 } else { memchr::memchr_iter(b'\n', body).count() + 1 }
 }
 
 const fn interrupted() -> Mode {
@@ -140,18 +133,18 @@ impl Back {
     const fn restore(self) -> Mode {
         match self {
             Self::Running => Mode::Running,
-            Self::Review { selected } => Mode::Review { selected, armed: false },
+            Self::Review { selected } => Mode::Review { selected, armed: false, top: None },
         }
     }
 }
 
 impl Mode {
-    /// The key rows of the transition table; `open` is the review list length.
-    pub(super) fn keyed(self, key: Key, open: usize) -> Self {
+    /// The key rows of the transition table; `open` is the review list length, `lines` the selected row's output lines.
+    pub(super) fn keyed(self, key: Key, open: usize, lines: usize) -> Self {
         match self {
             Self::Running => running_key(key, open),
             Self::QuitArmed => armed_key(key),
-            Self::Review { selected, armed } => review_key(selected, armed, key, open),
+            Self::Review { selected, armed, top } => review_key(selected, armed, top, key, (open, lines)),
             Self::Timeline { back } | Self::Find { back } | Self::Skipped { back } | Self::Warnings { back } => {
                 screen_key(self, back, key)
             }
@@ -178,7 +171,7 @@ impl Mode {
 
 fn running_key(key: Key, open: usize) -> Mode {
     match key {
-        Key::Char(b'f') if open > 0 => Mode::Review { selected: 0, armed: false },
+        Key::Char(b'f') if open > 0 => Mode::Review { selected: 0, armed: false, top: None },
         Key::Char(b'q') => Mode::QuitArmed,
         Key::Char(b'c') | Key::CtrlC => interrupted(),
         Key::Char(byte) => opening(byte, Back::Running).unwrap_or(Mode::Running),
@@ -194,16 +187,20 @@ const fn armed_key(key: Key) -> Mode {
     }
 }
 
-fn review_key(selected: u16, armed: bool, key: Key, open: usize) -> Mode {
-    let stay = Mode::Review { selected, armed: false };
-    match key {
-        Key::Char(b'j') | Key::Down => Mode::Review { selected: clamp(selected.saturating_add(1), open), armed: false },
-        Key::Char(b'k') | Key::Up => Mode::Review { selected: selected.saturating_sub(1), armed: false },
-        Key::Char(b'q') if armed => Mode::Receipt,
-        Key::Char(b'q') => Mode::Review { selected, armed: true },
-        Key::Char(b'c') | Key::CtrlC => interrupted(),
-        Key::Char(byte) => opening(byte, Back::Review { selected }).unwrap_or(stay),
-        Key::Enter | Key::Esc => stay,
+fn review_key(selected: u16, armed: bool, top: Option<u16>, key: Key, (open, lines): (usize, usize)) -> Mode {
+    let stay = Mode::Review { selected, armed: false, top };
+    match (key, top) {
+        (Key::Enter, None) if open > 0 => Mode::Review { selected, armed: false, top: Some(0) },
+        (Key::Enter, Some(_)) => Mode::Review { selected, armed: false, top: None },
+        (Key::Char(b'j') | Key::Down, Some(line)) => Mode::Review { selected, armed: false, top: Some(clamp(line.saturating_add(1), lines)) },
+        (Key::Char(b'k') | Key::Up, Some(line)) => Mode::Review { selected, armed: false, top: Some(line.saturating_sub(1)) },
+        (Key::Char(b'j') | Key::Down, None) => Mode::Review { selected: clamp(selected.saturating_add(1), open), armed: false, top },
+        (Key::Char(b'k') | Key::Up, None) => Mode::Review { selected: selected.saturating_sub(1), armed: false, top },
+        (Key::Char(b'q'), _) if armed => Mode::Receipt,
+        (Key::Char(b'q'), _) => Mode::Review { selected, armed: true, top },
+        (Key::Char(b'c') | Key::CtrlC, _) => interrupted(),
+        (Key::Char(byte), _) => opening(byte, Back::Review { selected }).unwrap_or(stay),
+        (Key::Enter | Key::Esc, _) => stay,
     }
 }
 
@@ -217,54 +214,56 @@ fn screen_key(own: Mode, back: Back, key: Key) -> Mode {
     }
 }
 
-/// What `key` asks the driver to do, given the mode it arrives in. Call it with the mode before `apply`.
-#[must_use]
-pub fn action<'a>(mode: Mode, key: Key, rows: &[Row<'a>]) -> Action<'a> {
-    match mode {
-        Mode::Review { selected, armed } => review_action(rows, usize::from(selected), armed, key),
-        Mode::QuitArmed => match key {
-            Key::Char(b'q') => Action::Quit,
+impl<const RERUN: usize> State<'_, RERUN> {
+    /// What `key` asks the driver to do, given the mode it arrives in. Call it with the state before `apply`.
+    #[must_use]
+    pub fn action<'s, 'a: 's>(&'s self, key: Key, detail: impl Fn(Identity<'s>) -> Detail<'a>) -> Action<'s> {
+        match self.mode() {
+            Mode::Review { selected, armed, .. } => self.review_action(selected, armed, key, detail),
+            Mode::QuitArmed => match key {
+                Key::Char(b'q') => Action::Quit,
+                Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
+                Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down => Action::None,
+            },
+            Mode::Running | Mode::Timeline { .. } | Mode::Find { .. } | Mode::Skipped { .. } | Mode::Warnings { .. } => match key {
+                Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
+                Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down => Action::None,
+            },
+            Mode::BuildError | Mode::Interrupted { .. } | Mode::Done { .. } | Mode::Receipt => Action::None,
+        }
+    }
+
+    fn review_action<'s, 'a: 's>(&'s self, selected: u16, armed: bool, key: Key, detail: impl Fn(Identity<'s>) -> Detail<'a>) -> Action<'s> {
+        let row = self.listed(selected).map(|index| self.ledger_entry(index));
+        let any_idle = (0..self.stored).any(|index| self.is_listed(index) && self.ledger_entry(index).3 == Rerun::Idle);
+        match key {
+            Key::Char(b'r') => row.filter(|(_, _, _, rerun)| *rerun == Rerun::Idle).map_or(Action::None, |(id, ..)| Action::RerunOne { id }),
+            Key::Char(b'R') if any_idle => Action::RerunFailed,
+            Key::Char(b'e') => row
+                .and_then(|(id, ..)| detail(id).1)
+                .map_or(Action::None, |location| Action::OpenEditor { file: location.file, line: location.line }),
+            Key::Char(b'q') if armed => Action::Quit,
             Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
             Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down => Action::None,
-        },
-        Mode::Running | Mode::Timeline { .. } | Mode::Find { .. } | Mode::Skipped { .. } | Mode::Warnings { .. } => match key {
-            Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
-            Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down => Action::None,
-        },
-        Mode::BuildError | Mode::Interrupted { .. } | Mode::Done { .. } | Mode::Receipt => Action::None,
+        }
     }
-}
 
-fn review_action<'a>(rows: &[Row<'a>], selected: usize, armed: bool, key: Key) -> Action<'a> {
-    let row = rows.get(selected.min(rows.len().saturating_sub(1)));
-    match key {
-        Key::Char(b'r') => row.filter(|row| row.rerun == Rerun::Idle).map_or(Action::None, |row| Action::RerunOne { id: row.id }),
-        Key::Char(b'R') if rows.iter().any(|row| row.rerun == Rerun::Idle) => Action::RerunFailed,
-        Key::Char(b'e') => row
-            .and_then(|row| row.location)
-            .map_or(Action::None, |location| Action::OpenEditor { file: location.file, line: location.line }),
-        Key::Char(b'q') if armed => Action::Quit,
-        Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
-        Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down => Action::None,
-    }
-}
-
-impl Row<'_> {
-    fn counts_as_failed(&self) -> bool {
-        !matches!(self.rerun, Rerun::Passed { .. }) && self.verdict != Some(Verdict::Flaky)
-    }
-}
-
-impl Review<'_> {
-    /// Draws `mode` into `frame` at `width` columns. Modes other than the review screens draw nothing.
+    /// Draws the current mode into `frame` at `width` columns, reading the ledger and `detail` for each listed failure.
+    /// Modes other than the review screens draw nothing.
     ///
     /// # Errors
     ///
     /// Returns the number of bytes cut when `frame` was too small.
-    pub fn project<const FRAME: usize>(&self, mode: Mode, width: usize, color: bool, frame: &mut Line<FRAME>) -> Result<(), usize> {
+    pub fn screen<'a, const FRAME: usize>(
+        &self,
+        detail: impl Fn(Identity<'_>) -> Detail<'a>,
+        width: usize,
+        color: bool,
+        frame: &mut Line<FRAME>,
+    ) -> Result<(), usize> {
         let look = (width.max(MIN_WIDTH), color);
-        match mode {
-            Mode::Review { selected, armed } => self.page(frame, look, selected, armed),
+        match self.mode() {
+            Mode::Review { selected, armed, top } => self.page(frame, look, (selected, armed, top), &detail),
             Mode::Timeline { .. } => self.stub(frame, look, b"timeline"),
             Mode::Find { .. } => self.stub(frame, look, b"find"),
             Mode::Skipped { .. } => self.stub(frame, look, b"skipped"),
@@ -290,11 +289,22 @@ impl Review<'_> {
         keys_line(frame, look, &STUB_KEYS);
     }
 
-    fn page<const FRAME: usize>(&self, frame: &mut Line<FRAME>, look: Look, selected: u16, armed: bool) {
+    fn shown<'s, 'a: 's>(&'s self, index: usize, detail: &impl Fn(Identity<'_>) -> Detail<'a>) -> Shown<'s> {
+        let (id, millis, verdict, rerun) = self.ledger_entry(index);
+        (id, millis, verdict, rerun, detail(id))
+    }
+
+    fn page<'a, const FRAME: usize>(
+        &self,
+        frame: &mut Line<FRAME>,
+        look: Look,
+        (selected, armed, top): (u16, bool, Option<u16>),
+        detail: &impl Fn(Identity<'_>) -> Detail<'a>,
+    ) {
         self.header(frame, look, b"review");
         frame.text(b"\n\n");
         self.counts(frame, look);
-        let open = self.rows.len();
+        let open = self.open();
         if open == 0 {
             self.empty(frame, look, armed);
             return;
@@ -304,15 +314,19 @@ impl Review<'_> {
             more_failures(frame, look, open);
         }
         frame.text(b"\n");
-        let selected = usize::from(clamp(selected, open));
+        let selected = clamp(selected, open);
         let shown = open.min(LIST_ROWS);
-        let first = selected.saturating_sub(1).min(open - shown);
-        for (index, row) in self.rows[first..first + shown].iter().enumerate() {
-            list_row(frame, look, row, first + index == selected);
+        let first = usize::from(selected).saturating_sub(1).min(open - shown);
+        let window = || (0..self.stored).filter(|index| self.is_listed(*index)).skip(first).take(shown);
+        let verdict_width = window().map(|index| self.ledger_entry(index).2.map_or(0, |verdict| verdict_word(verdict).0.len() + 1)).max().unwrap_or(0);
+        for (position, index) in window().enumerate() {
+            list_row(frame, look, &self.shown(index, detail), first + position == usize::from(selected), verdict_width);
         }
         rule(frame, look.0);
-        detail(frame, look, &self.rows[selected]);
-        footer(frame, look, &KEYS, armed);
+        if let Some(index) = self.listed(selected) {
+            detail_view(frame, look, &self.shown(index, detail), top);
+        }
+        footer(frame, look, if top.is_some() { &SCROLL_KEYS } else { &KEYS }, armed);
     }
 
     fn empty<const FRAME: usize>(&self, frame: &mut Line<FRAME>, look: Look, armed: bool) {
@@ -320,7 +334,7 @@ impl Review<'_> {
         paint(frame, look.1, GREEN_BOLD, b"no failures left");
         frame.text(b"\n ");
         let mut text = Line::<64>::new();
-        text.number(self.passed);
+        text.number(self.passed + self.cleared());
         text.text(b" passed. q then q to leave.");
         paint(frame, look.1, FAINT, text.bytes());
         frame.text(b"\n\n");
@@ -333,15 +347,24 @@ impl Review<'_> {
         frame.text(b"  ");
         paint(frame, look.1, CYAN_BOLD, title);
         let used = 1 + 9 + 2 + title.len();
-        let clock_len = digits(usize::try_from(self.clock_ms / 60_000).unwrap_or(usize::MAX)) + 3;
+        let clock_len = digits(usize::try_from(self.now_ms / 60_000).unwrap_or(usize::MAX)) + 3;
         spaces(frame, look.0.saturating_sub(1 + used + clock_len).max(1));
-        clock(frame, look.1, self.clock_ms);
+        clock(frame, look.1, self.now_ms);
+    }
+
+    fn cleared(&self) -> usize {
+        (0..self.stored).filter(|index| matches!(self.ledger_entry(*index).3, Rerun::Passed { .. })).count()
     }
 
     fn counts<const FRAME: usize>(&self, frame: &mut Line<FRAME>, look: Look) {
-        let failed = self.rows.iter().filter(|row| row.counts_as_failed()).count();
-        let flaky = self.rows.iter().filter(|row| row.verdict == Some(Verdict::Flaky)).count();
-        let cleared = self.rows.iter().filter(|row| matches!(row.rerun, Rerun::Passed { .. })).count();
+        let flaky = (0..self.stored).filter(|index| self.ledger_entry(*index).2 == Some(Verdict::Flaky)).count();
+        let cleared = self.cleared();
+        let failed = (0..self.stored)
+            .filter(|index| {
+                let (_, _, verdict, rerun) = self.ledger_entry(*index);
+                !matches!(rerun, Rerun::Passed { .. }) && verdict != Some(Verdict::Flaky)
+            })
+            .count();
         let tone = |count: usize, loud: &'static [u8]| if count == 0 { FAINT } else { loud };
         let items: [(usize, &[u8], &[u8]); 5] = [
             (failed, b"failed", tone(failed, RED_BOLD)),
@@ -463,17 +486,18 @@ fn rule<const FRAME: usize>(frame: &mut Line<FRAME>, width: usize) {
     frame.text(b"\n");
 }
 
-fn list_row<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Row<'_>, selected: bool) {
+fn list_row<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, selected: bool, verdict_width: usize) {
+    let (id, millis, verdict, rerun, (class, ..)) = *row;
     if selected {
         paint(frame, look.1, CYAN_BOLD, "\u{203a}".as_bytes());
     } else {
         frame.text(b" ");
     }
-    let prefix = match row.rerun {
+    let prefix = match rerun {
         Rerun::Idle => {
             let mut text = Line::<24>::new();
-            centiseconds(&mut text, row.millis);
-            field(frame, look.1, RED_BOLD, class_word(row.class), text.bytes(), FAINT);
+            centiseconds(&mut text, millis);
+            field(frame, look.1, RED_BOLD, class_word(class), text.bytes(), FAINT);
             frame.text(b"   ");
             CLASS_FIELD + SECONDS_FIELD + 3
         }
@@ -494,8 +518,27 @@ fn list_row<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Row<'
             CLASS_FIELD + SECONDS_FIELD + 3
         }
     };
-    middle(frame, row.id, look.0.saturating_sub(prefix + 1).max(1));
+    verdict_column(frame, look.1, verdict, verdict_width);
+    middle(frame, id, look.0.saturating_sub(prefix + verdict_width + 1).max(1));
     frame.text(b"\n");
+}
+
+fn verdict_column<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, verdict: Option<Verdict>, width: usize) {
+    let used = verdict.map_or(0, |verdict| {
+        let (word, sgr) = verdict_word(verdict);
+        paint(frame, color, sgr, word);
+        word.len()
+    });
+    spaces(frame, width - used);
+}
+
+const fn verdict_word(verdict: Verdict) -> (&'static [u8], &'static [u8]) {
+    match verdict {
+        Verdict::Real => (b"REAL", RED_BOLD),
+        Verdict::Flaky => (b"FLAKY", YELLOW_BOLD),
+        Verdict::OrderDependent => (b"ORDER-DEPENDENT", YELLOW_BOLD),
+        Verdict::NotRetried { .. } => (b"NO-RETRY", YELLOW_BOLD),
+    }
 }
 
 fn field<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, sgr: &[u8], word: &[u8], time: &[u8], time_sgr: &[u8]) {
@@ -568,17 +611,18 @@ fn middle<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, room: u
     joined_range(frame, id, tail_start, total);
 }
 
-fn detail<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Row<'_>) {
-    wrapped_name(frame, look, row.id);
-    class_line(frame, look, row);
-    if let Some(verdict) = row.verdict {
-        verdict_line(frame, look, verdict, row.millis);
+fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, top: Option<u16>) {
+    let (id, millis, verdict, _, (class, location, output)) = *row;
+    wrapped_name(frame, look, id);
+    class_line(frame, look, (class, millis, location));
+    if let Some(verdict) = verdict {
+        verdict_line(frame, look, verdict, millis);
     }
-    output_block(frame, look, row.output);
+    output_block(frame, look, output, top);
     frame.text(b"\n");
-    hint_line(frame, look, row);
-    if matches!(row.verdict, Some(Verdict::Real | Verdict::NotRetried { .. })) {
-        bisect_line(frame, look, row.id);
+    hint_line(frame, look, class, millis);
+    if matches!(verdict, Some(Verdict::Real | Verdict::NotRetried { .. })) {
+        bisect_line(frame, look, id);
     }
 }
 
@@ -604,15 +648,15 @@ fn wrapped_name<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, id: Ide
     }
 }
 
-fn class_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Row<'_>) {
-    let word = class_word(row.class);
+fn class_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, (class, millis, location): (Class, u64, Option<Location<'_>>)) {
+    let word = class_word(class);
     let mut after = Line::<32>::new();
     after.text(b" after ");
-    centiseconds(&mut after, row.millis);
+    centiseconds(&mut after, millis);
     frame.text(b" ");
     paint(frame, look.1, RED_BOLD, word);
     paint(frame, look.1, FAINT, after.bytes());
-    let Some(location) = row.location else {
+    let Some(location) = location else {
         frame.text(b"\n");
         return;
     };
@@ -631,12 +675,7 @@ fn class_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Row
 }
 
 fn verdict_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, verdict: Verdict, millis: u64) {
-    let (word, sgr): (&[u8], &[u8]) = match verdict {
-        Verdict::Real => (b"REAL", RED_BOLD),
-        Verdict::Flaky => (b"FLAKY", YELLOW_BOLD),
-        Verdict::OrderDependent => (b"ORDER-DEPENDENT", YELLOW_BOLD),
-        Verdict::NotRetried { .. } => (b"NO-RETRY", YELLOW_BOLD),
-    };
+    let (word, sgr) = verdict_word(verdict);
     let mut why = Line::<192>::new();
     match verdict {
         Verdict::Real => why.text(b"failed again alone: load and test order are ruled out"),
@@ -656,12 +695,12 @@ fn verdict_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, verdict
     frame.text(b"\n");
 }
 
-fn hint_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Row<'_>) {
+fn hint_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, class: Class, millis: u64) {
     let mut text = Line::<96>::new();
-    match row.class {
+    match class {
         Class::Timeout { enforced_by: Enforcer::Val } => {
             text.text(b"process group killed after ");
-            centiseconds(&mut text, row.millis);
+            centiseconds(&mut text, millis);
         }
         Class::Timeout { enforced_by: Enforcer::Harness } => text.text(b"the test's own harness enforced this timeout"),
         Class::Hang => text.text(b"killed at its deadline with no output captured"),
@@ -689,25 +728,33 @@ fn bisect_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, id: Iden
     frame.text(b"\n");
 }
 
-fn output_block<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, output: &[u8]) {
+fn output_block<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, output: &[u8], top: Option<u16>) {
     let body = output.trim_ascii_end();
     if body.is_empty() {
         return;
     }
+    let total = output_lines(body);
+    let start = usize::from(top.unwrap_or(0)).min(total - 1);
     frame.text(b"\n ");
     paint(frame, look.1, FAINT, b"test output  verbatim");
+    if start > 0 {
+        let mut text = Line::<32>::new();
+        text.text(b"  from line ");
+        text.number(start + 1);
+        paint(frame, look.1, FAINT, text.bytes());
+    }
     frame.text(b"\n");
-    for line in body.split(|byte| *byte == b'\n').take(OUTPUT_LINES) {
+    for line in body.split(|byte| *byte == b'\n').skip(start).take(OUTPUT_LINES) {
         spaces(frame, 3);
         let mut column = 3;
         put(frame, look.0 - 1, &mut column, 3, line);
         frame.text(b"\n");
     }
-    let total = memchr::memchr_iter(b'\n', body).count() + 1;
-    if total > OUTPUT_LINES {
+    let below = total.saturating_sub(start + OUTPUT_LINES);
+    if below > 0 {
         let mut text = Line::<32>::new();
         text.text(b"   +");
-        text.number(total - OUTPUT_LINES);
+        text.number(below);
         text.text(b" lines");
         paint(frame, look.1, FAINT, text.bytes());
         frame.text(b"\n");
