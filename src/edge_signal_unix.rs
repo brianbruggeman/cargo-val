@@ -180,14 +180,21 @@ impl SignalPipe {
             self.received.set(Some(signal));
             self.interrupt.fire();
         }
-        TARGETS
-            .iter()
-            .map(|target| target.load(Ordering::SeqCst))
-            .filter(|target| !matches!(*target, 0 | RESERVED))
-            .for_each(|target| {
-                unsafe { libc::kill(target, signal) };
-            });
+        signal_children(signal);
     }
+}
+
+/// Sends `signal` to every child and child group this process still tracks.
+///
+/// Reads only the atomic table, so any thread may call it, including one that outlives a blocked event loop.
+pub fn signal_children(signal: c_int) {
+    TARGETS
+        .iter()
+        .map(|target| target.load(Ordering::SeqCst))
+        .filter(|target| !matches!(*target, 0 | RESERVED))
+        .for_each(|target| {
+            unsafe { libc::kill(target, signal) };
+        });
 }
 
 impl Drop for SignalPipe {

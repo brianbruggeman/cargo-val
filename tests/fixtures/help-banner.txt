@@ -22,6 +22,8 @@ Options:
                    Select tests with a nextest filterset subset (see below)
       --target-dir <isolated|shared|PATH>
                    Where the build directories live (see below; default: shared)
+      --exit-with-parent
+                   Kill the running tests and exit when the parent process exits (macOS, Linux; default: off)
 
 Cargo options such as -p, --package, --test, --lib, -F, --features, -m,
 --manifest-path, --target, --profile, and -j/--jobs are forwarded to Cargo.
@@ -74,6 +76,14 @@ Plain output is append-only, one line per event, labels padded to nine columns:
   SUMMARY passed=P failed=F ignored=I not_run=N wall=S, one FAILED line per failure, and
   RERUN, a cargo val command that reruns only the failures. GITHUB_ACTIONS=true also wraps
   each block in ::group::/::endgroup:: and prints one ::error annotation per failure.
+
+Exit with parent, highest precedence first (default: off):
+  1. --exit-with-parent
+  2. CARGO_VAL_EXIT_WITH_PARENT=<on|off|1|0>
+  3. the build-time default (CARGO_VAL_BUILD_EXIT_WITH_PARENT=<on|off>)
+Off, a run keeps going when its parent exits, as a nohup or backgrounded run must. On, the first
+parent exit kills every running test and ends the run with status 129; a test harness that may be
+SIGKILLed sets it so no run outlives it.
 
 Ignored tests: `#[ignore]`d tests are listed per test binary with `--list --ignored`, are
 not launched by default, and are reported IGNORED and counted separately. CARGO_VAL_IGNORED

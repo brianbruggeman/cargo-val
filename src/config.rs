@@ -412,6 +412,35 @@ pub const OUTPUT: Layers<'static> = Layers::setting(
     ],
 );
 
+/// Whether the run ends when its parent process exits; off, a run outlives its parent as a backgrounded run must.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitWithParent {
+    Off,
+    On,
+}
+
+impl TryFrom<&[u8]> for ExitWithParent {
+    type Error = ();
+
+    fn try_from(text: &[u8]) -> Result<Self, ()> {
+        match text {
+            b"on" | b"1" => Ok(Self::On),
+            b"off" | b"0" => Ok(Self::Off),
+            _ => Err(()),
+        }
+    }
+}
+
+/// `CARGO_VAL_EXIT_WITH_PARENT` / `--exit-with-parent`; the build default is supplied by the caller.
+pub const EXIT_WITH_PARENT: Layers<'static> = Layers::setting(
+    "CARGO_VAL_EXIT_WITH_PARENT",
+    [
+        b"cargo-val: --exit-with-parent takes no value\n",
+        b"cargo-val: CARGO_VAL_EXIT_WITH_PARENT must be on, off, 1, or 0\n",
+        b"cargo-val: the build default exit-with-parent setting is invalid\n",
+    ],
+);
+
 impl<'argument> HarnessRequest<'argument> {
     /// The ignore mode a harness flag selected, else the `CARGO_VAL_IGNORED` setting, else skip.
     ///
@@ -938,6 +967,35 @@ mod layers_tests {
             from_settings.resolve::<OutputSetting>().map(|(setting, _)| setting.mode(TERMINAL, &source)),
             Ok(OutputMode::Plain)
         );
+    }
+
+    #[test]
+    fn exit_with_parent_precedence_is_command_line_then_environment_then_build_default() {
+        let off = EXIT_WITH_PARENT.build_default(Some("off"));
+        let table: [(Layers<'_>, Resolved<ExitWithParent>); 6] = [
+            (off, Ok((ExitWithParent::Off, Source::BuildDefault))),
+            (EXIT_WITH_PARENT.build_default(Some("on")), Ok((ExitWithParent::On, Source::BuildDefault))),
+            (off.configured(Some("1")), Ok((ExitWithParent::On, Source::Configured))),
+            (off.configured(Some("1")).command_line(Some(b"0")), Ok((ExitWithParent::Off, Source::CommandLine))),
+            (off.configured(Some("yes")), Err(refused(EXIT_WITH_PARENT, Source::Configured))),
+            (EXIT_WITH_PARENT.build_default(Some("maybe")), Err(refused(EXIT_WITH_PARENT, Source::BuildDefault))),
+        ];
+        for (layers, expected) in table {
+            assert_eq!(layers.resolve::<ExitWithParent>(), expected, "{layers:?}");
+        }
+    }
+
+    #[test]
+    fn exit_with_parent_settings_and_builder_resolve_the_same_choice() {
+        let pairs = [("CARGO_VAL_EXIT_WITH_PARENT", "1")];
+        let source = BorrowedSettings::new(&pairs);
+        let off = EXIT_WITH_PARENT.build_default(Some("off"));
+
+        let from_settings = off.from_settings(&source, None);
+        let from_builder = off.configured(Some("1"));
+
+        assert_eq!(from_settings, from_builder);
+        assert_eq!(from_settings.resolve::<ExitWithParent>(), Ok((ExitWithParent::On, Source::Configured)));
     }
 
     #[proxima::test]

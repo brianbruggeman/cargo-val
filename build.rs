@@ -20,6 +20,8 @@ struct BuildDefaults {
     process: String,
     #[setting(default = "auto")]
     output: String,
+    #[setting(default = "off")]
+    exit_with_parent: String,
     #[setting(default = 4096)]
     shard_names: usize,
     #[setting(default = 64)]
@@ -56,6 +58,9 @@ impl Validate for BuildDefaults {
         }
         if !matches!(self.output.as_str(), "auto" | "rich" | "plain") {
             errors.push(ValidationMessage::new("output", "must be auto, rich, or plain"));
+        }
+        if !matches!(self.exit_with_parent.as_str(), "on" | "off") {
+            errors.push(ValidationMessage::new("exit_with_parent", "must be on or off"));
         }
         if self.shard_retry_slots < MAX_JOBS {
             errors.push(ValidationMessage::new(
