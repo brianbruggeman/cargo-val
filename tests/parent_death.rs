@@ -300,3 +300,21 @@ fn a_nonblocking_write_open_of_a_fifo_needs_a_holder_and_fails_enxio_without_one
     let released = write_open().expect_err("the holder died, which is what a run killed with its parent looks like");
     assert_eq!(released.raw_os_error(), Some(libc::ENXIO), "{released} opening {}", block.display());
 }
+
+#[test]
+fn signalling_a_group_whose_only_member_is_an_unreaped_zombie_is_not_a_failure() {
+    let mut leader = Command::new("/bin/sleep").arg("600").process_group(0).spawn().expect("sleep spawns as its own group leader");
+    let pid = leader.id();
+    let group = libc::pid_t::try_from(pid).expect("a pid fits pid_t");
+    assert_eq!(unsafe { libc::kill(group, libc::SIGKILL) }, 0, "the leader is killable");
+    let mut exited: libc::siginfo_t = unsafe { core::mem::zeroed() };
+    let waited = unsafe { libc::waitid(libc::P_PID, libc::id_t::from(pid), &raw mut exited, libc::WEXITED | libc::WNOWAIT) };
+    assert_eq!(waited, 0, "waitid reports the leader dead without reaping it");
+
+    let interrupted = common::interrupt(pid);
+    let killed = common::kill_group(pid);
+    leader.wait().expect("the zombie leader is reaped");
+
+    assert_eq!(interrupted, Ok(()), "SIGINT to a zombie-only group");
+    assert_eq!(killed, Ok(()), "SIGKILL to a zombie-only group");
+}

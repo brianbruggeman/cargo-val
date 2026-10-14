@@ -163,7 +163,7 @@ pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
     signal_group(leader, libc::SIGKILL)
 }
 
-// ESRCH means the group already exited, which is the goal of both signals
+// ESRCH means the group already exited, which is the goal of both signals; macOS answers EPERM for a group whose members are all unreaped zombies
 #[cfg(unix)]
 fn signal_group(leader: u32, signal: libc::c_int) -> Result<(), String> {
     // safety: killpg takes plain integers and reports failure through its status
@@ -173,6 +173,7 @@ fn signal_group(leader: u32, signal: libc::c_int) -> Result<(), String> {
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(()),
+        Some(libc::EPERM) if cfg!(target_os = "macos") => Ok(()),
         _ => Err(format!("killpg({leader}, signal {signal}) failed: {error}")),
     }
 }
