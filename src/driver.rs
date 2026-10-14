@@ -959,9 +959,11 @@ pub(crate) fn erase_live(render: &Render<'_>) -> Result<(), RunError> {
     write_fd(1, frame.bytes())
 }
 
-/// Writes bytes a shard child kept for the terminal; a rich run erases its live frame first so nothing lands mid-frame.
+/// Writes bytes a shard child kept for the terminal; a rich run writes nothing above its live frame, review holds the detail.
 pub(crate) fn emit_kept(render: &Render<'_>, bytes: &[u8]) -> Result<(), RunError> {
-    erase_live(render)?;
+    if render.0 == OutputMode::Rich {
+        return Ok(());
+    }
     write_fd(1, bytes)
 }
 
@@ -5041,17 +5043,14 @@ mod close_sequence_tests {
     }
 
     #[proxima::test]
-    async fn a_failure_that_settles_while_the_editor_is_open_prints_its_block_once_before_the_redrawn_frame() {
+    async fn a_failure_that_settles_while_the_editor_is_open_prints_no_block_and_the_frame_redraws() {
         in_single_threaded_process(|| {
             let delivered = failure_settles_while_the_editor_is_open();
             let text = std::string::String::from_utf8_lossy(&delivered);
 
             let frames = delivered.windows(HIDE_CURSOR.len()).filter(|window| *window == HIDE_CURSOR).count();
             assert_eq!(frames, 2, "the tick under the editor drew nothing, the first frame and the redraw did:\n{text:?}");
-            assert_eq!(delivered.windows(FAILURE_BLOCK.len()).filter(|window| *window == FAILURE_BLOCK).count(), 1, "the failure block arrives once:\n{text:?}");
-            let block = position(&delivered, FAILURE_BLOCK).expect("the failure block arrives");
-            let redraw = rposition(&delivered, HIDE_CURSOR).expect("the frame is redrawn");
-            assert!(block < redraw, "the block precedes the redrawn frame:\n{text:?}");
+            assert!(position(&delivered, FAILURE_BLOCK).is_none(), "a rich run writes no failure block above its frame:\n{text:?}");
         });
     }
 
