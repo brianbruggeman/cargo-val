@@ -1,5 +1,7 @@
 use core::time::Duration;
+use std::ffi::{OsStr, OsString};
 use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use futures::FutureExt;
@@ -21,6 +23,7 @@ pub async fn supervised<Outcome>(
     let body = AssertUnwindSafe(interact(leader, &stdout, &stderr, &exit)).catch_unwind();
     let outcome = timeout(deadline, body).await;
     let group = if outcome.is_err() { group_processes(leader) } else { String::new() };
+    let locks = if outcome.is_err() { lock_report(command) } else { String::new() };
     let failures = settle(leader, &exit).await;
     release_group(leader);
     match outcome {
@@ -30,7 +33,7 @@ pub async fn supervised<Outcome>(
         }
         Ok(Err(payload)) => panic::resume_unwind(payload),
         Err(elapsed) => panic!(
-            "{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}\nprocess group at the deadline:\n{group}\nstdout so far:\n{}\nstderr so far:\n{}",
+            "{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}\nprocess group at the deadline:\n{group}\nlock holders at the deadline:\n{locks}\nstdout so far:\n{}\nstderr so far:\n{}",
             String::from_utf8_lossy(&stdout.retained()),
             String::from_utf8_lossy(&stderr.retained()),
         ),
@@ -47,6 +50,62 @@ fn group_processes(leader: u32) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Err(error) => format!("ps did not run: {error}"),
+    }
+}
+
+// a fixture compile that waits on cargo's build-directory lock or the package-cache lock looks identical to a stuck rustc until the holder is named; the holder is usually another worktree's cargo
+pub fn lock_report(command: &Command) -> String {
+    let held = lock_files(command)
+        .into_iter()
+        .filter(|file| file.exists())
+        .map(|file| format!("{}:\n{}", file.display(), holders_of(&file)))
+        .collect::<Vec<_>>();
+    format!("{}\nsccache servers:\n{}", held.join("\n"), sccache_servers())
+}
+
+fn command_variable(command: &Command, name: &str) -> Option<OsString> {
+    match command.get_envs().find(|(key, _)| *key == name) {
+        Some((_, value)) => value.map(OsString::from),
+        None => std::env::var_os(name),
+    }
+}
+
+fn lock_files(command: &Command) -> Vec<PathBuf> {
+    let cargo_home = command_variable(command, "CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| command_variable(command, "HOME").map(|home| PathBuf::from(home).join(".cargo")));
+    let package_cache = cargo_home.into_iter().flat_map(|home| [home.join(".package-cache"), home.join(".package-cache-mutate")]);
+    let build_directory = command_variable(command, "CARGO_TARGET_DIR").into_iter().flat_map(|target| {
+        let target = PathBuf::from(target);
+        [target.join(".cargo-lock"), target.join("debug/.cargo-lock"), target.join("debug/.cargo-build-lock"), target.join("debug/.cargo-artifact-lock")]
+    });
+    build_directory.chain(package_cache).collect()
+}
+
+fn holders_of(file: &Path) -> String {
+    let listing = capture("lsof", [OsStr::new("-Fp"), OsStr::new("--"), file.as_os_str()]);
+    let holders = listing.lines().filter_map(|line| line.strip_prefix('p')).map(holder_line).collect::<Vec<_>>();
+    if holders.is_empty() { "  no holder".to_string() } else { holders.join("\n") }
+}
+
+fn holder_line(pid: &str) -> String {
+    let directory = capture("lsof", ["-a", "-d", "cwd", "-Fn", "-p", pid]);
+    let cwd = directory.lines().find_map(|line| line.strip_prefix('n')).unwrap_or("unknown");
+    let argv = capture("ps", ["-o", "args=", "-p", pid]);
+    format!("  pid {pid} cwd {cwd} argv {}", argv.trim())
+}
+
+fn sccache_servers() -> String {
+    let listing = capture("ps", ["-axo", "pid,ppid,etime,command"]);
+    let servers = listing.lines().filter(|line| line.contains("sccache") && !line.contains("rustc")).collect::<Vec<_>>();
+    if servers.is_empty() { "  none".to_string() } else { servers.join("\n") }
+}
+
+// lsof exits 1 when nothing holds the file, so only stdout is read; a program that cannot run is reported in place of its output
+fn capture<Argument: AsRef<OsStr>>(program: &str, arguments: impl IntoIterator<Item = Argument>) -> String {
+    match Command::new(program).args(arguments).output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Err(error) => format!("{program} did not run: {error}"),
     }
 }
 
