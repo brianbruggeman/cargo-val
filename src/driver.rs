@@ -183,6 +183,7 @@ pub enum RunError {
     CargoRefused,
     Interrupted(i32),
     Cancelled,
+    Tripped,
     ListingFailed,
     DeclaredCapacity,
 }
@@ -228,6 +229,7 @@ impl RunError {
             Self::CargoRefused => b"cargo-val: cargo refused the invocation before building; its error is above\n",
             Self::ListingFailed => b"cargo-val: libtest listing failed\n",
             Self::Cancelled => b"cargo-val: a session was cancelled by its scope\n",
+            Self::Tripped => b"cargo-val: a launch was refused after the --max-fail trip\n",
             Self::DeclaredCapacity => {
                 b"cargo-val: declared test scheduling records exceed the build's capacity; raise CARGO_VAL_BUILD_SCHED_RECORD_BYTES\n"
             }
@@ -1025,8 +1027,7 @@ struct Reporting<'run, 'storage> {
     targets: &'run RefCell<TargetTable>,
     ready: &'run Cell<Option<SessionSlotId>>,
     withdrawn_ready: &'run Cell<Option<SessionSlotId>>,
-    policy: &'run RefCell<StopPolicy>,
-    doc_failures: &'run Cell<usize>,
+    run: &'run ListingRun<'storage>,
     jobs: usize,
     render: &'run Render<'storage>,
 }
@@ -1045,8 +1046,7 @@ impl Reporting<'_, '_> {
             self.ready.set(None);
             return;
         };
-        let failures = ledger.snapshot().failed + self.doc_failures.get();
-        if self.policy.borrow().observe_failures(failures) != Observation::Clear {
+        if self.run.admit(ledger).is_err() {
             session.child().terminate();
             self.withdrawn_ready.set(Some(slot));
             self.ready.set(None);
@@ -1381,8 +1381,7 @@ impl<'run> ListingRun<'run> {
             targets: &self.targets,
             ready: &self.ready,
             withdrawn_ready: &self.withdrawn_ready,
-            policy: &self.policy,
-            doc_failures: &self.docs.failed,
+            run: self,
             jobs: self.settings.jobs,
             render: self.docs.render,
         }
@@ -1442,6 +1441,34 @@ impl ListingRun<'_> {
         self.admit_limit() > self.settings.jobs
             && self.ready.get().is_none()
             && ledger.sessions().len() >= self.settings.jobs
+    }
+
+    // gate: In = a launch about to happen, Out = (), Err = Interrupted once a signal arrived, else Tripped once the failure budget is spent
+    pub(crate) fn admit(
+        &self,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    ) -> Result<(), RunError> {
+        if let Some(signal) = self.signals.received() {
+            self.root.fire();
+            return Err(RunError::Interrupted(signal));
+        }
+        if self.tripped(ledger) { Err(RunError::Tripped) } else { Ok(()) }
+    }
+
+    // the one place a refused launch is counted: a tripped refusal puts its names in listed-not-run, an interrupt counts nothing
+    pub(crate) fn shed(
+        &self,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        names: usize,
+    ) -> bool {
+        match self.admit(ledger) {
+            Ok(()) => false,
+            Err(RunError::Tripped) => {
+                (0..names).for_each(|_| self.policy.borrow_mut().listed_test_skipped());
+                true
+            }
+            Err(_) => true,
+        }
     }
 
     fn tripped(
@@ -1546,14 +1573,13 @@ impl ListingScan<'_, '_> {
     fn apply(
         &self,
         step: ListingSourceStep<'_, '_, '_>,
-        stopped: bool,
         ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
         watches: &mut Watches,
     ) -> Result<Flow, RunError> {
         let run = self.run;
         match step {
             ListingSourceStep::Launch(intent) => {
-                if !run.policy.borrow_mut().admit_listed(run.interrupted(), stopped) {
+                if run.shed(ledger, 1) {
                     return Ok(Flow::Next);
                 }
                 if run.settings.process == ProcessMode::Shard {
@@ -2279,7 +2305,6 @@ impl CargoDriver<'_> {
         let mut context = Context::from_waker(Waker::noop());
         let mut offset = 0;
         loop {
-            let stopped = run.tripped(ledger);
             if !status_queue::room_for(EVENT_RESERVE) {
                 status_queue::defer();
                 return Ok(offset);
@@ -2297,7 +2322,7 @@ impl CargoDriver<'_> {
             };
             let (step, consumed) = polled.map_err(|_| RunError::ListingStream)?;
             offset += consumed;
-            if matches!(scan.apply(step, stopped, ledger, watches)?, Flow::Pause) {
+            if matches!(scan.apply(step, ledger, watches)?, Flow::Pause) {
                 return Ok(offset);
             }
             let ready = self.listing_framer.frame_ready().map_err(|_| RunError::ListingStream)?;
@@ -2340,7 +2365,6 @@ impl CargoDriver<'_> {
         shard::load_records(run, executable, active.target)?;
         let mut context = Context::from_waker(Waker::noop());
         loop {
-            let stopped = run.tripped(ledger);
             if !status_queue::room_for(EVENT_RESERVE) {
                 status_queue::defer();
                 return Ok(false);
@@ -2356,7 +2380,7 @@ impl CargoDriver<'_> {
                 return Ok(false);
             };
             let step = polled.map_err(|_| RunError::ListingStream)?;
-            match scan.apply(step, stopped, ledger, watches)? {
+            match scan.apply(step, ledger, watches)? {
                 Flow::Eof => {
                     shard::seal(run);
                     return Ok(true);
