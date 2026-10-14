@@ -1,0 +1,11 @@
+[package]
+name = "cargo_val_rich_pty_noisy_fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+unused_manifest_key = "cargo prints this to stderr on every invocation, including cargo metadata"
+
+[workspace]
+
+[dependencies]

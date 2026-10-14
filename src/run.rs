@@ -569,7 +569,7 @@ fn handle_doc(
             let slot = lanes[DOC_LANE].1.borrow();
             let stream = slot.as_deref().ok_or(RunError::Reactor)?;
             let bytes = stream.window(range).ok_or(RunError::Reactor)?;
-            doc.stderr_chunk(&bytes)
+            doc.stderr_chunk(&bytes, observation.render())
         }
         Item::OutEnd(_) => {
             doc.stdout_ended();
