@@ -1,8 +1,9 @@
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
-use core::task::{Context, Poll};
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
 use std::boxed::Box;
-use std::io::{self, Write};
+use std::io;
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::string::String;
 use std::sync::Once;
@@ -71,14 +72,18 @@ impl OutputSink {
     /// # Errors
     /// Returns the OS error from `GetFileType`.
     pub fn new(handle: OwnedHandle) -> io::Result<Self> {
+        Self::classified(handle, true)
+    }
+
+    fn classified(handle: OwnedHandle, announce: bool) -> io::Result<Self> {
         let (handle, mode) = match file_type(handle.as_raw_handle())? {
             FILE_TYPE_CHAR if is_console(handle.as_raw_handle()) => (handle, Mode::Console),
             FILE_TYPE_DISK => (handle, Mode::Synchronous),
             FILE_TYPE_PIPE => match reopen_overlapped(&handle) {
                 Some(reopened) => (reopened, Mode::Overlapped),
-                None => (handle, synchronous_with_notice()),
+                None => (handle, synchronous_with_notice(announce)),
             },
-            _ => (handle, synchronous_with_notice()),
+            _ => (handle, synchronous_with_notice(announce)),
         };
         Ok(Self {
             handle,
@@ -269,6 +274,10 @@ impl Pipe for OutputSink {
 /// # Errors
 /// Returns `ERROR_INVALID_HANDLE` when the process has no such standard handle, or the OS error from the duplicate or from [`OutputSink::new`].
 pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
+    standard_with(descriptor, true)
+}
+
+fn standard_with(descriptor: i32, announce: bool) -> io::Result<OutputSink> {
     let slot = match descriptor {
         STANDARD_OUTPUT => STD_OUTPUT_HANDLE,
         STANDARD_ERROR => STD_ERROR_HANDLE,
@@ -279,7 +288,7 @@ pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
         return Err(io::Error::from_raw_os_error(ERROR_INVALID_HANDLE.cast_signed()));
     }
     let borrowed = unsafe { BorrowedHandle::borrow_raw(handle) };
-    OutputSink::new(borrowed.try_clone_to_owned()?)
+    OutputSink::classified(borrowed.try_clone_to_owned()?, announce)
 }
 
 /// Whether `descriptor` (standard output `1` or standard error `2`) is a console: `GetConsoleMode` fails on a pipe or a file.
@@ -365,13 +374,31 @@ fn reopen_overlapped(handle: &OwnedHandle) -> Option<OwnedHandle> {
         .then(|| unsafe { OwnedHandle::from_raw_handle(reopened) })
 }
 
-fn synchronous_with_notice() -> Mode {
-    SYNCHRONOUS_NOTICE.call_once(|| {
-        let _ = io::stderr().write_all(
-            b"cargo-val: the output handle cannot be reopened for overlapped writes; writing synchronously\n",
-        );
-    });
+// one nonblocking attempt through a sink that cannot announce again; a handle that only writes synchronously drops the notice rather than wait on a reader
+fn synchronous_with_notice(announce: bool) -> Mode {
+    if announce {
+        SYNCHRONOUS_NOTICE.call_once(post_notice);
+    }
     Mode::Synchronous
+}
+
+fn post_notice() {
+    let Ok(sink) = standard_with(STANDARD_ERROR, false) else {
+        return;
+    };
+    let can_skip_reader = match sink.mode {
+        Mode::Overlapped => true,
+        Mode::Console | Mode::Synchronous => {
+            file_type(sink.raw()).is_ok_and(|kind| kind == FILE_TYPE_DISK || kind == FILE_TYPE_CHAR)
+        }
+    };
+    if !can_skip_reader {
+        return;
+    }
+    let mut line = Line::<LINE_CAPACITY>::new();
+    line.text(b"cargo-val: the output handle cannot be reopened for overlapped writes; writing synchronously\n");
+    let mut call = UnpinPipe::call(&sink, line);
+    let _ = Pin::new(&mut call).poll(&mut Context::from_waker(Waker::noop()));
 }
 
 #[cfg(test)]
