@@ -522,6 +522,8 @@ fn a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly() {
 // libc::kill and fifos
 #[cfg(unix)]
 fn interrupt_ends_blocked_child(process: &str, label: &str) {
+    // the shared target queues this build behind other fixtures' dependency builds, past the pid deadline
+    let interrupt_target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{label}-target"));
     let directory = scratch(label);
     let ready = directory.join("ready");
     let hold = directory.join("hold");
@@ -543,7 +545,7 @@ fn interrupt_ends_blocked_child(process: &str, label: &str) {
         .env("CARGO_VAL_SHARD_READY", &ready)
         .env("CARGO_VAL_SHARD_HOLD", &hold)
         .env("CARGO_VAL_SHARD_IGNORE_INT", "1")
-        .env("CARGO_TARGET_DIR", fixture_target())
+        .env("CARGO_TARGET_DIR", &interrupt_target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
