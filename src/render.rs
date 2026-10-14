@@ -54,8 +54,10 @@ pub enum Event<'a> {
     Warned { id: Identity<'a>, what: &'a [u8] },
     BlockOpened { id: Identity<'a> },
     BlockClosed,
-    BuildFailed { diagnostic: &'a [u8] },
-    Interrupted { signal: u8 },
+    BuildFailed { diagnostic: &'a [u8], exit: u8 },
+    Interrupted { signal: u8, groups: usize },
+    Running { id: Identity<'a> },
+    Exited { code: u8 },
     Finished { passed: usize, failed: usize, ignored: usize, not_run: usize, wall_ms: u64, manifest: Option<&'a [u8]>, discovered: usize, filtered: usize, exit: u8 },
 }
 
@@ -65,7 +67,7 @@ impl Mode {
     pub const fn next(self, event: &Event<'_>) -> Self {
         match (self, event) {
             (Self::Running, Event::BuildFailed { .. }) => Self::BuildError,
-            (Self::Running, Event::Interrupted { signal }) => Self::Interrupted { signal: *signal },
+            (Self::Running, Event::Interrupted { signal, .. }) => Self::Interrupted { signal: *signal },
             (Self::Running, Event::Finished { failed: 0, wall_ms, .. }) => Self::Done { wall_ms: *wall_ms },
             (
                 Self::Running,
@@ -77,6 +79,8 @@ impl Mode {
                 | Event::Warned { .. }
                 | Event::BlockOpened { .. }
                 | Event::BlockClosed
+                | Event::Running { .. }
+                | Event::Exited { .. }
                 | Event::Finished { .. },
             ) => Self::Running,
             (Self::BuildError | Self::Interrupted { .. } | Self::Done { .. }, _) => self,
@@ -184,8 +188,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Warned { id, what } => warned(frame, id, what),
             Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
-            Event::BuildFailed { diagnostic } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
-            Event::Interrupted { signal } => interrupted(frame, signal),
+            Event::BuildFailed { diagnostic, .. } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
+            Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
+            Event::Running { id } => text_pair(frame, b"RUNNING", id),
+            Event::Exited { .. } => {}
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, .. } => {
                 self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, None);
             }
@@ -405,10 +411,20 @@ fn text_line<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], prefix: &
     frame.text(b"\n");
 }
 
-fn interrupted<const FRAME: usize>(frame: &mut Line<FRAME>, signal: u8) {
+fn text_pair<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], id: Identity<'_>) {
+    label(frame, name);
+    frame.text(id.0);
+    frame.text(b" ");
+    frame.text(id.1);
+    frame.text(b"\n");
+}
+
+fn interrupted<const FRAME: usize>(frame: &mut Line<FRAME>, signal: u8, groups: usize) {
     label(frame, b"INTERRUPTED");
-    frame.text(b"signal=");
+    frame.text(b" signal=");
     frame.number(usize::from(signal));
+    frame.text(b"  forwarded_groups=");
+    frame.number(groups);
     frame.text(b"\n");
 }
 
@@ -594,12 +610,12 @@ mod tests {
     fn every_mode_event_pair_lands_where_the_transition_table_says() {
         let finished = |failed| Event::Finished { passed: 1, failed, ignored: 0, not_run: 0, wall_ms: 5, manifest: None, discovered: 0, filtered: 0, exit: 0 };
         let rows = [
-            (Mode::Running, Event::BuildFailed { diagnostic: b"E0308" }, Mode::BuildError),
-            (Mode::Running, Event::Interrupted { signal: 2 }, Mode::Interrupted { signal: 2 }),
+            (Mode::Running, Event::BuildFailed { diagnostic: b"E0308", exit: 3 }, Mode::BuildError),
+            (Mode::Running, Event::Interrupted { signal: 2, groups: 0 }, Mode::Interrupted { signal: 2 }),
             (Mode::Running, finished(0), Mode::Done { wall_ms: 5 }),
             (Mode::Running, finished(1), Mode::Running),
             (Mode::Running, Event::Started { id: PASSING, solo: false }, Mode::Running),
-            (Mode::Done { wall_ms: 5 }, Event::Interrupted { signal: 2 }, Mode::Done { wall_ms: 5 }),
+            (Mode::Done { wall_ms: 5 }, Event::Interrupted { signal: 2, groups: 0 }, Mode::Done { wall_ms: 5 }),
             (Mode::BuildError, finished(0), Mode::BuildError),
             (Mode::Interrupted { signal: 15 }, Event::Started { id: PASSING, solo: false }, Mode::Interrupted { signal: 15 }),
         ];
@@ -621,7 +637,7 @@ mod tests {
             Event::Warned { id: FAILING, what: b"rerun failed to start" },
             Event::BlockOpened { id: FAILING },
             Event::BlockClosed,
-            Event::Interrupted { signal: 2 },
+            Event::Interrupted { signal: 2, groups: 0 },
         ];
 
         for event in events {

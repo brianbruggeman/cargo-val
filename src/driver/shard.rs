@@ -1023,6 +1023,7 @@ mod pause_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
+            interrupt_reported: Cell::new(false),
         }
     }
 

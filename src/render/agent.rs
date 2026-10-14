@@ -23,7 +23,10 @@ impl<const RERUN: usize> State<'_, RERUN> {
         match *event {
             Event::Begin { version, why: Some(why), .. } => header(frame, version, why),
             Event::Captured { id, stdout, stderr, exit } => failure_block(frame, id, [stdout, stderr], exit),
-            Event::Interrupted { signal } => super::interrupted(frame, signal),
+            Event::BuildFailed { diagnostic, exit } => build_failed(frame, diagnostic, exit),
+            Event::Interrupted { signal, groups } => super::interrupted(frame, signal, groups),
+            Event::Running { id } => super::text_pair(frame, b"RUNNING", id),
+            Event::Exited { code } => exit_line(frame, code),
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, discovered, filtered, exit } => {
                 if passed + failed == 0 {
                     no_tests_note(frame, [discovered, filtered, ignored]);
@@ -48,9 +51,21 @@ pub(super) fn exit_word(code: u8) -> &'static [u8] {
     match code {
         0 => b"green",
         1 => b"failed",
+        3 => b"build_failed",
+        2 => b"invocation_error",
         4 => b"no_tests",
+        128..=255 => b"interrupted",
         _ => b"exited",
     }
+}
+
+fn build_failed<const FRAME: usize>(frame: &mut Line<FRAME>, diagnostic: &[u8], exit: u8) {
+    label(frame, b"BUILD");
+    frame.text(b"failed  exit=");
+    frame.number(usize::from(exit));
+    frame.text(b"  ");
+    frame.text(diagnostic);
+    frame.text(b"\n");
 }
 
 pub(super) fn exit_line<const FRAME: usize>(frame: &mut Line<FRAME>, code: u8) {

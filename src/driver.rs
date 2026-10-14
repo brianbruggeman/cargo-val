@@ -951,6 +951,7 @@ struct Reporting<'run, 'storage> {
     policy: &'run RefCell<StopPolicy>,
     doc_failures: &'run Cell<usize>,
     jobs: usize,
+    interrupted: bool,
     render: &'run Render<'storage>,
 }
 
@@ -1057,8 +1058,11 @@ fn deliver<'bytes>(
                     let millis = monotonic_millis().saturating_sub(watch.started_millis);
                     let targets = reporting.targets.borrow();
                     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-                    emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), millis: Some(millis), solo: false })?;
-                    if outcome == TerminalOutcome::Failed {
+                    let withdrawn = reporting.interrupted && reporting.render.0 == OutputMode::Agent;
+                    if !withdrawn {
+                        emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), millis: Some(millis), solo: false })?;
+                    }
+                    if outcome == TerminalOutcome::Failed && !withdrawn {
                         let (stdout, stderr) = watch.output.captured();
                         let exit = watch.status.map_or(Exit::Code(1), Exit::from_status);
                         emit(reporting.render, &Event::Captured { id, stdout, stderr, exit })?;
@@ -1272,6 +1276,7 @@ pub(crate) struct ListingRun<'run> {
     specials: RefCell<SpecialPlan<'run>>,
     sched_target: Cell<Option<usize>>,
     stop_sent: Cell<bool>,
+    interrupt_reported: Cell<bool>,
 }
 
 pub(crate) struct DocObservation<'run> {
@@ -1310,6 +1315,7 @@ impl<'run> ListingRun<'run> {
             policy: &self.policy,
             doc_failures: &self.docs.failed,
             jobs: self.settings.jobs,
+            interrupted: self.interrupted(),
             render: self.docs.render,
         }
     }
@@ -1330,6 +1336,24 @@ impl ListingRun<'_> {
 
     pub(crate) fn drain_signals(&self) -> Result<(), RunError> {
         self.signals.drain().map_err(|_| RunError::Reactor)
+    }
+
+    // agent output names the interrupt once, with every session still alive at that moment, before they are ended
+    pub(crate) fn report_interrupt(&self, ledger: &Ledger<'_>, watches: &Watches) -> Result<(), RunError> {
+        let Some(signal) = self.signals.received() else {
+            return Ok(());
+        };
+        if self.settings.output != OutputMode::Agent || self.interrupt_reported.replace(true) {
+            return Ok(());
+        }
+        let groups = watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot)).count();
+        emit(self.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups })?;
+        let targets = self.targets.borrow();
+        for session in watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot)) {
+            let id = (targets.id(session.target()), session.name_bytes());
+            emit(self.render(), &Event::Running { id })?;
+        }
+        Ok(())
     }
 
     // a forwarded signal only reaches children that honor it, so a per-test child that ignores it is terminated here
@@ -2511,6 +2535,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
+            interrupt_reported: Cell::new(false),
     });
     let mut launch_doc = doc_wanted.then_some(|| {
         let mut doc = spawn_doc_tests(parser, (settings.ignore, settings.output), inherited, directories.as_ref().map(|chosen| &chosen.doc))?;
@@ -2841,10 +2866,19 @@ fn finish_run(
     cargo_exit_code: Option<i32>,
     build_reported: bool,
 ) -> Result<RunSummary, RunError> {
-    interrupted(run.signals)?;
+    if let Err(error) = interrupted(run.signals) {
+        agent_exit(run, error.exit_code())?;
+        return Err(error);
+    }
     if cargo_exit_code.is_some_and(|code| code != 0) {
         run.interrupt_doc_tests();
-        return Err(if build_reported { RunError::CargoFailed } else { RunError::CargoRefused });
+        let error = if build_reported { RunError::CargoFailed } else { RunError::CargoRefused };
+        if build_reported && run.settings.output == OutputMode::Agent {
+            let exit = u8::try_from(error.exit_code()).unwrap_or(u8::MAX);
+            emit(run.render(), &Event::BuildFailed { diagnostic: b"diagnostics on stderr", exit })?;
+        }
+        agent_exit(run, error.exit_code())?;
+        return Err(error);
     }
     let doc_tests = run.finish_doc_tests(parser.doc_selection() == DocSelection::Included)?;
     let stop = run.policy.borrow().report();
@@ -2856,6 +2890,14 @@ fn finish_run(
         stop,
         doc_tests,
     )
+}
+
+// the closing EXIT line of an agent run that ends in an error; every other ending already printed its own
+fn agent_exit(run: &ListingRun<'_>, code: i32) -> Result<(), RunError> {
+    if run.settings.output != OutputMode::Agent {
+        return Ok(());
+    }
+    emit(run.render(), &Event::Exited { code: u8::try_from(code).unwrap_or(u8::MAX) })
 }
 
 fn monotonic_millis() -> u64 {
@@ -3643,6 +3685,7 @@ mod listing_allocation_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
+            interrupt_reported: Cell::new(false),
         };
         let artifact = TestArtifact {
             executable,

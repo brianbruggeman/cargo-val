@@ -382,6 +382,7 @@ fn handle(
         Item::Signal(ready) => {
             ready.map_err(|_| RunError::Reactor)?;
             run.drain_signals()?;
+            run.report_interrupt(ledger, watches)?;
             run.interrupt_sessions(ledger, watches);
             Ok(())
         }

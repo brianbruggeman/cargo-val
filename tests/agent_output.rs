@@ -87,6 +87,11 @@ async fn a_build_error_prints_the_rustc_diagnostic_and_exits_three() {
     assert_eq!(output.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("error[E0308]: mismatched types"), "{stderr}");
     assert!(stderr.replace('\\', "/").contains("src/lib.rs:4:5"), "{stderr}");
+    let report = stdout_of(&output);
+    let lines: Vec<&str> = report.lines().collect();
+    assert_eq!(lines.len(), 3, "header, BUILD, EXIT:\n{report}");
+    assert_eq!(lines[1], "BUILD    failed  exit=3  diagnostics on stderr", "{report}");
+    assert_eq!(lines[2], "EXIT     3  build_failed", "{report}");
     assert_no_escape(&output);
 }
 
