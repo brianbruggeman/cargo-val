@@ -1745,7 +1745,7 @@ mod spawn {
         WINDOWS_BELOW_NORMAL_PRIORITY, WindowsArgumentsError, lower_arguments, windows_creation_flags,
         write_executable_path, write_working_directory,
     };
-    use crate::edge_signal_windows::register_group;
+    use crate::edge_signal_windows::{abandon_group, register_group, reserve_group};
     use crate::edge_spawn_windows::handles::{
         WindowsHandleList, WindowsJob, WindowsJobError, WindowsOwnedHandle,
     };
@@ -2343,6 +2343,10 @@ mod spawn {
             })?;
         let (command_line, environment_block) = lowered.create_process_buffers();
         let group = in_group.then(WindowsJob::new).transpose().map_err(job_error)?;
+        let slot = in_group
+            .then(reserve_group)
+            .transpose()
+            .map_err(|os_code| SpawnError { os_code })?;
         let process = spawn_windows_child_grouped(
             executable_path,
             command_line,
@@ -2350,9 +2354,10 @@ mod spawn {
             &ChildEnvironment::Block(environment_block),
             &working_directory.map_or(ChildWorkingDirectory::Inherit, ChildWorkingDirectory::Borrowed),
             (group.as_ref(), windows_creation_flags()),
-        )?;
-        if let Some(group) = group {
-            register_group(process.process_id(), group.into_raw());
+        )
+        .inspect_err(|_| slot.iter().for_each(|held| abandon_group(*held)))?;
+        if let (Some(group), Some(held)) = (group, slot) {
+            register_group(held, process.process_id(), group.into_raw());
         }
         drop(handle_list);
         let (mut stdout_pipe, mut stderr_pipe) = (stdout_pipe, stderr_pipe);

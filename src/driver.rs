@@ -7,6 +7,7 @@ use core::task::{Context, Poll, Waker};
 use conflaguration::{BorrowedSettings, SettingsSource, resolve_color};
 
 use crate::ExecutablePath;
+use crate::build_defaults::SIGNAL_SLOTS;
 use crate::artifact_stream::{ArtifactFramer, RecordStep};
 use crate::cargo_message::TestArtifact;
 use crate::cargo_source::{CargoSource, CargoSourceStep};
@@ -40,7 +41,7 @@ use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
 use crate::status_queue::{self, EVENT_RESERVE};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
 use crate::edge_signal::{
-    SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group,
+    SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group, TABLE_FULL,
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
 use crate::edge_spawn::{
@@ -169,6 +170,7 @@ pub enum RunError {
     DocTests,
     Spawn,
     Reactor,
+    SignalSlots,
     CargoStream,
     ListingStream,
     Launch(LaunchCause),
@@ -212,6 +214,7 @@ impl RunError {
             Self::DocTests => b"cargo-val: cargo test --doc failed before reporting results\n",
             Self::Spawn => b"cargo-val: child spawn failed\n",
             Self::Reactor => b"cargo-val: reactor operation failed\n",
+            Self::SignalSlots => b"cargo-val: the signal table has no free slot; raise CARGO_VAL_BUILD_SIGNAL_SLOTS and rebuild\n",
             Self::CargoStream => b"cargo-val: cargo output could not be parsed\n",
             Self::ListingStream => b"cargo-val: libtest listing could not be parsed\n",
             Self::Launch(_) => b"cargo-val: exact test launch failed\n",
@@ -237,6 +240,11 @@ impl RunError {
                 line.text(b"cargo-val: exact test launch failed: ");
                 cause.write(&mut line);
                 line.text(b"\n");
+            }
+            Self::SignalSlots => {
+                line.text(b"cargo-val: the signal table holds ");
+                line.number(SIGNAL_SLOTS);
+                line.text(b" children and groups and has no free slot; raise CARGO_VAL_BUILD_SIGNAL_SLOTS and rebuild\n");
             }
             other => line.text(other.message()),
         }
@@ -623,7 +631,7 @@ pub(crate) fn write_fd(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
 }
 
 fn track(target: u32) -> Result<(), RunError> {
-    track_child(target).map_err(|_| RunError::Reactor)
+    track_child(target).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })
 }
 
 // a session's child runs on its own prime lane; its streams and exit arrive as items shaped like the events the outcome ledger already takes
@@ -2699,9 +2707,11 @@ fn spawn_doc_tests(
         IgnoreMode::Only => arguments.push(b"--ignored"),
         IgnoreMode::Include => arguments.push(b"--include-ignored"),
     }
-    let child = spawn_in_group(b"cargo", &arguments, environment, &[], None).map_err(|_| RunError::Spawn)?;
+    let child = spawn_in_group(b"cargo", &arguments, environment, &[], None).map_err(|error| {
+        if error.os_code == TABLE_FULL { RunError::SignalSlots } else { RunError::Spawn }
+    })?;
     let process_id = child.process_id();
-    track_group(process_id).map_err(|_| RunError::Reactor)?;
+    track_group(process_id).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })?;
     if child.lower_priority().is_err() {
         write_fd(2, b"cargo-val: could not lower the doc test priority\n")?;
     }

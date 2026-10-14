@@ -14,12 +14,17 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent};
 
+use crate::build_defaults::SIGNAL_SLOTS;
 use crate::edge_spawn_windows::{STATUS_CONTROL_C_EXIT, terminate_children};
 
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
 const CONVENTIONAL_BASE: i32 = 128;
-const GROUP_CAPACITY: usize = 8;
+const GROUP_CAPACITY: usize = SIGNAL_SLOTS;
+const RESERVED: u32 = u32::MAX;
+
+/// `ERROR_NO_SYSTEM_RESOURCES`, the code a full group table refuses with before any child is spawned.
+pub const TABLE_FULL: i32 = 1450;
 const ERROR_ALREADY_EXISTS: i32 = 183;
 
 // the handler runs on a system thread and can only reach process-global state; 0 means no event is installed
@@ -40,21 +45,33 @@ pub struct SignalPipe {
     interrupt: Signal,
 }
 
+/// Claims a table slot before the group leader is spawned, so a full table refuses the spawn instead of killing the child.
+///
+/// # Errors
+///
+/// Returns [`TABLE_FULL`] when every slot is taken; raise `CARGO_VAL_BUILD_SIGNAL_SLOTS` and rebuild.
+pub(crate) fn reserve_group() -> Result<usize, i32> {
+    GROUP_PROCESSES
+        .iter()
+        .position(|process| {
+            process
+                .compare_exchange(0, RESERVED, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        })
+        .ok_or(TABLE_FULL)
+}
+
+/// Frees a slot claimed by [`reserve_group`] when the spawn that wanted it failed.
+pub(crate) fn abandon_group(slot: usize) {
+    GROUP_PROCESSES[slot].store(0, Ordering::SeqCst);
+}
+
 /// Remembers the nested job that holds the group a child leads, so a later interrupt can end the whole group.
 ///
 /// The slot owns `job` until [`release_group`] closes it.
-pub(crate) fn register_group(process_id: u32, job: HANDLE) {
-    for (process, slot) in GROUP_PROCESSES.iter().zip(&GROUP_JOBS) {
-        if process
-            .compare_exchange(0, process_id, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            slot.store(job as usize, Ordering::SeqCst);
-            return;
-        }
-    }
-    // a full table leaves the group unreachable by interrupt, but the run job still ends it with this process
-    unsafe { CloseHandle(job) };
+pub(crate) fn register_group(slot: usize, process_id: u32, job: HANDLE) {
+    GROUP_JOBS[slot].store(job as usize, Ordering::SeqCst);
+    GROUP_PROCESSES[slot].store(process_id, Ordering::SeqCst);
 }
 
 /// Children join the run job at creation, so there is nothing to register per child.
@@ -207,4 +224,24 @@ unsafe extern "system" fn record_control_event(control: u32) -> i32 {
 
 fn last_error() -> i32 {
     unsafe { GetLastError() }.cast_signed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GROUP_CAPACITY, TABLE_FULL, abandon_group, reserve_group};
+
+    #[test]
+    fn a_full_group_table_refuses_the_reservation_and_an_abandoned_slot_admits_it() {
+        let first = reserve_group().expect("a free slot admits the group");
+        for _ in 1..GROUP_CAPACITY {
+            reserve_group().expect("a free slot admits the group");
+        }
+
+        let refused = reserve_group();
+        abandon_group(first);
+        let admitted = reserve_group();
+
+        assert_eq!(refused, Err(TABLE_FULL));
+        assert_eq!(admitted, Ok(first));
+    }
 }
