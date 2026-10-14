@@ -353,10 +353,7 @@ fn handle(
             Ok(())
         }
         Item::OutEnd(lane) => session_ended(run, ledger, watches, lane - JOB_BASE, true),
-        Item::ErrEnd(CARGO_LANE) => {
-            driver.stderr_ended();
-            Ok(())
-        }
+        Item::ErrEnd(CARGO_LANE) => driver.stderr_ended(),
         Item::ErrEnd(LISTING_LANE) => {
             driver.listing_stderr_ended();
             Ok(())

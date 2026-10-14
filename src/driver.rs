@@ -1658,6 +1658,14 @@ pub(crate) struct CargoDriver<'buffer> {
     diagnostics_reported: bool,
 }
 
+// the byte count of `pending` that ends on a newline, or all of it once the stream has ended with no newline to come
+fn whole_lines_len(pending: &[u8], closed: bool) -> usize {
+    if closed {
+        return pending.len();
+    }
+    memchr::memrchr(b'\n', pending).map_or(0, |newline| newline + 1)
+}
+
 // a coloured run has cargo wrap "error" in SGR sequences, so the prefix only matches once escapes are skipped
 fn begins_build_failure(line: &[u8]) -> bool {
     let mut inside_escape = false;
@@ -2026,7 +2034,7 @@ impl CargoDriver<'_> {
         }
         self.diagnostics_reported = true;
         let withheld = core::mem::take(&mut self.stderr_held);
-        self.emit_stderr(&withheld)
+        self.emit_whole_lines(&withheld)
     }
 
     fn emit_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
@@ -2034,9 +2042,20 @@ impl CargoDriver<'_> {
         announce_lock_wait(&mut self.lock_watch, bytes)
     }
 
+    // cargo writes one line in several pieces, so a piece written whole would let cargo-val's own lines land inside it
+    fn emit_whole_lines(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+        self.stderr_held.extend_from_slice(bytes);
+        let pending = core::mem::take(&mut self.stderr_held);
+        let end = whole_lines_len(&pending, self.discovery.stderr_closed());
+        let emitted = if end == 0 { Ok(()) } else { self.emit_stderr(&pending[..end]) };
+        self.stderr_held = pending;
+        self.stderr_held.drain(..end);
+        emitted
+    }
+
     pub(crate) fn forward_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
         if self.diagnostics_reported {
-            return self.emit_stderr(bytes);
+            return self.emit_whole_lines(bytes);
         }
         self.stderr_held.extend_from_slice(bytes);
         if begins_build_failure(&self.stderr_held) {
@@ -2067,8 +2086,12 @@ impl CargoDriver<'_> {
         self.discovery.exited(code);
     }
 
-    pub(crate) fn stderr_ended(&mut self) {
+    pub(crate) fn stderr_ended(&mut self) -> Result<(), RunError> {
         self.discovery.stderr_eof();
+        if self.diagnostics_reported {
+            return self.emit_whole_lines(&[]);
+        }
+        Ok(())
     }
 
     pub(crate) fn listing_chunk(
@@ -3312,7 +3335,7 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError};
+    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError, whole_lines_len};
 
     fn rendered(cause: LaunchCause) -> std::string::String {
         let line: ErrorLine = RunError::Launch(cause).render();
@@ -3331,6 +3354,33 @@ mod tests {
             panic!("windows accepted exit-with-parent: {refused:?}");
         };
         assert_eq!(error.message(), b"cargo-val: CARGO_VAL_EXIT_WITH_PARENT=on is not supported on windows\n");
+    }
+
+    #[proxima::test]
+    async fn a_cargo_error_line_split_after_its_label_is_held_until_its_newline() {
+        let first_piece = b"error";
+        let second_piece = b": could not compile `bin_gate` (bin \"gate-bin\") due to 1 previous error\n";
+        let mut pending = first_piece.to_vec();
+
+        assert_eq!(whole_lines_len(&pending, false), 0);
+
+        pending.extend_from_slice(second_piece);
+        assert_eq!(whole_lines_len(&pending, false), pending.len());
+    }
+
+    #[proxima::test]
+    async fn a_trailing_partial_line_stays_held_behind_the_whole_lines_before_it() {
+        let pending = b"warning: build failed, waiting for other jobs to finish...\nerror";
+
+        assert_eq!(whole_lines_len(pending, false), pending.len() - b"error".len());
+    }
+
+    #[proxima::test]
+    async fn an_ended_stream_releases_its_unterminated_tail() {
+        let pending = b"error: could not compile `bin_gate`";
+
+        assert_eq!(whole_lines_len(pending, true), pending.len());
+        assert_eq!(whole_lines_len(b"", true), 0);
     }
 
     #[proxima::test]
