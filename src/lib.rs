@@ -241,6 +241,18 @@ pub mod run;
     )
 ))]
 pub(crate) mod status_queue;
+#[cfg(all(
+    feature = "edge-os",
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives",
+    any(
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows"
+    )
+))]
+pub use status_queue::UNPAUSED_QUEUE_BYTES;
 #[cfg(all(feature = "proxima-codec", feature = "proxima-primitives"))]
 pub mod host_event;
 #[cfg(all(

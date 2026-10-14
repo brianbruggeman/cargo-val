@@ -166,14 +166,14 @@ async fn escaped_windows_paths_are_decoded_into_scratch() {
 }
 
 #[proxima::test]
-async fn records_without_a_test_executable_are_ignored() {
+async fn records_without_a_test_executable_are_compile_units_and_nothing_more() {
     let not_test_profile = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","profile":{"test":false},"executable":"/work/a/target/debug/a"}"#;
     let no_executable = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","profile":{"test":true},"executable":null}"#;
     let build_finished = br#"{"reason":"build-finished","success":true}"#;
     let mut scratch = [0_u8; 64];
 
     for record in [&not_test_profile[..], &no_executable[..]] {
-        assert_eq!(parse(record, &mut scratch), Ok(CargoMessage::Ignored));
+        assert_eq!(parse(record, &mut scratch), Ok(CargoMessage::Compiled { fresh: false }));
     }
     assert_eq!(
         parse(build_finished, &mut scratch),
@@ -219,6 +219,16 @@ async fn allocation_probe_detects_a_heap_allocation() {
 }
 
 #[proxima::test]
+async fn a_fresh_flag_is_read_whether_cargo_reused_the_unit_or_compiled_it() {
+    let reused = br#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#memchr.8.3","manifest_path":"/home/dev/.cargo/registry/src/memchr-2.8.3/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"memchr"},"profile":{"test":false},"features":["alloc"],"filenames":["/work/target/debug/deps/libmemchr-0a1b2c.rmeta"],"executable":null,"fresh":true}"#;
+    let compiled = br#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#memchr.8.3","manifest_path":"/home/dev/.cargo/registry/src/memchr-2.8.3/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"memchr"},"profile":{"test":false},"features":["alloc"],"filenames":["/work/target/debug/deps/libmemchr-0a1b2c.rmeta"],"executable":null,"fresh":false}"#;
+    let mut scratch = [0_u8; 512];
+
+    assert_eq!(parse(reused, &mut scratch), Ok(CargoMessage::Compiled { fresh: true }));
+    assert_eq!(parse(compiled, &mut scratch), Ok(CargoMessage::Compiled { fresh: false }));
+}
+
+#[proxima::test]
 async fn a_built_bin_target_is_reported_by_its_package_and_a_bin_unit_test_is_not() {
     let bin = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","target":{"kind":["bin"],"crate_types":["bin"],"name":"a"},"profile":{"test":false},"executable":"/work/a/target/debug/a"}"#;
     let library = br#"{"reason":"compiler-artifact","package_id":"path+file:///work/a#0.1.0","manifest_path":"/work/a/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"a"},"profile":{"test":false},"executable":null}"#;
@@ -232,7 +242,7 @@ async fn a_built_bin_target_is_reported_by_its_package_and_a_bin_unit_test_is_no
             executable: "/work/a/target/debug/a",
         })
     );
-    assert_eq!(parse(library, &mut scratch), Ok(CargoMessage::Ignored));
+    assert_eq!(parse(library, &mut scratch), Ok(CargoMessage::Compiled { fresh: false }));
     assert!(matches!(
         parse(bin_unit_test, &mut scratch),
         Ok(CargoMessage::TestArtifact(_))

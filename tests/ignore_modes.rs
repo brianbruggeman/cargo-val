@@ -4,7 +4,10 @@ use std::time::Duration;
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/plain.rs"]
+mod plain;
 
+use cargo_val::render::Outcome;
 use common::{fixture_output, output_within};
 
 #[cfg(unix)]
@@ -22,6 +25,10 @@ struct Run {
 }
 
 impl Run {
+    fn has(&self, test: &str, outcome: Outcome) -> bool {
+        plain::names(&self.stdout, outcome).iter().any(|name| name == test)
+    }
+
     fn lines_with(&self, prefix: &str) -> Vec<&str> {
         self.stdout
             .lines()
@@ -58,7 +65,7 @@ fn manifest(fixture: &str) -> PathBuf {
 async fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
     let mut command = crate::binary::command();
     command
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", "plain")
         .arg("--manifest-path")
         .arg(manifest_path)
         .args(arguments)
@@ -98,6 +105,8 @@ async fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, 
 }
 
 const BINARY: &str = "ignore_modes: discovered";
+#[cfg(unix)]
+const TEST_NAME: &str = "the_bin_target_exists_when_the_test_starts";
 
 #[proxima::test(timeout = "310s")]
 async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
@@ -111,13 +120,13 @@ async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mo
     let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(1), "{context}");
-    assert!(result.stdout.contains("fixture::passes PASS"), "{context}");
-    assert!(result.stdout.contains("fixture::fails FAIL"), "{context}");
+    assert!(result.has("fixture::passes", Outcome::Passed), "{context}");
+    assert!(result.has("fixture::fails", Outcome::Failed), "{context}");
     assert!(
-        result.stdout.contains("fixture::ignored_with_reason IGNORED"),
+        result.has("fixture::ignored_with_reason", Outcome::Ignored),
         "{context}"
     );
-    assert!(!result.stdout.contains("fixture::ignored_with_reason PASS"), "{context}");
+    assert!(!result.has("fixture::ignored_with_reason", Outcome::Passed), "{context}");
     assert_eq!(
         result.lines_with(BINARY),
         ["ignore_modes: discovered 3, passed 1, failed 1, ignored 1, filtered 0"],
@@ -143,7 +152,7 @@ async fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &
 
     assert_eq!(result.status, Some(0), "{context}");
     assert!(
-        result.stdout.contains("fixture::ignored_with_reason PASS"),
+        result.has("fixture::ignored_with_reason", Outcome::Passed),
         "{context}"
     );
     assert_eq!(
@@ -309,29 +318,24 @@ mod bin_gate_hold {
     use futures::future::join3;
     use proxima_primitives::pipe::Pipe;
 
-    use super::{Run, manifest, target_directory};
+    use super::{Run, TEST_NAME, manifest, target_directory};
     use crate::common::{ChildStream, FIXTURE_DEADLINE, drain, drain_until};
     use crate::supervise::supervised;
 
-    const TEST_NAME: &str = "the_bin_target_exists_when_the_test_starts";
     const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
 
     /// What proves the bin-less window was observed, so the bin build may be released.
     #[derive(Clone, Copy)]
     pub enum Release {
-        /// gate off: the test ran with no bin and said so on stdout.
+        /// gate off: the test settled with no bin; the wait ends on any settle of it, so a mismatch fails at once with what stdout printed.
         AfterTestFails,
         /// gate on: cargo-val is holding the linked test executable for the bin and says so on stderr.
         AfterTestArtifactLinks,
     }
 
-    // a line naming the test with any verdict, so a grammar that words the verdict differently releases the build at once and the caller's assertion reports what was printed, instead of the wait running to its deadline
+    // releases on any verdict the plain grammar prints for the test, so the wait never runs to its deadline when the verdict is not a failure
     fn test_settled(text: &str) -> bool {
-        text.lines().any(|line| line.contains(TEST_NAME) && ["FAIL", "PASS", "IGNORED"].iter().any(|verdict| line.contains(verdict)))
-    }
-
-    pub fn test_failed(text: &str) -> bool {
-        text.lines().any(|line| line.contains(TEST_NAME) && line.contains("FAIL"))
+        crate::plain::settled(text).iter().any(|(_, name, _)| name == TEST_NAME)
     }
 
     fn make_fifo(path: &Path) {
@@ -369,7 +373,7 @@ mod bin_gate_hold {
         make_fifo(&fifo);
         let mut command = crate::binary::command();
         command
-            .env("CARGO_VAL_OUTPUT", "rich")
+            .env("CARGO_VAL_OUTPUT", "plain")
             .arg("--manifest-path")
             .arg(manifest("bin_gate"))
             .env_remove("CARGO_VAL_BIN_GATE")
@@ -383,7 +387,7 @@ mod bin_gate_hold {
         }
         let (status, stdout, stderr) = supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
             let settled: fn(&str) -> bool = test_settled;
-            let parked: fn(&str) -> bool = |text| text.contains(GATE_PARKED_LINE);
+            let parked: fn(&str) -> bool = |text| text.contains(GATE_PARKED_LINE) || text.contains("cargo test build failed");
             let (stdout_proof, stderr_proof) = match release {
                 Release::AfterTestFails => (Some(settled), None),
                 Release::AfterTestArtifactLinks => (None, Some(parked)),
@@ -408,8 +412,7 @@ async fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
     assert_eq!(result.status, Some(0), "{context}");
     assert!(
         result
-            .stdout
-            .contains("the_bin_target_exists_when_the_test_starts PASS"),
+            .has(TEST_NAME, Outcome::Passed),
         "{context}"
     );
 }
@@ -446,7 +449,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
 #[proxima::test(timeout = "310s")]
 async fn the_same_fixture_fails_with_the_bin_gate_off() {
     let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails).await;
-    let failed = bin_gate_hold::test_failed(&result.stdout);
+    let failed = result.has(TEST_NAME, Outcome::Failed);
     println!(
         "{{\"event\":\"bin_gate_off\",\"status\":{:?},\"test_failed_without_the_rule\":{failed}}}",
         result.status
