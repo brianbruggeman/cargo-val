@@ -1,17 +1,19 @@
+use core::cell::Cell;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cargo_val::{ArtifactRecord, ExecutablePath, ParseError, parse_artifact};
 
 struct CountAllocations;
 
-static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
-static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static COUNT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 unsafe impl GlobalAlloc for CountAllocations {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        if COUNT_ALLOCATIONS.try_with(Cell::get).unwrap_or(false) {
+            let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
         }
         unsafe { System.alloc(layout) }
     }
@@ -21,8 +23,8 @@ unsafe impl GlobalAlloc for CountAllocations {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        if COUNT_ALLOCATIONS.try_with(Cell::get).unwrap_or(false) {
+            let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
         }
         unsafe { System.realloc(pointer, layout, size) }
     }
@@ -37,11 +39,11 @@ fn counted_parse<'input, 'scratch>(
     max_record_bytes: usize,
     max_json_depth: usize,
 ) -> (Result<ArtifactRecord<'input, 'scratch>, ParseError>, usize) {
-    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
-    COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+    ALLOCATION_COUNT.with(|count| count.set(0));
+    COUNT_ALLOCATIONS.with(|counting| counting.set(true));
     let result = parse_artifact(line, scratch, max_record_bytes, max_json_depth);
-    COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
-    (result, ALLOCATION_COUNT.load(Ordering::Relaxed))
+    COUNT_ALLOCATIONS.with(|counting| counting.set(false));
+    (result, ALLOCATION_COUNT.with(Cell::get))
 }
 
 fn assert_escaped_and_bounded_parses(scratch: &mut [u8]) {
@@ -168,11 +170,11 @@ fn assert_malformed_and_escaped_field_parses(scratch: &mut [u8]) {
 
 #[proxima::test]
 async fn artifact_records_borrow_decode_and_enforce_caller_bounds() {
-    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
-    COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+    ALLOCATION_COUNT.with(|count| count.set(0));
+    COUNT_ALLOCATIONS.with(|counting| counting.set(true));
     let allocation_control = vec![1_u8];
-    COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
-    assert_eq!(ALLOCATION_COUNT.load(Ordering::Relaxed), 1);
+    COUNT_ALLOCATIONS.with(|counting| counting.set(false));
+    assert_eq!(ALLOCATION_COUNT.with(Cell::get), 1);
     assert_eq!(allocation_control, [1]);
 
     let input = include_str!("../specs/cargo-val/oracles/c2.jsonl");
