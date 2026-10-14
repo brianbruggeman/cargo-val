@@ -2,7 +2,7 @@ use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Context, Poll};
 use std::boxed::Box;
-use std::io;
+use std::io::{self, Write};
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::string::String;
 use std::sync::Once;
@@ -282,38 +282,6 @@ pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
     OutputSink::new(borrowed.try_clone_to_owned()?)
 }
 
-/// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until Windows takes them.
-///
-/// The synchronous twin of [`OutputSink`] for callers with no reactor: callers with no reactor, such as pre-runtime errors in `main`; the run never uses it. A console takes
-/// `WriteConsoleW`, which is synchronous by nature; anything else takes `WriteFile`.
-///
-/// # Errors
-///
-/// Returns the OS error of a failed write, `WriteZero` when the handle accepts no bytes, or `ERROR_INVALID_HANDLE` when the process has no such standard handle.
-pub fn write(descriptor: i32, bytes: &[u8]) -> io::Result<()> {
-    let (slot, which) = match descriptor {
-        STANDARD_OUTPUT => (STD_OUTPUT_HANDLE, 0),
-        STANDARD_ERROR => (STD_ERROR_HANDLE, 1),
-        _ => return Err(io::ErrorKind::InvalidInput.into()),
-    };
-    let handle = unsafe { GetStdHandle(slot) };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::from_raw_os_error(ERROR_INVALID_HANDLE.cast_signed()));
-    }
-    if file_type(handle)? == FILE_TYPE_CHAR && is_console(handle) {
-        return write_console(handle, which, bytes);
-    }
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        let written = write_file(handle, remaining)?;
-        if written == 0 {
-            return Err(io::ErrorKind::WriteZero.into());
-        }
-        remaining = &remaining[written..];
-    }
-    Ok(())
-}
-
 /// Whether `descriptor` (standard output `1` or standard error `2`) is a console: `GetConsoleMode` fails on a pipe or a file.
 #[must_use]
 pub fn is_terminal(descriptor: i32) -> bool {
@@ -399,8 +367,7 @@ fn reopen_overlapped(handle: &OwnedHandle) -> Option<OwnedHandle> {
 
 fn synchronous_with_notice() -> Mode {
     SYNCHRONOUS_NOTICE.call_once(|| {
-        let _ = write(
-            STANDARD_ERROR,
+        let _ = io::stderr().write_all(
             b"cargo-val: the output handle cannot be reopened for overlapped writes; writing synchronously\n",
         );
     });
@@ -474,7 +441,7 @@ mod tests {
 
     #[proxima::test]
     async fn standard_descriptors_outside_one_and_two_are_refused() {
-        let error = super::write(7, b"ignored").expect_err("descriptor 7 is not a standard stream");
+        let error = super::standard(7).map(|_| ()).expect_err("descriptor 7 is not a standard stream");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
