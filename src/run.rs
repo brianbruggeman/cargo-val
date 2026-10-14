@@ -43,8 +43,8 @@ const ARMS: usize = LANES * 3 + 4;
 
 /// One child's stdout and stderr streams, its exit source, and whether its stdout may be read now.
 pub(crate) type Lane = (
-    RefCell<Option<Box<ChildStream>>>,
-    RefCell<Option<Box<ChildStream>>>,
+    RefCell<Option<Rc<ChildStream>>>,
+    RefCell<Option<Rc<ChildStream>>>,
     RefCell<Option<ExitSource>>,
     Cell<bool>,
     RefCell<Option<SignalSource>>,
@@ -76,8 +76,8 @@ pub(crate) fn attach(lane: &Lane, child: Child) -> Result<u32, RunError> {
     let exit = child.exit_source().map_err(|_| RunError::Spawn)?;
     let (process_id, stdout, stderr) = child.into_parts();
     // each stream owns a 20 KiB capture window, too large to sit in the awaited future
-    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(stdout)));
-    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(stderr)));
+    *lane.0.borrow_mut() = Some(Rc::new(ChildStream::new(stdout)));
+    *lane.1.borrow_mut() = Some(Rc::new(ChildStream::new(stderr)));
     *lane.2.borrow_mut() = Some(exit);
     lane.3.set(true);
     Ok(process_id)
@@ -91,8 +91,8 @@ pub(crate) fn attach(lane: &Lane, child: Child) -> Result<u32, RunError> {
 pub(crate) fn attach_session(lane: &Lane, child: &Child, (store, key): (&Rc<Store>, u32)) -> Result<(), RunError> {
     let exit = child.exit_source().map_err(|_| RunError::Spawn)?;
     let (stdout, stderr) = child.duplicate_streams().map_err(|_| RunError::Spawn)?;
-    *lane.0.borrow_mut() = Some(Box::new(ChildStream::with_store(stdout, Rc::clone(store), key)));
-    *lane.1.borrow_mut() = Some(Box::new(ChildStream::with_store(stderr, Rc::clone(store), key + 1)));
+    *lane.0.borrow_mut() = Some(Rc::new(ChildStream::with_store(stdout, Rc::clone(store), key)));
+    *lane.1.borrow_mut() = Some(Rc::new(ChildStream::with_store(stderr, Rc::clone(store), key + 1)));
     *lane.2.borrow_mut() = Some(exit);
     lane.3.set(true);
     Ok(())
@@ -160,7 +160,7 @@ type StreamItems = (usize, fn(usize, io::Result<Range<u32>>) -> Item, fn(usize) 
 
 // the merge swallows Exhausted, so the first one is turned into an item the loop can act on; a gated or empty lane parks
 fn stream_step(
-    slot: &RefCell<Option<Box<ChildStream>>>,
+    slot: &RefCell<Option<Rc<ChildStream>>>,
     wanted: bool,
     context: &mut Context<'_>,
     (id, read, ended): StreamItems,
@@ -486,7 +486,7 @@ fn attach_keys(lane: &Lane) -> Result<(), RunError> {
         return Ok(());
     }
     let stream = crate::edge_output::key_stream(0).map_err(|_| RunError::Reactor)?;
-    *lane.0.borrow_mut() = Some(Box::new(stream));
+    *lane.0.borrow_mut() = Some(Rc::new(stream));
     lane.3.set(true);
     Ok(())
 }
@@ -736,9 +736,10 @@ pub(crate) async fn observe_cargo(
             driver.resume(&lanes, run, ledger, watches)?;
             run.with_doc(|doc, observation| resume_doc(&lanes, doc, observation))?;
             resume_sessions(&lanes, run, ledger, watches)?;
+            run.resume_failures()?;
             lanes[CARGO_LANE].3.set(driver.cargo_open());
             lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
-            Ok(if run.edit_pending() || (driver.finished(run, ledger) && !editor_running()) {
+            Ok(if run.edit_pending() || (driver.finished(run, ledger) && !run.failures_pending() && !editor_running()) {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())

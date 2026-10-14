@@ -26,17 +26,18 @@ use crate::discover_cargo::{BinGate, DiscoveryFsm};
 use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::edge_store;
+use crate::edge_stream::ChildStream;
 use crate::last_run;
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
-use crate::failure_class::Exit;
+use crate::failure_class::{Exit, Location};
 use crate::hyperlink::{editor_template, links_enabled, site_in, write_link};
 use crate::source_excerpt::{colour_allowed, for_failure, for_span, splice_excerpt};
 use crate::render::review::{Action, Key, Rerun as Standing};
-use crate::render::{Event, Mode, Outcome, State, Stream, located};
+use crate::render::{Event, Mode, Outcome, STDERR_STREAM, STDOUT_STREAM, State, Stream, located, stream_close, stream_open, stream_page};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
-    CARGO_LANE, DOC_LANE, EDITOR_LANE, JOB_BASE, KEY_LANE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
+    CARGO_LANE, DOC_LANE, EDITOR_LANE, JOB_BASE, KEY_LANE, LISTING_LANE, Lane, Lanes, attach, attach_session, collect_child, collect_libdir,
     observe_cargo, observe_doc,
 };
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
@@ -76,7 +77,9 @@ use crate::shard_arena::{DECLARED_BYTES, Rerun, ShardArena};
 use crate::shard_sched::{SchedTable, SpecialPlan};
 
 mod shard;
+pub(crate) mod window;
 use shard::ShardWatch;
+use window::{PAGE_BYTES, SYNC_WINDOW_BYTES, WINDOW_BYTES};
 use crate::selection::{NameFilter, Selection};
 use crate::stop::{self, DocAtTrip, StopPolicy, StopReport};
 use crate::test_environment::{
@@ -106,7 +109,6 @@ const LISTING_SLOTS: usize = 2;
 const LIBDIR_CAPACITY: usize = 1024;
 const SOURCE_CAPACITY: usize = 8192;
 const FRAME_CAPACITY: usize = 131_072;
-pub(crate) const CAPTURE_CAPACITY: usize = 4096;
 const RESULT_LINE_CAPACITY: usize = NAME_CAPACITY + 64;
 
 struct Identity {
@@ -393,6 +395,7 @@ pub(crate) struct TestWatch {
     process_id: u32,
     scope: Signal,
     output: ChildOutput,
+    streams: Option<(Rc<ChildStream>, Rc<ChildStream>)>,
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
     group_length: usize,
@@ -420,17 +423,7 @@ impl TestWatch {
     }
 }
 
-struct Truncation {
-    stdout: u64,
-    stderr: u64,
-}
-
 struct ChildOutput {
-    stdout: [u8; CAPTURE_CAPACITY],
-    stderr: [u8; CAPTURE_CAPACITY],
-    stdout_length: usize,
-    stderr_length: usize,
-    truncation: Truncation,
     result_line: [u8; RESULT_LINE_CAPACITY],
     result_line_length: usize,
     result_line_overflow: bool,
@@ -440,14 +433,6 @@ struct ChildOutput {
 impl ChildOutput {
     const fn new() -> Self {
         Self {
-            stdout: [0; CAPTURE_CAPACITY],
-            stderr: [0; CAPTURE_CAPACITY],
-            stdout_length: 0,
-            stderr_length: 0,
-            truncation: Truncation {
-                stdout: 0,
-                stderr: 0,
-            },
             result_line: [0; RESULT_LINE_CAPACITY],
             result_line_length: 0,
             result_line_overflow: false,
@@ -456,13 +441,6 @@ impl ChildOutput {
     }
 
     fn observe_stdout(&mut self, bytes: &[u8]) {
-        let available = CAPTURE_CAPACITY - self.stdout_length;
-        let retained = bytes.len().min(available);
-        self.stdout[self.stdout_length..self.stdout_length + retained]
-            .copy_from_slice(&bytes[..retained]);
-        self.stdout_length += retained;
-        self.truncation.stdout = self.truncation.stdout.saturating_add(u64::try_from(bytes.len() - retained).unwrap_or(u64::MAX));
-
         for &byte in bytes {
             if byte == b'\n' {
                 if !self.result_line_overflow {
@@ -496,21 +474,6 @@ impl ChildOutput {
         }
     }
 
-    fn observe_stderr(&mut self, bytes: &[u8]) {
-        let available = CAPTURE_CAPACITY - self.stderr_length;
-        let retained = bytes.len().min(available);
-        self.stderr[self.stderr_length..self.stderr_length + retained]
-            .copy_from_slice(&bytes[..retained]);
-        self.stderr_length += retained;
-        self.truncation.stderr = self.truncation.stderr.saturating_add(u64::try_from(bytes.len() - retained).unwrap_or(u64::MAX));
-    }
-
-    fn captured(&self) -> (Stream<'_>, Stream<'_>) {
-        (
-            (&self.stdout[..self.stdout_length], self.truncation.stdout),
-            (&self.stderr[..self.stderr_length], self.truncation.stderr),
-        )
-    }
 }
 
 // `test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 716 filtered out; finished in 0.00s`
@@ -731,6 +694,10 @@ pub fn spawn_reserved<Output>(spawn: impl FnOnce() -> Result<Output, RunError>) 
     spawn().inspect_err(|_| abandon_slot())
 }
 
+fn session_streams(lane: &Lane) -> Option<(Rc<ChildStream>, Rc<ChildStream>)> {
+    Some((lane.0.borrow().clone()?, lane.1.borrow().clone()?))
+}
+
 // a session's child runs on its own prime lane; its streams and exit arrive as items shaped like the events the outcome ledger already takes
 fn start_session(
     ledger: &Ledger<'_>,
@@ -753,6 +720,7 @@ fn start_session(
         process_id,
         scope,
         output: ChildOutput::new(),
+        streams: session_streams(&lanes[JOB_BASE + slot.index()]),
         shard,
         group: [0; GROUP_CAPACITY],
         group_length: 0,
@@ -792,7 +760,6 @@ pub(crate) fn session_output(
             }
             HostEvent::Stdout { slot, bytes: piece }
         } else {
-            watch.output.observe_stderr(piece);
             HostEvent::Stderr { slot, bytes: piece }
         };
         let step = deliver(ledger, event, run.reporting(), watch)?;
@@ -957,7 +924,7 @@ fn announce_lock_wait(watch: &mut LockWatch, bytes: &[u8]) -> Result<(), RunErro
 pub(crate) type RenderState<'storage> = State<'storage, RERUN_BYTES>;
 
 /// The run's output mode with the one render state and the frame its projection fills; plain output is `emit` into this.
-pub(crate) type Render<'storage> = (OutputMode, RefCell<RenderState<'storage>>, RefCell<&'storage mut Line<FRAME_BYTES>>);
+pub(crate) type Render<'storage> = (OutputMode, RefCell<RenderState<'storage>>, RefCell<&'storage mut Line<FRAME_BYTES>>, RefCell<Option<Rc<edge_store::Store>>>);
 
 const TIMELINE_COLUMNS: usize = 80;
 const PROJECTED_LINE: usize = NAME_CAPACITY + 2 * 128 + 64;
@@ -979,7 +946,7 @@ pub(crate) fn projected(render: &Render<'_>, event: &Event<'_>) -> Line<PROJECTE
 
 /// Moves the cursor back over the live frame, if one is drawn, so what is written next lands where the frame was.
 pub(crate) fn erase_live(render: &Render<'_>) -> Result<(), RunError> {
-    let (output, state, frame) = render;
+    let (output, state, frame, _) = render;
     let mut frame = frame.borrow_mut();
     let frame: &mut Line<FRAME_BYTES> = &mut frame;
     frame.clear();
@@ -1041,10 +1008,15 @@ const fn redraws_frame(event: &Event<'_>) -> bool {
 
 /// Applies `event` to the render state and writes its projection to standard output; a frame that was too small says so on stderr.
 pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
-    let (output, state, frame) = render;
+    render.1.borrow_mut().apply(event);
+    show(render, event)
+}
+
+// the projection of an event the state already applied
+fn show(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
+    let (output, state, frame, store) = render;
     let (mut state, mut frame) = (state.borrow_mut(), frame.borrow_mut());
     let frame: &mut Line<FRAME_BYTES> = &mut frame;
-    state.apply(event);
     frame.clear();
     let projected = match output {
         OutputMode::Plain | OutputMode::Agent | OutputMode::Json => state.project(event, frame),
@@ -1055,12 +1027,24 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
             if editor_reserved() && redraws_frame(event) {
                 return Ok(());
             }
+            fill_review(&mut state, store);
             let projected = state.project_live(event, frame);
             MOUSE_REPORTING.store(state.mouse_on(), Ordering::SeqCst);
             projected
         }
     };
     flush(frame, projected)
+}
+
+// the review shows the selected failure's output window, read from the run store once per selection into the state's one buffer
+fn fill_review(state: &mut RenderState<'_>, store: &RefCell<Option<Rc<edge_store::Store>>>) {
+    let Some(store) = store.borrow().clone() else {
+        return;
+    };
+    state.fill_window(|view, buffer| match <&mut [u8; WINDOW_BYTES]>::try_from(buffer) {
+        Ok(window) => window::locate(&store, (view, &[]), window),
+        Err(_) => 0,
+    });
 }
 
 fn flush(frame: &Line<FRAME_BYTES>, projected: Result<(), usize>) -> Result<(), RunError> {
@@ -1079,7 +1063,7 @@ fn flush(frame: &Line<FRAME_BYTES>, projected: Result<(), usize>) -> Result<(), 
 
 /// Writes the timeline of the run so far, 80 columns wide, after the closing block or the rich receipt.
 pub(crate) fn emit_timeline(render: &Render<'_>) -> Result<(), RunError> {
-    let (_, state, frame) = render;
+    let (_, state, frame, _) = render;
     let mut frame = frame.borrow_mut();
     let frame: &mut Line<FRAME_BYTES> = &mut frame;
     frame.clear();
@@ -1162,7 +1146,7 @@ pub fn restore_cursor() {
 
 /// Erases the live frame from the screen; plain mode has no frame, so it writes nothing.
 fn erase_frame(render: &Render<'_>) -> Result<(), RunError> {
-    let (output, state, frame) = render;
+    let (output, state, frame, _) = render;
     if *output != OutputMode::Rich {
         return Ok(());
     }
@@ -1294,8 +1278,7 @@ fn deliver<'bytes>(
                 let millis = monotonic_millis().saturating_sub(started);
                 let rerun = if outcome == TerminalOutcome::Passed { Standing::Passed { millis } } else { Standing::Failed { millis } };
                 if outcome == TerminalOutcome::Failed {
-                    let (stdout, stderr) = watch.output.captured();
-                    reporting.run.emit_captured(id, (stdout, stderr), watch.status.map_or(Exit::Code(1), Exit::from_status))?;
+                    reporting.run.emit_failure(id, watch.streams.as_ref(), watch.status.map_or(Exit::Code(1), Exit::from_status))?;
                 }
                 emit(reporting.render, &Event::Reran { id, rerun })?;
                 return Ok(step);
@@ -1305,9 +1288,8 @@ fn deliver<'bytes>(
                 emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
             }
             if outcome == TerminalOutcome::Failed && !withdrawn {
-                let (stdout, stderr) = watch.output.captured();
                 let exit = watch.status.map_or(Exit::Code(1), Exit::from_status);
-                reporting.run.emit_captured(id, (stdout, stderr), exit)?;
+                reporting.run.emit_failure(id, watch.streams.as_ref(), exit)?;
             }
             drop(targets);
             if let Some(target) = target {
@@ -1574,6 +1556,8 @@ pub(crate) struct ListingRun<'run> {
     probe: RefCell<Option<(u32, u64)>>,
     probe_site: RefCell<(Vec<u8>, u32, u32)>,
     probe_output: RefCell<(Vec<u8>, Option<bool>, bool)>,
+    reads: RefCell<&'run mut [u8]>,
+    cursor: Cell<[u64; 5]>,
     root: Signal,
     trip: Signal,
 }
@@ -1626,6 +1610,156 @@ impl ListingRun<'_> {
         let excerpt = for_failure(&self.settings.source_root, colour, &record);
         let rows = excerpt.as_ref().map(Vec::as_slice).map_err(Vec::as_slice);
         emit(self.render(), &Event::Captured { id, stdout, stderr, exit, excerpt: rows })
+    }
+
+    /// Emits a settled failure from its streams: sealed into the run store first, so the store alone holds every byte.
+    ///
+    /// Each projection takes the window of the output it needs from the store through the run's one read buffer; plain output
+    /// queues the whole block and prints it page by page as the output queue has room (see [`ListingRun::resume_failures`]).
+    ///
+    /// # Errors
+    ///
+    /// The error of the output write.
+    pub(crate) fn emit_failure(&self, id: (&[u8], &[u8]), streams: Option<&(Rc<ChildStream>, Rc<ChildStream>)>, exit: Exit) -> Result<(), RunError> {
+        self.emit_shaped(id, streams, exit, |stdout, stderr| (stdout, stderr))
+    }
+
+    /// [`ListingRun::emit_failure`] for a caller that narrows the windows to the part of the output it shows, such as libtest's failure block.
+    ///
+    /// # Errors
+    ///
+    /// The error of the output write.
+    pub(crate) fn emit_shaped(&self, id: (&[u8], &[u8]), streams: Option<&(Rc<ChildStream>, Rc<ChildStream>)>, exit: Exit, shape: impl for<'window> FnOnce(Stream<'window>, Stream<'window>) -> (Stream<'window>, Stream<'window>)) -> Result<(), RunError> {
+        let Some((stdout, stderr)) = streams else {
+            return self.emit_captured(id, ((b"", 0), (b"", 0)), exit);
+        };
+        let views = [stdout.settle(), stderr.settle()];
+        let (tails, seen) = ([stdout.resident(), stderr.resident()], [stdout.seen(), stderr.seen()]);
+        let mut reads = self.reads.borrow_mut();
+        let Some((first, rest)) = reads.split_first_chunk_mut::<WINDOW_BYTES>() else {
+            return self.emit_captured(id, ((&tails[0], seen[0] - tails[0].len() as u64), (&tails[1], seen[1] - tails[1].len() as u64)), exit);
+        };
+        let Some((second, _)) = rest.split_first_chunk_mut::<WINDOW_BYTES>() else {
+            return self.emit_captured(id, ((&tails[0], seen[0] - tails[0].len() as u64), (&tails[1], seen[1] - tails[1].len() as u64)), exit);
+        };
+        let lengths = [
+            window::locate(&self.store, (views[0], &tails[0]), first).min(SYNC_WINDOW_BYTES),
+            window::locate(&self.store, (views[1], &tails[1]), second).min(SYNC_WINDOW_BYTES),
+        ];
+        let windows = ((&first[..lengths[0]], seen[0] - lengths[0] as u64), (&second[..lengths[1]], seen[1] - lengths[1] as u64));
+        let (stdout_window, stderr_window) = shape(windows.0, windows.1);
+        let queued = self.settings.output == OutputMode::Plain && windows.0 == stdout_window && windows.1 == stderr_window && tails.iter().all(|tail| tail.is_empty()) && views.iter().any(|view| view.3 != 0);
+        let resume = self.emit_windows(id, (stdout_window, stderr_window), exit, (views, queued))?;
+        drop(reads);
+        if resume { self.resume_failures() } else { Ok(()) }
+    }
+
+    fn emit_windows(&self, id: (&[u8], &[u8]), (stdout, stderr): (Stream<'_>, Stream<'_>), exit: Exit, (views, queued): ([edge_store::View; 2], bool)) -> Result<bool, RunError> {
+        let colour = self.settings.output == OutputMode::Rich && self.settings.color && colour_allowed();
+        let record = located(stdout, stderr, exit);
+        let excerpt = for_failure(&self.settings.source_root, colour, &record);
+        let rows = excerpt.as_ref().map(Vec::as_slice).map_err(Vec::as_slice);
+        let event = Event::Captured { id, stdout, stderr, exit, excerpt: rows };
+        if !queued {
+            emit(self.render(), &event)?;
+            self.render().1.borrow_mut().keep_views(id, views);
+            return Ok(false);
+        }
+        self.render().1.borrow_mut().apply(&event);
+        let kept = {
+            let mut state = self.render().1.borrow_mut();
+            state.keep_views(id, views);
+            state.queue_block(id)
+        };
+        if kept {
+            self.cursor.set([0; 5]);
+            return Ok(true);
+        }
+        show(self.render(), &event)?;
+        Ok(false)
+    }
+
+    /// Whether a failure block still waits for output queue room.
+    pub(crate) fn failures_pending(&self) -> bool {
+        self.render().1.borrow().pending_block().is_some()
+    }
+
+    /// Prints the queued failure blocks, one frame at a time while the output queue has room; the pump resumes it when the queue drains.
+    ///
+    /// A block is the GitHub group line, each non-empty stream as a fenced run of its store pages, then the source excerpt.
+    /// Pages go through the run's one read page and the render frame, so a block of any size costs no allocation.
+    ///
+    /// # Errors
+    ///
+    /// The error of the output write.
+    pub(crate) fn resume_failures(&self) -> Result<(), RunError> {
+        loop {
+            let Some(index) = self.render().1.borrow().pending_block() else {
+                return Ok(());
+            };
+            if !status_queue::room_for(PAGE_BYTES + EVENT_RESERVE) {
+                status_queue::defer();
+                return Ok(());
+            }
+            if self.step_block(index)? {
+                self.render().1.borrow_mut().finish_block(index);
+                self.cursor.set([0; 5]);
+            }
+        }
+    }
+
+    // stage 0 opens the block, each stream is three stages (open, pages, close) from stage 1 and 4, and stage 7 closes the block
+    fn step_block(&self, index: usize) -> Result<bool, RunError> {
+        let (_, state, frame, _) = self.render();
+        let (state, mut frame) = (state.borrow(), frame.borrow_mut());
+        let frame: &mut Line<FRAME_BYTES> = &mut frame;
+        let ((id, views), links, excerpt) = (state.block_at(index), state.block_links(index), state.block_excerpt(index));
+        frame.clear();
+        let section = self.cursor.get()[0];
+        match section {
+            0 => {
+                state.captured_open(frame, id);
+                self.cursor.set([1, 0, 0, 0, 1]);
+            }
+            7 => {
+                state.captured_close(frame, id, excerpt);
+                flush(frame, Ok(()))?;
+                return Ok(true);
+            }
+            _ => self.step_stream(frame, id, (section, views[usize::try_from((section - 1) / 3).unwrap_or(0)]), links)?,
+        }
+        flush(frame, Ok(()))?;
+        Ok(false)
+    }
+
+    fn step_stream(&self, frame: &mut Line<FRAME_BYTES>, id: (&[u8], &[u8]), (stage, (_, first, last, total)): (u64, edge_store::View), links: (&[u8], &[u8], Option<Location<'_>>)) -> Result<(), RunError> {
+        let [_, previous, position, printed, newline_ended] = self.cursor.get();
+        let name = if stage < 4 { STDOUT_STREAM } else { STDERR_STREAM };
+        match (stage - 1) % 3 {
+            0 if total == 0 => self.cursor.set([stage + 3, 0, 0, 0, 1]),
+            0 => {
+                stream_open(frame, id, name);
+                self.cursor.set([stage + 1, 0, first, 0, 1]);
+            }
+            1 => {
+                let mut reads = self.reads.borrow_mut();
+                let page = reads.last_chunk_mut::<PAGE_BYTES>().ok_or(RunError::Outcome)?;
+                match edge_store::next_page(&self.store, (previous, position), page) {
+                    Ok((at, length)) => {
+                        stream_page(frame, &page[..length], links);
+                        let ended = u64::from(page[..length].last().is_none_or(|byte| *byte == b'\n'));
+                        let after = (at, at + (edge_store::HEADER_BYTES + length) as u64, printed + length as u64);
+                        self.cursor.set([if at == last { stage + 1 } else { stage }, after.0, after.1, after.2, ended]);
+                    }
+                    Err(_) => self.cursor.set([stage + 1, previous, position, printed, newline_ended]),
+                }
+            }
+            _ => {
+                stream_close(frame, name, (newline_ended != 0, total.saturating_sub(printed)));
+                self.cursor.set([stage + 1, 0, 0, 0, 1]);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) const fn signals(&self) -> &SignalPipe {
@@ -3264,17 +3398,15 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let settings = runtime_settings(&environment, &harness, parser)?;
     let mut storage = run_storage(settings.process, timeline_arena_bytes(settings.output, parser.timeline()));
     let storage = &mut storage;
-    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots, timeline_slots)) = storage;
+    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots, timeline_slots), (read_storage, review_window)) = storage;
     let link_directory = absolute_directory(&settings.source_root);
     let link_template = settings.link_template.as_deref().unwrap_or("");
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_timeline(timeline_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color).with_links(link_template.as_bytes(), link_directory.as_bytes())), RefCell::new(frame_line));
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_timeline(timeline_slots).with_window(review_window).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color).with_links(link_template.as_bytes(), link_directory.as_bytes())), RefCell::new(frame_line), RefCell::new(None));
     emit_begin(&render, &settings, &environment, started_millis)?;
     if settings.output == OutputMode::Rich {
         begin_rich(&render, settings.mouse == Some(true))?;
     }
-    let inherited_count = environment
-        .collect(inherited)
-        .map_err(|_| RunError::Environment)?;
+    let inherited_count = environment.collect(inherited).map_err(|_| RunError::Environment)?;
     let inherited = &inherited[..inherited_count];
     let configured_target = utf8_variable(&environment, b"CARGO_VAL_TARGET_DIR")?;
     let target_pairs = [("CARGO_VAL_TARGET_DIR", configured_target.unwrap_or(""))];
@@ -3312,9 +3444,11 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let prepared = held(settings.filterset.as_ref().map(Filterset::prepare));
     let doc_wanted = parser.doc_selection() == DocSelection::Included;
     let root = Signal::new();
+    let store = open_store(&render, location.as_deref());
     let run = held(ListingRun {
         signals: &signals,
-        store: Rc::new(edge_store::open(location.as_deref())),
+        store: Rc::clone(&store),
+        reads: RefCell::new(read_storage), cursor: Cell::new([0; 5]),
         filter,
         exact: parser.exact(),
         targets: RefCell::new(TargetTable::new()),
@@ -3382,6 +3516,7 @@ type RunStorage<'environment> = (
     ),
     (Box<[u8]>, Box<[u8]>, Box<[u32]>),
     (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>, Box<[u8]>, Box<[u8]>),
+    (Box<[u8]>, Box<[u8]>),
 );
 
 // run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup: the cargo and listing buffers, the session tables, and the render frame, failure ledger and name arena
@@ -3408,7 +3543,15 @@ fn run_storage<'environment>(process: ProcessMode, timeline_bytes: usize) -> Run
             ProcessMode::Test => (zeroed(0), zeroed(crate::build_defaults::SCHED_RECORD_BYTES), std::vec::Vec::new().into_boxed_slice()),
         },
         (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame(), zeroed(crate::view_defaults::INFLIGHT_BYTES), zeroed(timeline_bytes)),
+        (zeroed(2 * WINDOW_BYTES + PAGE_BYTES), zeroed(WINDOW_BYTES)),
     )
+}
+
+// the review reads its windows from the same store the sessions seal into
+fn open_store(render: &Render<'_>, target: Option<&Path>) -> Rc<edge_store::Store> {
+    let store = Rc::new(edge_store::open(target));
+    *render.3.borrow_mut() = Some(Rc::clone(&store));
+    store
 }
 
 // rich keeps the arena for the review `s` key; plain only when --timeline asked for the view
@@ -4646,11 +4789,13 @@ mod listing_allocation_tests {
         let mut arena = [0_u8; 64];
         let mut ledger = [0_u32; 4];
         let mut frame = crate::line::Line::new();
-        let render = (crate::config::OutputMode::Rich, RefCell::new(super::RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+        let render = (crate::config::OutputMode::Rich, RefCell::new(super::RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame), RefCell::new(None));
         let root = Signal::new();
         let run = ListingRun {
             signals: &signals,
             store: std::rc::Rc::new(crate::edge_store::unavailable()),
+            reads: RefCell::new(&mut []),
+            cursor: Cell::new([0; 5]),
             filter: "",
             exact: false,
             targets: RefCell::new(TargetTable::new()),
@@ -4802,7 +4947,7 @@ mod close_sequence_tests {
             let _capture = Capture::enter();
             let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 4]);
             let mut frame = Line::<FRAME_BYTES>::new();
-            let live: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+            let live: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame), RefCell::new(None));
             emit(&live, &begin()).expect("begin draws the first frame");
             emit(&live, &Event::Tick { now_ms: 250 }).expect("a tick redraws the frame");
             erase_frame(&live).expect("the close erases the frame");
@@ -4854,7 +4999,7 @@ mod close_sequence_tests {
             let _capture = Capture::enter();
             let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 4]);
             let mut frame = Line::<FRAME_BYTES>::new();
-            let live: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+            let live: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame), RefCell::new(None));
             emit(&live, &begin()).expect("begin draws the first frame");
             erase_live(&live).expect("the editor launch erases the frame");
             EDITOR_RESERVED.store(true, Ordering::SeqCst);

@@ -23,7 +23,16 @@ type Review<'storage> = State<'storage, 400>;
 
 fn tracked<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32]) -> Review<'storage> {
     let inflight: &'static mut [u8] = std::boxed::Box::leak(vec![0_u8; 512].into_boxed_slice());
-    State::new(arena, ledger).with_inflight(inflight)
+    let window: &'static mut [u8] = std::boxed::Box::leak(vec![0_u8; 512].into_boxed_slice());
+    State::new(arena, ledger).with_inflight(inflight).with_window(window)
+}
+
+fn loaded(state: &mut Review<'_>) {
+    state.fill_window(|(key, ..), buffer| {
+        let output = if key == 8 { SCHED_OUTPUT } else { SHARD_OUTPUT };
+        buffer[..output.len()].copy_from_slice(output);
+        output.len()
+    });
 }
 
 fn detail(id: Identity<'_>) -> Detail<'static> {
@@ -53,6 +62,7 @@ fn run_with_excerpt<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [
     for (id, millis, output) in [(SCHED, 71_660, SCHED_OUTPUT), (SHARD, 120_030, SHARD_OUTPUT)] {
         settle(&mut state, id, Outcome::Failed, millis);
         state.apply(&Event::Captured { id, stdout: (output, 0), stderr: (b"", 0), exit: if id == SCHED { Exit::DeadlineKilled } else { Exit::Code(101) }, excerpt: if id == SHARD { shard_rows } else { UNREAD } });
+        state.keep_views(id, [(if id == SCHED { 8 } else { 7 }, 1, 1, output.len() as u64), (0, 0, 0, 0)]);
         state.apply(&Event::Retried { id, verdict: NOT_RETRIED });
     }
     state.apply(&Event::Tick { now_ms: CLOCK_MS });
@@ -63,6 +73,7 @@ fn keys(state: &mut Review<'_>, pressed: &[Key]) {
     for key in pressed {
         state.apply(&Event::Key(*key));
     }
+    loaded(state);
 }
 
 fn scenario<'storage>(name: &str, arena: &'storage mut [u8], ledger: &'storage mut [u32]) -> Review<'storage> {
@@ -535,15 +546,15 @@ fn ten_thousand_decodes_lane_chunks_projections_and_details_allocate_nothing() {
             state.project_live(&Event::Key(key), &mut frame).expect("the frame holds a review projection");
             projections += 1;
 
-            let (_, _, _, _, output) = state.detail(if round % 2 == 0 { SCHED } else { SHARD });
-            detail_bytes += output.len();
+            loaded(&mut state);
+            detail_bytes += state.detail(SCHED).4.len() + state.detail(SHARD).4.len();
             details += 1;
         }
     });
 
     assert_eq!((frames, events, decodes, projections, details), (10_000, 10_000, 10_000, 10_000, 10_000), "every loop ran, so a zero is not an empty loop");
     assert_eq!(keys_seen, 10_000, "five split reads yield five keys, so 10k rounds yield 10k keys through the carry");
-    assert_eq!(detail_bytes, 5_000 * SCHED_OUTPUT.len() + 5_000 * SHARD_OUTPUT.len(), "the real detail returned the retained capture each time");
+    assert!(detail_bytes > 0 && detail_bytes <= 10_000 * SHARD_OUTPUT.len(), "the detail returned the loaded window of the selected failure only: {detail_bytes}");
     assert_eq!(allocations, 0);
     assert!(frame.bytes().len() > 200, "the last projection is a drawn screen");
 }
@@ -653,11 +664,14 @@ fn a_sink_error_stops_the_decode_and_is_returned() {
 #[test]
 fn the_state_keeps_each_failures_output_and_classifies_it_for_the_detail_view() {
     let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
-    let state = run(&mut arena, &mut ledger, 1);
+    let mut state = run(&mut arena, &mut ledger, 1);
+    keys(&mut state, &[Key::Char(b'f')]);
 
-    assert_eq!(state.detail(SHARD), detail(SHARD), "a panic keeps its class, its line and its bytes");
+    let (class, location, reason, rows, _) = state.detail(SHARD);
+    let expected = detail(SHARD);
+    assert_eq!((class, location, reason, rows), (expected.0, expected.1, expected.2, expected.3), "a panic keeps its class, its line and its reason in the arena");
     let (class, _, _, _, output) = state.detail(SCHED);
-    assert_eq!((class, output), (Class::Timeout { enforced_by: Enforcer::Val }, SCHED_OUTPUT), "a val deadline keeps its class and its bytes");
+    assert_eq!((class, output), (Class::Timeout { enforced_by: Enforcer::Val }, SCHED_OUTPUT), "a val deadline keeps its class, and the review loads its bytes from the store");
 }
 
 const LONG_OUTPUT: &[u8] = b"\nrunning 1 test\ntest tests::settles_failing ... FAILED\n\nfailures:\n\n---- tests::settles_failing stdout ----\n\nthread 'tests::settles_failing' panicked at src/lib.rs:11:9:\nassertion `left == right` failed: expected three listeners, found [8080, 8443]\n  left: 2\n right: 3\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::settles_failing\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
@@ -887,7 +901,7 @@ fn the_state_classifies_a_signal_death_and_a_silent_deadline_kill_without_a_pani
         settle(&mut state, SCHED, Outcome::Failed, 5_000);
         state.apply(&Event::Captured { id: SCHED, stdout: (capture, 0), stderr: (b"", 0), exit, excerpt: UNREAD });
 
-        assert_eq!(state.detail(SCHED), (expected, None, (&b""[..], None), &b""[..], capture), "{name}");
+        assert_eq!(state.detail(SCHED), (expected, None, (&b""[..], None), &b""[..], &b""[..]), "{name}");
         checked += 1;
     }
     assert_eq!(checked, 3);
@@ -1070,6 +1084,7 @@ fn live_frame(state: &Review<'_>, width: usize) -> String {
 }
 
 fn redraw(state: &mut Review<'_>, width: usize) -> Vec<String> {
+    loaded(state);
     let mut frame = Line::<8192>::new();
     state.project_live(&Event::Tick { now_ms: CLOCK_MS }, &mut frame).expect("the frame holds a review projection");
     let rows = u16::try_from(live_frame(state, width).matches('\n').count()).expect("a review frame has few rows");

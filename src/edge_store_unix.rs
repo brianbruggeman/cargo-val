@@ -8,7 +8,7 @@ use std::process;
 use std::string::ToString;
 
 const MAGIC: &[u8; 8] = b"CVRUN001";
-const HEADER_BYTES: usize = 12;
+pub const HEADER_BYTES: usize = 12;
 const DIRECTORY: &str = "cargo-val";
 const RUN_DIRECTORY: &str = "run";
 const DATA_FILE: &str = "data";
@@ -120,6 +120,32 @@ pub fn read_page(store: &Store, offset: u64, page: &mut [u8]) -> io::Result<(u64
     let window = page.get_mut(..length).ok_or(io::ErrorKind::InvalidData)?;
     file.read_exact_at(window, offset + HEADER_BYTES as u64)?;
     Ok((previous, length))
+}
+
+/// Reads the next page of a chain walked forward from its first page, into the caller's `page`, and returns `(offset, bytes read)`.
+///
+/// Pages carry only a back link, so the walk steps over the other streams' pages by length: `(previous, cursor)` is the last
+/// page of this chain read so far (0 before the first) and where the next page header can start (the chain's first page before
+/// the first). The page whose back link is `previous` is this chain's; the next call passes `(offset, offset + HEADER_BYTES + bytes)`.
+///
+/// # Errors
+///
+/// `NotConnected` for a memory-only store, `UnexpectedEof` when the walk passes the end of the store without finding the page,
+/// `InvalidData` when a page is longer than `page`, or the OS read error.
+pub fn next_page(store: &Store, (previous, cursor): (u64, u64), page: &mut [u8]) -> io::Result<(u64, usize)> {
+    let file = store.0.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+    let mut offset = cursor;
+    while offset < store.1.get() {
+        let mut header = [0_u8; HEADER_BYTES];
+        file.read_exact_at(&mut header, offset)?;
+        let back = u64::from_le_bytes(<[u8; 8]>::try_from(&header[..8]).map_err(|_| io::ErrorKind::InvalidData)?);
+        if back == previous {
+            return read_page(store, offset, page).map(|(_, length)| (offset, length));
+        }
+        let length = u64::from(u32::from_le_bytes(<[u8; 4]>::try_from(&header[8..]).map_err(|_| io::ErrorKind::InvalidData)?));
+        offset += HEADER_BYTES as u64 + length;
+    }
+    Err(io::ErrorKind::UnexpectedEof.into())
 }
 
 /// Counts `bytes` as lost and, the first time only, says so on stderr; the caller keeps draining.
