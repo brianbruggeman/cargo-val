@@ -6,7 +6,7 @@
 //! Colour roles are the terminal's own 16 ANSI colours; without colour the bars keep their state as glyph textures.
 
 use crate::line::Line;
-use crate::render::{Event, Identity, Mode, State, excerpt};
+use crate::render::{Event, Identity, Mode, State, excerpt, review};
 use crate::view_defaults::{BAR_COLUMNS, INFLIGHT_ROWS};
 
 const GREEN: &[u8] = b"\x1b[32m";
@@ -238,6 +238,12 @@ impl<const RERUN: usize> State<'_, RERUN> {
         if self.shows_screen() {
             return self.project_screen(event, frame);
         }
+        if self.mouse_on() {
+            self.mouse = Some(false);
+            self.origin = 0;
+            self.hover = false;
+            frame.text(review::MOUSE_OFF);
+        }
         match *event {
             Event::Tick { .. } if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
             Event::Begin { .. } | Event::Previous { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
@@ -267,11 +273,20 @@ impl<const RERUN: usize> State<'_, RERUN> {
     }
 
     fn project_review<const FRAME: usize>(&mut self, frame: &mut Line<FRAME>) -> Result<(), usize> {
+        let previous = self.drawn_rows;
         self.erase_rich(frame);
+        if self.mouse == Some(false) {
+            self.mouse = Some(true);
+            frame.text(review::MOUSE_ON);
+        }
         let before = frame.bytes().len();
         let drawn = self.screen(|id| self.detail(id), usize::from(self.cols), self.color, frame);
         let rows = memchr::memchr_iter(b'\n', &frame.bytes()[before..]).count();
         self.drawn_rows = u16::try_from(rows).unwrap_or(u16::MAX);
+        if self.mouse_on() && (self.drawn_rows != previous || self.origin == 0) {
+            self.origin = 0;
+            frame.text(review::CURSOR_QUERY);
+        }
         drawn
     }
 
