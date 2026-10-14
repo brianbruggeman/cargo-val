@@ -110,6 +110,11 @@ pub enum CargoMessage<'text> {
         /// the uplifted path such as `/repo/target/debug/parser`, which cargo reports once it is linked.
         executable: &'text str,
     },
+    /// A `compiler-artifact` that is neither a test executable nor a `bin`: one more compile unit done.
+    Compiled {
+        /// true when cargo reused the unit from a previous build instead of compiling it.
+        fresh: bool,
+    },
     /// `build-finished`: cargo will emit no further artifacts.
     BuildFinished {
         /// false when a unit failed to build.
@@ -364,6 +369,7 @@ struct Fields<'input> {
     linked_paths: Option<Span>,
     environment: Option<Span>,
     success: Option<bool>,
+    fresh: Option<bool>,
     level: Option<Slot<'input>>,
     rendered: Option<Slot<'input>>,
 }
@@ -428,6 +434,8 @@ fn read_fields<'input>(json: &mut Json<'input, '_>) -> Result<Fields<'input>, Pa
             json.read_target(&mut fields)?;
         } else if text_equals(key, b"message") {
             json.read_message(&mut fields)?;
+        } else if text_equals(key, b"fresh") {
+            fields.fresh = Some(read_success(json)?);
         } else if text_equals(key, b"success") {
             if fields.success.is_some() {
                 return Err(ParseError::InvalidJson);
@@ -515,11 +523,11 @@ pub fn parse_cargo_message<'text>(
     match fields.reason {
         Some(Reason::CompilerArtifact) if fields.test_profile => {
             let Some(executable) = fields.executable else {
-                return Ok(CargoMessage::Ignored);
+                return Ok(CargoMessage::Compiled { fresh: fields.fresh == Some(true) });
             };
             let executable = resolve(scratch, executable)?;
             if executable.is_empty() {
-                return Ok(CargoMessage::Ignored);
+                return Ok(CargoMessage::Compiled { fresh: fields.fresh == Some(true) });
             }
             let package_id = fields.package_id.ok_or(ParseError::MissingArtifactField)?;
             let manifest_path = fields
@@ -546,7 +554,7 @@ pub fn parse_cargo_message<'text>(
                     package_id: resolve(scratch, package_id)?,
                     executable: resolve(scratch, executable)?,
                 }),
-                _ => Ok(CargoMessage::Ignored),
+                _ => Ok(CargoMessage::Compiled { fresh: fields.fresh == Some(true) }),
             }
         }
         Some(Reason::BuildFinished) => Ok(CargoMessage::BuildFinished {
