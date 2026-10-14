@@ -234,15 +234,44 @@ impl<const RERUN: usize> State<'_, RERUN> {
     ///
     /// Returns the bytes cut when the frame buffer was too small.
     pub fn project_live<const FRAME: usize>(&mut self, event: &Event<'_>, frame: &mut Line<FRAME>) -> Result<(), usize> {
+        if self.shows_screen() {
+            return self.project_screen(event, frame);
+        }
         match *event {
-            Event::Tick { .. } if self.mode == Mode::Running => self.project_rich(self.color, frame),
+            Event::Tick { .. } if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
             Event::Begin { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
+            Event::Key(_) if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
             Event::Captured { .. } | Event::Warned { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Finished { .. } => {
                 self.erase_rich(frame);
                 self.project(event, frame)
             }
             Event::Tick { .. } | Event::Previous { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Running { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
         }
+    }
+
+    const fn shows_screen(&self) -> bool {
+        matches!(self.mode, Mode::Review { .. } | Mode::Timeline { .. } | Mode::Find { .. } | Mode::Skipped { .. } | Mode::Warnings { .. })
+    }
+
+    /// While a review screen owns the terminal, input and ledger events redraw it and everything else waits for the close.
+    fn project_screen<const FRAME: usize>(&mut self, event: &Event<'_>, frame: &mut Line<FRAME>) -> Result<(), usize> {
+        match *event {
+            Event::Key(_) | Event::Tick { .. } | Event::Reran { .. } | Event::Retried { .. } | Event::Resize { .. } => self.project_review(frame),
+            Event::Interrupted { .. } | Event::BuildFailed { .. } => {
+                self.erase_rich(frame);
+                self.project(event, frame)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn project_review<const FRAME: usize>(&mut self, frame: &mut Line<FRAME>) -> Result<(), usize> {
+        self.erase_rich(frame);
+        let before = frame.bytes().len();
+        let drawn = self.screen(|id| self.detail(id), usize::from(self.cols), self.color, frame);
+        let rows = memchr::memchr_iter(b'\n', &frame.bytes()[before..]).count();
+        self.drawn_rows = u16::try_from(rows).unwrap_or(u16::MAX);
+        drawn
     }
 
     /// Moves the cursor back over the live frame and clears it, so the closing block replaces it in scrollback.

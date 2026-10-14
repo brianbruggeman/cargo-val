@@ -47,7 +47,7 @@ fn run<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], passed:
     }
     for (id, millis, output) in [(SCHED, 71_660, SCHED_OUTPUT), (SHARD, 120_030, SHARD_OUTPUT)] {
         settle(&mut state, id, Outcome::Failed, millis);
-        state.apply(&Event::Captured { id, stdout: (output, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
+        state.apply(&Event::Captured { id, stdout: (output, 0), stderr: (b"", 0), exit: if id == SCHED { Exit::DeadlineKilled } else { Exit::Code(101) }, excerpt: UNREAD });
         state.apply(&Event::Retried { id, verdict: NOT_RETRIED });
     }
     state.apply(&Event::Tick { now_ms: CLOCK_MS });
@@ -520,4 +520,34 @@ fn ten_thousand_review_frames_and_ten_thousand_key_events_allocate_nothing() {
     assert_eq!((frames, events), (10_000, 10_000), "the loops ran, so a zero is not an empty loop");
     assert_eq!(allocations, 0);
     assert!(frame.bytes().len() > 200, "the last frame is a drawn screen");
+}
+
+#[test]
+fn terminal_reads_decode_to_the_keys_the_review_table_names() {
+    let reads: [(&[u8], &[Key]); 8] = [
+        (b"j", &[Key::Char(b'j')]),
+        (b"qq", &[Key::Char(b'q'), Key::Char(b'q')]),
+        (b"\r", &[Key::Enter]),
+        (b"\x1b", &[Key::Esc]),
+        (b"\x1b[A\x1b[B", &[Key::Up, Key::Down]),
+        (b"\x1bOB", &[Key::Down]),
+        (b"\x03", &[Key::CtrlC]),
+        (b"\x1b[1;5C\xc3\xa9\x00", &[]),
+    ];
+
+    for (bytes, expected) in reads {
+        let mut decoded = Vec::new();
+        Key::decode(bytes, |key| decoded.push(key));
+        assert_eq!(decoded, expected, "read {bytes:?}");
+    }
+}
+
+#[test]
+fn the_state_keeps_each_failures_output_and_classifies_it_for_the_detail_view() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let state = run(&mut arena, &mut ledger, 1);
+
+    assert_eq!(state.detail(SHARD), detail(SHARD), "a panic keeps its class, its line and its bytes");
+    let (class, _, output) = state.detail(SCHED);
+    assert_eq!((class, output), (Class::Timeout { enforced_by: Enforcer::Val }, SCHED_OUTPUT), "a val deadline keeps its class and its bytes");
 }

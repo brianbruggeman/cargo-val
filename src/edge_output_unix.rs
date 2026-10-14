@@ -1,10 +1,12 @@
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Context, Poll};
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::OnceLock;
 
 use libc::c_int;
 use prime::os::readiness::{Readiness, ReadyState};
@@ -15,6 +17,9 @@ use crate::line::Line;
 
 const LINE_CAPACITY: usize = 512;
 const TTY_NAME_BYTES: usize = 256;
+
+static SAVED_MODE: OnceLock<libc::termios> = OnceLock::new();
+static RAW_ON: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "linux")]
 const SEND_FLAGS: c_int = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
@@ -222,6 +227,64 @@ pub fn is_terminal(descriptor: i32) -> bool {
     let character_device = unsafe { libc::fstat(descriptor, &raw mut status) } == 0
         && status.st_mode & libc::S_IFMT == libc::S_IFCHR;
     character_device && unsafe { libc::isatty(descriptor) } == 1
+}
+
+/// Puts the terminal on `descriptor` into key-at-a-time mode: no line buffering, no echo, `Enter` arrives as `\r`.
+///
+/// Signals stay enabled, so `Ctrl-C` still raises the interrupt the run already handles. The original mode is saved
+/// once and [`leave_raw_mode`] puts it back; returns whether the terminal is now raw.
+#[must_use]
+pub fn enter_raw_mode(descriptor: i32) -> bool {
+    // safety: tcgetattr fills a local termios and the descriptor is a plain integer; a non-terminal reports an error.
+    let mut mode: libc::termios = unsafe { core::mem::zeroed() };
+    if unsafe { libc::tcgetattr(descriptor, &raw mut mode) } != 0 {
+        return false;
+    }
+    let saved = *SAVED_MODE.get_or_init(|| mode);
+    let mut raw = saved;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::IEXTEN);
+    raw.c_iflag &= !(libc::ICRNL | libc::IXON);
+    // safety: tcsetattr reads a fully initialised local termios.
+    let applied = unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &raw const raw) } == 0;
+    RAW_ON.store(applied, Ordering::SeqCst);
+    applied
+}
+
+/// Restores the mode [`enter_raw_mode`] saved, exactly once per entry, from any exit path.
+pub fn leave_raw_mode(descriptor: i32) {
+    if !RAW_ON.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(saved) = SAVED_MODE.get() {
+        // safety: tcsetattr reads the termios the terminal itself reported at entry.
+        unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, saved) };
+    }
+}
+
+/// A readable, nonblocking key source over the terminal behind `descriptor`.
+///
+/// The terminal is reopened rather than duplicated: `O_NONBLOCK` lives on the open file description, and the standard
+/// descriptors share one with the output the frame is written to. Composes [`ChildStream`](crate::edge_stream::ChildStream),
+/// the readiness-gated reader every child pipe already uses, so keys merge into the run's `FanIn` like any other lane.
+///
+/// # Errors
+///
+/// Returns the OS error when the descriptor has no terminal name or the terminal cannot be opened.
+pub fn key_stream(descriptor: i32) -> io::Result<crate::edge_stream::ChildStream> {
+    let mut name = [0 as libc::c_char; TTY_NAME_BYTES];
+    // safety: ttyname_r writes at most name.len() bytes into the local buffer.
+    let status = unsafe { libc::ttyname_r(descriptor, name.as_mut_ptr(), name.len()) };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status));
+    }
+    let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+    // safety: name is the NUL-terminated path ttyname_r just wrote.
+    let opened = unsafe { libc::open(name.as_ptr(), flags) };
+    if opened < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // safety: open returned a fresh descriptor this call now owns.
+    Ok(crate::edge_stream::ChildStream::new(unsafe { OwnedFd::from_raw_fd(opened) }))
 }
 
 fn file_mode(descriptor: &OwnedFd) -> io::Result<libc::mode_t> {

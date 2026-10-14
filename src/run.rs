@@ -22,16 +22,18 @@ use crate::edge_signal::SignalPipe;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, emit, monotonic_millis, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, emit, keys_raw, monotonic_millis, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
+use crate::render::review::Key;
 use crate::status_queue::{self, Capture, Sinks};
 
 pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
 pub(crate) const DOC_LANE: usize = 2;
-pub(crate) const JOB_BASE: usize = 3;
+pub(crate) const KEY_LANE: usize = 3;
+pub(crate) const JOB_BASE: usize = 4;
 const LANES: usize = JOB_BASE + LIVE_CAPACITY;
 const TICK_MS: u64 = crate::view_defaults::TICK_MS as u64;
 const ARMS: usize = LANES * 3 + 4;
@@ -385,6 +387,7 @@ fn handle(
             let range = range.map_err(|_| RunError::CargoStream)?;
             driver.cargo_chunk(lanes, range, 0, run, ledger)
         }
+        Item::Out(KEY_LANE, range) => keys_chunk(lanes, range, run),
         Item::Out(LISTING_LANE, range) => {
             let range = range.map_err(|_| RunError::ListingStream)?;
             driver.listing_chunk(lanes, range, 0, run, ledger, watches)
@@ -412,6 +415,7 @@ fn handle(
             driver.listing_stdout_ended();
             Ok(())
         }
+        Item::OutEnd(KEY_LANE) | Item::Interrupt => Ok(()),
         Item::OutEnd(lane) => session_ended(run, ledger, watches, lane - JOB_BASE, true),
         Item::ErrEnd(CARGO_LANE) => driver.stderr_ended(run.render()),
         Item::ErrEnd(LISTING_LANE) => {
@@ -441,13 +445,36 @@ fn handle(
             session_cancelled(ledger, watches, lane - JOB_BASE);
             Ok(())
         }
-        Item::Interrupt => Ok(()),
         Item::Tick => {
             #[cfg(windows)]
             run.refresh_width()?;
             emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })
         }
     }
+}
+
+fn attach_keys(lane: &Lane) -> Result<(), RunError> {
+    if !keys_raw() {
+        return Ok(());
+    }
+    let stream = crate::edge_output::key_stream(0).map_err(|_| RunError::Reactor)?;
+    *lane.0.borrow_mut() = Some(Box::new(stream));
+    lane.3.set(true);
+    Ok(())
+}
+
+fn keys_chunk(lanes: &Lanes, range: io::Result<Range<u32>>, run: &ListingRun<'_>) -> Result<(), RunError> {
+    let range = range.map_err(|_| RunError::Reactor)?;
+    let slot = lanes[KEY_LANE].0.borrow();
+    let stream = slot.as_deref().ok_or(RunError::Reactor)?;
+    let bytes = stream.window(range).ok_or(RunError::Reactor)?;
+    let mut outcome = Ok(());
+    Key::decode(&bytes, |key| {
+        if outcome.is_ok() {
+            outcome = run.key(key);
+        }
+    });
+    outcome
 }
 
 // a window the status queue could not take whole stays on the lane, whose gate closes until `resume_doc` finishes it
@@ -661,6 +688,7 @@ pub(crate) async fn observe_cargo(
 ) -> Result<(), RunError> {
     let lanes = Box::new(empty_lanes());
     attach(&lanes[CARGO_LANE], child)?;
+    attach_keys(&lanes[KEY_LANE])?;
     let signal = RefCell::new(run.signal_gate()?);
     let interrupt = run.interrupt_source();
     let beat = Beat::new(None);

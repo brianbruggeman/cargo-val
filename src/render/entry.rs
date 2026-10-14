@@ -6,7 +6,7 @@
 
 use super::review::{Rerun, Verdict};
 
-pub(super) const TAIL: usize = 38;
+pub(super) const TAIL: usize = 46;
 const VERDICT: usize = 0;
 const BUDGET: usize = 1;
 const RERUN: usize = 5;
@@ -14,6 +14,7 @@ const FIRST: usize = 6;
 const SECOND: usize = 14;
 const CLEARED: usize = 22;
 const LINES: usize = 30;
+const PAYLOAD: usize = 38;
 
 fn get(tail: &[u8], at: usize) -> u64 {
     let mut word = [0_u8; 8];
@@ -31,6 +32,14 @@ pub(super) fn lines(tail: &[u8]) -> usize {
 
 pub(super) fn set_lines(tail: &mut [u8], lines: usize) {
     put(tail, LINES, u64::try_from(lines).unwrap_or(u64::MAX));
+}
+
+pub(super) fn payload(tail: &[u8]) -> usize {
+    usize::try_from(get(tail, PAYLOAD)).unwrap_or(usize::MAX)
+}
+
+pub(super) fn set_payload(tail: &mut [u8], length: usize) {
+    put(tail, PAYLOAD, u64::try_from(length).unwrap_or(u64::MAX));
 }
 
 pub(super) fn cleared_at(tail: &[u8]) -> u64 {
