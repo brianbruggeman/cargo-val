@@ -33,8 +33,8 @@ fn run_with_failure() -> Result<(), String> {
     let mut ledger = [0_u32; FAILURES];
     let mut inflight = [0_u8; INFLIGHT_BYTES];
     let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
-    show(&mut state, Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true })?;
-    show(&mut state, Event::Listed { binaries: 19, tests: 383 })?;
+    show(&mut state, Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true, at_ms: 0 })?;
+    show(&mut state, Event::Listed { binaries: 19, of: Some(19), tests: 383 })?;
     show(&mut state, Event::Started { id: PASSING, solo: false, at_ms: 1_000, limit_ms: None })?;
     show(&mut state, Event::Started { id: FAILING, solo: false, at_ms: 1_200, limit_ms: Some(120_000) })?;
     show(&mut state, Event::Tick { now_ms: 11_000 })?;
@@ -49,7 +49,7 @@ fn run_clean() -> Result<(), String> {
     let mut arena = [0_u8; NAME_BYTES];
     let mut ledger = [0_u32; FAILURES];
     let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
-    show(&mut state, Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false })?;
+    show(&mut state, Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, at_ms: 0 })?;
     show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
     show(&mut state, finished(0))
 }

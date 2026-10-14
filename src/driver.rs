@@ -1,6 +1,7 @@
 //! One poll-driven owner of Cargo discovery, libtest listings, and child outcomes.
 
 use core::cell::{Cell, RefCell};
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::ops::Range;
 use core::task::{Context, Poll, Waker};
 
@@ -52,7 +53,6 @@ use crate::edge_spawn::{
 };
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
-use crate::reporter::write_report;
 use crate::runner::{
     LaunchCause, LibtestVerdict, RunningChild, LaunchInput, LaunchOwner,
     ChildOutcomeError, OutcomeInput, OutcomeStep,
@@ -479,24 +479,6 @@ impl ChildOutput {
             (&self.stderr[..self.stderr_length], self.truncation.stderr),
         )
     }
-
-    fn write_failure(&self) -> Result<(), RunError> {
-        if self.stdout_length != 0 {
-            write_fd(2, b"stdout:\n")?;
-            write_fd(2, &self.stdout[..self.stdout_length])?;
-            if self.truncation.stdout {
-                write_fd(2, b"\n[stdout truncated]\n")?;
-            }
-        }
-        if self.stderr_length != 0 {
-            write_fd(2, b"stderr:\n")?;
-            write_fd(2, &self.stderr[..self.stderr_length])?;
-            if self.truncation.stderr {
-                write_fd(2, b"\n[stderr truncated]\n")?;
-            }
-        }
-        Ok(())
-    }
 }
 
 // `test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 716 filtered out; finished in 0.00s`
@@ -846,15 +828,7 @@ fn settled(
     step: OutcomeStep<'_>,
 ) -> Result<bool, RunError> {
     match step {
-        OutcomeStep::Reported { outcome, .. } => {
-            if outcome == TerminalOutcome::Failed
-                && let Some(watch) = watches[index].as_ref()
-            {
-                match run.settings.output {
-                    OutputMode::Rich => watch.output.write_failure()?,
-                    OutputMode::Plain => {}
-                }
-            }
+        OutcomeStep::Reported { .. } => {
             watches[index] = None;
             Ok(true)
         }
@@ -916,14 +890,76 @@ pub(crate) fn projected(render: &Render<'_>, event: &Event<'_>) -> Line<PROJECTE
     line
 }
 
+/// Moves the cursor back over the live frame, if one is drawn, so what is written next lands where the frame was.
+pub(crate) fn erase_live(render: &Render<'_>) -> Result<(), RunError> {
+    let (output, state, frame) = render;
+    let mut frame = frame.borrow_mut();
+    let frame: &mut Line<FRAME_BYTES> = &mut frame;
+    frame.clear();
+    if *output == OutputMode::Rich {
+        state.borrow_mut().erase_rich(frame);
+    }
+    if frame.bytes().is_empty() {
+        return Ok(());
+    }
+    write_fd(1, frame.bytes())
+}
+
+/// Writes bytes a shard child kept for the terminal; a rich run erases its live frame first so nothing lands mid-frame.
+pub(crate) fn emit_kept(render: &Render<'_>, bytes: &[u8]) -> Result<(), RunError> {
+    erase_live(render)?;
+    write_fd(1, bytes)
+}
+
+const STATUS_WORDS: [&[u8]; 14] = [
+    b"Compiling", b"Fresh", b"Finished", b"Blocking", b"Checking", b"Building", b"Downloading", b"Downloaded", b"Updating", b"Locking", b"Adding", b"Documenting", b"Running", b"Dirty",
+];
+
+const LOCK_WAIT: &[u8] = b"waiting for file lock on ";
+
+fn is_status_line(line: &[u8]) -> bool {
+    STATUS_WORDS.iter().any(|word| {
+        let mut seen = visible(line).skip_while(|byte| *byte == b' ');
+        seen.by_ref().take(word.len() + 1).eq(word.iter().copied().chain(core::iter::once(b' ')))
+    })
+}
+
+// a rich run shows cargo's progress in the frame, so status lines are consumed; anything else erases the frame and prints
+fn summarize_status_lines(bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let length = memchr::memchr(b'\n', rest).map_or(rest.len(), |newline| newline + 1);
+        let (line, after) = rest.split_at(length);
+        rest = after;
+        if !is_status_line(line) {
+            erase_live(render)?;
+            write_fd(2, line)?;
+            continue;
+        }
+        if let Some(at) = memchr::memmem::find(line, LOCK_WAIT) {
+            let lock = line[at + LOCK_WAIT.len()..].trim_ascii_end();
+            emit(render, &Event::Waiting { lock })?;
+        }
+    }
+    Ok(())
+}
+
 /// Applies `event` to the render state and writes its projection to standard output; a frame that was too small says so on stderr.
 pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
-    let (_, state, frame) = render;
+    let (output, state, frame) = render;
     let (mut state, mut frame) = (state.borrow_mut(), frame.borrow_mut());
     let frame: &mut Line<FRAME_BYTES> = &mut frame;
     state.apply(event);
     frame.clear();
-    let projected = state.project(event, frame);
+    let projected = match output {
+        OutputMode::Plain => state.project(event, frame),
+        OutputMode::Rich => {
+            if matches!(event, Event::Begin { .. }) {
+                CURSOR_HIDDEN.store(true, Ordering::SeqCst);
+            }
+            state.project_live(event, frame)
+        }
+    };
     if !frame.bytes().is_empty() {
         write_fd(1, frame.bytes())?;
     }
@@ -935,6 +971,42 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
     notice.number(lost);
     notice.text(b" bytes\n");
     write_fd(2, notice.bytes())
+}
+
+/// Emits an event that only the live frame shows; plain output already prints its totals once, at the close.
+pub(crate) fn emit_live(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
+    if render.0 == OutputMode::Rich {
+        return emit(render, event);
+    }
+    Ok(())
+}
+
+/// Set once the live frame hides the cursor; [`restore_cursor`] shows it again exactly once on any exit path.
+static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+/// Shows the cursor if the live frame hid it; safe to call from the panic hook, the interrupt path and the normal exit.
+pub fn restore_cursor() {
+    if CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
+        let _ = crate::edge_output::write(1, SHOW_CURSOR);
+    }
+}
+
+/// Erases the live frame from the screen and shows the cursor; plain mode has no frame, so it writes nothing.
+fn erase_frame(render: &Render<'_>) -> Result<(), RunError> {
+    let (output, state, frame) = render;
+    if *output != OutputMode::Rich {
+        return Ok(());
+    }
+    let mut frame = frame.borrow_mut();
+    frame.clear();
+    state.borrow_mut().erase_rich(&mut **frame);
+    if !frame.bytes().is_empty() {
+        write_fd(1, frame.bytes())?;
+    }
+    restore_cursor();
+    Ok(())
 }
 
 /// Where a finished test's counters and color choice live.
@@ -1042,24 +1114,17 @@ fn deliver<'bytes>(
         _ => RunError::Outcome,
     })?;
     match step {
-        OutcomeStep::Reported {
-            outcome,
-            report_bytes,
-        } => {
+        OutcomeStep::Reported { outcome, .. } => {
             reporting.settle_ready(ledger);
-            match reporting.render.0 {
-                OutputMode::Plain => {
-                    let name = &report[..name_length.saturating_sub(1)];
-                    let targets = reporting.targets.borrow();
-                    let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-                    emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
-                    if outcome == TerminalOutcome::Failed {
-                        let (stdout, stderr) = watch.output.captured();
-                        emit(reporting.render, &Event::Captured { id, stdout, stderr })?;
-                    }
-                }
-                OutputMode::Rich => write_fd(1, &report[..name_length + report_bytes])?,
+            let name = &report[..name_length.saturating_sub(1)];
+            let targets = reporting.targets.borrow();
+            let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+            emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
+            if outcome == TerminalOutcome::Failed {
+                let (stdout, stderr) = watch.output.captured();
+                emit(reporting.render, &Event::Captured { id, stdout, stderr })?;
             }
+            drop(targets);
             if let Some(target) = target {
                 reporting.targets.borrow_mut().tally(
                     target,
@@ -1229,14 +1294,10 @@ fn launch_listed(
     }
     run.targets.borrow_mut().tally(target, Tally::Launched);
     start_session(ledger, watches, scan.lanes, slot, None)?;
-    match run.settings.output {
-        OutputMode::Plain => {
-            let targets = run.targets.borrow();
-            let id = (targets.id(target), intent.test_name().as_bytes());
-            emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
-        }
-        OutputMode::Rich => {}
-    }
+    let targets = run.targets.borrow();
+    let id = (targets.id(target), intent.test_name().as_bytes());
+    emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
+    drop(targets);
     shard::note_group(run, watches, slot.index(), intent.test_name());
     Ok(())
 }
@@ -1319,7 +1380,19 @@ impl ListingRun<'_> {
     }
 
     pub(crate) fn drain_signals(&self) -> Result<(), RunError> {
-        self.signals.drain().map_err(|_| RunError::Reactor)
+        self.signals.drain().map_err(|_| RunError::Reactor)?;
+        if self.signals.take_resized() {
+            self.refresh_width()?;
+        }
+        Ok(())
+    }
+
+    // the width is data the render state is told, never queried inside it
+    pub(crate) fn refresh_width(&self) -> Result<(), RunError> {
+        match (self.settings.output, crate::edge_output::columns(1)) {
+            (OutputMode::Rich, Some(cols)) => emit(self.render(), &Event::Resize { cols }),
+            _ => Ok(()),
+        }
     }
 
     // a forwarded signal only reaches children that honor it, so a per-test child that ignores it is terminated here
@@ -1402,10 +1475,10 @@ impl ListingRun<'_> {
 
     pub(crate) fn with_doc(
         &self,
-        act: impl FnOnce(&mut DocRun, bool, &DocObservation<'_>) -> Result<(), RunError>,
+        act: impl FnOnce(&mut DocRun, &DocObservation<'_>) -> Result<(), RunError>,
     ) -> Result<(), RunError> {
         match self.doc.borrow_mut().as_mut() {
-            Some(doc) => act(doc, self.settings.color, &self.docs),
+            Some(doc) => act(doc, &self.docs),
             None => Ok(()),
         }
     }
@@ -1468,14 +1541,10 @@ impl ListingScan<'_, '_> {
                 run.targets.borrow_mut().tally(self.target, Tally::Filtered);
             }
             ListingSourceStep::IgnoredTest(name) => {
-                match run.settings.output {
-                    OutputMode::Plain => {
-                        let targets = run.targets.borrow();
-                        let id = (targets.id(self.target), name.as_bytes());
-                        emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
-                    }
-                    OutputMode::Rich => report_skipped(name, run.settings.color)?,
-                }
+                let targets = run.targets.borrow();
+                let id = (targets.id(self.target), name.as_bytes());
+                emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
+                drop(targets);
                 ledger.record_ignored().map_err(|_| RunError::Outcome)?;
                 run.targets.borrow_mut().tally(self.target, Tally::Ignored);
             }
@@ -1485,16 +1554,6 @@ impl ListingScan<'_, '_> {
         }
         Ok(Flow::Next)
     }
-}
-
-fn report_skipped(name: &str, color: bool) -> Result<(), RunError> {
-    let mut report = [0; NAME_CAPACITY + 34];
-    let name_length = name.len().min(NAME_CAPACITY);
-    report[..name_length].copy_from_slice(&name.as_bytes()[..name_length]);
-    report[name_length] = b' ';
-    let label = write_report(&[TerminalOutcome::Ignored], color, &mut report[name_length + 1..])
-        .map_err(|_| RunError::Outcome)?;
-    write_fd(1, &report[..name_length + 1 + label])
 }
 
 fn feed_ignored_lines(
@@ -1663,6 +1722,9 @@ pub(crate) struct CargoDriver<'buffer> {
     diagnostics: Vec<u8>,
     stderr_held: Vec<u8>,
     diagnostics_reported: bool,
+    built: u16,
+    listed_binaries: usize,
+    test_targets: Option<usize>,
 }
 
 // the byte count of `pending` that ends on a newline, or all of it once the stream has ended with no newline to come
@@ -1674,18 +1736,20 @@ fn whole_lines_len(pending: &[u8], closed: bool) -> usize {
 }
 
 // a coloured run has cargo wrap "error" in SGR sequences, so the prefix only matches once escapes are skipped
-fn begins_build_failure(line: &[u8]) -> bool {
+fn visible(line: &[u8]) -> impl Iterator<Item = u8> {
     let mut inside_escape = false;
-    line.iter()
-        .copied()
-        .filter(move |&byte| {
-            if inside_escape {
-                inside_escape = !byte.is_ascii_alphabetic();
-                return false;
-            }
-            inside_escape = byte == 0x1b;
-            !inside_escape
-        })
+    line.iter().copied().filter(move |&byte| {
+        if inside_escape {
+            inside_escape = !byte.is_ascii_alphabetic();
+            return false;
+        }
+        inside_escape = byte == 0x1b;
+        !inside_escape
+    })
+}
+
+fn begins_build_failure(line: &[u8]) -> bool {
+    visible(line)
         .take(BUILD_FAILURE_PREFIX.len())
         .eq(BUILD_FAILURE_PREFIX.iter().copied())
 }
@@ -1799,6 +1863,11 @@ fn start_listing(
     spawn_listing(artifact, run, linked.as_str(), build_script, slot, environments).map(Some)
 }
 
+fn note_built(built: &mut u16, run: &ListingRun<'_>) -> Result<(), RunError> {
+    *built = built.saturating_add(1);
+    emit_live(run.render(), &Event::Built { done: *built, total: None })
+}
+
 pub(crate) type Ledger<'ledger> =
     OutcomeLedger<'ledger, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>;
 pub(crate) type Watches = [Option<TestWatch>];
@@ -1898,6 +1967,32 @@ impl CargoDriver<'_> {
         }
     }
 
+    fn build_finished(
+        &mut self,
+        success: bool,
+        (run, ledger, lanes): (&ListingRun<'_>, &Ledger<'_>, &Lanes),
+    ) -> Result<(), RunError> {
+        emit_live(run.render(), &Event::Built { done: self.built, total: Some(self.built) })?;
+        let (event, reason): (&[u8], &'static [u8]) = if success {
+            (b" build-finished success=true", b"build-succeeded")
+        } else {
+            (b" build-finished success=false", b"build-failed")
+        };
+        debug_build_end(run.settings.debug, event, self.parked.len());
+        self.discovery.build_finished(success);
+        self.report_diagnostics(success, run.render())?;
+        self.finishing = true;
+        self.reason = reason;
+        self.release_parked(run, ledger, lanes)
+    }
+
+    fn note_listed(&mut self, run: &ListingRun<'_>) -> Result<(), RunError> {
+        self.listed_binaries += 1;
+        let total = self.test_targets.map(|found| found.max(self.listed_binaries));
+        let tests = run.targets.borrow().total().discovered;
+        emit_live(run.render(), &Event::Listed { binaries: self.listed_binaries, of: total, tests })
+    }
+
     /// Parses one lent chunk of Cargo stdout, or the end-of-stream drain when `eof`, acting on every record it completes while a listing slot is free.
     /// Returns how many chunk bytes were consumed.
     fn advance(
@@ -1937,6 +2032,7 @@ impl CargoDriver<'_> {
             let progressed = consumed > 0 || ready_before;
             match step {
                 CargoSourceStep::Artifact(artifact) => {
+                    note_built(&mut self.built, run)?;
                     let gated = matches!(artifact.target_kind, "test" | "bench")
                         && self.discovery.waits(artifact.package_id);
                     debug_artifact(run.settings.debug, gated, self.discovery.gate(), &artifact);
@@ -1955,29 +2051,19 @@ impl CargoDriver<'_> {
                         self.queue_listing(started, lanes)?;
                     }
                 }
+                CargoSourceStep::Compiled { .. } => note_built(&mut self.built, run)?,
                 CargoSourceStep::BinBuilt {
                     package_id,
                     executable,
                 } => {
+                    note_built(&mut self.built, run)?;
                     debug_bin_built(run.settings.debug, executable, package_id);
                     self.discovery.bin_built(package_id);
                     self.reason = b"bin-built";
                     self.release_parked(run, ledger, lanes)?;
                 }
                 CargoSourceStep::Diagnostic { level, rendered } => keep_diagnostic(&mut self.diagnostics, level, rendered),
-                CargoSourceStep::BuildFinished { success } => {
-                    let (event, reason): (&[u8], &'static [u8]) = if success {
-                        (b" build-finished success=true", b"build-succeeded")
-                    } else {
-                        (b" build-finished success=false", b"build-failed")
-                    };
-                    debug_build_end(run.settings.debug, event, self.parked.len());
-                    self.discovery.build_finished(success);
-                    self.report_diagnostics(success)?;
-                    self.finishing = true;
-                    self.reason = reason;
-                    self.release_parked(run, ledger, lanes)?;
-                }
+                CargoSourceStep::BuildFinished { success } => self.build_finished(success, (run, ledger, lanes))?,
                 CargoSourceStep::BuildScript(script) => {
                     for reported in script.linked_paths.iter() {
                         self.linked
@@ -1993,7 +2079,7 @@ impl CargoDriver<'_> {
                 | CargoSourceStep::Ignored => {}
                 CargoSourceStep::Eof => {
                     self.discovery.stdout_eof();
-                    self.report_diagnostics(false)?;
+                    self.report_diagnostics(false, run.render())?;
                     debug_build_end(run.settings.debug, b" stdout-eof", self.parked.len());
                     self.finishing = true;
                     self.reason = b"stdout-eof";
@@ -2031,9 +2117,10 @@ impl CargoDriver<'_> {
         self.cargo_eof = true;
     }
 
-    fn report_diagnostics(&mut self, success: bool) -> Result<(), RunError> {
+    fn report_diagnostics(&mut self, success: bool, render: &Render<'_>) -> Result<(), RunError> {
         let held = core::mem::take(&mut self.diagnostics);
         if !success && !held.is_empty() {
+            erase_live(render)?;
             write_fd(2, &held)?;
             if held.len() >= DIAGNOSTIC_CAPACITY {
                 write_fd(2, b"cargo-val: compiler diagnostics were truncated\n")?;
@@ -2041,38 +2128,41 @@ impl CargoDriver<'_> {
         }
         self.diagnostics_reported = true;
         let withheld = core::mem::take(&mut self.stderr_held);
-        self.emit_whole_lines(&withheld)
+        self.emit_whole_lines(&withheld, render)
     }
 
-    fn emit_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+    fn emit_stderr(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
+        if render.0 == OutputMode::Rich {
+            return summarize_status_lines(bytes, render);
+        }
         write_fd(2, bytes)?;
         announce_lock_wait(&mut self.lock_watch, bytes)
     }
 
     // cargo writes one line in several pieces, so a piece written whole would let cargo-val's own lines land inside it
-    fn emit_whole_lines(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+    fn emit_whole_lines(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
         self.stderr_held.extend_from_slice(bytes);
         let pending = core::mem::take(&mut self.stderr_held);
         let end = whole_lines_len(&pending, self.discovery.stderr_closed());
-        let emitted = if end == 0 { Ok(()) } else { self.emit_stderr(&pending[..end]) };
+        let emitted = if end == 0 { Ok(()) } else { self.emit_stderr(&pending[..end], render) };
         self.stderr_held = pending;
         self.stderr_held.drain(..end);
         emitted
     }
 
-    pub(crate) fn forward_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+    pub(crate) fn forward_stderr(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
         if self.diagnostics_reported {
-            return self.emit_whole_lines(bytes);
+            return self.emit_whole_lines(bytes, render);
         }
         self.stderr_held.extend_from_slice(bytes);
         if begins_build_failure(&self.stderr_held) {
             return Ok(());
         }
-        self.release_ahead_of_failure()
+        self.release_ahead_of_failure(render)
     }
 
     // cargo's failure summary must follow rustc's rendered diagnostics, which arrive on the other pipe; lines before it stream through.
-    fn release_ahead_of_failure(&mut self) -> Result<(), RunError> {
+    fn release_ahead_of_failure(&mut self, render: &Render<'_>) -> Result<(), RunError> {
         let pending = core::mem::take(&mut self.stderr_held);
         let mut start = 0;
         while let Some(newline) = memchr::memchr(b'\n', &pending[start..]) {
@@ -2080,7 +2170,7 @@ impl CargoDriver<'_> {
             if begins_build_failure(&pending[start..end]) {
                 break;
             }
-            self.emit_stderr(&pending[start..end])?;
+            self.emit_stderr(&pending[start..end], render)?;
             start = end;
         }
         self.stderr_held = pending;
@@ -2093,10 +2183,10 @@ impl CargoDriver<'_> {
         self.discovery.exited(code);
     }
 
-    pub(crate) fn stderr_ended(&mut self) -> Result<(), RunError> {
+    pub(crate) fn stderr_ended(&mut self, render: &Render<'_>) -> Result<(), RunError> {
         self.discovery.stderr_eof();
         if self.diagnostics_reported {
-            return self.emit_whole_lines(&[]);
+            return self.emit_whole_lines(&[], render);
         }
         Ok(())
     }
@@ -2362,6 +2452,7 @@ impl CargoDriver<'_> {
             return Ok(false);
         }
         self.active = None;
+        self.note_listed(run)?;
         if let Some(next) = self.pending_listing.take() {
             self.begin_listing(next, lanes)?;
         }
@@ -2395,6 +2486,26 @@ fn watch_parent() -> Result<(), RunError> {
     Err(RunError::Settings)
 }
 
+fn emit_begin(render: &Render<'_>, settings: &Settings, environment: &Environment, at_ms: u64) -> Result<(), RunError> {
+    emit(
+        render,
+        &Event::Begin {
+            version: env!("CARGO_PKG_VERSION").as_bytes(),
+            shard: settings.process == ProcessMode::Shard,
+            jobs: settings.jobs,
+            github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
+            at_ms,
+        },
+    )
+}
+
+fn begin_rich(render: &Render<'_>) -> Result<(), RunError> {
+    if !crate::edge_output::enable_virtual_terminal(1) {
+        return Err(RunError::Settings);
+    }
+    emit(render, &Event::Resize { cols: crate::edge_output::columns(1).unwrap_or(80) })
+}
+
 /// Runs the whole cargo-val run: setup, the awaited prime loop, and the summary.
 ///
 /// # Errors
@@ -2411,18 +2522,10 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms)), RefCell::new(frame_line));
-    match settings.output {
-        OutputMode::Plain => emit(
-            &render,
-            &Event::Begin {
-                version: env!("CARGO_PKG_VERSION").as_bytes(),
-                shard: settings.process == ProcessMode::Shard,
-                jobs: settings.jobs,
-                github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
-            },
-        )?,
-        OutputMode::Rich => {}
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color)), RefCell::new(frame_line));
+    emit_begin(&render, &settings, &environment, started_millis)?;
+    if settings.output == OutputMode::Rich {
+        begin_rich(&render)?;
     }
     let inherited_count = environment
         .collect(inherited)
@@ -2445,11 +2548,13 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         directories,
         bins,
         gate,
+        test_targets,
         lock_watch,
     } = start_children(parser, &settings, target_mode, inherited).await?;
     let cargo_process_id = cargo_child.process_id();
     let shared_directory = lock_watch.directory().to_vec();
-    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?;
+    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, test_targets, lock_watch)?;
+    emit_live(&render, &Event::Listed { binaries: 0, of: test_targets, tests: 0 })?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .await
@@ -2570,6 +2675,7 @@ fn new_driver(
     process_id: u32,
     bins: BinCounts,
     gate: BinGate,
+    test_targets: Option<usize>,
     lock_watch: LockWatch,
 ) -> Result<Box<CargoDriver<'_>>, RunError> {
     Ok(Box::new(CargoDriver {
@@ -2597,6 +2703,9 @@ fn new_driver(
         diagnostics: Vec::new(),
         stderr_held: Vec::new(),
         diagnostics_reported: false,
+        built: 0,
+        listed_binaries: 0,
+        test_targets,
     }))
 }
 
@@ -2631,6 +2740,7 @@ struct StartedChildren {
     directories: Option<BuildDirectories>,
     bins: BinCounts,
     gate: BinGate,
+    test_targets: Option<usize>,
     lock_watch: LockWatch,
 }
 
@@ -2642,7 +2752,7 @@ async fn start_children(
     environment: &[&[u8]],
 ) -> Result<StartedChildren, RunError> {
     let isolating = target_mode == TargetDirMode::Isolated;
-    let mut metadata_child = (settings.bin_gate || isolating)
+    let mut metadata_child = (settings.bin_gate || isolating || settings.output == OutputMode::Rich)
         .then(|| spawn_metadata(parser, environment))
         .and_then(Result::ok);
     let spawned = metadata_child.is_some();
@@ -2664,12 +2774,14 @@ async fn start_children(
         }
         (None, None) => {}
     }
+    let test_targets = facts.as_deref().map(|found| found.test_targets);
     let (bins, gate) = resolve_bin_gate(settings, spawned, facts);
     Ok(StartedChildren {
         cargo,
         directories,
         bins,
         gate,
+        test_targets,
         lock_watch,
     })
 }
@@ -3014,7 +3126,6 @@ impl DocRun {
         &mut self,
         bytes: &[u8],
         mut offset: usize,
-        color: bool,
         observation: &DocObservation<'_>,
     ) -> Result<usize, RunError> {
         while offset < bytes.len() {
@@ -3026,7 +3137,7 @@ impl DocRun {
             let line = memchr::memchr(b'\n', rest).map_or(rest.len(), |newline| newline + 1);
             let phase = &mut self.phase;
             self.parser.feed(&rest[..line], |event| {
-                record_doc_event(event, phase, color, observation)
+                record_doc_event(event, phase, observation)
             })?;
             offset += line;
         }
@@ -3101,7 +3212,6 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn record_doc_event(
     event: DocEvent<'_>,
     phase: &mut DocPhase,
-    color: bool,
     observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     match event {
@@ -3117,7 +3227,7 @@ fn record_doc_event(
             }
             Ok(())
         }
-        DocEvent::Result { name, outcome, .. } => report_doc_result(name, outcome, color, observation),
+        DocEvent::Result { name, outcome, .. } => report_doc_result(name, outcome, observation),
         DocEvent::FailureLine(line) => {
             write_fd(2, line)?;
             write_fd(2, b"\n")
@@ -3129,7 +3239,6 @@ fn record_doc_event(
 fn report_doc_result(
     name: &[u8],
     outcome: DocOutcome,
-    color: bool,
     observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     let (terminal, counter) = match outcome {
@@ -3138,17 +3247,8 @@ fn report_doc_result(
         DocOutcome::Ignored => (TerminalOutcome::Ignored, &observation.ignored),
     };
     counter.set(counter.get() + 1);
-    if observation.render.0 == OutputMode::Plain {
-        let id = (&b"doc-tests"[..], name);
-        return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false });
-    }
-    let mut report = [0; NAME_CAPACITY + 34];
-    let name_length = name.len().min(NAME_CAPACITY);
-    report[..name_length].copy_from_slice(&name[..name_length]);
-    report[name_length] = b' ';
-    let label_length = write_report(&[terminal], color, &mut report[name_length + 1..])
-        .map_err(|_| RunError::Outcome)?;
-    write_fd(1, &report[..name_length + 1 + label_length])
+    let id = (&b"doc-tests"[..], name);
+    emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false })
 }
 
 fn write_doc_notice(totals: &DocTotals) -> Result<(), RunError> {
@@ -3246,6 +3346,7 @@ fn conclude(
     stop: Option<StopReport>,
     doc_tests: Option<DocTotals>,
 ) -> Result<RunSummary, RunError> {
+    erase_frame(render)?;
     if let Some(report) = stop {
         write_stop_trailer(&report, settings.process == ProcessMode::Shard)?;
     }
@@ -3253,10 +3354,7 @@ fn conclude(
         write_doc_notice(doc)?;
     }
     let total = write_summary(targets, doc_tests.as_ref(), started_millis)?;
-    match settings.output {
-        OutputMode::Plain => close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path()))?,
-        OutputMode::Rich => {}
-    }
+    close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path()))?;
     let empty = total.passed + total.failed == 0;
     if empty && settings.no_tests != NoTestsPolicy::Pass {
         write_no_tests(parser, settings.ignore)?;
@@ -3276,7 +3374,7 @@ fn close_plain(
     stop: Option<StopReport>,
     (started_millis, manifest): (u64, Option<&[u8]>),
 ) -> Result<(), RunError> {
-    emit(render, &Event::Listed { binaries, tests: total.discovered })?;
+    emit(render, &Event::Listed { binaries, of: Some(binaries), tests: total.discovered })?;
     emit(
         render,
         &Event::Finished {
@@ -3319,7 +3417,7 @@ async fn run_doc_only<'run>(
         doc.lock_watch.set_directory(shared);
     }
     let observation = DocObservation::new(render);
-    observe_doc(&mut doc, &signals, settings.color, &observation).await?;
+    observe_doc(&mut doc, &signals, &observation).await?;
     interrupted(&signals)?;
     let totals = close_doc_tests(&doc, false, &observation)?;
     conclude(
@@ -3342,7 +3440,16 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError, is_status_line, whole_lines_len};
+
+    #[proxima::test]
+    async fn cargo_status_lines_are_recognised_with_or_without_colour_and_diagnostics_are_not() {
+        let status: [&[u8]; 4] = [b"   Compiling cargo-val v0.1.0 (/work)\n", b"    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.21s\n", b"    Blocking waiting for file lock on package cache\n", b"\x1b[1m\x1b[32m   Compiling\x1b[0m serde v1.0.0\n"];
+        let kept: [&[u8]; 4] = [b"error[E0308]: mismatched types\n", b"warning: unused variable: `scale`\n", b"error: could not compile `build_error` (lib test) due to 1 previous error\n", b"  --> src/lib.rs:4:5\n"];
+
+        assert!(status.iter().all(|line| is_status_line(line)));
+        assert!(!kept.iter().any(|line| is_status_line(line)));
+    }
 
     fn rendered(cause: LaunchCause) -> std::string::String {
         let line: ErrorLine = RunError::Launch(cause).render();

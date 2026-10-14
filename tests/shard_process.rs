@@ -21,7 +21,12 @@ use std::time::Duration;
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/plain.rs"]
+mod plain;
+#[path = "common/plain_summary.rs"]
+mod plain_summary;
 
+use cargo_val::render::Outcome;
 use common::fixture_output;
 #[cfg(unix)]
 use common::{ChildStream, drain, drain_until};
@@ -51,11 +56,13 @@ struct Run {
 }
 
 impl Run {
-    fn lines_ending(&self, label: &str) -> Vec<&str> {
-        self.stdout
-            .lines()
-            .filter(|line| line.ends_with(&format!(" {label}")))
-            .collect()
+    #[cfg(unix)]
+    fn settled_names(&self) -> Vec<String> {
+        plain::settled(&self.stdout).into_iter().map(|(_, test, _)| test).collect()
+    }
+
+    fn names(&self, outcome: Outcome) -> Vec<String> {
+        plain::names(&self.stdout, outcome)
     }
 }
 
@@ -77,7 +84,7 @@ async fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment
     let log = directory.join("pids.log");
     let output: Output = fixture_output(
         binary::command()
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", "plain")
         .arg("--manifest-path")
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -132,8 +139,8 @@ async fn shard_mode_runs_a_binary_in_about_jobs_children_and_reports_every_test(
     ).await;
 
     assert_eq!(run.status, Some(0), "stderr: {}", run.stderr);
-    assert_eq!(run.lines_ending("PASS").len(), 5, "{}", run.stdout);
-    assert_eq!(run.lines_ending("IGNORED").len(), 1, "{}", run.stdout);
+    assert_eq!(run.names(Outcome::Passed).len(), 5, "{}", run.stdout);
+    assert_eq!(run.names(Outcome::Ignored).len(), 1, "{}", run.stdout);
     assert_eq!(run.pids.len(), 2, "5 tests over 2 jobs is ceil(5/2) = 3 names per shard, so 2 children");
 }
 
@@ -147,7 +154,7 @@ async fn test_mode_still_runs_each_test_in_its_own_child() {
     ).await;
 
     assert_eq!(run.status, Some(0), "stderr: {}", run.stderr);
-    assert_eq!(run.lines_ending("PASS").len(), 5, "{}", run.stdout);
+    assert_eq!(run.names(Outcome::Passed).len(), 5, "{}", run.stdout);
     assert_eq!(run.pids.len(), 5);
 }
 
@@ -187,17 +194,18 @@ async fn a_test_that_aborts_inside_a_shard_fails_alone_and_every_unsettled_name_
     ).await;
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
-    assert_eq!(run.lines_ending("FAIL"), ["suite::b_aborts_the_process FAIL"], "{}", run.stdout);
-    let passed: BTreeSet<&str> = run.lines_ending("PASS").into_iter().collect();
-    let expected: BTreeSet<&str> = [
-        "suite::a_passes PASS",
-        "suite::c_passes_after_the_crash PASS",
-        "suite::d_panics_on_request PASS",
-        "suite::e_passes_last PASS",
+    assert_eq!(run.names(Outcome::Failed), ["suite::b_aborts_the_process"], "{}", run.stdout);
+    let passed: BTreeSet<String> = run.names(Outcome::Passed).into_iter().collect();
+    let expected: BTreeSet<String> = [
+        "suite::a_passes",
+        "suite::c_passes_after_the_crash",
+        "suite::d_panics_on_request",
+        "suite::e_passes_last",
     ]
+    .map(str::to_owned)
     .into();
     assert_eq!(passed, expected);
-    assert!(run.stderr.contains("test suite::b_aborts_the_process"), "solo run prints its own output: {}", run.stderr);
+    assert!(run.stdout.contains("test suite::b_aborts_the_process"), "solo run prints its own output: {}", run.stdout);
     assert_eq!(run.pids.len(), 5, "one shard child, then one solo child for each of the four names it did not settle");
 }
 
@@ -211,10 +219,10 @@ async fn a_failing_test_prints_its_own_libtest_block_and_no_other_name_does() {
     ).await;
 
     assert_eq!(run.status, Some(1));
-    assert_eq!(run.lines_ending("FAIL"), ["suite::d_panics_on_request FAIL"]);
-    assert!(run.stderr.contains("---- suite::d_panics_on_request stdout ----"), "{}", run.stderr);
-    assert!(run.stderr.contains("requested shard failure in d"), "{}", run.stderr);
-    assert_eq!(run.stderr.matches("---- suite::").count(), 1, "{}", run.stderr);
+    assert_eq!(run.names(Outcome::Failed), ["suite::d_panics_on_request"]);
+    assert!(run.stdout.contains("---- suite::d_panics_on_request stdout ----"), "{}", run.stdout);
+    assert!(run.stdout.contains("requested shard failure in d"), "{}", run.stdout);
+    assert_eq!(run.stdout.matches("---- suite::").count(), 1, "{}", run.stderr);
 }
 
 // the held test blocks on a fifo open
@@ -237,9 +245,9 @@ async fn fail_fast_ends_the_shard_and_leaves_its_unreported_names_uncounted() {
     ).await;
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
-    assert!(run.stdout.contains("suite::d_panics_on_request FAIL"), "{}", run.stdout);
-    assert!(!run.stdout.contains("e_passes_last"), "the held test never reported: {}", run.stdout);
-    assert!(run.stdout.contains("listed tests not run 1"), "{}", run.stdout);
+    assert!(run.names(Outcome::Failed).contains(&"suite::d_panics_on_request".to_owned()), "{}", run.stdout);
+    assert!(!run.settled_names().contains(&"suite::e_passes_last".to_owned()), "the held test never settled: {}", run.stdout);
+    assert!(plain_summary::summary(&run.stdout).is_some_and(|counts| counts["not_run"] == 1), "{}", run.stdout);
 }
 
 #[proxima::test(timeout = "310s")]
@@ -252,7 +260,7 @@ async fn names_past_the_command_line_budget_split_into_more_shards_than_jobs() {
     ).await;
 
     assert_eq!(run.status, Some(0), "stderr: {}", run.stderr);
-    assert_eq!(run.lines_ending("PASS").len(), 200, "every long name reported once");
+    assert_eq!(run.names(Outcome::Passed).len(), 200, "every long name reported once");
     assert_eq!(run.pids.len(), 2, "200 names of ~210 units each need two 32,767-unit command lines");
 }
 
@@ -281,7 +289,7 @@ async fn declared_tests_share_processes_by_group_and_serial_tests_run_with_nothi
     ).await;
 
     assert_eq!(run.status, Some(0), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
-    assert_eq!(run.lines_ending("PASS").len(), 8, "{}", run.stdout);
+    assert_eq!(run.names(Outcome::Passed).len(), 8, "{}", run.stdout);
     let launched = launches(&run);
     let by_class = |class: &str| launched.iter().filter(|line| field(line, "class=") == class).count();
     assert_eq!(
@@ -374,7 +382,7 @@ async fn per_test_mode_runs_serial_alone_and_one_child_per_group_at_a_time() {
     assert_eq!(run.status, Some(0), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
     let all = intervals(&run);
     assert_eq!(all.len(), 7, "every name ran exactly once: {}", run.log);
-    assert_eq!(run.lines_ending("PASS").len(), 7, "{}", run.stdout);
+    assert_eq!(run.names(Outcome::Passed).len(), 7, "{}", run.stdout);
     let serial = all.iter().find(|interval| interval.name == "loads_whole_checkpoint").expect("the serial test ran");
     let crossings: Vec<&str> = all
         .iter()
@@ -390,19 +398,15 @@ async fn per_test_mode_runs_serial_alone_and_one_child_per_group_at_a_time() {
 
 const QUIRKS: &str = "shard_quirks";
 const QUIRK_NAMES: [&str; 5] = [
-    "suite::panics_plain PASS",
-    "suite::panics_with_expected_message PASS",
-    "suite::panics_then_aborts PASS",
-    "suite::child_process_writes_to_stdout PASS",
-    "suite::passes_after_the_stray_output PASS",
+    "suite::panics_plain",
+    "suite::panics_with_expected_message",
+    "suite::panics_then_aborts",
+    "suite::child_process_writes_to_stdout",
+    "suite::passes_after_the_stray_output",
 ];
 
 fn statuses(run: &Run) -> BTreeSet<String> {
-    run.stdout
-        .lines()
-        .filter(|line| line.ends_with(" PASS") || line.ends_with(" FAIL") || line.ends_with(" IGNORED"))
-        .map(str::to_owned)
-        .collect()
+    plain::settled(&run.stdout).into_iter().map(|(_, test, outcome)| format!("{test} {outcome:?}")).collect()
 }
 
 #[proxima::test(timeout = "310s")]
@@ -422,7 +426,7 @@ async fn should_panic_and_stray_child_output_report_the_same_as_per_test_mode() 
 
     assert_eq!(shard.status, Some(0), "stdout: {}\nstderr: {}", shard.stdout, shard.stderr);
     assert_eq!(statuses(&shard), statuses(&per_test), "shard:\n{}\nper-test:\n{}", shard.stdout, per_test.stdout);
-    let expected: BTreeSet<String> = QUIRK_NAMES.iter().map(|line| (*line).to_owned()).collect();
+    let expected: BTreeSet<String> = QUIRK_NAMES.iter().map(|name| format!("{name} Passed")).collect();
     assert_eq!(statuses(&shard), expected, "{}", shard.stdout);
     assert!(!shard.stderr.contains("ended without a result line"), "{}", shard.stderr);
 }
@@ -434,10 +438,10 @@ async fn a_crash_inside_a_should_panic_test_fails_that_test_alone_like_per_test_
     let per_test = run_fixture(QUIRKS, "quirks-abort-test", &["--process", "test", "--no-fail-fast"], &environment).await;
 
     assert_eq!(statuses(&shard), statuses(&per_test), "shard:\n{}\nper-test:\n{}", shard.stdout, per_test.stdout);
-    assert!(shard.stdout.contains("suite::panics_then_aborts FAIL"), "{}", shard.stdout);
-    assert!(shard.stderr.contains("test suite::panics_then_aborts"), "solo run prints its own output: {}", shard.stderr);
+    assert!(shard.stdout.contains("suite::panics_then_aborts"), "{}", shard.stdout);
+    assert!(shard.stdout.contains("test suite::panics_then_aborts"), "solo run prints its own output: {}", shard.stdout);
     assert!(!shard.stderr.contains("ended without a result line"), "{}", shard.stderr);
-    assert_eq!(shard.lines_ending("PASS").len(), 4, "{}", shard.stdout);
+    assert_eq!(shard.names(Outcome::Passed).len(), 4, "{}", shard.stdout);
 }
 
 const INIT: &str = "shard_init";
@@ -452,8 +456,8 @@ async fn an_abort_before_any_test_runs_each_name_alone_after_one_shard_child_per
 
     for (run, children) in [(&one, 6), (&two, 7)] {
         assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
-        assert_eq!(run.lines_ending("FAIL").len(), 5, "every name is failed exactly once: {}", run.stdout);
-        assert_eq!(run.lines_ending("PASS").len(), 0, "{}", run.stdout);
+        assert_eq!(run.names(Outcome::Failed).len(), 5, "every name is failed exactly once: {}", run.stdout);
+        assert_eq!(run.names(Outcome::Passed).len(), 0, "{}", run.stdout);
         assert_eq!(run.pids.len(), children, "one shard child per shard (1 at one job, 2 at two), then one solo child per name (5): {}", run.stderr);
     }
 }
@@ -463,8 +467,8 @@ async fn a_full_shard_that_aborts_at_its_first_test_gives_every_name_exactly_one
     let run = run_fixture(MANY, "many", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "1")]).await;
 
     assert_eq!(run.status, Some(0), "stderr tail: {}", run.stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n"));
-    assert_eq!(run.lines_ending("PASS").len(), MANY_NAMES, "every name passes in its solo run, counted once");
-    assert_eq!(run.lines_ending("FAIL").len(), 0, "{}", run.stdout.lines().take(5).collect::<Vec<_>>().join("\n"));
+    assert_eq!(run.names(Outcome::Passed).len(), MANY_NAMES, "every name passes in its solo run, counted once");
+    assert_eq!(run.names(Outcome::Failed).len(), 0, "{}", run.stdout.lines().take(5).collect::<Vec<_>>().join("\n"));
     assert_eq!(run.log.lines().count(), MANY_NAMES + 1, "one shard child, then exactly one solo child per name; windows reuses pids, so the log lines are counted, not the distinct pids ({})", run.pids.len());
     assert!(!run.stderr.contains("could not queue"), "{}", run.stderr.lines().take(5).collect::<Vec<_>>().join("\n"));
 }
@@ -474,8 +478,17 @@ async fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
     let run = run_fixture(SHARD, "fail-fast-block", &["--process", "shard"], &[("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_SHARD_FAIL", "1")]).await;
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
-    assert!(run.stderr.contains("---- suite::d_panics_on_request stdout ----"), "{}", run.stderr);
-    assert!(run.stderr.contains("requested shard failure in d"), "{}", run.stderr);
+    let full = format!("stdout: {}\nstderr: {}", run.stdout, run.stderr);
+    let frame = run.stdout.split("------ stdout: cargo_val_shard_fixture suite::d_panics_on_request ------\n").nth(1).and_then(|rest| rest.split_once("------ end stdout ------\n")).map(|(body, _)| body);
+    let body = frame.unwrap_or_default();
+    assert!(body.starts_with("\nthread 'suite::d_panics_on_request' ("), "{full}");
+    assert!(body.contains("panicked at src/lib.rs:40:13:\nrequested shard failure in d\n"), "{full}");
+    assert!(!run.stdout.contains("---- suite::d_panics_on_request stdout ----"), "libtest's raw header must not print: {full}");
+    assert!(!run.stdout.contains("running 1 test"), "{full}");
+    assert!(!run.stdout.contains("re-run alone"), "{full}");
+    assert!(run.stdout.contains("listed tests not run 1;"), "{full}");
+    let counts = plain_summary::summary(&run.stdout).expect("a SUMMARY line is printed");
+    assert_eq!([counts["passed"], counts["failed"], counts["ignored"], counts["not_run"]], [3, 1, 1, 1], "{full}");
 }
 
 #[proxima::test(timeout = "310s")]
@@ -489,9 +502,9 @@ async fn fail_fast_after_a_crash_keeps_the_crash_as_a_failure_and_withdraws_only
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
     let full = format!("stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
-    assert_eq!(run.lines_ending("FAIL"), ["suite::b_aborts_the_process FAIL"], "{full}");
-    assert_eq!(run.lines_ending("PASS"), ["suite::a_passes PASS"], "{full}");
-    assert!(run.stdout.contains("listed tests not run 3"), "{full}");
+    assert_eq!(run.names(Outcome::Failed), ["suite::b_aborts_the_process"], "{full}");
+    assert_eq!(run.names(Outcome::Passed), ["suite::a_passes"], "{full}");
+    assert!(plain_summary::summary(&run.stdout).is_some_and(|counts| counts["not_run"] == 3), "{full}");
 }
 
 #[proxima::test(timeout = "310s")]
@@ -501,11 +514,11 @@ async fn a_stray_ok_line_before_the_verdict_is_decided_by_running_the_test_alone
 
     assert_eq!(shard.status, Some(1), "stdout: {}\nstderr: {}", shard.stdout, shard.stderr);
     assert_eq!(statuses(&shard), statuses(&per_test), "shard:\n{}\nper-test:\n{}", shard.stdout, per_test.stdout);
-    assert_eq!(shard.lines_ending("FAIL"), ["suite::stray_ok_then_fails FAIL"], "{}", shard.stdout);
-    let passes: BTreeSet<&str> = shard.lines_ending("PASS").into_iter().collect();
+    assert_eq!(shard.names(Outcome::Failed), ["suite::stray_ok_then_fails"], "{}", shard.stdout);
+    let passes: BTreeSet<String> = shard.names(Outcome::Passed).into_iter().collect();
     assert_eq!(
         passes,
-        BTreeSet::from(["suite::nested_cargo_output_passes PASS", "suite::plain_passes PASS", "suite::stray_ok_then_passes PASS"]),
+        ["suite::nested_cargo_output_passes", "suite::plain_passes", "suite::stray_ok_then_passes"].map(str::to_owned).into(),
         "{}",
         shard.stdout
     );
@@ -516,8 +529,8 @@ async fn a_stray_ok_line_is_settled_once_at_two_jobs_too() {
     let shard = run_fixture(STRAY, "stray-two", &["--process", "shard", "--no-fail-fast"], &[("CARGO_VAL_JOBS", "2")]).await;
 
     assert_eq!(shard.status, Some(1), "stdout: {}\nstderr: {}", shard.stdout, shard.stderr);
-    assert_eq!(shard.lines_ending("FAIL"), ["suite::stray_ok_then_fails FAIL"], "{}", shard.stdout);
-    assert_eq!(shard.lines_ending("PASS").len(), 3, "{}", shard.stdout);
+    assert_eq!(shard.names(Outcome::Failed), ["suite::stray_ok_then_fails"], "{}", shard.stdout);
+    assert_eq!(shard.names(Outcome::Passed).len(), 3, "{}", shard.stdout);
 }
 
 // sigint delivery and fifo rendezvous
@@ -550,7 +563,7 @@ async fn interrupt_ends_blocked_child(process: &str, label: &str) {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shard/Cargo.toml");
     let mut command = binary::command();
     command
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", "plain")
         .arg("--manifest-path")
         .arg(manifest)
         .args(["--process", process, "--no-fail-fast"])
