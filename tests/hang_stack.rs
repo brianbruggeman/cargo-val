@@ -6,9 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use cargo_val::edge_stack::capture;
-use cargo_val::stack_capture::Capture;
-use cargo_val::stack_frames::{Class, Frame, Rows};
+use cargo_val::edge_stack::{FORMAT, capture};
+use cargo_val::stack_frames::{Class, Frame, frames};
 
 #[path = "../src/test_alloc.rs"]
 mod test_alloc;
@@ -101,12 +100,6 @@ fn block_fixture() -> (Blocked, u32) {
     (blocked, pid)
 }
 
-fn user_frames(rows: Rows<'_>) -> Vec<Frame<'_>> {
-    rows.filter_map(|row| if let cargo_val::stack_frames::Row::Frame(frame) = row { Some(frame) } else { None })
-        .filter(|frame| frame.class == Class::User)
-        .collect()
-}
-
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_sample_of_a_real_blocked_child_finds_the_user_frame_at_its_file_and_line() {
@@ -115,17 +108,11 @@ fn macos_sample_of_a_real_blocked_child_finds_the_user_frame_at_its_file_and_lin
 
     let (outcome, allocations) = test_alloc::measure_allocations(|| capture(pid, &mut buffer));
 
-    let Capture::Captured { format, written, dropped, source } = outcome else {
-        panic!("sample of a live child must capture: {outcome:?}");
-    };
-    let rows = Rows::folded(&buffer[..written], format, &WORKSPACE).expect("sample output is text");
-    let users = user_frames(rows.clone());
-    let useful: usize = rows
-        .filter_map(|row| if let cargo_val::stack_frames::Row::Frame(frame) = row { Some(frame) } else { None })
-        .map(|frame| frame.symbol.len() + frame.file.map_or(0, str::len) + 8)
-        .sum();
+    let (written, dropped) = outcome.expect("sample of a live child must capture");
+    let all = frames(&buffer[..written], FORMAT, &WORKSPACE).expect("sample output is text");
+    let users: Vec<Frame<'_>> = all.filter(|frame| frame.class == Class::User).collect();
     println!(
-        "{{\"event\":\"hang_stack_capture\",\"pid\":{pid},\"source_bytes\":{source},\"written\":{written},\"dropped\":{dropped},\"useful_bytes\":{useful},\"user_frames\":{},\"allocations\":{allocations}}}",
+        "{{\"event\":\"hang_stack_capture\",\"pid\":{pid},\"written\":{written},\"dropped\":{dropped},\"user_frames\":{},\"allocations\":{allocations}}}",
         users.len()
     );
     let blocked = users
@@ -139,24 +126,27 @@ fn macos_sample_of_a_real_blocked_child_finds_the_user_frame_at_its_file_and_lin
 
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_proc_stack_of_a_real_blocked_child_parses_or_names_why_it_cannot() {
+fn linux_proc_of_a_real_blocked_child_yields_a_kernel_frame_per_thread_or_names_why_not() {
     use cargo_val::stack_capture::Unavailable;
 
     let (_blocked, pid) = block_fixture();
     let mut buffer = vec![0_u8; 32 * 1024];
 
-    match capture(pid, &mut buffer) {
-        Capture::Captured { format, written, .. } => {
-            let rows = Rows::raw(&buffer[..written], format, &WORKSPACE).expect("proc stacks are text");
-            assert!(rows.count() > 0, "captured bytes must hold rows");
+    let (outcome, allocations) = test_alloc::measure_allocations(|| capture(pid, &mut buffer));
+
+    match outcome {
+        Ok((written, dropped)) => {
+            let all: Vec<Frame<'_>> = frames(&buffer[..written], FORMAT, &WORKSPACE).expect("proc stacks are text").collect();
+            let mut threads: Vec<&str> = all.iter().map(|frame| frame.thread).collect();
+            threads.dedup();
+            let symbols: Vec<&str> = all.iter().map(|frame| frame.symbol).collect();
+            println!("{{\"event\":\"hang_stack_capture\",\"pid\":{pid},\"written\":{written},\"dropped\":{dropped},\"allocations\":{allocations},\"threads\":{},\"symbols\":{symbols:?}}}", threads.len());
+            assert!(threads.len() >= 2, "a main thread and the test thread: {threads:?}");
+            assert!(all.iter().all(|frame| frame.image == "kernel" && frame.class == Class::Runtime), "{all:?}");
         }
-        Capture::Unavailable(reason) => {
+        Err(reason) => {
             let Unavailable::Denied { os_code } = reason else { panic!("unexpected reason: {reason}") };
             assert!(os_code == libc::EACCES || os_code == libc::EPERM, "os error {os_code}");
-            assert_eq!(
-                reason.to_string(),
-                format!("unavailable: kernel stack read denied (os error {os_code}); ptrace fallback needs an unwinder dependency and Cargo.lock has none")
-            );
         }
     }
 }

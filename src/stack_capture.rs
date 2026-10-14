@@ -1,7 +1,5 @@
 use core::fmt;
 
-use crate::stack_frames::Format;
-
 /// Why a platform could not produce a stack: always a named reason, never an empty success.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unavailable {
@@ -30,22 +28,6 @@ impl fmt::Display for Unavailable {
             Self::Io { operation, os_code } => write!(formatter, "unavailable: {operation} failed (os error {os_code})"),
         }
     }
-}
-
-/// The result of one stack capture into a caller-provided buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use]
-pub enum Capture {
-    Captured {
-        format: Format,
-        /// Bytes now in the buffer.
-        written: usize,
-        /// Useful bytes that did not fit the buffer.
-        dropped: usize,
-        /// Bytes the tool or kernel produced before the useful section was cut out.
-        source: usize,
-    },
-    Unavailable(Unavailable),
 }
 
 /// Copies as much of `bytes` as fits after `written` and returns how many bytes did not fit.
