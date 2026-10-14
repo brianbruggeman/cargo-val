@@ -12,10 +12,9 @@ use crate::cargo_message::TestArtifact;
 use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
-    FailFastError, FailFastSources, FiltersetSources, HarnessFault, HarnessRequest, IgnoreError,
-    IgnoreMode, IgnoreSources, NoTestsError, NoTestsPolicy, NoTestsSources, ProcessError, ProcessMode,
-    ProcessSources, ThreadSources,
-    TargetDirError, TargetDirMode, TargetDirSources, ThreadsError, ThreadsFault, ThreadsSource,
+    FILTERSET, FailFastError, FailFastSources, HarnessFault, HarnessRequest, IgnoreMode, NO_TESTS, NoTestsPolicy,
+    PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
+    ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
     DocEvent, DocOutcome, DocParser, ListingLine, ListingSource, ListingSourceStep,
@@ -156,8 +155,7 @@ pub enum RunError {
     TestEnvironment,
     RustcLibdir,
     Settings,
-    Ignore(IgnoreError),
-    TargetDir(TargetDirError),
+    Setting(SettingError),
     Filterset(FilterError),
     IgnoredSet(IgnoredSetFull),
     NothingRan,
@@ -166,8 +164,6 @@ pub enum RunError {
     Parked(ParkFault),
     TestThreads(ThreadsError),
     FailFast(FailFastError),
-    NoTests(NoTestsError),
-    Process(ProcessError),
     DocTests,
     Spawn,
     Reactor,
@@ -201,8 +197,7 @@ impl RunError {
             }
             Self::RustcLibdir => b"cargo-val: cannot read the rustc library directory\n",
             Self::Settings => b"cargo-val: invalid runtime settings\n",
-            Self::Ignore(error) => error.message(),
-            Self::TargetDir(error) => error.message(),
+            Self::Setting(error) => error.message(),
             Self::IgnoredSet(_) => b"cargo-val: a test binary lists more ignored tests than the fixed set holds\n",
             Self::NothingRan => b"cargo-val: an exact test launch ran no test body\n",
             Self::SummaryMismatch => b"cargo-val: test counts do not balance\n",
@@ -210,8 +205,6 @@ impl RunError {
             Self::TargetTable => b"cargo-val: more test binaries than the fixed table or a binary id is too long\n",
             Self::TestThreads(error) => error.message(),
             Self::FailFast(error) => error.message(),
-            Self::NoTests(error) => error.message(),
-            Self::Process(error) => error.message(),
             Self::DocTests => b"cargo-val: cargo test --doc failed before reporting results\n",
             Self::Spawn => b"cargo-val: child spawn failed\n",
             Self::Reactor => b"cargo-val: reactor operation failed\n",
@@ -535,10 +528,12 @@ fn runtime_settings(
         }
     }
     let source = BorrowedSettings::new(&pairs[..count]);
-    let process = ProcessSources::from_settings(&source, parser.process(), crate::build_defaults::PROCESS)
-        .resolve()
-        .map_err(RunError::Process)?
-        .setting
+    let process = PROCESS
+        .build_default(Some(crate::build_defaults::PROCESS))
+        .from_settings(&source, parser.process())
+        .resolve::<ProcessSetting>()
+        .map_err(RunError::Setting)?
+        .0
         .mode(cfg!(windows));
     // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
     let default_jobs = match process {
@@ -561,18 +556,18 @@ fn runtime_settings(
         .resolve()
         .map_err(RunError::FailFast)?
         .max_fail;
-    let no_tests = NoTestsSources::from_settings(&source, parser.no_tests())
-        .resolve()
-        .map_err(RunError::NoTests)?
-        .policy;
+    let no_tests = NO_TESTS
+        .from_settings(&source, parser.no_tests())
+        .resolve::<NoTestsPolicy>()
+        .map_err(RunError::Setting)?
+        .0;
     let color =
         resolve_color(&source, crate::build_defaults::COLOR).map_err(|_| RunError::Settings)?;
-    let (ignore, _) = IgnoreSources::from_settings(&source, harness.ignore)
-        .resolve()
-        .map_err(RunError::Ignore)?;
-    let filterset = FiltersetSources::from_settings(&source, parser.filterset())
-        .resolve()
-        .map(|text| {
+    let ignore = harness.ignore_mode(&source).map_err(RunError::Setting)?;
+    let filterset = FILTERSET
+        .from_settings(&source, parser.filterset())
+        .supplied()
+        .map(|(_, text)| {
             Filterset::parse(text).map_err(|error| {
                 report_filterset_error(text, error);
                 RunError::Filterset(error)
@@ -2369,10 +2364,12 @@ fn resolve_target_dir<'value>(
     source: &'value BorrowedSettings<'value>,
     parser: &CliParser<'value>,
 ) -> Result<TargetDirMode<'value>, RunError> {
-    TargetDirSources::from_settings(source, parser.target_dir(), crate::build_defaults::TARGET_DIR)
-        .resolve()
+    TARGET_DIR
+        .build_default(Some(crate::build_defaults::TARGET_DIR))
+        .from_settings(source, parser.target_dir())
+        .resolve::<TargetDirMode<'value>>()
         .map(|(mode, _)| mode)
-        .map_err(RunError::TargetDir)
+        .map_err(RunError::Setting)
 }
 
 // isolated mode without usable metadata falls back to cargo's own directory, and says so
