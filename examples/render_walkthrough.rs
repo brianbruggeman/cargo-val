@@ -12,7 +12,7 @@ use cargo_val::view_defaults::{FAILURES, NAME_BYTES, RERUN_BYTES};
 const FAILING: Identity<'static> = (b"sched_records", b"the_host_binary_format_yields_every_declared_record");
 const PASSING: Identity<'static> = (b"c68_run_policy", b"c68_max_fail_two_stops_after_the_second_of_three_failures");
 
-fn show(state: &mut State<'_, FAILURES, RERUN_BYTES>, event: Event<'static>) -> Result<(), String> {
+fn show(state: &mut State<'_, RERUN_BYTES>, event: Event<'static>) -> Result<(), String> {
     let before = state.mode();
     state.apply(&event);
     let mut frame = Line::<16_384>::new();
@@ -30,7 +30,8 @@ fn finished(failed: usize) -> Event<'static> {
 
 fn run_with_failure() -> Result<(), String> {
     let mut arena = [0_u8; NAME_BYTES];
-    let mut state = State::<FAILURES, RERUN_BYTES>::new(&mut arena);
+    let mut ledger = [0_u32; FAILURES];
+    let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
     show(&mut state, Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true })?;
     show(&mut state, Event::Listed { binaries: 19, tests: 383 })?;
     show(&mut state, Event::Started { id: PASSING, solo: false })?;
@@ -43,7 +44,8 @@ fn run_with_failure() -> Result<(), String> {
 
 fn run_clean() -> Result<(), String> {
     let mut arena = [0_u8; NAME_BYTES];
-    let mut state = State::<FAILURES, RERUN_BYTES>::new(&mut arena);
+    let mut ledger = [0_u32; FAILURES];
+    let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
     show(&mut state, Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false })?;
     show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Ignored, millis: None, solo: false })?;
     show(&mut state, finished(0))
@@ -51,9 +53,10 @@ fn run_clean() -> Result<(), String> {
 
 fn run_ended_early() -> Result<(), String> {
     let (mut build_arena, mut interrupted_arena) = ([0_u8; NAME_BYTES], [0_u8; NAME_BYTES]);
-    let mut build = State::<FAILURES, RERUN_BYTES>::new(&mut build_arena);
+    let (mut build_ledger, mut interrupted_ledger) = ([0_u32; FAILURES], [0_u32; FAILURES]);
+    let mut build = State::<RERUN_BYTES>::new(&mut build_arena, &mut build_ledger);
     show(&mut build, Event::BuildFailed { diagnostic: b"error[E0308]: mismatched types" })?;
-    let mut interrupted = State::<FAILURES, RERUN_BYTES>::new(&mut interrupted_arena);
+    let mut interrupted = State::<RERUN_BYTES>::new(&mut interrupted_arena, &mut interrupted_ledger);
     show(&mut interrupted, Event::Interrupted { signal: 2 })?;
     assert!(matches!(interrupted.mode(), Mode::Interrupted { signal: 2 }));
     Ok(())
