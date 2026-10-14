@@ -107,6 +107,14 @@ pub mod edge_spawn_windows;
 ))]
 pub mod edge_stream_windows;
 #[cfg(all(
+    target_os = "windows",
+    feature = "edge-os",
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub mod edge_store_windows;
+#[cfg(all(
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
     feature = "edge-os"
 ))]
@@ -125,6 +133,8 @@ pub mod edge_parent_unix;
 pub mod edge_signal_unix;
 #[cfg(all(feature = "edge-os", unix))]
 pub mod edge_stream_unix;
+#[cfg(all(feature = "edge-os", unix))]
+pub mod edge_store_unix;
 #[cfg(all(
     feature = "edge-os",
     feature = "proxima-core",
@@ -146,6 +156,8 @@ pub(crate) use edge_args_unix as edge_args;
 pub(crate) use edge_spawn_unix as edge_spawn;
 #[cfg(all(unix, feature = "edge-os"))]
 pub(crate) use edge_stream_unix as edge_stream;
+#[cfg(all(unix, feature = "edge-os"))]
+pub(crate) use edge_store_unix as edge_store;
 #[cfg(all(unix, feature = "edge-os", feature = "proxima-core"))]
 pub(crate) use edge_signal_unix as edge_signal;
 #[cfg(all(
@@ -196,6 +208,14 @@ pub(crate) use edge_spawn_windows as edge_spawn;
     feature = "proxima-primitives"
 ))]
 pub(crate) use edge_stream_windows as edge_stream;
+#[cfg(all(
+    target_os = "windows",
+    feature = "edge-os",
+    feature = "proxima-core",
+    feature = "proxima-codec",
+    feature = "proxima-primitives"
+))]
+pub(crate) use edge_store_windows as edge_store;
 #[cfg(all(target_os = "linux", feature = "edge-os"))]
 pub(crate) use edge_exit_linux::LinuxExit as ExitSource;
 #[cfg(all(target_os = "macos", feature = "edge-os"))]

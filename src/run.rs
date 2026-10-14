@@ -7,6 +7,7 @@ use core::task::{Context, Poll};
 use std::boxed::Box;
 use std::io;
 use std::process::ExitStatus;
+use std::rc::Rc;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::vec::Vec;
@@ -19,6 +20,7 @@ use proxima_primitives::pipe::{Exhausted, FanIn, Select, SignalSource, UnpinPipe
 use crate::ExitSource;
 use crate::cli::CliParser;
 use crate::edge_signal::SignalPipe;
+use crate::edge_store::Store;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
@@ -85,11 +87,11 @@ pub(crate) fn attach(lane: &Lane, child: Child) -> Result<u32, RunError> {
 /// # Errors
 ///
 /// Returns [`RunError::Spawn`] when a stream cannot be duplicated or the child has no usable exit source.
-pub(crate) fn attach_session(lane: &Lane, child: &Child) -> Result<(), RunError> {
+pub(crate) fn attach_session(lane: &Lane, child: &Child, (store, key): (&Rc<Store>, u32)) -> Result<(), RunError> {
     let exit = child.exit_source().map_err(|_| RunError::Spawn)?;
     let (stdout, stderr) = child.duplicate_streams().map_err(|_| RunError::Spawn)?;
-    *lane.0.borrow_mut() = Some(Box::new(ChildStream::new(stdout)));
-    *lane.1.borrow_mut() = Some(Box::new(ChildStream::new(stderr)));
+    *lane.0.borrow_mut() = Some(Box::new(ChildStream::with_store(stdout, Rc::clone(store), key)));
+    *lane.1.borrow_mut() = Some(Box::new(ChildStream::with_store(stderr, Rc::clone(store), key + 1)));
     *lane.2.borrow_mut() = Some(exit);
     lane.3.set(true);
     Ok(())
