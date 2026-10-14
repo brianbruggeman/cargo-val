@@ -210,3 +210,25 @@ async fn a_crash_that_died_before_printing_a_result_leaves_an_empty_output_secti
 
     assert!(section.is_empty(), "{section:?}");
 }
+
+#[proxima::test(timeout = "310s")]
+async fn a_failing_assert_prints_an_excerpt_block_of_seven_source_rows_and_a_caret_row_before_the_output_record() {
+    let output = run("cli_run", &[("CARGO_VAL_C52D_FAIL", "1")], &["--output", "agent"]).await;
+    let text = stdout_of(&output);
+
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.iter().position(|line| line.trim_end() == "EXCERPT").expect("an EXCERPT record");
+    let expected = [
+        "              9 |             print!(\"{}\", \"X\".repeat(5000));",
+        "             10 |         }",
+        "             11 |         if std::env::var_os(\"CARGO_VAL_C52D_FAIL\").is_some() {",
+        "         >   12 |             panic!(\"requested fixture failure\");",
+        "               |             ^^^^^ panicked here",
+        "             13 |         }",
+        "             14 |         if std::env::var_os(\"CARGO_VAL_C52D_ESCAPES\").is_some() {",
+        "             15 |             panic!(\"path \\\"C:\\\\tmp\\\\out\\\" is missing\\nsecond line\");",
+    ];
+    assert_eq!(lines[start + 1..start + 1 + expected.len()], expected, "{text}");
+    assert!(lines[start + 1 + expected.len()].starts_with("OUTPUT   bytes="), "{text}");
+    assert_no_escape(&output);
+}

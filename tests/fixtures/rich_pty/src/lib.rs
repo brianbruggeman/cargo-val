@@ -21,4 +21,11 @@ mod tests {
             std::thread::yield_now();
         }
     }
+
+    #[test]
+    fn fails_when_requested() {
+        if std::env::var_os("CARGO_VAL_FIXTURE_FAIL").is_some() {
+            panic!("requested fixture failure");
+        }
+    }
 }
