@@ -1,0 +1,25 @@
+ where the time went       wall 20.000s
+ tests running at once, max 3
+ tests at once
+       3    █████████                  
+            █████████                  
+         ▃▃▃█████████▃▃▃▃▃▃            
+         ██████████████████            
+       1 ██████████████████            
+         ██████████████████▆▆▆▆▆▆      
+         ████████████████████████      
+       0 ████████████████████████      
+         ┬──────────────┬─────────────┤
+ seconds 0s             10s     20.000s
+ █ tests running
+ After 12.000s only 1 test was still
+ running, for 8.000s (40% of the run).
+ Peak was 3 at once at 2.000s. Next
+ slowest test 10.000s.
+ longest tests, same time scale
+1        ████████████████████████
+   16.000s  cli_run  fixture::sleeps…
+2           ███████████████
+   10.000s  cli_run  fixture::fails_…
+3        ██████
+   4.000s  summary  counts::adds_up

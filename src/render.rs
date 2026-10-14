@@ -19,6 +19,7 @@ use crate::failure_class::{Exit, Record, Reject, classify};
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
 
 mod rich;
+mod timeline;
 
 /// A test id as two borrowed fields: the binary, then the test name.
 pub type Identity<'a> = (&'a [u8], &'a [u8]);
@@ -48,6 +49,7 @@ const HEARTBEAT_MS: u64 = HEARTBEAT_SECS as u64 * 1000;
 const INFLIGHT_HEAD: usize = 13;
 const FAILURE_HEAD: usize = 13;
 const LOCK_BYTES: usize = 32;
+const TIMED_HEAD: usize = 9;
 const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
@@ -143,6 +145,14 @@ pub struct State<'storage, const RERUN: usize> {
     inflight_used: usize,
     inflight_count: usize,
     untracked: usize,
+    timed: &'storage mut [u8],
+    timed_used: usize,
+    timed_count: usize,
+    untimed: usize,
+    peak: usize,
+    peak_ms: u64,
+    busy_ms: u64,
+    wall_ms: Option<u64>,
     heartbeat_ms: u64,
     last_beat_ms: u64,
     now_ms: u64,
@@ -181,6 +191,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             inflight_used: 0,
             inflight_count: 0,
             untracked: 0,
+            timed: &mut [],
+            timed_used: 0,
+            timed_count: 0,
+            untimed: 0,
+            peak: 0,
+            peak_ms: 0,
+            busy_ms: 0,
+            wall_ms: None,
             heartbeat_ms: HEARTBEAT_MS,
             last_beat_ms: 0,
             now_ms: 0,
@@ -215,6 +233,13 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
     pub const fn with_inflight(mut self, inflight: &'storage mut [u8]) -> Self {
         self.inflight = inflight;
+        self
+    }
+
+    /// Gives the state the byte arena every settled test's start and settle times live in; without one (or with a zero-size one) nothing is timed and nothing is counted as untimed.
+    #[must_use]
+    pub const fn with_timeline(mut self, timed: &'storage mut [u8]) -> Self {
+        self.timed = timed;
         self
     }
 
@@ -277,16 +302,27 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             }
             Event::Resize { cols } => self.cols = cols,
             Event::Captured { id, stdout, stderr, .. } => self.remember_reason(id, stdout.0, stderr.0),
-            Event::Started { id, at_ms, limit_ms, .. } => self.track(id, at_ms, limit_ms),
+            Event::Started { id, at_ms, limit_ms, .. } => {
+                self.watch(at_ms);
+                self.track(id, at_ms, limit_ms);
+                self.note_peak(at_ms);
+            }
             Event::Settled { id, outcome, at_ms, .. } => {
                 self.done += 1;
+                if let Some(at_ms) = at_ms {
+                    self.watch(at_ms);
+                }
                 self.settled_ms = self.untrack(id, at_ms);
+                self.time(id, outcome, at_ms, self.settled_ms);
                 if outcome == Outcome::Failed {
                     self.record(id, self.settled_ms);
                 }
             }
             Event::Tick { now_ms } => self.beat(now_ms),
-            Event::Finished { .. } => self.clear_inflight(),
+            Event::Finished { wall_ms, .. } => {
+                self.wall_ms = Some(wall_ms);
+                self.clear_inflight();
+            }
             _ => {}
         }
     }
@@ -311,6 +347,13 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.stored = 0;
         self.unstored = 0;
         self.untracked = 0;
+        self.timed_used = 0;
+        self.timed_count = 0;
+        self.untimed = 0;
+        self.peak = 0;
+        self.peak_ms = 0;
+        self.busy_ms = 0;
+        self.wall_ms = None;
         self.clear_inflight();
     }
 
@@ -402,6 +445,58 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             }
             _ => self.unstored += 1,
         }
+    }
+
+    /// The most tests in flight at once the timeline calls a tail: half the jobs, and never fewer than one.
+    const fn tail_limit(&self) -> usize {
+        let half = self.jobs / 2;
+        if half == 0 { 1 } else { half }
+    }
+
+    /// Before an event at `at_ms`, the in-flight count is what ran up to that instant: while it exceeds the tail limit, the tail has not begun.
+    fn watch(&mut self, at_ms: u64) {
+        if self.inflight_count > self.tail_limit() {
+            self.busy_ms = at_ms.saturating_sub(self.origin_ms.unwrap_or(0));
+        }
+    }
+
+    fn note_peak(&mut self, at_ms: u64) {
+        if self.inflight_count > self.peak {
+            self.peak = self.inflight_count;
+            self.peak_ms = at_ms.saturating_sub(self.origin_ms.unwrap_or(0));
+        }
+    }
+
+    /// Appends `start u32 | end u32 | outcome u8 | binary NUL name NUL`, both times in milliseconds since `Begin`; a full arena counts instead, and a zero-size arena means the view is not wanted so nothing is counted.
+    fn time(&mut self, id: Identity<'_>, outcome: Outcome, finished: Option<u64>, duration: Option<u64>) {
+        if outcome == Outcome::Ignored || self.timed.is_empty() {
+            return;
+        }
+        let (Some(finished), Some(duration)) = (finished, duration) else {
+            self.untimed += 1;
+            return;
+        };
+        let origin = self.origin_ms.unwrap_or(0);
+        let end = finished.saturating_sub(origin);
+        let start = end.saturating_sub(duration);
+        let at = self.timed_used;
+        let stop = at + TIMED_HEAD + id.0.len() + id.1.len() + 2;
+        if stop > self.timed.len() {
+            self.untimed += 1;
+            return;
+        }
+        self.timed[at..at + 4].copy_from_slice(&u32::try_from(start).unwrap_or(u32::MAX).to_le_bytes());
+        self.timed[at + 4..at + 8].copy_from_slice(&u32::try_from(end).unwrap_or(u32::MAX).to_le_bytes());
+        self.timed[at + 8] = u8::from(outcome == Outcome::Failed);
+        write_names(&mut self.timed[at + TIMED_HEAD..stop], id);
+        self.timed_used = stop;
+        self.timed_count += 1;
+    }
+
+    /// Settled tests the timeline has no interval for, because the arena was full, the settle carried no time or the id was never started; ignored tests never held a job and are not among them.
+    #[must_use]
+    pub const fn untimed(&self) -> usize {
+        self.untimed
     }
 
     fn wait_on(&mut self, lock: &[u8]) {

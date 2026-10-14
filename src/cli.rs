@@ -85,6 +85,7 @@ pub struct CliParser<'argument> {
     manifest_path: Option<&'argument [u8]>,
     filter: Option<&'argument [u8]>,
     exact: bool,
+    timeline: Option<&'static [u8]>,
     fail_fast: Option<FailFastArgument<'argument>>,
     no_tests: Option<&'argument [u8]>,
     test_timeout: Option<&'argument [u8]>,
@@ -114,6 +115,7 @@ impl<'argument> CliParser<'argument> {
             manifest_path: None,
             filter: None,
             exact: false,
+            timeline: None,
             fail_fast: None,
             no_tests: None,
             test_timeout: None,
@@ -161,6 +163,7 @@ impl<'argument> CliParser<'argument> {
             b"--version" | b"-V" => self.action = Some(CliAction::Version),
             b"--exact" => self.exact = true,
             b"--doc" => self.doc = true,
+            b"--timeline" => self.timeline = Some(b"on"),
             b"--exit-with-parent" => self.exit_with_parent = Some(b"on"),
             b"--fail-fast" => self.fail_fast = Some(FailFastArgument::FailFast),
             b"--no-fail-fast" => {
@@ -443,6 +446,12 @@ impl<'argument> CliParser<'argument> {
         } else {
             self.process
         }
+    }
+
+    /// Whether `--timeline` asked for the how-many-tests-ran-at-once chart after the closing block.
+    #[must_use]
+    pub const fn timeline(&self) -> bool {
+        self.timeline.is_some()
     }
 
     /// Whether doc tests are skipped, included with the other targets, or the only target.

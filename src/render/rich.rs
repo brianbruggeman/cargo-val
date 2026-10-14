@@ -29,7 +29,7 @@ const JOINED: usize = 512;
 const LABEL: &str = " failed at";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tone {
+pub(super) enum Tone {
     Plain,
     Green,
     Red,
@@ -51,7 +51,7 @@ impl Tone {
     }
 }
 
-fn paint<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, tone: Tone, text: &[u8]) {
+pub(super) fn paint<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, tone: Tone, text: &[u8]) {
     if text.is_empty() {
         return;
     }
@@ -64,7 +64,7 @@ fn paint<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, tone: Tone, t
     }
 }
 
-fn bold<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, text: &[u8]) {
+pub(super) fn bold<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, text: &[u8]) {
     if color {
         frame.text(BOLD);
     }
@@ -74,7 +74,7 @@ fn bold<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, text: &[u8]) {
     }
 }
 
-fn run<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, tone: Tone, (glyph, count): (&str, usize)) {
+pub(super) fn run<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, tone: Tone, (glyph, count): (&str, usize)) {
     if count == 0 {
         return;
     }
@@ -89,33 +89,33 @@ fn run<const FRAME: usize>(frame: &mut Line<FRAME>, color: bool, tone: Tone, (gl
     }
 }
 
-fn spaces<const FRAME: usize>(frame: &mut Line<FRAME>, count: usize) {
+pub(super) fn spaces<const FRAME: usize>(frame: &mut Line<FRAME>, count: usize) {
     for _ in 0..count {
         frame.text(b" ");
     }
 }
 
-fn digits(value: usize) -> usize {
+pub(super) fn digits(value: usize) -> usize {
     value.checked_ilog10().map_or(1, |log| log as usize + 1)
 }
 
-fn padded<const FRAME: usize>(frame: &mut Line<FRAME>, value: usize, width: usize) {
+pub(super) fn padded<const FRAME: usize>(frame: &mut Line<FRAME>, value: usize, width: usize) {
     spaces(frame, width.saturating_sub(digits(value)));
     frame.number(value);
 }
 
-fn columns(text: &[u8]) -> usize {
+pub(super) fn columns(text: &[u8]) -> usize {
     text.iter().filter(|byte| (**byte & 0xc0) != 0x80).count()
 }
 
-fn boundary(text: &[u8], mut at: usize) -> usize {
+pub(super) fn boundary(text: &[u8], mut at: usize) -> usize {
     while at > 0 && at < text.len() && (text[at] & 0xc0) == 0x80 {
         at -= 1;
     }
     at
 }
 
-fn ellipsis_end<const FRAME: usize>(frame: &mut Line<FRAME>, text: &[u8], width: usize) {
+pub(super) fn ellipsis_end<const FRAME: usize>(frame: &mut Line<FRAME>, text: &[u8], width: usize) {
     if columns(text) <= width {
         frame.text(text);
         return;
