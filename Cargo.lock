@@ -246,6 +246,7 @@ dependencies = [
  "proxima-runtime",
  "serde_json",
  "temp-env",
+ "tempfile",
  "tree-sitter",
  "tree-sitter-highlight",
  "tree-sitter-rust",

@@ -64,7 +64,7 @@ fn measure(label: &str, iterations: u32, mut body: impl FnMut() -> usize) {
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     let mean = samples.iter().sum::<f64>() / f64::from(ROUNDS);
     let variance = samples.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>() / f64::from(ROUNDS);
-    let per_use = allocations as f64 / f64::from(ROUNDS * iterations);
+    let per_use = f64::from(u32::try_from(allocations).unwrap_or(u32::MAX)) / f64::from(ROUNDS * iterations);
     println!("{label:<62} {bytes:>6} {mean:>12.0} {:>7.2} {per_use:>10.1}", variance.sqrt() / mean * 100.0);
 }
 
