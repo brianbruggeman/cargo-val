@@ -247,3 +247,101 @@ async fn with_highlight_and_colour_on_the_failure_source_block_colours_the_if_ke
 
     assert!(block.contains(KEYWORD_SGR), "{}", shown(block));
 }
+
+const BUILD_ERROR_MARKER: &str = ">    4 |     \"forty-two\"";
+const EXCERPT_ROWS_BEFORE_MARKER: usize = 3;
+const EXCERPT_ROWS_AFTER_MARKER: usize = 4;
+
+fn raw_excerpt_lines(output: &str) -> Vec<String> {
+    let lines: Vec<String> = output.replace('\r', "").lines().map(ToOwned::to_owned).collect();
+    let marker = lines
+        .iter()
+        .rposition(|line| without_sgr(line) == BUILD_ERROR_MARKER)
+        .unwrap_or_else(|| panic!("no marker row {BUILD_ERROR_MARKER:?}:\n{}", shown(output)));
+    lines[marker - EXCERPT_ROWS_BEFORE_MARKER..=marker + EXCERPT_ROWS_AFTER_MARKER].to_vec()
+}
+
+fn screen_lines(output: &str) -> Vec<String> {
+    without_sgr(&output.replace('\r', "")).lines().map(ToOwned::to_owned).collect()
+}
+
+fn line_at(lines: &[String], text: &str) -> usize {
+    lines.iter().position(|line| line.ends_with(text)).unwrap_or_else(|| panic!("no line {text:?} in:\n{lines:#?}"))
+}
+
+#[proxima::test]
+async fn a_rich_build_error_replaces_rustcs_snippet_with_the_excerpt_between_the_header_and_the_label() {
+    let (output, status) = run_on_pty("build_error").await;
+
+    assert_eq!(status.code(), Some(3), "{}", shown(&output));
+    let lines = screen_lines(&output);
+    let header = line_at(&lines, "error[E0308]: mismatched types");
+    let expected = [
+        " --> src/lib.rs:4:5",
+        "     1 | pub fn answer() -> u32 {",
+        "     2 |     /// scale applied before the answer is reported",
+        "     3 |     let scale = 6;",
+        BUILD_ERROR_MARKER,
+        "      |     ^^^^^^^^^^^ expected `u32`, found `&str`",
+        "     5 | }",
+        "     6 |",
+        "     7 | #[cfg(test)]",
+    ];
+    assert_eq!(lines[header + 1..=header + expected.len()], expected, "{}", shown(&output));
+    for rustc_row in ["1 | pub fn answer() -> u32 {", "4 |     \"forty-two\"", "..."] {
+        assert!(!lines.iter().any(|line| line == rustc_row), "rustc's own snippet row {rustc_row:?} survived:\n{}", shown(&output));
+    }
+    assert!(!lines.iter().any(|line| line.contains("--- expected `u32` because of return type")), "{}", shown(&output));
+    let at_summary = lines.iter().position(|line| line.starts_with("error: could not compile")).expect("cargo's summary is printed");
+    assert!(header + expected.len() < at_summary, "{}", shown(&output));
+}
+
+#[proxima::test]
+async fn a_rich_build_error_keeps_the_separator_note_and_help_blocks_after_the_excerpt_verbatim() {
+    let (output, status) = run_on_pty("build_error_help").await;
+
+    assert_eq!(status.code(), Some(3), "{}", shown(&output));
+    let lines = screen_lines(&output);
+    let header = line_at(&lines, "error[E0382]: use of moved value: `text`");
+    let caret = format!("      | {}^^^^ value used here after move", " ".repeat(20));
+    let head = [" --> src/lib.rs:8:21", "     3 | }", "     4 |", "     5 | pub fn twice() -> usize {", "     6 |     let text = String::from(\"forty-two\");", "     7 |     let first = consume(text);", ">    8 |     first + consume(text)", caret.as_str(), "     9 | }"];
+    assert_eq!(lines[header + 1..=header + head.len()], head, "{}", shown(&output));
+    let tail = [
+        "  |",
+        "note: consider changing this parameter type in function `consume` to borrow instead if owning the value isn't necessary",
+        " --> src/lib.rs:1:22",
+        "  |",
+        "1 | pub fn consume(text: String) -> usize {",
+        "  |        -------       ^^^^^^ this parameter takes ownership of the value",
+        "  |        |",
+        "  |        in this function",
+        "help: consider cloning the value if the performance cost is acceptable",
+        "  |",
+        "7 |     let first = consume(text.clone());",
+        "  |                             ++++++++",
+    ];
+    let after = header + head.len() + 1;
+    assert_eq!(lines[after..after + tail.len()], tail, "{}", shown(&output));
+}
+
+#[proxima::test]
+async fn with_no_color_set_the_build_error_excerpt_rows_have_zero_escape_bytes() {
+    let (output, _) = run_on_pty("build_error").await;
+
+    let rows = raw_excerpt_lines(&output);
+
+    assert_eq!(rows.len(), EXCERPT_ROWS_BEFORE_MARKER + 1 + EXCERPT_ROWS_AFTER_MARKER);
+    assert_eq!(rows.iter().flat_map(|row| row.bytes()).filter(|byte| *byte == 0x1b).count(), 0, "{rows:?}");
+}
+
+#[cfg(feature = "highlight")]
+#[proxima::test]
+async fn with_highlight_and_colour_on_the_build_error_excerpt_colours_the_keyword_and_reads_the_same_without_sgr() {
+    let (output, _) = run_on_pty_with("build_error", &[]).await;
+
+    let rows = raw_excerpt_lines(&output);
+
+    assert!(rows[0].contains("\x1b[35mfn\x1b[0m"), "{}", shown(&rows[0]));
+    assert_eq!(without_sgr(&rows[0]), "     1 | pub fn answer() -> u32 {");
+    assert_eq!(without_sgr(&rows[3]), BUILD_ERROR_MARKER);
+}

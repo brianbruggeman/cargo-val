@@ -54,6 +54,8 @@ pub enum CargoSourceStep<'path> {
         level: &'path str,
         /// the text rustc would print, escapes decoded.
         rendered: &'path str,
+        /// the primary span as (file as rustc printed it, 1-based line, 1-based column).
+        span: Option<(&'path str, u32, u32, u32, Option<&'path str>)>,
     },
     /// The reader produced bytes in this step, or zero when it reported EOF.
     Read {
@@ -248,9 +250,9 @@ impl<'buffer> CargoSource<'buffer> {
                 consumed_bytes,
             } => (CargoSourceStep::Compiled { fresh }, consumed_bytes),
             RecordStep::Parsed {
-                parsed: Some(CargoMessage::Diagnostic { level, rendered }),
+                parsed: Some(CargoMessage::Diagnostic { level, rendered, span }),
                 consumed_bytes,
-            } => (CargoSourceStep::Diagnostic { level, rendered }, consumed_bytes),
+            } => (CargoSourceStep::Diagnostic { level, rendered, span }, consumed_bytes),
             RecordStep::Parsed {
                 parsed: Some(CargoMessage::BuildFinished { success }),
                 consumed_bytes,

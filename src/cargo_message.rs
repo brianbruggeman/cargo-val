@@ -126,6 +126,8 @@ pub enum CargoMessage<'text> {
         level: &'text str,
         /// the text rustc would print, such as `error[E0308]: mismatched types\n --> src/lib.rs:2:5\n...`.
         rendered: &'text str,
+        /// the primary span as (file as rustc printed it, 1-based line, 1-based column, caret width, label); the width is `column_end - column_start` on a single-line span and 1 on a multi-line one; the label is `None` when rustc gave null. `None` when the message has no primary span.
+        span: Option<(&'text str, u32, u32, u32, Option<&'text str>)>,
     },
     /// A valid message that carries nothing a test launch needs.
     Ignored,
@@ -288,11 +290,85 @@ impl<'input> Json<'input, '_> {
                 read_once(&mut fields.level, self)?;
             } else if text_equals(key, b"rendered") && self.input.get(self.offset..self.offset + 4) != Some(b"null") {
                 read_once(&mut fields.rendered, self)?;
+            } else if text_equals(key, b"spans") {
+                self.read_spans(fields)?;
             } else {
                 self.skip_value(2)?;
             }
         }
         Ok(())
+    }
+
+    fn read_spans(&mut self, fields: &mut Fields<'input>) -> Result<(), ParseError> {
+        self.whitespace();
+        if self.input.get(self.offset) != Some(&b'[') {
+            return self.skip_value(2);
+        }
+        self.enter(2)?;
+        self.byte(b'[')?;
+        self.whitespace();
+        if self.input.get(self.offset) == Some(&b']') {
+            self.offset += 1;
+            return Ok(());
+        }
+        loop {
+            self.read_span(fields)?;
+            self.whitespace();
+            match self.input.get(self.offset) {
+                Some(b']') => {
+                    self.offset += 1;
+                    return Ok(());
+                }
+                Some(b',') => self.offset += 1,
+                _ => return Err(ParseError::InvalidJson),
+            }
+        }
+    }
+
+    fn read_span(&mut self, fields: &mut Fields<'input>) -> Result<(), ParseError> {
+        self.enter(3)?;
+        self.byte(b'{')?;
+        let (mut file, mut line, mut column, mut primary) = (None, None, None, false);
+        let (mut line_end, mut column_end, mut label) = (None, None, None);
+        let mut first = true;
+        while let Some(key) = self.member_key(first)? {
+            first = false;
+            if text_equals(key, b"file_name") {
+                file = Some(self.slot_string()?);
+            } else if text_equals(key, b"line_start") {
+                line = Some(self.small_number()?);
+            } else if text_equals(key, b"column_start") {
+                column = Some(self.small_number()?);
+            } else if text_equals(key, b"line_end") {
+                line_end = Some(self.small_number()?);
+            } else if text_equals(key, b"column_end") {
+                column_end = Some(self.small_number()?);
+            } else if text_equals(key, b"label") && self.input.get(self.offset..self.offset + 4) != Some(b"null") {
+                label = Some(self.slot_string()?);
+            } else if text_equals(key, b"is_primary") {
+                primary = read_success(self)?;
+            } else {
+                self.skip_value(4)?;
+            }
+        }
+        if let (true, Some(file), Some(line), Some(column)) = (primary, file, line, column) {
+            let width = match (line_end, column_end) {
+                (Some(last), Some(end)) if last == line => end.saturating_sub(column).max(1),
+                _ => 1,
+            };
+            fields.span = fields.span.or(Some((file, line, column, width, label)));
+        }
+        Ok(())
+    }
+
+    fn small_number(&mut self) -> Result<u32, ParseError> {
+        self.whitespace();
+        let start = self.offset;
+        self.number()?;
+        str::from_utf8(&self.input[start..self.offset])
+            .ok()
+            .and_then(|digits| digits.parse().ok())
+            .ok_or(ParseError::InvalidJson)
     }
 
     fn first_of_list(&mut self, slot: &mut Option<Slot<'input>>) -> Result<(), ParseError> {
@@ -372,6 +448,7 @@ struct Fields<'input> {
     fresh: Option<bool>,
     level: Option<Slot<'input>>,
     rendered: Option<Slot<'input>>,
+    span: Option<(Slot<'input>, u32, u32, u32, Option<Slot<'input>>)>,
 }
 
 fn read_success(json: &mut Json<'_, '_>) -> Result<bool, ParseError> {
@@ -564,6 +641,10 @@ pub fn parse_cargo_message<'text>(
             (Some(level), Some(rendered)) => Ok(CargoMessage::Diagnostic {
                 level: resolve(scratch, level)?,
                 rendered: resolve(scratch, rendered)?,
+                span: fields
+                    .span
+                    .map(|(file, line, column, width, label)| Ok((resolve(scratch, file)?, line, column, width, label.map(|slot| resolve(scratch, slot)).transpose()?)))
+                    .transpose()?,
             }),
             _ => Ok(CargoMessage::Ignored),
         },
@@ -590,6 +671,8 @@ pub fn parse_cargo_message<'text>(
 
 #[cfg(test)]
 mod tests {
+    use std::format;
+
     use super::{CargoMessage, parse_cargo_message};
 
     const LIBRARY: &[u8] = br#"{"reason":"compiler-artifact","package_id":"path+file:///repo/proxima-model-interop#0.1.0","manifest_path":"/repo/proxima-model-interop/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"proxima_model_interop","src_path":"/repo/proxima-model-interop/src/lib.rs","edition":"2024","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"0","debuginfo":2,"test":true},"executable":"/repo/target/debug/deps/proxima_model_interop-3f2a1c9d8e7b6a50"}"#;
@@ -618,5 +701,66 @@ mod tests {
             artifact(INTEGRATION),
             ("serde".into(), "capability_matrix".into(), "test".into(), false)
         );
+    }
+
+    const ERROR_MESSAGE: &str = include_str!("../tests/fixtures/compiler_message_error.jsonl");
+
+    type Located = (std::string::String, u32, u32, u32, Option<std::string::String>);
+
+    fn diagnostic_span(line: &str) -> Option<Located> {
+        let mut scratch = [0; 8192];
+        match parse_cargo_message(line.trim_end().as_bytes(), &mut scratch, 65536, 8).expect("real rustc line parses") {
+            CargoMessage::Diagnostic { level: "error", span, .. } => span.map(|(file, line, column, width, label)| (file.into(), line, column, width, label.map(Into::into))),
+            other => panic!("not an error diagnostic: {other:?}"),
+        }
+    }
+
+    #[proxima::test]
+    async fn a_rustc_error_yields_the_primary_span_file_line_and_column() {
+        assert_eq!(diagnostic_span(ERROR_MESSAGE), Some(("src/lib.rs".into(), 4, 5, 11, Some("expected `u32`, found `&str`".into()))));
+    }
+
+    #[proxima::test]
+    async fn the_primary_span_wins_when_a_secondary_span_comes_first() {
+        let swapped = ERROR_MESSAGE.replacen("\"is_primary\":true", "\"is_primary\":MOVED", 1).replacen("\"is_primary\":false", "\"is_primary\":true", 1).replacen("MOVED", "false", 1);
+
+        assert_eq!(diagnostic_span(&swapped), Some(("src/lib.rs".into(), 1, 20, 3, Some("expected `u32` because of return type".into()))));
+    }
+
+    #[proxima::test]
+    async fn a_message_with_no_primary_span_yields_none() {
+        let demoted = ERROR_MESSAGE.replacen("\"is_primary\":true", "\"is_primary\":false", 1);
+
+        assert_eq!(diagnostic_span(&demoted), None);
+    }
+
+    #[proxima::test]
+    async fn a_message_with_no_spans_yields_none() {
+        let start = ERROR_MESSAGE.find("\"spans\":[").expect("real line has spans");
+        let end = ERROR_MESSAGE.find("],\"code\"").expect("spans precede the code");
+        let spanless = format!("{}\"spans\":[{}", &ERROR_MESSAGE[..start], &ERROR_MESSAGE[end..]);
+
+        assert_eq!(diagnostic_span(&spanless), None);
+    }
+
+    #[proxima::test]
+    async fn a_null_label_yields_no_label_and_keeps_the_span() {
+        let unlabelled = ERROR_MESSAGE.replacen("\"label\":\"expected `u32`, found `&str`\"", "\"label\":null", 1);
+
+        assert_eq!(diagnostic_span(&unlabelled), Some(("src/lib.rs".into(), 4, 5, 11, None)));
+    }
+
+    #[proxima::test]
+    async fn an_escaped_label_is_decoded() {
+        let quoted = ERROR_MESSAGE.replacen("expected `u32`, found `&str`\",\"line_end", "expected \\\"u32\\\"\",\"line_end", 1);
+
+        assert_eq!(diagnostic_span(&quoted).and_then(|(.., label)| label), Some("expected \"u32\"".into()));
+    }
+
+    const MULTILINE_MESSAGE: &str = include_str!("../tests/fixtures/compiler_message_multiline_error.jsonl");
+
+    #[proxima::test]
+    async fn a_multi_line_primary_span_has_one_caret_and_its_label() {
+        assert_eq!(diagnostic_span(MULTILINE_MESSAGE), Some(("src/lib.rs".into(), 6, 5, 1, Some("expected `u32`, found `u64`".into()))));
     }
 }
