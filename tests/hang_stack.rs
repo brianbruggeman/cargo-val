@@ -177,12 +177,13 @@ async fn linux_proc_of_a_real_blocked_child_yields_a_kernel_frame_per_thread_or_
             Ok((written, dropped)) => {
                 let all: Vec<Frame<'_>> = frames(&buffer[..written], FORMAT, &WORKSPACE).expect("proc stacks are text").collect();
                 let main_thread = format!("Thread_{pid}");
-                let main_frames = all.iter().filter(|frame| frame.thread == main_thread).count();
-                let test_frames = all.iter().filter(|frame| frame.thread != main_thread).count();
-                let symbols: Vec<&str> = all.iter().map(|frame| frame.symbol).collect();
-                println!("{{\"event\":\"hang_stack_capture\",\"pid\":{pid},\"written\":{written},\"dropped\":{dropped},\"allocations\":{allocations},\"main_frames\":{main_frames},\"test_frames\":{test_frames},\"symbols\":{symbols:?}}}");
-                assert!(main_frames >= 1, "the main thread sleeps in libtest's wait and has a kernel frame: {all:?}");
-                assert!(test_frames >= 1, "the test thread sleeps in its fifo open and has a kernel frame: {all:?}");
+                let symbols_of = |is_main: bool| -> Vec<&str> {
+                    all.iter().filter(|frame| (frame.thread == main_thread) == is_main).map(|frame| frame.symbol).collect()
+                };
+                let (main_symbols, test_symbols) = (symbols_of(true), symbols_of(false));
+                println!("{{\"event\":\"hang_stack_capture\",\"pid\":{pid},\"written\":{written},\"dropped\":{dropped},\"allocations\":{allocations},\"main_symbols\":{main_symbols:?},\"test_symbols\":{test_symbols:?}}}");
+                assert!(main_symbols.iter().any(|symbol| symbol.contains("futex")), "the main thread sleeps in libtest's channel wait: {all:?}");
+                assert!(test_symbols.iter().any(|symbol| symbol.contains("pipe_read")), "the test thread sleeps in its read of the block fifo: {all:?}");
                 assert!(all.iter().all(|frame| frame.image == "kernel" && frame.class == Class::Runtime), "{all:?}");
             }
             Err(reason) => {

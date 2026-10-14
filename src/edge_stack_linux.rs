@@ -16,7 +16,7 @@ pub const FORMAT: Format = Format::KernelStack;
 /// (`[<0>] symbol+offset/size`), which [`frames`](crate::stack_frames::frames) parses with [`FORMAT`]. The kernel
 /// allows the stack read only to privileged callers. For a thread whose stack is refused, the world-readable
 /// `wchan` file supplies the one symbol the thread is sleeping in, written as a single `[<0>] symbol` frame: on
-/// versailles an unprivileged read of a child blocked in `open` on a fifo gave `wait_for_partner`, while `syscall`
+/// versailles an unprivileged read of a child blocked in `read` on a fifo gave `anon_pipe_read`, while `syscall`
 /// answered EPERM, so no fd number is available without privilege. When no thread gives a stack or a wchan symbol the
 /// answer is [`Unavailable::Denied`], because the ptrace-plus-unwind fallback needs a dependency that Cargo.lock
 /// does not hold. Cold path: it allocates one string per thread directory entry.
