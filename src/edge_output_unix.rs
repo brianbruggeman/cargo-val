@@ -58,6 +58,7 @@ impl OutputSink {
         } else {
             (descriptor, None)
         };
+        #[cfg(target_os = "macos")]
         if socket {
             suppress_sigpipe(&descriptor)?;
         }
@@ -228,7 +229,9 @@ fn reopen_tty(descriptor: &OwnedFd) -> io::Result<OwnedFd> {
 fn adopt_pipe(descriptor: OwnedFd) -> io::Result<(OwnedFd, Option<c_int>)> {
     let path = CString::new(std::format!("/proc/self/fd/{}", descriptor.as_raw_fd()))
         .map_err(io::Error::other)?;
-    Ok((open_nonblocking(path.as_ptr())?, None))
+    let reopened = open_nonblocking(path.as_ptr())?;
+    drop(descriptor);
+    Ok((reopened, None))
 }
 
 #[cfg(target_os = "macos")]
@@ -248,11 +251,6 @@ fn adopt_pipe(descriptor: OwnedFd) -> io::Result<(OwnedFd, Option<c_int>)> {
         return Err(io::Error::last_os_error());
     }
     Ok((descriptor, Some(flags)))
-}
-
-#[cfg(target_os = "linux")]
-fn suppress_sigpipe(_descriptor: &OwnedFd) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
