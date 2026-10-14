@@ -63,7 +63,7 @@ fn run_ended_early() -> Result<(), String> {
     show(&mut build, Event::Exited { code: 3 })?;
     let mut interrupted = State::<RERUN_BYTES>::new(&mut interrupted_arena, &mut interrupted_ledger);
     show(&mut interrupted, Event::Interrupted { signal: 2, groups: 1 })?;
-    show(&mut interrupted, Event::Running { id: FAILING })?;
+    show(&mut interrupted, Event::Running { id: FAILING, group: 48213, age_ms: 56_825 })?;
     show(&mut interrupted, Event::Exited { code: 130 })?;
     assert!(matches!(interrupted.mode(), Mode::Interrupted { signal: 2 }));
     Ok(())

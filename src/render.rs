@@ -108,7 +108,7 @@ pub enum Event<'a> {
     BlockClosed,
     BuildFailed { diagnostic: &'a [u8], exit: u8 },
     Interrupted { signal: u8, groups: usize },
-    Running { id: Identity<'a> },
+    Running { id: Identity<'a>, group: u32, age_ms: u64 },
     Exited { code: u8 },
     Key(Key),
     /// What retrying a failure alone concluded, or why it was not tried.
@@ -832,9 +832,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
             Event::BuildFailed { diagnostic, .. } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
-            Event::Running { id } => text_pair(frame, b"RUNNING", id),
-            Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, .. } => {
-                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, None);
+            Event::Running { id, group, age_ms } => killed(frame, id, group, age_ms),
+            Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, discovered, filtered, .. } => {
+                let extras = matches!(self.mode, Mode::Interrupted { .. }).then_some([discovered, filtered]);
+                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, extras);
             }
         }
         Self::checked(frame)
@@ -1092,6 +1093,18 @@ fn text_pair<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], id: Ident
     frame.text(id.0);
     frame.text(b" ");
     frame.text(id.1);
+    frame.text(b"\n");
+}
+
+fn killed<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, group: u32, age_ms: u64) {
+    label(frame, b"RUNNING");
+    frame.text(id.0);
+    frame.text(b"  ");
+    frame.text(id.1);
+    frame.text(b"  ");
+    seconds(frame, age_ms);
+    frame.text(b"  killed group=");
+    frame.number(usize::try_from(group).unwrap_or(usize::MAX));
     frame.text(b"\n");
 }
 
@@ -1643,5 +1656,33 @@ mod tests {
 
         assert_eq!(state.inflight_len(), 0);
         assert_eq!(state.oldest(), None);
+    }
+
+    #[test]
+    fn an_interrupted_run_projects_the_block_the_spec_prints_then_a_summary_that_accounts_for_every_discovered_name() {
+        let mut arena = [0_u8; 64];
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
+        let mut frame = Line::<512>::new();
+        let finished = Event::Finished { passed: 381, failed: 0, ignored: 0, not_run: 2, wall_ms: 75_000, manifest: None, discovered: 383, filtered: 0, exit: 130 };
+        let events = [
+            Event::Interrupted { signal: 2, groups: 2 },
+            Event::Running { id: (b"shard_process", b"a_per_test_interrupt"), group: 48213, age_ms: 56_825 },
+            Event::Running { id: (b"sched_records", b"the_host_binary_format"), group: 48230, age_ms: 40_904 },
+            finished,
+        ];
+
+        for event in &events {
+            state.apply(event);
+            state.project(event, &mut frame).expect("fits");
+        }
+
+        assert_eq!(
+            core::str::from_utf8(frame.bytes()).expect("utf-8"),
+            "INTERRUPTED  signal=2  forwarded_groups=2\n\
+             RUNNING  shard_process  a_per_test_interrupt  56.825s  killed group=48213\n\
+             RUNNING  sched_records  the_host_binary_format  40.904s  killed group=48230\n\
+             SUMMARY  passed=381 failed=0 ignored=0 not_run=2  wall=75.000s discovered=383 run=381 filtered=0\n"
+        );
     }
 }

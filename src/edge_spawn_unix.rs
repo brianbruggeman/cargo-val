@@ -540,6 +540,8 @@ mod spawn {
 
     /// Spawns one exact test child, lowering its launch into `storage` so the call makes no heap allocation.
     ///
+    /// The child leads its own process group, so a forwarded signal reaches everything the test spawned.
+    ///
     /// The child runs `program --exact name...` followed by `harness_arguments`, in `directory`, with the
     /// inherited `environment` overlaid by `overrides`. `names` is one test name, or several joined by NUL for a shard;
     /// each is lowered as its own argument in the same caller-owned storage.
@@ -558,7 +560,7 @@ mod spawn {
         directory: &[u8],
     ) -> Result<Child, ExactError> {
         let exact: &[&[u8]] = &[b"--exact"];
-        spawn_stored(storage, program, (exact, names), harness_arguments, environment, overrides, directory)
+        spawn_stored(storage, program, (exact, names, true), harness_arguments, environment, overrides, directory)
     }
 
     /// Children beyond the job limit that may wait created and frozen; Unix creation is cheap enough that none do.
@@ -600,13 +602,13 @@ mod spawn {
         directory: &[u8],
     ) -> Result<Child, ExactError> {
         let listing: &[&[u8]] = if ignored { &[b"--list", b"--ignored"] } else { &[b"--list"] };
-        spawn_stored(storage, program, (listing, &[]), &[], environment, overrides, directory)
+        spawn_stored(storage, program, (listing, &[], false), &[], environment, overrides, directory)
     }
 
     fn spawn_stored(
         storage: &mut LaunchStorage,
         program: &[u8],
-        (arguments, names): (&[&[u8]], &[u8]),
+        (arguments, names, new_group): (&[&[u8]], &[u8], bool),
         trailing: &[&[u8]],
         environment: &[&[u8]],
         overrides: &[&[u8]],
@@ -625,7 +627,7 @@ mod spawn {
             .map_err(ExactError::Arguments)?;
         let pipes = UnixPipePair::new()
             .map_err(|error: UnixPipeError| ExactError::Spawn(SpawnError { os_code: error.code }))?;
-        spawn_lowered(&lowered, pipes, false).map_err(ExactError::Spawn)
+        spawn_lowered(&lowered, pipes, new_group).map_err(ExactError::Spawn)
     }
 
     fn spawn_lowered(
@@ -638,10 +640,17 @@ mod spawn {
         let (argv, envp) = (lowered.argv(), lowered.envp());
         let mut actions = FileActions::new()?;
         let mut attributes = SpawnAttributes::new(new_group)?;
-        #[cfg(target_os = "macos")]
-        add_action(unsafe {
-            posix_spawn_file_actions_addinherit_np(actions.raw(), libc::STDIN_FILENO)
-        })?;
+        if new_group {
+            // a child in a background group that reads the controlling terminal is stopped by SIGTTIN and never exits
+            add_action(unsafe {
+                libc::posix_spawn_file_actions_addopen(actions.raw(), libc::STDIN_FILENO, c"/dev/null".as_ptr(), libc::O_RDONLY, 0)
+            })?;
+        } else {
+            #[cfg(target_os = "macos")]
+            add_action(unsafe {
+                posix_spawn_file_actions_addinherit_np(actions.raw(), libc::STDIN_FILENO)
+            })?;
+        }
         add_action(unsafe {
             libc::posix_spawn_file_actions_adddup2(
                 actions.raw(),
