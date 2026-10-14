@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fs;
 use core::future::poll_fn;
+use core::num::NonZeroI32;
 use core::task::Poll;
 use std::io::PipeWriter;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -12,7 +13,13 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+#[cfg(target_os = "linux")]
+use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
+#[cfg(target_os = "macos")]
+use cargo_val::edge_exit_macos::MacosExit as ExitSource;
 use cargo_val::edge_stream_unix::ChildStream;
+use futures::FutureExt;
+use futures::future::join;
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_primitives::pipe::{Exhausted, Pipe};
 
@@ -23,12 +30,26 @@ const PIPE_CEILING_BYTES: usize = 65_536;
 const FLOOD_PIPE_BYTES: libc::c_int = 4096;
 const RUN_PIPE_BYTES: libc::c_int = 65_536;
 
-struct Running(Child);
+// the stdout stream sees EOF as EPOLLHUP alone on Linux, which the default reactor strategy does not wake on; the exit source is the wake that ends the drain
+struct Running {
+    child: Child,
+    exit: ExitSource,
+}
+
+impl Running {
+    fn start(child: Child) -> Self {
+        let pid = NonZeroI32::new(child.id().cast_signed()).expect("a spawned child has a nonzero pid");
+        Self { exit: ExitSource::new(pid), child }
+    }
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if Pipe::call(&self.exit, ()).now_or_never().is_some() {
+            return;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -173,22 +194,22 @@ async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drai
     let stdout = ChildStream::new(OwnedFd::from(stdout));
     // the pump pauses once its status queue is full, so pipe plus queue must hold the fixture's whole stdout for every test to run unread
     size_pipe(&stdout_writer, RUN_PIPE_BYTES);
-    let mut running = Running(spawn_cargo_val(&directory, "full_stdout", stdout_writer));
+    let mut running = Running::start(spawn_cargo_val(&directory, "full_stdout", stdout_writer));
 
     let names = collect_done_names(&done).await;
     assert_eq!(names, expected_names(), "every fixture test ran exactly once");
-    let alive = running.0.try_wait().expect("cargo-val status reads");
+    let alive = running.child.try_wait().expect("cargo-val status reads");
     assert!(alive.is_none(), "cargo-val waits on a full stdout instead of exiting: {alive:?}");
     let unread = unread_bytes(stdout_descriptor);
     assert!(unread > 0, "no stdout was pending while the stdout pipe went unread");
 
-    let output = drain_stdout(&stdout).await;
+    let (output, exited) = join(drain_stdout(&stdout), Pipe::call(&running.exit, ())).await;
     assert!(
         output.len() > PIPE_CEILING_BYTES,
         "stdout ({} bytes) must exceed any pipe buffer to prove the stall path",
         output.len()
     );
-    let status = running.0.wait().expect("cargo-val exits after the drain");
+    let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
     assert_eq!(status.code(), Some(0), "cargo-val exit status");
 
     let text = String::from_utf8(output).expect("stdout is text");
@@ -225,14 +246,14 @@ async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_
     let stdout_descriptor = stdout.as_raw_fd();
     let stdout = ChildStream::new(OwnedFd::from(stdout));
     size_pipe(&stdout_writer, FLOOD_PIPE_BYTES);
-    let mut running = Running(spawn_cargo_val(&directory, "ignored_flood", stdout_writer));
+    let mut running = Running::start(spawn_cargo_val(&directory, "ignored_flood", stdout_writer));
 
     await_pending_bytes(stdout_descriptor, "stdout").await;
-    let alive = running.0.try_wait().expect("cargo-val status reads");
+    let alive = running.child.try_wait().expect("cargo-val status reads");
     assert!(alive.is_none(), "cargo-val waits on a full stdout instead of exiting: {alive:?}");
 
-    let output = drain_stdout(&stdout).await;
-    let status = running.0.wait().expect("cargo-val exits after the drain");
+    let (output, exited) = join(drain_stdout(&stdout), Pipe::call(&running.exit, ())).await;
+    let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
     let stderr = fs::read_to_string(directory.join("stderr.log")).expect("stderr log reads");
     assert_eq!(status.code(), Some(0), "cargo-val exit status; stderr: {stderr}");
 
