@@ -7,7 +7,7 @@ use std::io::Write;
 
 use cargo_val::line::Line;
 use cargo_val::render::{Event, Identity, Mode, Outcome, State};
-use cargo_val::view_defaults::{FAILURES, NAME_BYTES, RERUN_BYTES};
+use cargo_val::view_defaults::{FAILURES, INFLIGHT_BYTES, NAME_BYTES, RERUN_BYTES};
 
 const FAILING: Identity<'static> = (b"sched_records", b"the_host_binary_format_yields_every_declared_record");
 const PASSING: Identity<'static> = (b"c68_run_policy", b"c68_max_fail_two_stops_after_the_second_of_three_failures");
@@ -31,12 +31,15 @@ fn finished(failed: usize) -> Event<'static> {
 fn run_with_failure() -> Result<(), String> {
     let mut arena = [0_u8; NAME_BYTES];
     let mut ledger = [0_u32; FAILURES];
-    let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
+    let mut inflight = [0_u8; INFLIGHT_BYTES];
+    let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
     show(&mut state, Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true })?;
     show(&mut state, Event::Listed { binaries: 19, tests: 383 })?;
-    show(&mut state, Event::Started { id: PASSING, solo: false })?;
-    show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Passed, millis: Some(3123), solo: false })?;
-    show(&mut state, Event::Settled { id: FAILING, outcome: Outcome::Failed, millis: Some(71_660), solo: false })?;
+    show(&mut state, Event::Started { id: PASSING, solo: false, at_ms: 1_000, limit_ms: None })?;
+    show(&mut state, Event::Started { id: FAILING, solo: false, at_ms: 1_200, limit_ms: Some(120_000) })?;
+    show(&mut state, Event::Tick { now_ms: 11_000 })?;
+    show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Passed, at_ms: Some(4_123), solo: false })?;
+    show(&mut state, Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: Some(72_860), solo: false })?;
     show(&mut state, Event::Captured { id: FAILING, stdout: (b"", false), stderr: (b"body did not complete within the timeout", false) })?;
     show(&mut state, Event::Warned { id: FAILING, what: b"solo rerun passed" })?;
     show(&mut state, finished(1))
@@ -47,7 +50,7 @@ fn run_clean() -> Result<(), String> {
     let mut ledger = [0_u32; FAILURES];
     let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
     show(&mut state, Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false })?;
-    show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Ignored, millis: None, solo: false })?;
+    show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
     show(&mut state, finished(0))
 }
 
