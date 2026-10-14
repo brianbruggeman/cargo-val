@@ -28,6 +28,7 @@ const LIMIT_BAR: usize = 6;
 const SLOW_MS: u64 = 30_000;
 const JOINED: usize = 512;
 const LABEL: &str = " failed at";
+const SEARCHING: &[u8] = b"searching for tests";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tone {
@@ -202,6 +203,10 @@ impl<const RERUN: usize> State<'_, RERUN> {
         4 + digits(self.listed_binaries) + digits(self.binaries_total.unwrap_or(0)) + 7
     }
 
+    fn searching_room(&self) -> usize {
+        usize::from(self.cols).saturating_sub(1 + BAR_COLUMN + 1 + SEARCHING.len())
+    }
+
     fn room_for_bar(&self, (with_note, with_word): (bool, bool)) -> usize {
         let avail = usize::from(self.cols).saturating_sub(1);
         let word = if with_word { 6 } else { 0 };
@@ -211,6 +216,9 @@ impl<const RERUN: usize> State<'_, RERUN> {
 
     /// Narrowing order: the listed note goes first, then the word `tests`, then the bars shrink, then names ellipsise.
     fn layout(&self) -> (usize, bool, bool) {
+        if !self.binaries_known() {
+            return (self.searching_room().clamp(BAR_MIN, BAR_COLUMNS), false, false);
+        }
         let options = [(true, true), (false, true), (false, false)];
         let chosen = options.into_iter().find(|choice| self.room_for_bar(*choice) >= BAR_COLUMNS).unwrap_or((false, false));
         (self.room_for_bar(chosen).clamp(BAR_MIN, BAR_COLUMNS), chosen.0, chosen.1)
@@ -406,15 +414,19 @@ impl<const RERUN: usize> State<'_, RERUN> {
         let settled = (passed * bar_width * 8).checked_div(total).unwrap_or(0);
         let live = if total == 0 || self.inflight_count == 0 { 0 } else { (self.inflight_count * bar_width).div_ceil(total).max(1) };
         bar(frame, color, bar_width, (settled, live), Tone::Green);
+        if !self.binaries_known() {
+            if self.searching_room() >= BAR_MIN {
+                frame.text(b" ");
+                paint(frame, color, Tone::Dim, SEARCHING);
+            }
+            frame.text(b"\n");
+            return;
+        }
         frame.text(b" ");
         let mut count = Line::<48>::new();
         count.number(self.done);
-        if self.binaries_known() || self.previous.is_some() || self.done > 0 {
-            count.text(if exact { b"/" } else { b"/~" });
-            count.number(total);
-        } else {
-            count.text(b"/?");
-        }
+        count.text(if exact { b"/" } else { b"/~" });
+        count.number(total);
         spaces(frame, COUNT_COLUMNS.saturating_sub(columns(count.bytes())));
         frame.text(count.bytes());
         if with_word {
@@ -797,7 +809,8 @@ mod tests {
         state.project_live(&begin, &mut frame).expect("the frame holds one redraw");
 
         let drawn = String::from_utf8_lossy(frame.bytes());
-        assert!(drawn.contains(" 0/?"), "{drawn}");
+        assert!(drawn.contains("searching for tests"), "{drawn}");
+        assert!(!drawn.contains(" failed"), "{drawn}");
         assert!(!drawn.contains("listed"), "{drawn}");
     }
 
@@ -817,23 +830,28 @@ mod tests {
     }
 
     #[test]
-    fn no_data_and_no_binaries_show_an_unknown_count_and_no_listed_note_at_eighty_columns() {
-        assert_eq!(predata_row(80, None), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░      0/? tests  0 failed");
+    fn no_data_and_no_binaries_show_only_searching_for_tests_at_eighty_columns() {
+        assert_eq!(predata_row(80, None), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ searching for tests");
     }
 
     #[test]
-    fn no_data_and_no_binaries_show_an_unknown_count_at_sixty_columns() {
-        assert_eq!(predata_row(60, None), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░      0/?  0 failed");
+    fn no_data_and_no_binaries_show_only_searching_for_tests_at_sixty_columns() {
+        assert_eq!(predata_row(60, None), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ searching for tests");
     }
 
     #[test]
-    fn a_previous_run_with_no_binaries_shows_the_previous_total_and_no_listed_note_at_eighty_columns() {
-        assert_eq!(predata_row(80, Some(383)), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0/~383 tests  0 failed");
+    fn a_previous_run_with_no_binaries_still_shows_only_searching_for_tests_at_eighty_columns() {
+        assert_eq!(predata_row(80, Some(383)), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ searching for tests");
     }
 
     #[test]
-    fn a_previous_run_with_no_binaries_shows_the_previous_total_at_sixty_columns() {
-        assert_eq!(predata_row(60, Some(383)), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0/~383  0 failed");
+    fn a_previous_run_with_no_binaries_still_shows_only_searching_for_tests_at_sixty_columns() {
+        assert_eq!(predata_row(60, Some(383)), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ searching for tests");
+    }
+
+    #[test]
+    fn no_binaries_at_forty_columns_shrink_the_bar_and_keep_the_phrase_whole() {
+        assert_eq!(predata_row(40, None), " test  ░░░░░░░░░░░░ searching for tests");
     }
 
     #[test]
