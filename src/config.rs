@@ -363,6 +363,8 @@ pub enum OutputMode {
     Rich,
     /// One complete line per event, never redrawn, never colored; what a CI log or a pipe reads back.
     Plain,
+    /// Counts, failures with class and location, and a rerun command; no per-test lines, no escape bytes.
+    Agent,
 }
 
 /// What the user asked for: a forced mode, or `auto`, which lets the terminal and the CI environment decide.
@@ -371,6 +373,7 @@ pub enum OutputSetting {
     Auto,
     Rich,
     Plain,
+    Agent,
 }
 
 impl TryFrom<&[u8]> for OutputSetting {
@@ -381,24 +384,66 @@ impl TryFrom<&[u8]> for OutputSetting {
             b"auto" => Ok(Self::Auto),
             b"rich" => Ok(Self::Rich),
             b"plain" => Ok(Self::Plain),
+            b"agent" => Ok(Self::Agent),
             _ => Err(()),
         }
     }
 }
 
+/// Environment variables an agent harness sets for its child processes, with the `why=` text each earns.
+pub const HARNESS_MARKERS: [(&str, &str); 4] = [
+    ("CLAUDECODE", "env:CLAUDECODE"),
+    ("CODEX_SANDBOX", "env:CODEX_SANDBOX"),
+    ("CURSOR_TRACE_ID", "env:CURSOR_TRACE_ID"),
+    ("GEMINI_CLI", "env:GEMINI_CLI"),
+];
+
+fn harness_reason(environment: &impl SettingsSource) -> Option<&'static str> {
+    HARNESS_MARKERS
+        .iter()
+        .find(|(name, _)| environment.get(name).is_some_and(|value| !value.is_empty()))
+        .map(|(_, reason)| *reason)
+}
+
 impl OutputSetting {
-    /// The mode this setting runs as; a forced setting ignores the terminal, `auto` is rich only on an interactive terminal outside CI.
+    /// The mode this setting runs as; a forced setting ignores the terminal and the environment. `auto` picks by the first match of: an agent-harness marker, `CI` or `TERM=dumb`, an interactive terminal, else plain.
     ///
-    /// `environment` supplies `CI` (any non-empty value) and `TERM` (`dumb`); `terminal` is whether standard output is interactive.
+    /// `environment` supplies the harness markers, `CI` (any non-empty value) and `TERM` (`dumb`); `terminal` is whether standard output is interactive.
     #[must_use]
     pub fn mode(self, terminal: bool, environment: &impl SettingsSource) -> OutputMode {
         let in_ci = environment.get("CI").is_some_and(|value| !value.is_empty());
         let dumb = environment.get("TERM") == Some("dumb");
         match self {
+            Self::Auto if harness_reason(environment).is_some() => OutputMode::Agent,
             Self::Auto if terminal && !in_ci && !dumb => OutputMode::Rich,
             Self::Auto | Self::Plain => OutputMode::Plain,
             Self::Rich => OutputMode::Rich,
+            Self::Agent => OutputMode::Agent,
         }
+    }
+
+    /// Why `mode` came out as it did: the layer that supplied a forced setting, or the first `auto` rule that matched.
+    #[must_use]
+    pub fn why(self, source: Source, terminal: bool, environment: &impl SettingsSource) -> &'static str {
+        match (self, source) {
+            (Self::Auto, _) => Self::auto_reason(terminal, environment),
+            (_, Source::CommandLine) => "flag",
+            (_, Source::Configured) => "env:CARGO_VAL_OUTPUT",
+            (_, Source::BuildDefault) => "build-default",
+        }
+    }
+
+    fn auto_reason(terminal: bool, environment: &impl SettingsSource) -> &'static str {
+        if let Some(reason) = harness_reason(environment) {
+            return reason;
+        }
+        if environment.get("CI").is_some_and(|value| !value.is_empty()) {
+            return "env:CI";
+        }
+        if environment.get("TERM") == Some("dumb") {
+            return "env:TERM";
+        }
+        if terminal { "tty" } else { "not-a-tty" }
     }
 }
 
@@ -406,8 +451,8 @@ impl OutputSetting {
 pub const OUTPUT: Layers<'static> = Layers::setting(
     "CARGO_VAL_OUTPUT",
     [
-        b"cargo-val: --output must be auto, rich, or plain\n",
-        b"cargo-val: CARGO_VAL_OUTPUT must be auto, rich, or plain\n",
+        b"cargo-val: --output must be auto, rich, plain, or agent\n",
+        b"cargo-val: CARGO_VAL_OUTPUT must be auto, rich, plain, or agent\n",
         b"cargo-val: the build default output setting is invalid\n",
     ],
 );

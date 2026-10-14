@@ -37,7 +37,7 @@ fn command(environment: &[(&str, &str)], arguments: &[&str]) -> Command {
         .env_remove("GITHUB_ACTIONS")
         .env_remove("NO_COLOR")
         .env_remove("TERM")
-        .env_remove("CARGO_VAL_OUTPUT")
+        .env_remove("CARGO_VAL_OUTPUT")        .env_remove("CLAUDECODE")
         .env_remove("CARGO_VAL_COLOR")
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
@@ -215,9 +215,9 @@ async fn an_unknown_output_value_is_refused_naming_its_source() {
     let environment = run(&[("CARGO_VAL_OUTPUT", "fancy")], &[]).await;
 
     assert_eq!(flag.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&flag.stderr).contains("--output must be auto, rich, or plain"));
+    assert!(String::from_utf8_lossy(&flag.stderr).contains("--output must be auto, rich, plain, or agent"));
     assert_eq!(environment.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&environment.stderr).contains("CARGO_VAL_OUTPUT must be auto, rich, or plain"));
+    assert!(String::from_utf8_lossy(&environment.stderr).contains("CARGO_VAL_OUTPUT must be auto, rich, plain, or agent"));
 }
 
 #[proxima::test(timeout = "310s")]

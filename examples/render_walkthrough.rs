@@ -25,14 +25,14 @@ fn show(state: &mut State<'_, RERUN_BYTES>, event: Event<'static>) -> Result<(),
 }
 
 fn finished(failed: usize) -> Event<'static> {
-    Event::Finished { passed: 2, failed, ignored: 0, not_run: 0, wall_ms: 258_235, manifest: Some(b"Cargo.toml") }
+    Event::Finished { passed: 2, failed, ignored: 0, not_run: 0, wall_ms: 258_235, manifest: Some(b"Cargo.toml"), discovered: 0, filtered: 0, exit: 0 }
 }
 
 fn run_with_failure() -> Result<(), String> {
     let mut arena = [0_u8; NAME_BYTES];
     let mut ledger = [0_u32; FAILURES];
     let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
-    show(&mut state, Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true })?;
+    show(&mut state, Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true, why: None })?;
     show(&mut state, Event::Listed { binaries: 19, tests: 383 })?;
     show(&mut state, Event::Started { id: PASSING, solo: false })?;
     show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Passed, millis: Some(3123), solo: false })?;
@@ -46,7 +46,7 @@ fn run_clean() -> Result<(), String> {
     let mut arena = [0_u8; NAME_BYTES];
     let mut ledger = [0_u32; FAILURES];
     let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
-    show(&mut state, Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false })?;
+    show(&mut state, Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None })?;
     show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Ignored, millis: None, solo: false })?;
     show(&mut state, finished(0))
 }

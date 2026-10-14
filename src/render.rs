@@ -9,6 +9,8 @@
 //!
 //! Plain is the first projection. Rich and agent read the same `State`; they add modes and events, not a second ledger.
 
+mod agent;
+
 use crate::line::Line;
 
 /// A test id as two borrowed fields: the binary, then the test name.
@@ -43,7 +45,7 @@ pub enum Mode {
 /// Everything the driver reports to the renderer. `B` payloads borrow from buffers the driver owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event<'a> {
-    Begin { version: &'a [u8], shard: bool, jobs: usize, github: bool },
+    Begin { version: &'a [u8], shard: bool, jobs: usize, github: bool, why: Option<&'a [u8]> },
     Listed { binaries: usize, tests: usize },
     Started { id: Identity<'a>, solo: bool },
     Settled { id: Identity<'a>, outcome: Outcome, millis: Option<u64>, solo: bool },
@@ -53,7 +55,7 @@ pub enum Event<'a> {
     BlockClosed,
     BuildFailed { diagnostic: &'a [u8] },
     Interrupted { signal: u8 },
-    Finished { passed: usize, failed: usize, ignored: usize, not_run: usize, wall_ms: u64, manifest: Option<&'a [u8]> },
+    Finished { passed: usize, failed: usize, ignored: usize, not_run: usize, wall_ms: u64, manifest: Option<&'a [u8]>, discovered: usize, filtered: usize, exit: u8 },
 }
 
 impl Mode {
@@ -90,6 +92,7 @@ impl Mode {
 pub struct State<'storage, const RERUN: usize> {
     mode: Mode,
     github: bool,
+    agent: bool,
     arena: &'storage mut [u8],
     used: usize,
     failures: &'storage mut [u32],
@@ -100,7 +103,7 @@ pub struct State<'storage, const RERUN: usize> {
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
     pub const fn new(arena: &'storage mut [u8], failures: &'storage mut [u32]) -> Self {
-        Self { mode: Mode::Running, github: false, arena, used: 0, failures, stored: 0, unstored: 0 }
+        Self { mode: Mode::Running, github: false, agent: false, arena, used: 0, failures, stored: 0, unstored: 0 }
     }
 
     #[must_use]
@@ -122,15 +125,16 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     pub fn apply(&mut self, event: &Event<'_>) {
         self.mode = self.mode.next(event);
         match *event {
-            Event::Begin { github, .. } => self.begin(github),
+            Event::Begin { github, why, .. } => self.begin(github, why.is_some()),
             Event::Settled { id, outcome: Outcome::Failed, .. } => self.record(id),
             _ => {}
         }
     }
 
-    fn begin(&mut self, github: bool) {
+    fn begin(&mut self, github: bool, agent: bool) {
         self.mode = Mode::Running;
         self.github = github;
+        self.agent = agent;
         self.used = 0;
         self.stored = 0;
         self.unstored = 0;
@@ -166,6 +170,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     ///
     /// Returns the number of bytes cut when the frame was too small; the frame then holds a truncated projection.
     pub fn project<const FRAME: usize>(&self, event: &Event<'_>, frame: &mut Line<FRAME>) -> Result<(), usize> {
+        if self.agent {
+            self.project_agent(event, frame);
+            return Self::checked(frame);
+        }
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Listed { binaries, tests } => listed(frame, binaries, tests),
@@ -177,10 +185,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
             Event::BuildFailed { diagnostic } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
             Event::Interrupted { signal } => interrupted(frame, signal),
-            Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest } => {
-                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest);
+            Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, .. } => {
+                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, None);
             }
         }
+        Self::checked(frame)
+    }
+
+    fn checked<const FRAME: usize>(frame: &Line<FRAME>) -> Result<(), usize> {
         match frame.lost() {
             0 => Ok(()),
             lost => Err(lost),
@@ -237,6 +249,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         [passed, failed, ignored, not_run]: [usize; 4],
         wall_ms: u64,
         manifest: Option<&[u8]>,
+        extras: Option<[usize; 2]>,
     ) {
         label(frame, b"SUMMARY");
         for (key, value) in [(&b"passed="[..], passed), (b" failed=", failed), (b" ignored=", ignored), (b" not_run=", not_run)] {
@@ -245,6 +258,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
         frame.text(b"  wall=");
         seconds(frame, wall_ms);
+        if let Some([discovered, filtered]) = extras {
+            frame.text(b" discovered=");
+            frame.number(discovered);
+            frame.text(b" run=");
+            frame.number(passed + failed);
+            frame.text(b" filtered=");
+            frame.number(filtered);
+        }
         frame.text(b"\n");
         for (target, name) in self.failures() {
             label(frame, b"FAILED");
@@ -467,7 +488,7 @@ mod tests {
         let mut arena = [0_u8; 512];
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
-        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true });
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true, why: None });
 
         let fail = settle(&mut state, FAILING, Outcome::Failed);
         let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", false), stderr: (b"", false) };
@@ -487,7 +508,7 @@ mod tests {
         let mut state = Small::new(&mut arena, &mut ledger);
         settle(&mut state, PASSING, Outcome::Passed);
         settle(&mut state, FAILING, Outcome::Failed);
-        let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 8400, manifest: Some(b"/w/Cargo.toml") };
+        let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 8400, manifest: Some(b"/w/Cargo.toml"), discovered: 0, filtered: 0, exit: 0 };
         state.apply(&finished);
 
         let block = projected(&state, &finished);
@@ -510,7 +531,7 @@ mod tests {
         for id in names {
             settle(&mut state, id, Outcome::Failed);
         }
-        let finished = Event::Finished { passed: 0, failed: 4, ignored: 0, not_run: 0, wall_ms: 10, manifest: None };
+        let finished = Event::Finished { passed: 0, failed: 4, ignored: 0, not_run: 0, wall_ms: 10, manifest: None, discovered: 0, filtered: 0, exit: 0 };
 
         let block = projected(&state, &finished);
 
@@ -545,7 +566,7 @@ mod tests {
         for id in [(&b"a"[..], &b"one"[..]), (b"a", b"two"), (b"a", b"three")] {
             state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: None, solo: false });
         }
-        let finished = Event::Finished { passed: 0, failed: 3, ignored: 0, not_run: 0, wall_ms: 10, manifest: None };
+        let finished = Event::Finished { passed: 0, failed: 3, ignored: 0, not_run: 0, wall_ms: 10, manifest: None, discovered: 0, filtered: 0, exit: 0 };
 
         let block = projected(&state, &finished);
 
@@ -567,7 +588,7 @@ mod tests {
 
     #[test]
     fn every_mode_event_pair_lands_where_the_transition_table_says() {
-        let finished = |failed| Event::Finished { passed: 1, failed, ignored: 0, not_run: 0, wall_ms: 5, manifest: None };
+        let finished = |failed| Event::Finished { passed: 1, failed, ignored: 0, not_run: 0, wall_ms: 5, manifest: None, discovered: 0, filtered: 0, exit: 0 };
         let rows = [
             (Mode::Running, Event::BuildFailed { diagnostic: b"E0308" }, Mode::BuildError),
             (Mode::Running, Event::Interrupted { signal: 2 }, Mode::Interrupted { signal: 2 }),
@@ -590,7 +611,7 @@ mod tests {
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
         let events = [
-            Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true },
+            Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true, why: None },
             Event::Listed { binaries: 19, tests: 383 },
             Event::Started { id: FAILING, solo: true },
             Event::Warned { id: FAILING, what: b"rerun failed to start" },
@@ -620,7 +641,7 @@ mod tests {
                     Event::Started { id: PASSING, solo: false },
                     Event::Settled { id: FAILING, outcome, millis: Some(round), solo: false },
                     Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", false), stderr: (b"", false) },
-                    Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml") },
+                    Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml"), discovered: 0, filtered: 0, exit: 0 },
                 ] {
                     frame.clear();
                     state.apply(&event);
@@ -636,6 +657,35 @@ mod tests {
     }
 
     #[test]
+    fn ten_thousand_agent_failure_blocks_and_closing_frames_project_with_zero_allocations() {
+        let mut arena = [0_u8; 4096];
+        let mut ledger = [0_u32; 64];
+        let mut state = State::<8192>::new(&mut arena, &mut ledger);
+        let mut frame = Line::<32_768>::new();
+        let capture = b"\nthread 't' panicked at src/lib.rs:12:13:\nrequested \x1b[31mfixture\x1b[0m failure\n";
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: Some(b"flag") });
+        state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, millis: None, solo: false });
+        let block = Event::Captured { id: FAILING, stdout: (capture, false), stderr: (b"", false) };
+        let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 9, manifest: None, discovered: 2, filtered: 0, exit: 1 };
+        let mut projections = 0_usize;
+
+        let ((), allocations) = measure_allocations(|| {
+            for _ in 0..10_000 {
+                for event in [block, finished] {
+                    frame.clear();
+                    state.project(&event, &mut frame).expect("the frame holds the agent projection");
+                    projections += 1;
+                }
+            }
+        });
+
+        assert_eq!(projections, 20_000, "the loop ran every projection, so a zero is not an empty loop");
+        assert_eq!(allocations, 0);
+        assert!(!frame.bytes().contains(&0x1b), "the last projection holds no escape byte");
+        assert!(frame.bytes().ends_with(b"EXIT     1  failed\n"));
+    }
+
+    #[test]
     fn ten_thousand_closing_frames_project_with_zero_allocations() {
         let mut arena = [0_u8; 4096];
         let mut ledger = [0_u32; 64];
@@ -646,7 +696,7 @@ mod tests {
             let id = (&b"sched_records"[..], &b"the_host_binary_format_yields_every_declared_record"[..]);
             state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: Some(ordinal), solo: false });
         }
-        let finished = Event::Finished { passed: 9, failed: 64, ignored: 0, not_run: 0, wall_ms: 258_235, manifest: Some(b"/w/Cargo.toml") };
+        let finished = Event::Finished { passed: 9, failed: 64, ignored: 0, not_run: 0, wall_ms: 258_235, manifest: Some(b"/w/Cargo.toml"), discovered: 0, filtered: 0, exit: 0 };
 
         let ((), allocations) = measure_allocations(|| {
             for _ in 0..10_000 {

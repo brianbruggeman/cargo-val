@@ -99,6 +99,10 @@ struct ViewDefaults {
     rerun_bytes: usize,
     #[setting(default = 16384)]
     frame_bytes: usize,
+    #[setting(default = 2048)]
+    output_bytes: usize,
+    #[setting(default = 512)]
+    output_head_bytes: usize,
 }
 
 impl Validate for ViewDefaults {
@@ -109,6 +113,9 @@ impl Validate for ViewDefaults {
         }
         if self.name_bytes == 0 {
             errors.push(ValidationMessage::new("name_bytes", "must be greater than zero"));
+        }
+        if self.output_head_bytes == 0 || self.output_head_bytes >= self.output_bytes {
+            errors.push(ValidationMessage::new("output_head_bytes", "must be greater than zero and less than output_bytes"));
         }
         if self.frame_bytes < self.rerun_bytes + 4096 {
             errors.push(ValidationMessage::new("frame_bytes", "must hold the rerun command plus a line, at least rerun_bytes + 4096"));
