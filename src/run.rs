@@ -289,7 +289,7 @@ fn edge<'edge>(
     }
 }
 
-// the editor owns the terminal, so the queue is not drained and a full one stops every producing lane unread; only the editor's exit, the signals and the tick are polled: the exit lets the queue drain, and the tick is what continues a stopped editor
+// the editor owns the terminal, so the queue is not drained; with the run store holding the overflow the lanes keep producing into it, and only a memory-only run stops every producing lane unread; only the editor's exit, the signals and the tick are polled: the exit lets the queue drain, and the tick is what continues a stopped editor
 fn step_unproducing(
     lanes: &Lanes,
     port: Option<(&RefCell<Readiness>, &SignalSource, &SignalPipe)>,
