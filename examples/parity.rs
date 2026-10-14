@@ -80,13 +80,13 @@ fn run(mut command: Command, target: &Path) -> Result<String, String> {
         .spawn()
         .map_err(|error| format!("spawn: {error}"))?;
     drop(command);
-    let (cancel, fired) = group::watchdog(child.id(), group::SYNC_DEADLINE);
+    let (cancel, fired) = group::watchdog(child.id(), group::sync_deadline());
     let mut text = String::new();
     let read = reader.read_to_string(&mut text);
     let waited = child.wait();
     drop(cancel);
     if fired.join().unwrap_or(false) {
-        return Err(format!("outlived {:?} and its process group was killed: {text}", group::SYNC_DEADLINE));
+        return Err(format!("outlived {:?} and its process group was killed: {text}", group::sync_deadline()));
     }
     read.map_err(|error| format!("read: {error}"))?;
     let status = waited.map_err(|error| format!("wait: {error}"))?;

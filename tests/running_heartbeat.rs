@@ -20,7 +20,7 @@ mod fifo;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{FIXTURE_DEADLINE, drain, drain_until, fixture_output};
+use common::{fixture_deadline, drain, drain_until, fixture_output};
 use supervise::supervised;
 
 const BINARY: &str = "cargo_val_blocked_fixture";
@@ -78,7 +78,7 @@ fn command(directory: &Path, arguments: &[&str]) -> Command {
         .args(arguments)
         .env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", directory)
         .env("CARGO_TARGET_DIR", target_directory().join("running-heartbeat-fixture"));
-    for key in ["CI", "GITHUB_ACTIONS", "NO_COLOR", "TERM", "CARGO_VAL_OUTPUT", "CARGO_VAL_PROCESS", "CARGO_VAL_TEST_TIMEOUT", "CARGO_VAL_HEARTBEAT_SECS", "RUST_TEST_THREADS"] {
+    for key in ["CI", "GITHUB_ACTIONS", "NO_COLOR", "TERM", "CARGO_VAL_OUTPUT", "CARGO_VAL_PROCESS", "CARGO_VAL_TEST_TIMEOUT", "CARGO_VAL_HEARTBEAT", "RUST_TEST_THREADS"] {
         command.env_remove(key);
     }
     command
@@ -101,7 +101,7 @@ async fn blocked_run(label: &str, arguments: &[&str]) -> Blocked {
     let held = open_held(&directory.join("held"));
     let mut invocation = command(&directory, arguments);
 
-    let outcome = supervised(&mut invocation, FIXTURE_DEADLINE, async |_, stdout, _, exit| {
+    let outcome = supervised(&mut invocation, fixture_deadline(), async |_, stdout, _, exit| {
         let (seen, fault) = drain_until(stdout, |bytes| running_line(&String::from_utf8_lossy(bytes)).is_some()).await;
         assert!(fault.is_none(), "stdout failed before the heartbeat: {fault:?}");
         let before = String::from_utf8(seen).expect("plain output is UTF-8");

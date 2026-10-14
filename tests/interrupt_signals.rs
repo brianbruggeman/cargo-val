@@ -145,7 +145,7 @@ macro_rules! interrupt {
         assert!(alive(fixture.holder), "the blocked process is alive before the signal");
 
         assert_eq!(unsafe { libc::kill(cargo_val, $signal) }, 0);
-        let status = wait::wait_bounded(&mut fixture.child, group::SYNC_DEADLINE).unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
+        let status = wait::wait_bounded(&mut fixture.child, group::sync_deadline()).unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
         let held = ChildStream::new(OwnedFd::from(fixture.held.try_clone().expect("the held fifo descriptor duplicates")));
         fifo::until_eof(&held, label).await;
 

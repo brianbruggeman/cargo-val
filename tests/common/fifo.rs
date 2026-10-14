@@ -4,13 +4,20 @@ use cargo_val::edge_stream_unix::ChildStream;
 use proxima_core::time::timeout;
 use proxima_primitives::pipe::{Exhausted, Pipe};
 
+pub mod settings {
+    include!("settings.rs");
+}
+
 // the fifo has no child to kill; every caller owns its child through supervised or a Drop guard that kills the group when this panics
-const FIFO_DEADLINE: Duration = Duration::from_secs(240);
 
 pub async fn first_line(stream: &ChildStream, what: &str) -> String {
-    timeout(FIFO_DEADLINE, read_line(stream, what))
+    timeout(fifo_deadline(), read_line(stream, what))
         .await
-        .unwrap_or_else(|elapsed| panic!("{what}: no line within {FIFO_DEADLINE:?} ({elapsed:?})"))
+        .unwrap_or_else(|elapsed| panic!("{what}: no line within {:?} ({elapsed:?})", fifo_deadline()))
+}
+
+fn fifo_deadline() -> Duration {
+    settings::bound("FIFO_DEADLINE")
 }
 
 async fn read_line(stream: &ChildStream, what: &str) -> String {
@@ -26,9 +33,9 @@ async fn read_line(stream: &ChildStream, what: &str) -> String {
 }
 
 pub async fn until_eof(stream: &ChildStream, what: &str) {
-    let read = timeout(FIFO_DEADLINE, stream.call(()))
+    let read = timeout(fifo_deadline(), stream.call(()))
         .await
-        .unwrap_or_else(|elapsed| panic!("{what}: no EOF within {FIFO_DEADLINE:?} ({elapsed:?})"));
+        .unwrap_or_else(|elapsed| panic!("{what}: no EOF within {:?} ({elapsed:?})", fifo_deadline()));
     match read {
         Err(Exhausted) => {}
         Ok(read) => panic!("{what}: the fifo carried {read:?} instead of EOF"),

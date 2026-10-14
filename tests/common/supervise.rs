@@ -10,7 +10,7 @@ use crate::common::{ChildStream, ExitSource, interrupt_then_kill, kill_group, la
 
 /// Spawns `command` as the leader of its own process group and lends `interact` the child's pid, its stdout and stderr streams and its exit source, all driven on the calling prime worker; then guarantees the group is gone before returning or unwinding.
 ///
-/// Where [`crate::common::output_until`] owns the whole run, this is for tests that must watch the child while it runs. A caller panic, a `deadline` missed by `interact`, or a child left running all end the same way: SIGINT to the group, `INTERRUPT_GRACE` for cargo-val to forward it, then SIGKILL, so no cargo or cargo-val child outlives the test and holds cargo's build lock.
+/// Where [`crate::common::output_until`] owns the whole run, this is for tests that must watch the child while it runs. A caller panic, a `deadline` missed by `interact`, or a child left running all end the same way: SIGINT to the group, `interrupt_grace()` for cargo-val to forward it, then SIGKILL, so no cargo or cargo-val child outlives the test and holds cargo's build lock.
 pub async fn supervised<Outcome>(
     command: &mut Command,
     deadline: Duration,

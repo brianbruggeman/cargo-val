@@ -210,7 +210,7 @@ fn build(context: &Context) -> Result<(), String> {
 fn nextest_available() -> bool {
     let mut probe = Command::new("cargo");
     probe.args(["nextest", "--version"]);
-    output::output_bounded(&mut probe, group::SYNC_DEADLINE).is_ok_and(|output| output.status.success())
+    output::output_bounded(&mut probe, group::sync_deadline()).is_ok_and(|output| output.status.success())
 }
 
 fn build_command(arm: Arm, context: &Context) -> Command {
