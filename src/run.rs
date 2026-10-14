@@ -346,8 +346,10 @@ pub(crate) async fn pump(
             } else if editing {
                 step_unproducing(lanes, port, beat, context)
             } else if block_ready {
+                status_queue::note_skipped();
                 Poll::Ready(Ok(Item::Signal(Ok(()))))
             } else {
+                status_queue::note_skipped();
                 Poll::Pending
             };
             parks += usize::from(polled.is_pending());
@@ -357,6 +359,7 @@ pub(crate) async fn pump(
         drained?;
         let Ok(item) = polled else {
             status_queue::drain_bounded(&mut sinks).await?;
+            proxima_telemetry::debug!(skipped_turns = status_queue::skipped_turns(), "pump ended; a turn is skipped only when the queue has no room and no store to overflow into");
             return Ok(parks);
         };
         let flow = on_item(item);
@@ -366,6 +369,7 @@ pub(crate) async fn pump(
         let delivered = status_queue::drain_bounded(&mut sinks).await;
         flow.map(|_| ())?;
         delivered?;
+        proxima_telemetry::debug!(skipped_turns = status_queue::skipped_turns(), "pump ended; a turn is skipped only when the queue has no room and no store to overflow into");
         return Ok(parks);
     }
 }
