@@ -33,6 +33,10 @@ pub(crate) use cargo_val::edge_signal_windows::release_group;
 // a cold fixture build under load 85-96 took up to ~63 s in shard_process; 240 s leaves ~3.8x headroom and matches isolated_target's WAIT_LINE_DEADLINE
 pub const FIXTURE_DEADLINE: Duration = Duration::from_secs(240);
 
+// a SIGKILLed harness cannot clean up in-process, so every cargo-val it launches carries the cleanup and exits with its parent
+#[cfg(unix)]
+pub(crate) const EXIT_WITH_PARENT: &str = "CARGO_VAL_EXIT_WITH_PARENT";
+
 // cargo-val forwards SIGINT to its children's groups and exits 130; interrupt_signals waits up to 60 s for the same exit
 pub(crate) const INTERRUPT_GRACE: Duration = Duration::from_secs(60);
 
@@ -96,10 +100,11 @@ pub(crate) fn launch(command: &Command) -> Result<(u32, Box<ChildStream>, Box<Ch
         .filter(|(key, _)| !changes.contains_key(key.as_os_str()))
         .map(|(key, value)| environment_entry(&key, &value))
         .collect();
-    let overrides: Vec<Vec<u8>> = changes
+    let mut overrides: Vec<Vec<u8>> = changes
         .iter()
         .filter_map(|(key, value)| value.map(|value| environment_entry(key, value)))
         .collect();
+    overrides.extend(exit_with_parent_entry(&changes));
     let arguments: Vec<&[u8]> = command.get_args().map(OsStr::as_encoded_bytes).collect();
     let inherited: Vec<&[u8]> = inherited.iter().map(Vec::as_slice).collect();
     let overrides: Vec<&[u8]> = overrides.iter().map(Vec::as_slice).collect();
@@ -110,6 +115,17 @@ pub(crate) fn launch(command: &Command) -> Result<(u32, Box<ChildStream>, Box<Ch
     let (leader, stdout, stderr) = child.into_parts();
     // boxed: each stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
     Ok((leader, Box::new(ChildStream::new(stdout)), Box::new(ChildStream::new(stderr)), exit))
+}
+
+// windows has no parent watch, so the opt-in would be refused there
+#[cfg(unix)]
+fn exit_with_parent_entry(changes: &BTreeMap<&OsStr, Option<&OsStr>>) -> Option<Vec<u8>> {
+    (!changes.contains_key(OsStr::new(EXIT_WITH_PARENT))).then(|| environment_entry(OsStr::new(EXIT_WITH_PARENT), OsStr::new("1")))
+}
+
+#[cfg(not(unix))]
+fn exit_with_parent_entry(_changes: &BTreeMap<&OsStr, Option<&OsStr>>) -> Option<Vec<u8>> {
+    None
 }
 
 fn environment_entry(key: &OsStr, value: &OsStr) -> Vec<u8> {
