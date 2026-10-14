@@ -709,7 +709,20 @@ pub(crate) async fn observe_cargo(
         })
     })
     .await?;
+    if run.open_review()? {
+        pump(&lanes, Some((&signal, &interrupt, run.signals())), None, |item| review_item(item, &lanes, run)).await?;
+    }
     Ok(())
+}
+
+// only the key lane acts while a finished run waits in review; a signal or a closed terminal ends the wait
+fn review_item(item: Item, lanes: &Lanes, run: &ListingRun<'_>) -> Result<ControlFlow<()>, RunError> {
+    match item {
+        Item::Out(KEY_LANE, range) => keys_chunk(lanes, range, run)?,
+        Item::OutEnd(KEY_LANE) | Item::Interrupt | Item::Signal(Err(_)) => return Ok(ControlFlow::Break(())),
+        _ => {}
+    }
+    Ok(if run.reviewing() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) })
 }
 
 /// The whole run as one prime root: argument parsing, setup, the awaited cargo child, and the delegated remainder.
