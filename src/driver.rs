@@ -165,6 +165,7 @@ pub enum RunError {
     TestEnvironment,
     RustcLibdir,
     Settings,
+    Timeline,
     Setting(SettingError),
     Filterset(FilterError),
     IgnoredSet(IgnoredSetFull),
@@ -213,6 +214,7 @@ impl RunError {
             }
             Self::RustcLibdir => b"cargo-val: cannot read the rustc library directory\n",
             Self::Settings => b"cargo-val: invalid runtime settings\n",
+            Self::Timeline => b"cargo-val: --timeline is a terminal view; use --output plain or rich\n",
             Self::Setting(error) => error.message(),
             Self::IgnoredSet(_) => b"cargo-val: a test binary lists more ignored tests than the fixed set holds\n",
             Self::NothingRan => b"cargo-val: an exact test launch ran no test body\n",
@@ -586,7 +588,10 @@ fn runtime_settings(
         .map_err(RunError::Setting)?
         .0
         .mode(cfg!(windows));
-    let (output, output_why) = resolve_output(&source, parser)?;    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
+    let (output, output_why) = resolve_output(&source, parser)?;
+    if parser.timeline() && output.is_agent_like() {
+        return Err(RunError::Timeline);
+    }    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
     let default_jobs = match process {
         ProcessMode::Shard => {
             let cores = std::thread::available_parallelism().map_or(1, core::num::NonZero::get);
@@ -909,6 +914,7 @@ pub(crate) type RenderState<'storage> = State<'storage, RERUN_BYTES>;
 /// The run's output mode with the one render state and the frame its projection fills; plain output is `emit` into this.
 pub(crate) type Render<'storage> = (OutputMode, RefCell<RenderState<'storage>>, RefCell<&'storage mut Line<FRAME_BYTES>>);
 
+const TIMELINE_COLUMNS: usize = 80;
 const PROJECTED_LINE: usize = NAME_CAPACITY + 2 * 128 + 64;
 
 const fn rendered(outcome: TerminalOutcome) -> Outcome {
@@ -996,6 +1002,10 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
             state.project_live(event, frame)
         }
     };
+    flush(frame, projected)
+}
+
+fn flush(frame: &Line<FRAME_BYTES>, projected: Result<(), usize>) -> Result<(), RunError> {
     if !frame.bytes().is_empty() {
         write_fd(1, frame.bytes())?;
     }
@@ -1007,6 +1017,16 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
     notice.number(lost);
     notice.text(b" bytes\n");
     write_fd(2, notice.bytes())
+}
+
+/// Writes the timeline of the run so far, 80 columns wide, after the closing block or the rich receipt.
+pub(crate) fn emit_timeline(render: &Render<'_>) -> Result<(), RunError> {
+    let (_, state, frame) = render;
+    let mut frame = frame.borrow_mut();
+    let frame: &mut Line<FRAME_BYTES> = &mut frame;
+    frame.clear();
+    let projected = state.borrow().project_timeline(TIMELINE_COLUMNS, frame);
+    flush(frame, projected)
 }
 
 /// Emits an event that only the live frame shows; plain output already prints its totals once, at the close.
@@ -2655,10 +2675,10 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
-    let mut storage = run_storage(settings.process);
+    let mut storage = run_storage(settings.process, timeline_arena_bytes(settings.output, parser.timeline()));
     let storage = &mut storage;
-    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color)), RefCell::new(frame_line));
+    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots, timeline_slots)) = storage;
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_timeline(timeline_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color)), RefCell::new(frame_line));
     emit_begin(&render, &settings, &environment, started_millis)?;
     if settings.output == OutputMode::Rich {
         begin_rich(&render)?;
@@ -2766,11 +2786,11 @@ type RunStorage<'environment> = (
         Box<Watches>,
     ),
     (Box<[u8]>, Box<[u8]>, Box<[u32]>),
-    (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>, Box<[u8]>),
+    (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>, Box<[u8]>, Box<[u8]>),
 );
 
 // run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup: the cargo and listing buffers, the session tables, and the render frame, failure ledger and name arena
-fn run_storage<'environment>(process: ProcessMode) -> RunStorage<'environment> {
+fn run_storage<'environment>(process: ProcessMode, timeline_bytes: usize) -> RunStorage<'environment> {
     (
         (
             zeroed(FRAME_CAPACITY),
@@ -2792,8 +2812,16 @@ fn run_storage<'environment>(process: ProcessMode) -> RunStorage<'environment> {
             ),
             ProcessMode::Test => (zeroed(0), zeroed(crate::build_defaults::SCHED_RECORD_BYTES), std::vec::Vec::new().into_boxed_slice()),
         },
-        (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame(), zeroed(crate::view_defaults::INFLIGHT_BYTES)),
+        (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame(), zeroed(crate::view_defaults::INFLIGHT_BYTES), zeroed(timeline_bytes)),
     )
+}
+
+// rich keeps the arena for the review `s` key; plain only when --timeline asked for the view
+const fn timeline_arena_bytes(output: OutputMode, requested: bool) -> usize {
+    match (output, requested) {
+        (OutputMode::Rich, _) | (OutputMode::Plain, true) => crate::view_defaults::TIMELINE_BYTES,
+        _ => 0,
+    }
 }
 
 fn zeroed(length: usize) -> Box<[u8]> {
@@ -3530,6 +3558,9 @@ fn conclude(
         _ => 1,
     };
     close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path(), exit))?;
+    if parser.timeline() && matches!(settings.output, OutputMode::Plain | OutputMode::Rich) {
+        emit_timeline(render)?;
+    }
     if empty && settings.no_tests != NoTestsPolicy::Pass && !settings.output.is_agent_like() {
         write_no_tests(parser, settings.ignore)?;
     }
@@ -3619,7 +3650,7 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError, is_status_line, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, is_status_line, whole_lines_len};
 
     #[proxima::test]
     async fn cargo_status_lines_are_recognised_with_or_without_colour_and_diagnostics_are_not() {
@@ -3628,6 +3659,18 @@ mod tests {
 
         assert!(status.iter().all(|line| is_status_line(line)));
         assert!(!kept.iter().any(|line| is_status_line(line)));
+    }
+
+    #[proxima::test]
+    async fn the_timeline_arena_is_sized_only_where_the_view_can_be_shown() {
+        let full = crate::view_defaults::TIMELINE_BYTES;
+
+        assert_eq!(super::timeline_arena_bytes(OutputMode::Plain, false), 0, "plain without --timeline never reads the arena");
+        assert_eq!(super::timeline_arena_bytes(OutputMode::Plain, true), full);
+        assert_eq!(super::timeline_arena_bytes(OutputMode::Rich, false), full, "the review s key reads it without the flag");
+        assert_eq!(super::timeline_arena_bytes(OutputMode::Rich, true), full);
+        assert_eq!(super::timeline_arena_bytes(OutputMode::Agent, false), 0);
+        assert_eq!(super::timeline_arena_bytes(OutputMode::Json, false), 0);
     }
 
     fn rendered(cause: LaunchCause) -> std::string::String {

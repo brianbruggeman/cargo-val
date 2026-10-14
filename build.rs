@@ -105,6 +105,9 @@ struct ViewDefaults {
     output_head_bytes: usize,
     #[setting(default = 65536)]
     inflight_bytes: usize,
+    /// Bytes for the per-test start and end records the timeline reads, roughly 40 bytes per test (two u32 times, an outcome byte, the binary and test names), so the default holds about 13k tests. Raising it times more tests at the cost of that much heap when the timeline can be shown; lowering it makes tests that no longer fit count as untimed. A run that cannot show the timeline allocates none of it.
+    #[setting(default = 524_288)]
+    timeline_bytes: usize,
     #[setting(default = 10)]
     heartbeat_secs: usize,
     #[setting(default = 250)]
