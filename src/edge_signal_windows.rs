@@ -2,6 +2,7 @@
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use core::task::{Context, Poll};
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
@@ -178,6 +179,11 @@ impl SignalPipe {
     /// Returns the `DuplicateHandle` error when the event cannot be duplicated for the gate.
     pub fn gate(&self) -> io::Result<Readiness> {
         Readiness::signaled(&self.event)
+    }
+
+    /// Windows has no parent watch; the run refuses `exit-with-parent` before it gets here.
+    pub const fn poll_parent(&self, _context: &Context<'_>) -> Poll<io::Error> {
+        Poll::Pending
     }
 
     /// Fires once, when [`drain`](Self::drain) first forwards a signal.

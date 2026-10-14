@@ -31,7 +31,7 @@ pub(crate) const LISTING_LANE: usize = 1;
 pub(crate) const DOC_LANE: usize = 2;
 pub(crate) const JOB_BASE: usize = 3;
 const LANES: usize = JOB_BASE + LIVE_CAPACITY;
-const ARMS: usize = LANES * 3 + 2;
+const ARMS: usize = LANES * 3 + 3;
 
 /// One child's stdout and stderr streams, its exit source, and whether its stdout may be read now.
 pub(crate) type Lane = (
@@ -91,6 +91,7 @@ pub(crate) enum Edge<'edge> {
     Exit(usize, &'edge Lane),
     Signal(Option<&'edge RefCell<Readiness>>),
     Interrupt(Option<&'edge SignalSource>),
+    Parent(Option<&'edge SignalPipe>),
 }
 
 pub(crate) enum Item {
@@ -122,6 +123,7 @@ impl UnpinPipe for Edge<'_> {
             }
             Edge::Interrupt(source) => source
                 .map_or(Poll::Ready(Err(Exhausted)), |source| interrupt_step(source, context)),
+            Edge::Parent(signals) => signals.map_or(Poll::Ready(Err(Exhausted)), |signals| parent_step(signals, context)),
         })
     }
 }
@@ -195,6 +197,10 @@ fn interrupt_step(source: &SignalSource, context: &mut Context<'_>) -> Poll<Resu
     }
 }
 
+fn parent_step(signals: &SignalPipe, context: &Context<'_>) -> Poll<Result<Item, Exhausted>> {
+    signals.poll_parent(context).map(|error| Ok(Item::Signal(Err(error))))
+}
+
 fn signal_step(gate: &RefCell<Readiness>, context: &Context<'_>) -> Poll<Result<Item, Exhausted>> {
     match gate.borrow_mut().poll(context) {
         Ok(ReadyState::Parked) => Poll::Pending,
@@ -208,14 +214,17 @@ fn signal_step(gate: &RefCell<Readiness>, context: &Context<'_>) -> Poll<Result<
 
 fn edge<'edge>(
     lanes: &'edge Lanes,
-    port: Option<(&'edge RefCell<Readiness>, &'edge SignalSource)>,
+    port: Option<(&'edge RefCell<Readiness>, &'edge SignalSource, &'edge SignalPipe)>,
     index: usize,
 ) -> Edge<'edge> {
     if index == ARMS - 1 {
-        return Edge::Signal(port.map(|(gate, _)| gate));
+        return Edge::Signal(port.map(|(gate, _, _)| gate));
     }
     if index == ARMS - 2 {
-        return Edge::Interrupt(port.map(|(_, source)| source));
+        return Edge::Interrupt(port.map(|(_, source, _)| source));
+    }
+    if index == ARMS - 3 {
+        return Edge::Parent(port.map(|(_, _, signals)| signals));
     }
     let lane = &lanes[index / 3];
     match index % 3 {
@@ -233,7 +242,7 @@ fn edge<'edge>(
 /// Returns the first error `on_item` reports.
 pub(crate) async fn pump(
     lanes: &Lanes,
-    port: Option<(&RefCell<Readiness>, &SignalSource)>,
+    port: Option<(&RefCell<Readiness>, &SignalSource, &SignalPipe)>,
     mut on_item: impl FnMut(Item) -> Result<ControlFlow<()>, RunError>,
 ) -> Result<usize, RunError> {
     let merged = FanIn::new(
@@ -461,7 +470,7 @@ pub(crate) async fn observe_doc(
     }
     let gate = RefCell::new(signals.gate().map_err(|_| RunError::Reactor)?);
     let interrupt = SignalSource::new(signals.interrupt());
-    pump(&lanes, Some((&gate, &interrupt)), |item| {
+    pump(&lanes, Some((&gate, &interrupt, signals)), |item| {
         match item {
             Item::Interrupt => {}
             Item::Signal(ready) => {
@@ -596,7 +605,7 @@ pub(crate) async fn observe_cargo(
     attach(&lanes[CARGO_LANE], child)?;
     let signal = RefCell::new(run.signal_gate()?);
     let interrupt = run.interrupt_source();
-    pump(&lanes, Some((&signal, &interrupt)), |item| {
+    pump(&lanes, Some((&signal, &interrupt, run.signals())), |item| {
         if matches!(item, Item::Out(CARGO_LANE, _) | Item::OutEnd(CARGO_LANE) | Item::Exit(CARGO_LANE, _)) {
             run.start_doc(&lanes, launch_doc)?;
         }

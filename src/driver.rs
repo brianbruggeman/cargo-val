@@ -1303,6 +1303,10 @@ impl<'run> ListingRun<'run> {
 }
 
 impl ListingRun<'_> {
+    pub(crate) const fn signals(&self) -> &SignalPipe {
+        self.signals
+    }
+
     pub(crate) fn signal_gate(&self) -> Result<Readiness, RunError> {
         self.signals.gate().map_err(|_| RunError::Reactor)
     }
@@ -2377,15 +2381,21 @@ impl CargoDriver<'_> {
 }
 
 
-// the one spawn site of the parent watch: a run that did not opt in has no extra thread
+// the one arming site of the parent watch: a run that did not opt in has no extra arm to poll
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn watch_parent() -> Result<(), RunError> {
-    crate::edge_parent_unix::watch().map_err(|_| RunError::Reactor)
+fn watch_parent(signals: &SignalPipe, setting: ExitWithParent) -> Result<(), RunError> {
+    match setting {
+        ExitWithParent::On => signals.watch_parent().map_err(|_| RunError::Reactor),
+        ExitWithParent::Off => Ok(()),
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn watch_parent() -> Result<(), RunError> {
-    Err(RunError::Settings)
+fn watch_parent(_signals: &SignalPipe, setting: ExitWithParent) -> Result<(), RunError> {
+    match setting {
+        ExitWithParent::On => Err(RunError::Settings),
+        ExitWithParent::Off => Ok(()),
+    }
 }
 
 /// Runs the whole cargo-val run: setup, the awaited prime loop, and the summary.
@@ -2394,13 +2404,11 @@ fn watch_parent() -> Result<(), RunError> {
 ///
 /// Returns [`RunError`] naming the stage that failed.
 pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
+    let _scope = status_queue::Capture::enter();
     let started_millis = monotonic_millis();
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
-    if settings.exit_with_parent == ExitWithParent::On {
-        watch_parent()?;
-    }
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line)) = storage;
@@ -2433,6 +2441,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let home = utf8_variable(&environment, b"HOME")?;
     let filter = filter_text(parser)?;
     let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
+    watch_parent(&signals, settings.exit_with_parent)?;
     let StartedChildren {
         cargo: cargo_child,
         directories,
@@ -2489,7 +2498,9 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
         return Err(RunError::CargoStream);
     }
-    finish_run(parser, &run, driver.discovery.exit_code(), driver.discovery.build_reported())
+    let summary = finish_run(parser, &run, driver.discovery.exit_code(), driver.discovery.build_reported())?;
+    status_queue::flush().await?;
+    Ok(summary)
 }
 
 type CargoStorage = (
@@ -3292,6 +3303,7 @@ async fn run_doc_only<'run>(
     environment: &[&[u8]],
 ) -> Result<RunSummary, RunError> {
     let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
+    watch_parent(&signals, settings.exit_with_parent)?;
     let metadata_child = (!matches!(target_mode, TargetDirMode::Path(_)))
         .then(|| spawn_metadata(parser, environment))
         .and_then(Result::ok);
@@ -3315,14 +3327,16 @@ async fn run_doc_only<'run>(
     observe_doc(&mut doc, &signals, settings.color, &observation).await?;
     interrupted(&signals)?;
     let totals = close_doc_tests(&doc, false, &observation)?;
-    conclude(
+    let summary = conclude(
         parser,
         settings,
         (&TargetTable::new(), render),
         started_millis,
         None,
         Some(totals),
-    )
+    )?;
+    status_queue::flush().await?;
+    Ok(summary)
 }
 
 fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {

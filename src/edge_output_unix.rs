@@ -179,9 +179,9 @@ pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
     OutputSink::new(unsafe { OwnedFd::from_raw_fd(copy) })
 }
 
-/// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until the kernel takes them.
+/// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until the kernel takes them; used only where no prime reactor runs.
 ///
-/// The synchronous twin of [`OutputSink`] for the sync report paths that cannot await a gate.
+/// The synchronous twin of [`OutputSink`] for callers with no reactor: pre-runtime errors in `main`, and the error-exit drain of `status_queue::Capture`.
 ///
 /// # Errors
 ///

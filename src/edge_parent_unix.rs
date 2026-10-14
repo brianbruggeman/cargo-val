@@ -1,106 +1,52 @@
 //! Ends the process when the parent that launched it dies.
 //!
-//! An orphan has no reader left: its output goes nowhere and its caller will never signal it, so a run that waits on a child
-//! or blocks in a synchronous write can outlive its caller for good. The event loop cannot notice, because the blocked thread
-//! is the one that would have to look. A dedicated blocking thread owns the wait instead: a `kqueue` `EVFILT_PROC` on macOS,
-//! a pidfd (`prime::os::child::open_pidfd`) on Linux.
+//! An orphan has no reader left and its caller will never signal it. The parent is watched as one more source on the run's
+//! prime merge: a `Readiness` gate (`Readiness::process_exit` on macOS, a pidfd from `prime::os::child::open_pidfd` on Linux),
+//! polled by the same `FanIn` as the tick and exit sources through `SignalPipe::poll_parent`. No thread and no raw event call.
+//! `Readiness::process_exit` and a pidfd watch any pid, so unlike `ExitSource` (which reaps) it needs no child relationship.
 
-use core::ffi::c_int;
-use std::io::{self, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
-#[cfg(target_os = "macos")]
-use std::os::fd::FromRawFd;
-use std::thread;
+use std::io;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+use std::os::fd::OwnedFd;
+
+use prime::os::readiness::Readiness;
 
 use crate::edge_signal_unix::{conventional_status, signal_children};
 
-const WATCHER_NAME: &str = "cargo-val-parent-watch";
 const INIT: libc::pid_t = 1;
 
-/// Starts the parent watch; once the parent exits, every tracked child is killed and the process exits with the status of `SIGHUP`.
-///
-/// A process already adopted by init has no parent to lose, so it starts no watch. Call it once, before the run spawns anything.
+/// The gate and the descriptor it must outlive, or `None` for a process already adopted by init, which has no parent to lose.
+pub type ParentGate = Option<(Readiness, Option<OwnedFd>)>;
+
+/// Opens the exit gate for the current parent.
 ///
 /// # Errors
 ///
-/// Returns the OS error from opening the exit gate or spawning the watch thread.
-pub fn watch() -> io::Result<()> {
+/// Returns the OS error from opening the gate; `ESRCH` means the parent is already gone.
+pub fn open() -> io::Result<ParentGate> {
     let parent = unsafe { libc::getppid() };
     if parent <= INIT {
-        return Ok(());
+        return Ok(None);
     }
-    let gate = match open_gate(parent) {
-        Ok(gate) => gate,
-        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => end_run(),
-        Err(error) => return Err(error),
-    };
-    thread::Builder::new().name(WATCHER_NAME.into()).spawn(move || match await_exit(&gate) {
-        Ok(()) => end_run(),
-        Err(error) => {
-            let _ = writeln!(io::stderr(), "cargo-val: parent watch failed: {error}");
-        }
-    })?;
-    Ok(())
+    gate(parent).map(Some)
 }
 
-fn end_run() -> ! {
+/// Kills every tracked child and exits with the status of `SIGHUP`.
+pub fn end_run() -> ! {
     signal_children(libc::SIGKILL);
     unsafe { libc::_exit(conventional_status(libc::SIGHUP)) }
 }
 
 #[cfg(target_os = "macos")]
-fn open_gate(parent: libc::pid_t) -> io::Result<OwnedFd> {
-    let queue = unsafe { libc::kqueue() };
-    if queue < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let queue = unsafe { OwnedFd::from_raw_fd(queue) };
-    let mut change: libc::kevent = unsafe { core::mem::zeroed() };
-    change.ident = usize::try_from(parent).map_err(io::Error::other)?;
-    change.filter = libc::EVFILT_PROC;
-    change.flags = libc::EV_ADD | libc::EV_ONESHOT;
-    change.fflags = libc::NOTE_EXIT;
-    let status = unsafe { libc::kevent(queue.as_raw_fd(), &raw const change, 1, core::ptr::null_mut(), 0, core::ptr::null()) };
-    if status < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(queue)
-}
-
-#[cfg(target_os = "macos")]
-fn await_exit(gate: &OwnedFd) -> io::Result<()> {
-    let mut event: libc::kevent = unsafe { core::mem::zeroed() };
-    loop {
-        let ready = unsafe { libc::kevent(gate.as_raw_fd(), core::ptr::null(), 0, &raw mut event, 1, core::ptr::null()) };
-        if ready > 0 {
-            return Ok(());
-        }
-        if ready < 0 && last_error() != libc::EINTR {
-            return Err(io::Error::last_os_error());
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn open_gate(parent: libc::pid_t) -> io::Result<OwnedFd> {
+fn gate(parent: libc::pid_t) -> io::Result<(Readiness, Option<OwnedFd>)> {
     let parent = core::num::NonZeroI32::new(parent).ok_or_else(|| io::Error::from_raw_os_error(libc::ESRCH))?;
-    prime::os::child::open_pidfd(parent)
+    Ok((Readiness::process_exit(parent), None))
 }
 
 #[cfg(target_os = "linux")]
-fn await_exit(gate: &OwnedFd) -> io::Result<()> {
-    let mut watched = libc::pollfd { fd: gate.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-    loop {
-        let ready = unsafe { libc::poll(&raw mut watched, 1, -1) };
-        if ready > 0 {
-            return Ok(());
-        }
-        if ready < 0 && last_error() != libc::EINTR {
-            return Err(io::Error::last_os_error());
-        }
-    }
-}
-
-fn last_error() -> c_int {
-    io::Error::last_os_error().raw_os_error().unwrap_or(0)
+fn gate(parent: libc::pid_t) -> io::Result<(Readiness, Option<OwnedFd>)> {
+    let parent = core::num::NonZeroI32::new(parent).ok_or_else(|| io::Error::from_raw_os_error(libc::ESRCH))?;
+    let pidfd = prime::os::child::open_pidfd(parent)?;
+    Ok((Readiness::new(pidfd.as_raw_fd()), Some(pidfd)))
 }
