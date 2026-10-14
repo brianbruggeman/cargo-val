@@ -229,6 +229,10 @@ fn on_a_pty(environment: &[(&str, &str)], arguments: &[&str]) -> Vec<u8> {
         libc::openpty(&raw mut master, &raw mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
     };
     assert_eq!(status, 0, "openpty allocates a pair");
+    // openpty hands back inheritable descriptors; a master that reaches cargo-val keeps the pty alive after this process dies
+    for descriptor in [master, slave] {
+        assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) }, 0, "close-on-exec is settable");
+    }
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     let reader = std::thread::spawn(move || {
         let mut received = Vec::new();
