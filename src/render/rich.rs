@@ -29,6 +29,13 @@ const SLOW_MS: u64 = 30_000;
 const JOINED: usize = 512;
 const LABEL: &str = " failed at";
 const SEARCHING: &[u8] = b"searching for tests";
+const REVIEW_KEY: &[u8] = b"f review failures";
+const TIMELINE_KEY: &[u8] = b"s timeline";
+const CANCEL_KEY: &[u8] = b"q cancel";
+const ARMED_KEY: &[u8] = b"q again to confirm, any key cancels";
+const REVIEW_HINT: &[u8] = b"f review";
+const HINT_GAP: usize = 2;
+const HINT_MIN_ROOM: usize = 40;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tone {
@@ -369,7 +376,32 @@ impl<const RERUN: usize> State<'_, RERUN> {
             rows += 1;
         }
         frame.text(b"\n");
-        rows + 1 + self.inflight_rows(color, frame)
+        rows + 1 + self.inflight_rows(color, frame) + self.keys_row(color, frame)
+    }
+
+    /// The last row of the frame: the keys that act now, a blank row above it. Absent when no key lane reads the terminal.
+    fn keys_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) -> u16 {
+        if self.keys.is_none() {
+            return 0;
+        }
+        let mut row = Line::<96>::new();
+        let hints = [(self.failed_count() != 0, REVIEW_KEY), (true, TIMELINE_KEY), (true, CANCEL_KEY)];
+        let limit = usize::from(self.cols).saturating_sub(1);
+        if self.mode == Mode::QuitArmed {
+            ellipsis_end(&mut row, ARMED_KEY, limit.saturating_sub(1));
+        }
+        for (_, hint) in hints.into_iter().filter(|(shown, _)| *shown && self.mode != Mode::QuitArmed) {
+            let gap = if row.bytes().is_empty() { 0 } else { 2 };
+            if 1 + columns(row.bytes()) + gap + columns(hint) > limit {
+                break;
+            }
+            spaces(&mut row, gap);
+            row.text(hint);
+        }
+        frame.text(b"\n ");
+        paint(frame, color, Tone::Dim, row.bytes());
+        frame.text(b"\n");
+        2
     }
 
     fn header_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
@@ -402,7 +434,9 @@ impl<const RERUN: usize> State<'_, RERUN> {
             frame.text(RED);
         }
         bold(frame, color, head.bytes());
-        let room = usize::from(self.cols).saturating_sub(1 + columns(head.bytes()));
+        let line_room = usize::from(self.cols).saturating_sub(1 + columns(head.bytes()));
+        let hint = self.keys.is_some() && line_room >= HINT_MIN_ROOM;
+        let room = line_room - if hint { HINT_GAP + REVIEW_HINT.len() } else { 0 };
         let reason = &self.reason[..self.reason_len];
         let name_room = if reason.is_empty() { room } else { (room * 3 / 5).max(12).min(room) };
         let used = ellipsis_middle(frame, first, name_room);
@@ -411,6 +445,10 @@ impl<const RERUN: usize> State<'_, RERUN> {
             let mut tail = Line::<256>::new();
             ellipsis_end(&mut tail, reason, room - used - 2);
             paint(frame, color, Tone::Red, tail.bytes());
+        }
+        if hint {
+            spaces(frame, HINT_GAP);
+            paint(frame, color, Tone::Dim, REVIEW_HINT);
         }
         frame.text(b"\n");
         excerpt::draw(frame, self.excerpt_at(0), (1, usize::from(self.cols).saturating_sub(1), color))
@@ -1104,5 +1142,145 @@ mod tests {
             assert_eq!(allocations, 0, "{cols} columns");
             assert!(String::from_utf8_lossy(frame.bytes()).contains("panicked here"), "the last frame at {cols} columns drew the excerpt");
         }
+    }
+
+    fn keyed_state<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], inflight: &'storage mut [u8], (cols, failing, keys): (u16, bool, bool)) -> State<'storage, 200> {
+        let mut state = State::<200>::new(arena, ledger).with_inflight(inflight);
+        state.set_keys_live(keys);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
+        state.apply(&Event::Resize { cols });
+        state.apply(&Event::Built { done: 19, total: Some(19) });
+        state.apply(&Event::Listed { binaries: 12, of: Some(19), tests: 240 });
+        if failing {
+            state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
+            state.apply(&Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (PANIC, 0), exit: Exit::Code(101), excerpt: UNREAD });
+        }
+        state.apply(&Event::Started { id: SHARD, solo: false, at_ms: 8100, limit_ms: Some(120_000) });
+        state.apply(&Event::Tick { now_ms: 47_100 });
+        state
+    }
+
+    fn keyed_frame(scenario: (u16, bool, bool), color: bool) -> (String, u16) {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = keyed_state(&mut arena, &mut ledger, &mut inflight, scenario);
+        let mut frame = Line::<4096>::new();
+        state.project_rich(color, &mut frame).expect("the frame holds one redraw");
+        (String::from_utf8(frame.bytes().to_vec()).expect("the frame is utf-8"), state.drawn_rows)
+    }
+
+    fn last_rows(frame: &str, count: usize) -> Vec<&str> {
+        let rows: Vec<&str> = frame.lines().collect();
+        rows[rows.len() - count..].to_vec()
+    }
+
+    #[test]
+    fn a_live_frame_with_no_failure_ends_in_the_timeline_and_cancel_keys_at_eighty_columns() {
+        let (frame, _) = keyed_frame((80, false, true), false);
+
+        assert_eq!(last_rows(&frame, 2), ["", " s timeline  q cancel"], "{frame}");
+    }
+
+    #[test]
+    fn a_live_frame_with_no_failure_ends_in_the_timeline_and_cancel_keys_at_sixty_columns() {
+        let (frame, _) = keyed_frame((60, false, true), false);
+
+        assert_eq!(last_rows(&frame, 2), ["", " s timeline  q cancel"], "{frame}");
+    }
+
+    #[test]
+    fn a_live_frame_with_one_failure_pins_the_review_hint_and_ends_in_the_full_key_row_at_eighty_columns() {
+        let (frame, _) = keyed_frame((80, true, true), false);
+
+        assert_eq!(frame.lines().nth(1), Some(" FAIL 1  sched_records::t\u{2026}ith_flags_and_group  assertion failed: lef\u{2026}  f review"), "{frame}");
+        assert_eq!(last_rows(&frame, 2), ["", " f review failures  s timeline  q cancel"], "{frame}");
+    }
+
+    #[test]
+    fn a_live_frame_with_one_failure_pins_the_review_hint_and_ends_in_the_full_key_row_at_sixty_columns() {
+        let (frame, _) = keyed_frame((60, true, true), false);
+
+        assert_eq!(frame.lines().nth(1), Some(" FAIL 1  sched_recor\u{2026}gs_and_group  assertion fai\u{2026}  f review"), "{frame}");
+        assert_eq!(last_rows(&frame, 2), ["", " f review failures  s timeline  q cancel"], "{frame}");
+    }
+
+    #[test]
+    fn the_key_row_drops_hints_from_the_right_and_never_cuts_a_word() {
+        let widths = [(40_u16, " f review failures  s timeline"), (30, " f review failures"), (18, " ")];
+        for (cols, expected) in widths {
+            let (frame, _) = keyed_frame((cols, true, true), false);
+
+            assert_eq!(last_rows(&frame, 1), [expected], "{cols} columns\n{frame}");
+        }
+    }
+
+    #[test]
+    fn the_key_row_is_dim_with_colour_and_has_no_escape_without_it() {
+        let (coloured, _) = keyed_frame((80, true, true), true);
+        let (plain, _) = keyed_frame((80, true, true), false);
+
+        assert!(coloured.ends_with(" \x1b[2mf review failures  s timeline  q cancel\x1b[0m\n"), "{coloured}");
+        assert!(coloured.contains("\x1b[2mf review\x1b[0m\n"), "{coloured}");
+        assert!(!plain["\x1b[?25l".len()..].contains('\x1b'), "{plain}");
+    }
+
+    #[test]
+    fn an_armed_quit_replaces_the_key_row_with_the_confirmation_prompt() {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = keyed_state(&mut arena, &mut ledger, &mut inflight, (80, true, true));
+        state.apply(&Event::Key(crate::render::review::Key::Char(b'q')));
+        let mut frame = Line::<4096>::new();
+
+        state.project_rich(false, &mut frame).expect("the frame holds one redraw");
+
+        let drawn = String::from_utf8_lossy(frame.bytes()).into_owned();
+        assert_eq!(last_rows(&drawn, 1), [" q again to confirm, any key cancels"], "{drawn}");
+    }
+
+    #[test]
+    fn without_a_live_key_lane_there_is_no_key_row_and_no_pinned_hint() {
+        let (frame, _) = keyed_frame((80, true, false), false);
+
+        assert!(!frame.contains("f review") && !frame.contains("q cancel"), "{frame}");
+        assert!(frame.ends_with('\n') && !frame.ends_with("\n\n"), "no blank row trails the in-flight rows:\n{frame}");
+    }
+
+    #[test]
+    fn the_erase_row_count_includes_the_key_row_exactly() {
+        let mut checked = 0;
+        for cols in [80_u16, 60, 40] {
+            for failing in [false, true] {
+                let (with_keys, drawn) = keyed_frame((cols, failing, true), false);
+                let (without_keys, bare) = keyed_frame((cols, failing, false), false);
+
+                assert_eq!(usize::from(drawn), with_keys.matches('\n').count(), "{cols} columns, failing {failing}");
+                assert_eq!(drawn, bare + 2, "the blank row and the key row join the frame at {cols} columns");
+                assert_eq!(usize::from(bare), without_keys.matches('\n').count());
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 6);
+    }
+
+    #[test]
+    fn ten_thousand_key_frames_at_each_width_allocate_nothing() {
+        let mut total_frames = 0_usize;
+        for cols in [80_u16, 60, 40] {
+            let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+            let mut state = keyed_state(&mut arena, &mut ledger, &mut inflight, (cols, true, true));
+            let mut frame = Line::<16_384>::new();
+
+            let ((), allocations) = measure_allocations(|| {
+                for round in 0..10_000_u64 {
+                    frame.clear();
+                    state.apply(&Event::Tick { now_ms: 47_100 + round });
+                    state.project_rich(round % 2 == 0, &mut frame).expect("the frame holds one redraw");
+                    total_frames += 1;
+                }
+            });
+
+            assert_eq!(allocations, 0, "{cols} columns");
+            assert!(String::from_utf8_lossy(frame.bytes()).contains("f review"), "the last frame at {cols} columns drew the key row");
+        }
+        assert_eq!(total_frames, 30_000, "every width ran its 10k frames");
     }
 }

@@ -2081,6 +2081,7 @@ impl ListingRun<'_> {
         if !waiting {
             return Ok(false);
         }
+        self.render().1.borrow_mut().hold_review();
         if self.render().1.borrow().mode() == Mode::QuitArmed {
             self.key(Key::Esc)?;
         }
@@ -3413,6 +3414,7 @@ fn begin_rich(render: &Render<'_>, mouse: bool) -> Result<(), RunError> {
         KEYS_RAW.store(true, Ordering::SeqCst);
     }
     render.1.borrow_mut().set_mouse(mouse && keys_raw());
+    render.1.borrow_mut().set_keys_live(keys_raw());
     emit(render, &Event::Resize { cols: crate::edge_output::columns(1).unwrap_or(80) })
 }
 
