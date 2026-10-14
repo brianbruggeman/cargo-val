@@ -1012,6 +1012,7 @@ mod pause_tests {
             docs: DocObservation::new(render),
             policy: RefCell::new(StopPolicy::new(None)),
             doc: RefCell::new(None),
+            doc_pending: Cell::new(false),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: Cell::new(None),
             withdrawn_ready: Cell::new(None),

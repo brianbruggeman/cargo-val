@@ -593,15 +593,16 @@ pub(crate) async fn observe_cargo(
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
     watches: &mut Watches,
+    launch_doc: &mut Option<impl FnOnce() -> Result<Box<DocRun>, RunError>>,
 ) -> Result<(), RunError> {
     let lanes = Box::new(empty_lanes());
     attach(&lanes[CARGO_LANE], child)?;
-    if let Some(doc_child) = run.take_doc_child() {
-        attach(&lanes[DOC_LANE], doc_child)?;
-    }
     let signal = RefCell::new(run.signal_gate()?);
     let interrupt = run.interrupt_source();
     pump(&lanes, Some((&signal, &interrupt)), |item| {
+        if matches!(item, Item::Out(CARGO_LANE, _) | Item::OutEnd(CARGO_LANE) | Item::Exit(CARGO_LANE, _)) {
+            run.start_doc(&lanes, launch_doc)?;
+        }
         handle(item, &lanes, driver, run, ledger, watches)?;
         driver.resume(&lanes, run, ledger, watches)?;
         run.with_doc(|doc, color, observation| resume_doc(&lanes, doc, color, observation))?;
