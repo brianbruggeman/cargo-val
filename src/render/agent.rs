@@ -45,7 +45,10 @@ impl<const RERUN: usize> State<'_, RERUN> {
             | Event::Tick { .. }
             | Event::Warned { .. }
             | Event::BlockOpened { .. }
-            | Event::BlockClosed => {}
+            | Event::BlockClosed
+            | Event::Key(_)
+            | Event::Retried { .. }
+            | Event::Reran { .. } => {}
         }
     }
 }

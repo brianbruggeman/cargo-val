@@ -241,7 +241,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 self.erase_rich(frame);
                 self.project(event, frame)
             }
-            Event::Tick { .. } | Event::Previous { .. } | Event::Running { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
+            Event::Tick { .. } | Event::Previous { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Running { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
         }
     }
 
