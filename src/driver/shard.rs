@@ -4,8 +4,10 @@ use super::{
     CargoDriver, ChildOutput, ExactTestIntent, ExecutablePath, LaunchCause, LaunchInput, LaunchOwner, Ledger,
     Line, ListingRun, NAME_CAPACITY, ProcessMode, RunError, RunningChild, Tally, TerminalOutcome, TestWatch,
     Watches, executable_text, override_entries, report_launch_failure, report_nothing_ran, slot_range, spawn_reserved, start_session, write_fd,
-    write_report,
+    monotonic_millis, projected, rendered, emit, Render, write_report,
 };
+use crate::config::OutputMode;
+use crate::render::Event;
 use core::ops::Range;
 
 use crate::build_defaults::SHARD_COMMAND_UNITS;
@@ -86,28 +88,61 @@ impl ShardWatch {
         matches!(self.class(), Class::Shared | Class::Grouped) && &self.group[..self.group_length] == group
     }
 
-    fn flush_failures(&mut self) -> Result<(), RunError> {
-        flush(&self.failures, &mut self.failure_length)
+    fn flush_failures(&mut self, render: &Render<'_>) -> Result<(), RunError> {
+        if render.0 == OutputMode::Plain && self.keeping {
+            self.keeping = false;
+            let closing = projected(render, &Event::BlockClosed);
+            keep_failure_line(&mut self.failures, &mut self.failure_length, (render.0, closing.bytes().trim_ascii_end()))?;
+        }
+        flush(&self.failures, &mut self.failure_length, render.0)
     }
 }
 
-fn flush(failures: &[u8; FAILURE_CAPACITY], length: &mut usize) -> Result<(), RunError> {
+const fn descriptor(output: OutputMode) -> i32 {
+    match output {
+        OutputMode::Plain => 1,
+        OutputMode::Rich => 2,
+    }
+}
+
+fn flush(failures: &[u8; FAILURE_CAPACITY], length: &mut usize, output: OutputMode) -> Result<(), RunError> {
     if *length != 0 {
-        write_fd(2, &failures[..*length])?;
+        write_fd(descriptor(output), &failures[..*length])?;
         *length = 0;
     }
     Ok(())
 }
 
 // blocks are written whole when they fit, so two shards failing at once do not interleave inside one block
-fn keep_failure_line(failures: &mut [u8; FAILURE_CAPACITY], length: &mut usize, line: &[u8]) -> Result<(), RunError> {
+fn keep_failure_line(failures: &mut [u8; FAILURE_CAPACITY], length: &mut usize, (output, line): (OutputMode, &[u8])) -> Result<(), RunError> {
     if *length + line.len() + 1 > FAILURE_CAPACITY {
-        flush(failures, length)?;
+        flush(failures, length, output)?;
     }
     let taken = line.len().min(FAILURE_CAPACITY - 1);
     failures[*length..*length + taken].copy_from_slice(&line[..taken]);
     failures[*length + taken] = b'\n';
     *length += taken + 1;
+    Ok(())
+}
+
+// plain output closes the block that was open and opens the next kept one with its own delimiter lines
+fn keep_block_edge(
+    run: &ListingRun<'_>,
+    (target, name): (Option<usize>, &[u8]),
+    (was_open, keeping): (bool, bool),
+    (failures, failure_length): (&mut [u8; FAILURE_CAPACITY], &mut usize),
+) -> Result<(), RunError> {
+    let render = run.render();
+    if was_open {
+        let closing = projected(render, &Event::BlockClosed);
+        keep_failure_line(failures, failure_length, (render.0, closing.bytes().trim_ascii_end()))?;
+    }
+    if keeping {
+        let targets = run.targets.borrow();
+        let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+        let opening = projected(render, &Event::BlockOpened { id });
+        keep_failure_line(failures, failure_length, (render.0, opening.bytes().trim_ascii_end()))?;
+    }
     Ok(())
 }
 
@@ -147,12 +182,21 @@ fn count_reported(
     target: Option<usize>,
     name: &[u8],
     (outcome, tally): (TerminalOutcome, Tally),
+    (started_millis, solo): (u64, bool),
 ) -> Result<(), RunError> {
     ledger.count(outcome).map_err(|_| RunError::Outcome)?;
     if let Some(target) = target {
         run.targets.borrow_mut().tally(target, tally);
     }
-    report_line(name, outcome, run.settings.color)
+    match run.settings.output {
+        OutputMode::Plain => {
+            let targets = run.targets.borrow();
+            let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+            let millis = Some(monotonic_millis().saturating_sub(started_millis));
+            emit(run.render(), &Event::Settled { id, outcome: rendered(outcome), millis, solo })
+        }
+        OutputMode::Rich => report_line(name, outcome, run.settings.color),
+    }
 }
 
 // a shard's failure is only counted when it would trip the stop policy; otherwise a solo run decides it
@@ -248,6 +292,7 @@ pub(super) fn observe(
     watch: &mut TestWatch,
     bytes: &[u8],
 ) -> Result<Observed, RunError> {
+    let started_millis = watch.started_millis;
     let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
     let whole = Observed { stop: false, consumed: bytes.len() };
     let Some(shard_watch) = watch.shard.as_mut() else {
@@ -301,13 +346,13 @@ pub(super) fn observe(
                     failed.mark(ordinal);
                 }
                 let counted = terminal(outcome);
-                count_reported(run, ledger, target, name, counted)?;
+                count_reported(run, ledger, target, name, counted, (started_millis, false))?;
                 tally_streamed(streamed, counted.0);
                 stop |= counted.0 == TerminalOutcome::Failed && run.tripped(ledger);
             }
             DocEvent::FailureLine(line) => {
                 if let Some(name) = failure_block_name(line) {
-                    *keeping = false;
+                    let was_open = std::mem::replace(keeping, false);
                     if let Some(Located { ordinal, .. }) = run.shards.borrow().locate(shard, *expected, name)
                         && reported.has(ordinal)
                         && failed.has(ordinal)
@@ -315,9 +360,12 @@ pub(super) fn observe(
                         blocked.mark(ordinal);
                         *keeping = true;
                     }
+                    if run.settings.output == OutputMode::Plain {
+                        return keep_block_edge(run, (target, name), (was_open, *keeping), (failures, failure_length));
+                    }
                 }
                 if *keeping {
-                    keep_failure_line(failures, failure_length, line)?;
+                    keep_failure_line(failures, failure_length, (run.settings.output, line))?;
                 }
             }
             DocEvent::Finished { passed, failed: failed_count, ignored } => {
@@ -613,10 +661,29 @@ impl CargoDriver<'_> {
             let (group, group_length) = group_of(run, shard);
             let watch = ShardWatch::new(shard, &group[..group_length]);
             start_session(ledger, watches, lanes, slot, Some(watch))?;
+            announce_starts(run, active.target, shard)?;
             moved = true;
         }
         Ok(moved)
     }
+}
+
+// a shard child starts all its names at once; a rerun starts only the one name its exit will decide
+fn announce_starts(run: &ListingRun<'_>, target: usize, shard: Shard) -> Result<(), RunError> {
+    let solo = match shard.rerun {
+        None => false,
+        Some(Rerun::Decides { .. }) => true,
+        Some(Rerun::OutputOnly) => return Ok(()),
+    };
+    if run.settings.output == OutputMode::Rich {
+        return Ok(());
+    }
+    let arena = run.shards.borrow();
+    let targets = run.targets.borrow();
+    let count = if solo { 1 } else { shard.count };
+    (0..count)
+        .filter_map(|ordinal| arena.nth(shard, ordinal))
+        .try_for_each(|name| emit(run.render(), &Event::Started { id: (targets.id(target), name), solo }))
 }
 
 /// Settles a shard child that exited: names that never reported are failed, a crash is pinned on the test that was running
@@ -636,9 +703,9 @@ pub(super) fn finish(
     let Some(mut shard_watch) = watch.shard.take() else {
         return Ok(());
     };
-    shard_watch.flush_failures()?;
+    shard_watch.flush_failures(run.render())?;
     if shard_watch.shard.rerun.is_some() {
-        finish_rerun(run, ledger, watches, target, &shard_watch, &watch.output, status)?;
+        finish_rerun(run, ledger, watches, target, (&shard_watch, &watch.output), (status, watch.started_millis))?;
         ledger.retire(watch.slot);
         run.shards.borrow_mut().finished(shard_watch.shard);
         return Ok(());
@@ -684,9 +751,8 @@ fn finish_rerun(
     ledger: &mut Ledger<'_>,
     watches: &Watches,
     target: Option<usize>,
-    shard_watch: &ShardWatch,
-    output: &ChildOutput,
-    status: i32,
+    (shard_watch, output): (&ShardWatch, &ChildOutput),
+    (status, started_millis): (i32, u64),
 ) -> Result<(), RunError> {
     let shard = shard_watch.shard;
     let arena = run.shards.borrow();
@@ -694,39 +760,65 @@ fn finish_rerun(
     if withdrawn_solo(run.interrupted(), run.stop_sent.get(), shard.rerun, status) {
         return withdraw_solo(run, ledger, target);
     }
+    let solo = (started_millis, true);
     match (shard.rerun, status == 0) {
         (Some(Rerun::Decides { after_shard_failure }), true) => {
             if after_shard_failure {
-                write_fd(2, b"cargo-val: ")?;
-                write_fd(2, name)?;
-                write_fd(2, b" failed in a shared process, passed alone\n")?;
+                warn_rerun(run, target, name, b"failed in a shared process, passed alone")?;
             }
             let counted = match output.verdict() {
                 LibtestVerdict::NothingRan => return Err(report_nothing_ran(&run.targets, target, name)),
                 LibtestVerdict::Skipped => (TerminalOutcome::Ignored, Tally::Skipped),
                 _ => (TerminalOutcome::Passed, Tally::Passed),
             };
-            count_reported(run, ledger, target, name, counted)
+            count_reported(run, ledger, target, name, counted, solo)
         }
         (Some(Rerun::Decides { .. }), false) => {
-            output.write_failure()?;
-            count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed))?;
+            match run.settings.output {
+                OutputMode::Plain => {
+                    count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
+                    failure_output(run, target, name, output)?;
+                }
+                OutputMode::Rich => {
+                    output.write_failure()?;
+                    count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
+                }
+            }
             if run.tripped(ledger) {
                 stop_all(run, ledger, watches);
             }
             Ok(())
         }
-        (_, true) => {
-            write_fd(2, b"cargo-val: ")?;
-            write_fd(2, name)?;
-            write_fd(2, b" passed when re-run alone\n")
-        }
+        (_, true) => warn_rerun(run, target, name, b"passed when re-run alone"),
         (_, false) => {
-            write_fd(2, b"cargo-val: ")?;
-            write_fd(2, name)?;
-            write_fd(2, b" failed when re-run alone\n")?;
-            output.write_failure()
+            warn_rerun(run, target, name, b"failed when re-run alone")?;
+            failure_output(run, target, name, output)
         }
+    }
+}
+
+fn warn_rerun(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], what: &[u8]) -> Result<(), RunError> {
+    if run.settings.output == OutputMode::Plain {
+        let targets = run.targets.borrow();
+        let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+        return emit(run.render(), &Event::Warned { id, what });
+    }
+    write_fd(2, b"cargo-val: ")?;
+    write_fd(2, name)?;
+    write_fd(2, b" ")?;
+    write_fd(2, what)?;
+    write_fd(2, b"\n")
+}
+
+fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], output: &ChildOutput) -> Result<(), RunError> {
+    match run.settings.output {
+        OutputMode::Plain => {
+            let targets = run.targets.borrow();
+            let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+            let (stdout, stderr) = output.captured();
+            emit(run.render(), &Event::Captured { id, stdout, stderr })
+        }
+        OutputMode::Rich => output.write_failure(),
     }
 }
 
@@ -832,8 +924,9 @@ mod pause_tests {
     use proxima_runtime::CoreId;
 
     use super::{ChildOutput, GROUP_CAPACITY, Ledger, ListingRun, ShardArena, ShardWatch, TestWatch, status_queue};
-    use crate::config::{IgnoreMode, NoTestsPolicy, ProcessMode};
-    use crate::driver::{DocObservation, Settings, TargetTable};
+    use crate::config::{IgnoreMode, NoTestsPolicy, OutputMode, ProcessMode};
+    use crate::driver::{DocObservation, Render, RenderState, Settings, TargetTable};
+    use crate::line::Line;
     use crate::edge_exit::fixture::in_single_threaded_process;
     use crate::edge_signal::SignalPipe;
     use crate::edge_spawn::held_launch_storage;
@@ -891,11 +984,12 @@ mod pause_tests {
             max_fail: None,
             no_tests: NoTestsPolicy::Pass,
             process: ProcessMode::Shard,
+            output: crate::config::OutputMode::Rich,
             color: false,
         }
     }
 
-    fn run_over<'run>(signals: &'run SignalPipe, settings: &'run Settings, names: &'run mut [u8]) -> ListingRun<'run> {
+    fn run_over<'run>(signals: &'run SignalPipe, settings: &'run Settings, (render, names): (&'run Render<'run>, &'run mut [u8])) -> ListingRun<'run> {
         let mut arena = ShardArena::new(names);
         for name in NAMES {
             arena.push(name).expect("name fits the arena");
@@ -914,7 +1008,7 @@ mod pause_tests {
             home: None,
             settings,
             prepared: None,
-            docs: DocObservation::default(),
+            docs: DocObservation::new(render),
             policy: RefCell::new(StopPolicy::new(None)),
             doc: RefCell::new(None),
             launch_storage: RefCell::new(held_launch_storage()),
@@ -938,6 +1032,7 @@ mod pause_tests {
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],
             group_length: 0,
+            started_millis: 0,
         }
     }
 
@@ -957,7 +1052,9 @@ mod pause_tests {
                 let signals = SignalPipe::install().expect("signal pipe installs in the isolated process");
                 let settings = settings();
                 let mut names = [0_u8; 512];
-                let run = run_over(&signals, &settings, &mut names);
+                let mut arena = [0_u8; 64];
+                let sink: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena)), RefCell::new(Line::new()));
+                let run = run_over(&signals, &settings, (&sink, &mut names));
                 let mut sessions = SessionSlots::new();
                 let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
                 let mut watch = shard_watch(&run);
@@ -993,7 +1090,9 @@ mod pause_tests {
                 let signals = SignalPipe::install().expect("signal pipe installs in the isolated process");
                 let settings = settings();
                 let mut names = [0_u8; 512];
-                let run = run_over(&signals, &settings, &mut names);
+                let mut arena = [0_u8; 64];
+                let sink: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena)), RefCell::new(Line::new()));
+                let run = run_over(&signals, &settings, (&sink, &mut names));
                 let mut sessions = SessionSlots::new();
                 let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
                 let mut watch = shard_watch(&run);

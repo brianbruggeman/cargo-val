@@ -20,6 +20,7 @@ fn twelve_tests_alive_at_once_under_jobs_twelve_all_report_pass() {
         .env_remove("CARGO_VAL_FAIL_FAST")
         .env_remove("CARGO_VAL_PROCESS")
         .env("NO_COLOR", "1")
+        .env("CARGO_VAL_OUTPUT", "rich")
         .env("CARGO_VAL_JOBS", PEERS.to_string())
         .env("CARGO_VAL_FIXTURE_RENDEZVOUS_DIR", &rendezvous)
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target"))

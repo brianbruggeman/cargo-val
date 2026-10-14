@@ -39,6 +39,7 @@ fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/same_name/Cargo.toml");
 
     let output = Command::new(CARGO_VAL)
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)
         .env_remove("RUST_TEST_THREADS")

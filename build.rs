@@ -88,9 +88,11 @@ impl Validate for BuildDefaults {
 struct ViewDefaults {
     #[setting(default = 64)]
     failures: usize,
+    #[setting(default = 65536)]
+    name_bytes: usize,
     #[setting(default = 8192)]
     rerun_bytes: usize,
-    #[setting(default = 32768)]
+    #[setting(default = 16384)]
     frame_bytes: usize,
 }
 
@@ -99,6 +101,9 @@ impl Validate for ViewDefaults {
         let mut errors = Vec::new();
         if self.failures == 0 {
             errors.push(ValidationMessage::new("failures", "must be greater than zero"));
+        }
+        if self.name_bytes == 0 {
+            errors.push(ValidationMessage::new("name_bytes", "must be greater than zero"));
         }
         if self.frame_bytes < self.rerun_bytes + 4096 {
             errors.push(ValidationMessage::new("frame_bytes", "must hold the rerun command plus a line, at least rerun_bytes + 4096"));
