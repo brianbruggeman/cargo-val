@@ -114,6 +114,7 @@ fn write_row(out: &mut Vec<u8>, excerpt: &Excerpt<'_>, index: usize, spans: &[(u
         cursor = to;
     }
     out.extend_from_slice(&source[cursor..row.end]);
+    excerpt.write_cut_mark(out, index);
 }
 
 #[cfg(test)]
