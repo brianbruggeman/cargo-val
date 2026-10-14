@@ -2,6 +2,8 @@
 
 use conflaguration::SettingsSource;
 
+use crate::line::Line;
+
 const HARNESS_FLAG: &[u8] = b"--test-threads";
 const IGNORED_FLAG: &[u8] = b"--ignored";
 const INCLUDE_IGNORED_FLAG: &[u8] = b"--include-ignored";
@@ -452,12 +454,61 @@ const MAX_TIMEOUT_SECONDS: u32 = u32::MAX / 1000;
 pub const TEST_TIMEOUT: Layers<'static> = Layers::setting(
     "CARGO_VAL_TEST_TIMEOUT",
     [
-        b"cargo-val: the test timeout takes no command-line value\n",
+        b"cargo-val: --test-timeout must be none or a whole number of seconds between 1 and 4294967\n",
         b"cargo-val: CARGO_VAL_TEST_TIMEOUT must be none or a whole number of seconds between 1 and 4294967\n",
         b"cargo-val: the default test timeout is invalid\n",
     ],
 )
 .build_default(Some("none"));
+
+/// The interval between `RUNNING` heartbeats in whole seconds; at least one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatSecs(u32);
+
+impl HeartbeatSecs {
+    #[must_use]
+    pub fn millis(self) -> u64 {
+        u64::from(self.0) * 1000
+    }
+}
+
+impl TryFrom<&[u8]> for HeartbeatSecs {
+    type Error = ();
+
+    fn try_from(text: &[u8]) -> Result<Self, ()> {
+        let seconds = core::str::from_utf8(text).map_err(|_| ())?.parse::<u32>().map_err(|_| ())?;
+        match seconds {
+            1..=MAX_TIMEOUT_SECONDS => Ok(Self(seconds)),
+            _ => Err(()),
+        }
+    }
+}
+
+/// `CARGO_VAL_HEARTBEAT_SECS` / `--heartbeat`: seconds between `RUNNING` lines; the build default is the `heartbeat_secs` sizing constant.
+pub const HEARTBEAT: Layers<'static> = Layers::setting(
+    "CARGO_VAL_HEARTBEAT_SECS",
+    [
+        b"cargo-val: --heartbeat must be a whole number of seconds between 1 and 4294967\n",
+        b"cargo-val: CARGO_VAL_HEARTBEAT_SECS must be a whole number of seconds between 1 and 4294967\n",
+        b"cargo-val: the default heartbeat is invalid\n",
+    ],
+);
+
+/// Resolves the heartbeat interval in milliseconds, the sizing constant standing in as the build-default layer.
+///
+/// # Errors
+///
+/// Returns [`SettingError`] naming the winning layer when its value is not a whole number of seconds from 1 to 4294967.
+pub fn heartbeat_millis(settings: &impl SettingsSource, command_line: Option<&[u8]>) -> Result<u64, SettingError> {
+    let mut default = Line::<24>::new();
+    default.number(crate::view_defaults::HEARTBEAT_SECS);
+    let default = core::str::from_utf8(default.bytes()).ok();
+    HEARTBEAT
+        .build_default(default)
+        .from_settings(settings, command_line)
+        .resolve::<HeartbeatSecs>()
+        .map(|(seconds, _)| seconds.millis())
+}
 
 /// Whether the run ends when its parent process exits; off, a run outlives its parent as a backgrounded run must.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1092,6 +1143,7 @@ mod layers_tests {
             ("CARGO_VAL_IGNORED", "include"),
             ("CARGO_VAL_FILTERSET", "test(alpha)"),
             ("CARGO_VAL_TEST_TIMEOUT", "120"),
+            ("CARGO_VAL_HEARTBEAT_SECS", "3"),
         ];
         let settings = BorrowedSettings::new(&pairs);
         let empty = BorrowedSettings::new(&[]);
@@ -1115,6 +1167,19 @@ mod layers_tests {
         assert_eq!(TEST_TIMEOUT.from_settings(&empty, None).resolve::<TestTimeout>(), Ok((TestTimeout::Unset, Source::BuildDefault)));
         assert_eq!(TestTimeout::Seconds(120).limit_ms(), Some(120_000));
         assert_eq!(TestTimeout::Unset.limit_ms(), None);
+        assert_eq!(TEST_TIMEOUT.from_settings(&empty, Some(b"90")).resolve::<TestTimeout>(), Ok((TestTimeout::Seconds(90), Source::CommandLine)));
+        assert_eq!(TEST_TIMEOUT.from_settings(&settings, Some(b"none")).resolve::<TestTimeout>(), Ok((TestTimeout::Unset, Source::CommandLine)));
+        assert_eq!(HEARTBEAT.from_settings(&settings, None), HEARTBEAT.configured(Some("3")));
+        assert_eq!(heartbeat_millis(&settings, None), Ok(3_000));
+        assert_eq!(heartbeat_millis(&settings, Some(b"1")), Ok(1_000));
+        assert_eq!(heartbeat_millis(&empty, None), Ok(u64::try_from(crate::view_defaults::HEARTBEAT_SECS).expect("the sizing constant fits u64") * 1000));
+        for refused_text in ["0", "-1", "often", "4294968", ""] {
+            assert!(heartbeat_millis(&empty, Some(refused_text.as_bytes())).is_err(), "{refused_text:?}");
+            assert_eq!(
+                HEARTBEAT.configured(Some(refused_text)).resolve::<HeartbeatSecs>().map_err(SettingError::message),
+                Err(HEARTBEAT.refusal(Source::Configured).message())
+            );
+        }
         for refused_text in ["0", "-3", "soon", "4294968", ""] {
             assert!(TEST_TIMEOUT.configured(Some(refused_text)).resolve::<TestTimeout>().is_err(), "{refused_text:?}");
         }

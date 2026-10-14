@@ -525,9 +525,10 @@ struct Settings {
     color: bool,
     exit_with_parent: ExitWithParent,
     test_limit_ms: Option<u32>,
+    heartbeat_ms: u64,
 }
 
-const SETTING_KEYS: [&str; 17] = [
+const SETTING_KEYS: [&str; 18] = [
     "RUST_TEST_THREADS",
     "CARGO_VAL_JOBS",
     "CARGO_VAL_MAX_FAIL",
@@ -537,6 +538,7 @@ const SETTING_KEYS: [&str; 17] = [
     "CARGO_VAL_OUTPUT",
     "CARGO_VAL_EXIT_WITH_PARENT",
     "CARGO_VAL_TEST_TIMEOUT",
+    "CARGO_VAL_HEARTBEAT_SECS",
     "CI",
     "TERM",
     "CARGO_VAL_COLOR",
@@ -633,7 +635,8 @@ fn runtime_settings(
         output,
         color,
         exit_with_parent,
-        test_limit_ms: TEST_TIMEOUT.from_settings(&source, None).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
+        test_limit_ms: TEST_TIMEOUT.from_settings(&source, parser.test_timeout()).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
+        heartbeat_ms: crate::config::heartbeat_millis(&source, parser.heartbeat()).map_err(RunError::Setting)?,
     })
 }
 
@@ -921,7 +924,9 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
     state.apply(event);
     frame.clear();
     let projected = state.project(event, frame);
-    write_fd(1, frame.bytes())?;
+    if !frame.bytes().is_empty() {
+        write_fd(1, frame.bytes())?;
+    }
     let Err(lost) = projected else {
         return Ok(());
     };
@@ -1286,7 +1291,7 @@ impl<'run> DocObservation<'run> {
 }
 
 impl<'run> ListingRun<'run> {
-    fn render(&self) -> &'run Render<'run> {
+    pub(crate) fn render(&self) -> &'run Render<'run> {
         self.docs.render
     }
 
@@ -2406,7 +2411,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots)), RefCell::new(frame_line));
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms)), RefCell::new(frame_line));
     match settings.output {
         OutputMode::Plain => emit(
             &render,
@@ -2820,7 +2825,7 @@ fn finish_run(
     )
 }
 
-fn monotonic_millis() -> u64 {
+pub(crate) fn monotonic_millis() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -3557,6 +3562,7 @@ mod listing_allocation_tests {
             color: false,
             exit_with_parent: crate::config::ExitWithParent::Off,
             test_limit_ms: None,
+            heartbeat_ms: 10_000,
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
         let mut arena = [0_u8; 64];
