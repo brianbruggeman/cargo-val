@@ -12,6 +12,7 @@ use fixture::fixture_output;
 const ESCAPE: u8 = 0x1b;
 const STIPPLE: &str = "\u{2592}";
 const AXIS_LABEL: &str = " seconds";
+const SHOW_CURSOR: &str = "\x1b[?25h";
 const REFUSAL: &str = "--timeline is a terminal view; use --output plain or rich";
 
 fn manifest() -> PathBuf {
@@ -161,4 +162,7 @@ async fn a_no_color_rich_run_prints_the_timeline_after_the_receipt_with_no_colou
     let title = text.lines().position(|line| line.contains("where the time went")).expect("the timeline is printed in rich mode");
     let receipt = summary_line_index(&text);
     assert!(receipt < title, "the timeline follows the receipt:\n{text}");
+    let last_show = text.rfind(SHOW_CURSOR).expect("the rich run shows the cursor again");
+    assert!(title < last_show, "the cursor returns after the timeline, never ahead of it:\n{text}");
+    assert_eq!(text[last_show + SHOW_CURSOR.len()..].trim(), "", "the show-cursor is the last thing written:\n{text}");
 }
