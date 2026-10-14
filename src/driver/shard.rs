@@ -572,13 +572,15 @@ impl CargoDriver<'_> {
             withdraw_unlaunched(run, ledger, active.target, dropped)?;
             return Ok(dropped > 0);
         }
-        let stopped = run.tripped(ledger);
+        let stopped = run.admit(ledger).is_err();
         let mut moved = false;
         if stopped {
-            let dropped = run.shards.borrow_mut().discard_unlaunched() + run.specials.borrow_mut().discard();
-            withdraw_unlaunched(run, ledger, active.target, dropped)?;
-            (0..dropped).for_each(|_| run.policy.borrow_mut().listed_test_skipped());
-            moved = dropped > 0;
+            let queued = core::iter::from_fn(|| run.shards.borrow_mut().pop_queued());
+            for names in queued.chain(Some(run.specials.borrow_mut().discard())) {
+                run.shed(ledger, names);
+                withdraw_unlaunched(run, ledger, active.target, names)?;
+                moved |= names > 0;
+            }
         }
         let executable = core::str::from_utf8(&active.path[..active.path_length]).map_err(|_| RunError::Arguments)?;
         let environment = &self.environments[slot_range(active.slot)];
