@@ -424,7 +424,7 @@ fn handle(
         Item::Signal(ready) => {
             ready.map_err(|_| RunError::Reactor)?;
             run.drain_signals()?;
-            run.interrupt_sessions();
+            run.interrupted();
             Ok(())
         }
         Item::Cancel(lane) => {
