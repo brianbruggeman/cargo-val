@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io;
 use std::process::{Command, Output};
+#[cfg(windows)]
+use std::process::Stdio;
 
 use futures::future::{Either, join3, select};
 use proxima_core::time::{sleep, timeout};
@@ -180,21 +182,16 @@ pub(crate) fn interrupt(leader: u32) -> Result<(), String> {
     kill_group(leader)
 }
 
-// taskkill /T walks the parent chain, the closest std-only reach to a job object
+// taskkill /T walks the parent chain, the closest std-only reach to a job object; spawned and not waited so the kill path cannot block
 #[cfg(windows)]
 pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
-    let output = Command::new("taskkill")
+    Command::new("taskkill")
         .args(["/PID", &leader.to_string(), "/T", "/F"])
-        .output()
-        .map_err(|error| format!("taskkill for pid {leader} did not run: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "taskkill for pid {leader} exited {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim(),
-    ))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|error| format!("taskkill for pid {leader} did not run: {error}"))
 }
 
 // windows registers each group's job in a process-wide table of eight at spawn and kills the group when a full table closes it, so a child that is not released leaves the ninth spawn dead on arrival

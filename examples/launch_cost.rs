@@ -8,6 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
+#[path = "../tests/common/group.rs"]
+mod group;
+#[path = "../tests/common/output.rs"]
+mod output;
+
 #[cfg(windows)]
 use cargo_val::edge_spawn_windows::{Child, HeldLaunchStorage, held_launch_storage, resume_ready, spawn_exact, spawn_exact_ready};
 #[cfg(not(windows))]
@@ -89,13 +94,13 @@ fn fixture_directory() -> Result<PathBuf, String> {
 }
 
 fn first_test_binary(fixture: &Path) -> Result<PathBuf, String> {
-    let output = Command::new("cargo")
+    let mut build = Command::new("cargo");
+    build
         .args(["test", "--lib", "--no-run", "--message-format=json", "--target-dir"])
         .arg(fixture.join("target"))
         .current_dir(fixture)
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .map_err(|error| format!("spawn cargo test --no-run: {error}"))?;
+        .env_remove("CARGO_TARGET_DIR");
+    let output = output::output_bounded(&mut build, group::SYNC_DEADLINE)?;
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -162,11 +167,9 @@ impl Launcher {
     }
 
     fn std_launch(&self, test: &str) -> Result<(), String> {
-        let output = Command::new(&self.executable)
-            .args(["--exact", test])
-            .current_dir(&self.directory)
-            .output()
-            .map_err(|error| format!("spawn {}: {error}", self.executable.display()))?;
+        let mut launch = Command::new(&self.executable);
+        launch.args(["--exact", test]).current_dir(&self.directory);
+        let output = output::output_bounded(&mut launch, group::SYNC_DEADLINE)?;
         if output.status.success() {
             return Ok(());
         }

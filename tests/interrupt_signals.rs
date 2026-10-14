@@ -14,6 +14,11 @@ mod fifo;
 #[path = "common/binary.rs"]
 mod binary;
 
+#[path = "common/group.rs"]
+mod group;
+#[path = "common/wait.rs"]
+mod wait;
+
 use cargo_val::edge_stream_unix::ChildStream;
 
 const SIGINT_STATUS: i32 = 130;
@@ -89,7 +94,9 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
     let held = open_nonblocking_reader(&directory.join("held"));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/{fixture}/Cargo.toml"));
-    let child = binary::command()
+    let mut command = binary::command();
+    group::lead_group(&mut command);
+    let child = command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)
@@ -106,13 +113,14 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
             target_directory().join(format!("c74-fixture-{label}")),
         )
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("cargo-val binary is spawnable");
+    let group = libc::pid_t::try_from(child.id()).expect("pid fits pid_t");
     let fixture = Fixture {
         child,
-        group: None,
+        group: Some(group),
         holder: 0,
         held,
     };
@@ -137,7 +145,7 @@ macro_rules! interrupt {
         assert!(alive(fixture.holder), "the blocked process is alive before the signal");
 
         assert_eq!(unsafe { libc::kill(cargo_val, $signal) }, 0);
-        let status = fixture.child.wait().expect("cargo-val exits after the signal");
+        let status = wait::wait_bounded(&mut fixture.child, group::SYNC_DEADLINE).unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
         let held = ChildStream::new(OwnedFd::from(fixture.held.try_clone().expect("the held fifo descriptor duplicates")));
         fifo::until_eof(&held, label).await;
 

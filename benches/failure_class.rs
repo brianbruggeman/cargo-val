@@ -1,3 +1,7 @@
+#[path = "../tests/common/group.rs"]
+mod group;
+#[path = "../tests/common/output.rs"]
+mod output;
 #[path = "../tests/common/failure_fixture.rs"]
 mod failure_fixture;
 #[path = "../tests/common/failure_fixture_sync.rs"]
