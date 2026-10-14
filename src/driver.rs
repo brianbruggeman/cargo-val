@@ -14,7 +14,7 @@ use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
     FILTERSET, FailFastError, FailFastSources, HarnessFault, HarnessRequest, IgnoreMode, NO_TESTS, NoTestsPolicy,
-    EXIT_WITH_PARENT, ExitWithParent, OUTPUT, exit_with_parent_unsupported, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
+    EXIT_WITH_PARENT, ExitWithParent, OUTPUT, TEST_TIMEOUT, TestTimeout, exit_with_parent_unsupported, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
     ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
@@ -372,7 +372,6 @@ pub(crate) struct TestWatch {
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
     group_length: usize,
-    started_millis: u64,
 }
 
 impl TestWatch {
@@ -525,33 +524,37 @@ struct Settings {
     output: OutputMode,
     color: bool,
     exit_with_parent: ExitWithParent,
+    test_limit_ms: Option<u32>,
 }
+
+const SETTING_KEYS: [&str; 17] = [
+    "RUST_TEST_THREADS",
+    "CARGO_VAL_JOBS",
+    "CARGO_VAL_MAX_FAIL",
+    "CARGO_VAL_FAIL_FAST",
+    "CARGO_VAL_NO_TESTS",
+    "CARGO_VAL_PROCESS",
+    "CARGO_VAL_OUTPUT",
+    "CARGO_VAL_EXIT_WITH_PARENT",
+    "CARGO_VAL_TEST_TIMEOUT",
+    "CI",
+    "TERM",
+    "CARGO_VAL_COLOR",
+    "NO_COLOR",
+    "CARGO_VAL_IGNORED",
+    "CARGO_VAL_FILTERSET",
+    "CARGO_VAL_BIN_GATE",
+    "CARGO_VAL_LOG",
+];
 
 fn runtime_settings(
     environment: &Environment<'_>,
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
-    let mut pairs = [("", ""); 16];
+    let mut pairs = [("", ""); SETTING_KEYS.len()];
     let mut count = 0;
-    for key in [
-        "RUST_TEST_THREADS",
-        "CARGO_VAL_JOBS",
-        "CARGO_VAL_MAX_FAIL",
-        "CARGO_VAL_FAIL_FAST",
-        "CARGO_VAL_NO_TESTS",
-        "CARGO_VAL_PROCESS",
-        "CARGO_VAL_OUTPUT",
-        "CARGO_VAL_EXIT_WITH_PARENT",
-        "CI",
-        "TERM",
-        "CARGO_VAL_COLOR",
-        "NO_COLOR",
-        "CARGO_VAL_IGNORED",
-        "CARGO_VAL_FILTERSET",
-        "CARGO_VAL_BIN_GATE",
-        "CARGO_VAL_LOG",
-    ] {
+    for key in SETTING_KEYS {
         if let Some(value) = environment.get(key.as_bytes()) {
             pairs[count] = (
                 key,
@@ -630,6 +633,7 @@ fn runtime_settings(
         output,
         color,
         exit_with_parent,
+        test_limit_ms: TEST_TIMEOUT.from_settings(&source, None).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
     })
 }
 
@@ -689,7 +693,6 @@ fn start_session(
         shard,
         group: [0; GROUP_CAPACITY],
         group_length: 0,
-        started_millis: monotonic_millis(),
     });
     Ok(())
 }
@@ -1042,10 +1045,9 @@ fn deliver<'bytes>(
             match reporting.render.0 {
                 OutputMode::Plain => {
                     let name = &report[..name_length.saturating_sub(1)];
-                    let millis = monotonic_millis().saturating_sub(watch.started_millis);
                     let targets = reporting.targets.borrow();
                     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-                    emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), millis: Some(millis), solo: false })?;
+                    emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
                     if outcome == TerminalOutcome::Failed {
                         let (stdout, stderr) = watch.output.captured();
                         emit(reporting.render, &Event::Captured { id, stdout, stderr })?;
@@ -1226,7 +1228,7 @@ fn launch_listed(
         OutputMode::Plain => {
             let targets = run.targets.borrow();
             let id = (targets.id(target), intent.test_name().as_bytes());
-            emit(run.render(), &Event::Started { id, solo: false })?;
+            emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
         }
         OutputMode::Rich => {}
     }
@@ -1465,7 +1467,7 @@ impl ListingScan<'_, '_> {
                     OutputMode::Plain => {
                         let targets = run.targets.borrow();
                         let id = (targets.id(self.target), name.as_bytes());
-                        emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, millis: None, solo: false })?;
+                        emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
                     }
                     OutputMode::Rich => report_skipped(name, run.settings.color)?,
                 }
@@ -2403,8 +2405,8 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     }
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
-    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots)), RefCell::new(frame_line));
+    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots)), RefCell::new(frame_line));
     match settings.output {
         OutputMode::Plain => emit(
             &render,
@@ -2514,7 +2516,7 @@ type RunStorage<'environment> = (
         Box<Watches>,
     ),
     (Box<[u8]>, Box<[u8]>, Box<[u32]>),
-    (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>),
+    (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>, Box<[u8]>),
 );
 
 // run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup: the cargo and listing buffers, the session tables, and the render frame, failure ledger and name arena
@@ -2540,7 +2542,7 @@ fn run_storage<'environment>(process: ProcessMode) -> RunStorage<'environment> {
             ),
             ProcessMode::Test => (zeroed(0), zeroed(crate::build_defaults::SCHED_RECORD_BYTES), std::vec::Vec::new().into_boxed_slice()),
         },
-        (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame()),
+        (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame(), zeroed(crate::view_defaults::INFLIGHT_BYTES)),
     )
 }
 
@@ -3133,7 +3135,7 @@ fn report_doc_result(
     counter.set(counter.get() + 1);
     if observation.render.0 == OutputMode::Plain {
         let id = (&b"doc-tests"[..], name);
-        return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), millis: None, solo: false });
+        return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false });
     }
     let mut report = [0; NAME_CAPACITY + 34];
     let name_length = name.len().min(NAME_CAPACITY);
@@ -3554,6 +3556,7 @@ mod listing_allocation_tests {
             output: crate::config::OutputMode::Rich,
             color: false,
             exit_with_parent: crate::config::ExitWithParent::Off,
+            test_limit_ms: None,
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
         let mut arena = [0_u8; 64];
