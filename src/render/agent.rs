@@ -206,6 +206,8 @@ fn location<const FRAME: usize>(frame: &mut Line<FRAME>, prefix: &[u8], file: &[
     frame.number(col as usize);
 }
 
+/// `bytes` is the whole stream; `capture_dropped` appears only when the event's window is not all of it and counts the stream
+/// bytes before that window (stream seen minus the window length), so `bytes = capture_dropped + window length`.
 fn output<const FRAME: usize>(frame: &mut Line<FRAME>, capture: &[u8], dropped: u64) {
     let body = libtest_body(capture);
     let shown_cut = body.len() > OUTPUT_BYTES;
@@ -314,4 +316,40 @@ pub(super) fn after_sequence(bytes: &[u8], escape: usize) -> usize {
         }
     }
     (position + 1).min(bytes.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::format;
+    use std::string::String;
+
+    use super::output;
+    use crate::line::Line;
+
+    const WINDOW: &[u8] = b"worker 0007 flushed segment 0031 to disk\nworker 0007 flushed segment 0032 to disk\n";
+
+    fn record(window: &[u8], before_window: u64) -> String {
+        let mut frame = Line::<512>::new();
+        output(&mut frame, window, before_window);
+        String::from_utf8_lossy(frame.bytes()).into_owned()
+    }
+
+    #[test]
+    fn capture_dropped_counts_the_stream_bytes_before_the_window_the_event_carried() {
+        let before_window = 3 * 1_048_576;
+
+        let text = record(WINDOW, before_window);
+
+        let total = before_window + WINDOW.len() as u64;
+        assert!(text.contains(&format!("bytes={total} ")), "bytes is the whole stream, window plus what preceded it: {text}");
+        assert!(text.contains(&format!(" capture_dropped={before_window}")), "capture_dropped is stream seen minus the window length: {text}");
+    }
+
+    #[test]
+    fn capture_dropped_is_absent_when_the_window_is_the_whole_stream() {
+        let text = record(WINDOW, 0);
+
+        assert!(text.contains(&format!("bytes={} ", WINDOW.len())), "{text}");
+        assert!(!text.contains("capture_dropped"), "{text}");
+    }
 }

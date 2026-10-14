@@ -15,6 +15,7 @@ use crate::edge_output::{self, OutputSink};
 use crate::edge_stream::CAPTURE_BYTES;
 use crate::line::Line;
 use crate::summary::ID_CAPACITY;
+use crate::view_defaults::FRAME_BYTES;
 
 const RECORD_BYTES: usize = 512;
 const SLOTS: usize = STATUS_QUEUE_BYTES / RECORD_BYTES;
@@ -37,6 +38,10 @@ const ITEM_RECORDS: usize = (UNGATED_BYTES + EVENT_RESERVE).div_ceil(RECORD_BYTE
 const FLUSH_BOUND: Duration = Duration::from_secs(2);
 
 const _: () = assert!(SLOTS >= ITEM_RECORDS, "status queue must hold one item");
+
+// a block page frame is written whole into the inline lane; two frames of room keep the drain fed while the next page is built.
+const FRAME_RECORDS: usize = FRAME_BYTES.div_ceil(RECORD_BYTES) + 1;
+const INLINE_SLOTS: usize = 2 * FRAME_RECORDS;
 
 /// Bytes the queue absorbs from an unread descriptor before `has_room` turns false and the run pauses; the reserve of one worst-case item stays free.
 pub const UNPAUSED_QUEUE_BYTES: usize = (SLOTS - ITEM_RECORDS) * RECORD_BYTES;
@@ -73,9 +78,19 @@ impl Record {
 }
 
 // the tail is the record still being packed by consecutive writes to one descriptor; the ring holds only sealed records, older than it.
+//
+// a pending failure block is a barrier in the ring: `pushed` and `taken` count the records ever sealed and ever delivered, and the
+// ring delivers nothing past the barrier position until the block's pages, written into `inline` as the screen catches up, have
+// been delivered ahead of it. Every later write queues in the ring behind the barrier, so scrollback order is the append order
+// and nothing that follows a block can print before it, while no producer waits on the screen.
 struct Queue {
     records: BoundedQueue<Record>,
+    inline: BoundedQueue<Record>,
     tail: RefCell<Option<Record>>,
+    pushed: Cell<u64>,
+    taken: Cell<u64>,
+    barrier: Cell<Option<u64>>,
+    inserting: Cell<bool>,
     capturing: Cell<bool>,
     deferred: Cell<bool>,
     abandoned: Cell<usize>,
@@ -85,7 +100,12 @@ std::thread_local! {
     // allocated once, on first use by the pump thread; FailClosed so a status line is never silently dropped.
     static QUEUE: Queue = Queue {
         records: BoundedQueue::new(SLOTS, FailMode::FailClosed),
+        inline: BoundedQueue::new(INLINE_SLOTS, FailMode::FailClosed),
         tail: RefCell::new(None),
+        pushed: Cell::new(0),
+        taken: Cell::new(0),
+        barrier: Cell::new(None),
+        inserting: Cell::new(false),
         capturing: Cell::new(false),
         deferred: Cell::new(false),
         abandoned: Cell::new(0),
@@ -106,11 +126,32 @@ fn can_take(queue: &Queue, bytes: usize) -> bool {
 }
 
 fn seal(queue: &Queue, tail: &mut Option<Record>) -> bool {
-    tail.take().is_none_or(|record| queue.records.enqueue(record) == EnqueueOutcome::Enqueued)
+    tail.take().is_none_or(|record| {
+        let sealed = queue.records.enqueue(record) == EnqueueOutcome::Enqueued;
+        queue.pushed.set(queue.pushed.get() + u64::from(sealed));
+        sealed
+    })
 }
 
+fn at_barrier(queue: &Queue) -> bool {
+    queue.barrier.get().is_some_and(|position| queue.taken.get() >= position)
+}
+
+// inline pages come first: they are only written once the ring ahead of their barrier has been delivered
 fn next_record(queue: &Queue) -> Option<Record> {
-    queue.records.dequeue().or_else(|| queue.tail.borrow_mut().take())
+    if let Some(page) = queue.inline.dequeue() {
+        return Some(page);
+    }
+    if at_barrier(queue) {
+        return None;
+    }
+    let record = queue.records.dequeue().or_else(|| {
+        let packed = queue.tail.borrow_mut().take();
+        queue.pushed.set(queue.pushed.get() + u64::from(packed.is_some()));
+        packed
+    })?;
+    queue.taken.set(queue.taken.get() + 1);
+    Some(record)
 }
 
 /// Scope inside which [`write`] queues instead of writing; the whole run holds one, the pump drains through [`Sinks`] after every
@@ -133,6 +174,7 @@ impl Drop for Capture {
     fn drop(&mut self) {
         QUEUE.with(|queue| queue.capturing.set(self.previous));
         if !self.previous {
+            QUEUE.with(|queue| queue.barrier.set(None));
             let queued = core::iter::from_fn(|| QUEUE.with(next_record)).count();
             let abandoned = QUEUE.with(|queue| queue.abandoned.replace(0));
             notify_abandoned(queued + abandoned);
@@ -162,7 +204,34 @@ pub(crate) fn room_for(bytes: usize) -> bool {
 
 /// Whether the queue can take the worst-case output of the next handled item.
 pub(crate) fn has_room() -> bool {
-    QUEUE.with(|queue| free_slots(queue) >= ITEM_RECORDS && !queue.deferred.get())
+    QUEUE.with(|queue| free_slots(queue) >= ITEM_RECORDS)
+}
+
+/// Seals the packed tail and returns the position every later append queues behind; the position a block holds the ring at.
+pub(crate) fn mark() -> u64 {
+    QUEUE.with(|queue| {
+        let mut tail = queue.tail.borrow_mut();
+        let _ = seal(queue, &mut tail);
+        queue.pushed.get()
+    })
+}
+
+/// Holds the ring at `position` (a [`mark`]) until the pages of the block waiting there are delivered; `None` releases it.
+pub(crate) fn hold(position: Option<u64>) {
+    QUEUE.with(|queue| queue.barrier.set(position));
+}
+
+/// Whether the ring ahead of the held position is delivered and the inline lane has room for another page frame.
+pub(crate) fn block_ready() -> bool {
+    QUEUE.with(|queue| at_barrier(queue) && queue.inline.capacity() - queue.inline.len() >= FRAME_RECORDS)
+}
+
+/// Runs `write` with every [`write`] it makes queued in the inline lane, delivered ahead of the ring records held behind the barrier.
+pub(crate) fn insert<Output>(write: impl FnOnce() -> Output) -> Output {
+    QUEUE.with(|queue| queue.inserting.set(true));
+    let output = write();
+    QUEUE.with(|queue| queue.inserting.set(false));
+    output
 }
 
 /// Marks that a writer paused for lack of room; its backlog waits for [`resume_due`].
@@ -209,6 +278,7 @@ fn abandon() {
 
 /// The last drain of a run, on every exit path; a failure to write is already counted as abandoned and is not the run's error.
 pub(crate) async fn flush_bounded() {
+    hold(None);
     let _ = drain_bounded(&mut Sinks::new()).await;
 }
 
@@ -218,8 +288,24 @@ pub(crate) async fn flush_bounded() {
 /// [`RunError::StatusQueue`] when no [`Capture`] scope is open or the queue refuses the append. Every burst writer gates on [`room_for`]
 /// or [`has_room`] and [`defer`]s first, so a refusal means a writer skipped its gate: the queue counts it as a drop and the run ends, never silently losing output or writing blocking.
 pub(crate) fn write(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
-    let appended = QUEUE.with(|queue| queue.capturing.get() && append(queue, descriptor, bytes));
+    let appended = QUEUE.with(|queue| queue.capturing.get() && if queue.inserting.get() { append_inline(queue, descriptor, bytes) } else { append(queue, descriptor, bytes) });
     if appended { Ok(()) } else { Err(RunError::StatusQueue) }
+}
+
+// a block page frame is its own records: it never packs into the ring's tail, which belongs to the writes queued behind the barrier
+fn append_inline(queue: &Queue, descriptor: i32, bytes: &[u8]) -> bool {
+    let Ok(tag) = u8::try_from(descriptor) else {
+        return false;
+    };
+    if queue.inline.capacity() - queue.inline.len() < records_for(bytes.len()) {
+        queue.inline.note_drop();
+        return false;
+    }
+    bytes.chunks(RECORD_BYTES).all(|chunk| {
+        let mut record = Record::empty(tag);
+        record.fill(chunk);
+        queue.inline.enqueue(record) == EnqueueOutcome::Enqueued
+    })
 }
 
 fn append(queue: &Queue, descriptor: i32, bytes: &[u8]) -> bool {
@@ -374,5 +460,34 @@ mod tests {
                 "both queued status lines arrive whole, in append order"
             );
         });
+    }
+
+    fn delivered() -> Option<std::string::String> {
+        super::QUEUE.with(super::next_record).map(|record| std::string::String::from_utf8_lossy(&record.bytes[..record.length]).into_owned())
+    }
+
+    #[test]
+    fn a_held_block_page_prints_after_the_records_ahead_of_it_and_before_the_records_behind_it() {
+        let _capture = Capture::enter();
+        write(1, b"settle a\n").expect("the line ahead of the block queues");
+        let position = super::mark();
+        super::hold(Some(position));
+        write(1, b"settle b\n").expect("the line behind the block queues");
+
+        let ahead = delivered();
+        let held = delivered();
+        let ready = super::block_ready();
+        super::insert(|| write(1, b"page 1\n")).expect("the page queues inline");
+        let page = delivered();
+        let still_held = delivered();
+        super::hold(None);
+        let behind = delivered();
+
+        assert_eq!(ahead.as_deref(), Some("settle a\n"));
+        assert_eq!(held, None, "nothing behind the barrier is delivered while the block waits");
+        assert!(ready, "the ring ahead is delivered, so the block may write its page");
+        assert_eq!(page.as_deref(), Some("page 1\n"), "the page comes before the later line");
+        assert_eq!(still_held, None, "the later line still waits for the rest of the block");
+        assert_eq!(behind.as_deref(), Some("settle b\n"), "the later line prints once the block releases the ring");
     }
 }
