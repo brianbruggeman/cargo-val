@@ -74,11 +74,13 @@ fn sited<'a>((stdout, stderr): (Stream<'a>, Stream<'a>), exit: Exit) -> Result<R
 const EXIT_HEAD: usize = 5;
 const VIEWS_AT: usize = 8;
 const VIEW_BYTES: usize = 28;
-const RECORD_AT: usize = VIEWS_AT + 2 * VIEW_BYTES;
+const BLOCK_AT: usize = VIEWS_AT + 2 * VIEW_BYTES;
+const RECORD_AT: usize = BLOCK_AT + 8;
 const PAYLOAD_HEAD: usize = RECORD_AT + 23;
 const CLASS_NONE: u8 = 255;
 const WHICH_STDERR: u8 = 1;
 const REASON_FLAG: u8 = 2;
+const BLOCK_PENDING: u8 = 4;
 const FILE_KEEP: usize = 512;
 const MESSAGE_KEEP: usize = 2048;
 const SIDE_KEEP: usize = 1024;
@@ -515,6 +517,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Resize { cols } => self.cols = cols,
             Event::Captured { id, stdout, stderr, exit, excerpt } => {
                 self.remember_reason(id, stdout.0, stderr.0);
+                self.begin_attempt(id);
                 self.retain(id, exit, (stdout, stderr), excerpt);
                 _ = self.edit(id, |tail| entry::set_lines(tail, review::output_lines(stdout.0) + review::output_lines(stderr.0)));
             }
@@ -674,6 +677,15 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.inflight_count -= 1;
     }
 
+    // a capture that arrives while the newest entry of its test is still a pending block opens a new entry, so the block keeps its own attempt
+    fn begin_attempt(&mut self, id: Identity<'_>) {
+        let Some(index) = self.find_failure(id).filter(|index| self.is_pending(*index)) else {
+            return;
+        };
+        let duration = self.resolve(self.failures[index]).1;
+        self.record(id, duration);
+    }
+
     fn record(&mut self, id: Identity<'_>, duration_ms: Option<u64>) {
         let (binary, name) = id;
         let end = self.used + FAILURE_HEAD + binary.len() + name.len() + 2 + entry::TAIL;
@@ -747,8 +759,9 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.untimed
     }
 
+    // the newest attempt: a test that settles failed again appends a ledger entry, and the entries before it keep what they captured
     fn find_failure(&self, id: Identity<'_>) -> Option<usize> {
-        self.failures().position(|stored| stored == id)
+        (0..self.stored).rev().find(|index| self.resolve(self.failures[*index]).0 == id)
     }
 
     fn edit(&mut self, id: Identity<'_>, change: impl FnOnce(&mut [u8])) -> bool {
@@ -870,23 +883,56 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.window_of = usize::MAX;
     }
 
-    /// The ledger index of the stored failure `id` when it was kept in full, the one a block prints its name, links and excerpt from.
+    /// Queues the newest stored attempt of the failure `id` as a block that prints once the scrollback reaches `position`, and returns its ledger index.
     ///
-    /// `None` means the arena had no room for the failure; the caller prints the block from the event instead.
-    #[must_use]
-    pub fn block_index(&self, id: Identity<'_>) -> Option<usize> {
+    /// `None` means the arena had no room for the failure; the caller prints the block from the event instead. The ledger entry is
+    /// the queue: its views, excerpt and links are the attempt's own, and a later attempt of the same test is a new entry.
+    pub fn queue_block(&mut self, id: Identity<'_>, position: u64) -> Option<usize> {
         let index = self.find_failure(id)?;
-        (entry::payload(self.failure_tail(index)) >= PAYLOAD_HEAD).then_some(index)
+        if entry::payload(self.failure_tail(index)) < PAYLOAD_HEAD {
+            return None;
+        }
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        self.arena[start + VIEWS_AT - 1] |= BLOCK_PENDING;
+        self.arena[start + BLOCK_AT..start + BLOCK_AT + 8].copy_from_slice(&position.to_le_bytes());
+        Some(index)
     }
 
-    /// The name of the queued failure at `index`; its store chains travel with the queue entry, so a rerun that replaces the kept views leaves a pending block's output alone.
+    /// The oldest ledger entry at or after `from` whose block still waits, with the scrollback position it prints at.
+    #[must_use]
+    pub fn pending_block(&self, from: usize) -> Option<(usize, u64)> {
+        (from..self.stored).find(|index| self.is_pending(*index)).map(|index| {
+            let start = self.failure_tail_start(index) + entry::TAIL;
+            let mut position = [0; 8];
+            position.copy_from_slice(&self.arena[start + BLOCK_AT..start + BLOCK_AT + 8]);
+            (index, u64::from_le_bytes(position))
+        })
+    }
+
+    /// Marks the block of the ledger entry at `index` printed.
+    pub fn finish_block(&mut self, index: usize) {
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        self.arena[start + VIEWS_AT - 1] &= !BLOCK_PENDING;
+    }
+
+    fn is_pending(&self, index: usize) -> bool {
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        entry::payload(self.failure_tail(index)) >= PAYLOAD_HEAD && self.arena[start + VIEWS_AT - 1] & BLOCK_PENDING != 0
+    }
+
+    /// The name of the queued failure at ledger `index`.
     pub(crate) fn block_at(&self, index: usize) -> Identity<'_> {
         self.resolve(self.failures[index]).0
     }
 
-    /// The editor template, its directory and the panic site the queued failure's pages are linked with.
+    /// The two store chains of the attempt the ledger entry at `index` kept.
+    pub(crate) fn block_views(&self, index: usize) -> [(u32, u64, u64, u64); 2] {
+        self.views_at(index).1
+    }
+
+    /// The editor template, its directory and the panic site of the attempt at ledger `index`, the links its pages carry.
     pub(crate) fn block_links(&self, index: usize) -> (&[u8], &[u8], Option<Location<'_>>) {
-        let site = if self.link_template.is_empty() { None } else { self.detail(self.resolve(self.failures[index]).0).1 };
+        let site = if self.link_template.is_empty() { None } else { self.detail_at(index).1 };
         (self.link_template, self.link_directory, site)
     }
 
@@ -969,10 +1015,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     /// loaded window; the window is empty until [`State::fill_window`] has loaded it for this failure.
     #[must_use]
     pub fn detail(&self, id: Identity<'_>) -> review::Detail<'_> {
-        let kept = self.find_failure(id).map(|index| (index, self.failure_tail_start(index) + entry::TAIL, entry::payload(self.failure_tail(index))));
-        let Some((index, start, _)) = kept.filter(|(_, _, length)| *length >= PAYLOAD_HEAD) else {
+        self.find_failure(id).map_or((Class::Panic, None, (b"", None), b"", b""), |index| self.detail_at(index))
+    }
+
+    fn detail_at(&self, index: usize) -> review::Detail<'_> {
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        if entry::payload(self.failure_tail(index)) < PAYLOAD_HEAD {
             return (Class::Panic, None, (b"", None), b"", b"");
-        };
+        }
         let rows = self.excerpt_at(index);
         let skipped = usize::from(u16::from_le_bytes([self.arena[start + EXIT_HEAD], self.arena[start + EXIT_HEAD + 1]]));
         let capture = if self.window_of == index { &self.window[..self.window_len] } else { &[][..] };
@@ -2236,5 +2286,57 @@ mod tests {
         assert_eq!(state.detail(second).2.0, b"short");
         assert_eq!(state.detail(third).2.0, b"third message");
         assert_eq!(state.detail(FAILING).2.0, b"first message");
+    }
+
+    const FIRST_VIEWS: [(u32, u64, u64, u64); 2] = [(4, 100, 900, 4_194_304), (5, 200, 800, 4_194_304)];
+    const RERUN_VIEWS: [(u32, u64, u64, u64); 2] = [(9, 300, 700, 5), (10, 400, 600, 5)];
+
+    fn capture_with_reason(state: &mut State<'_, 8192>, id: Identity<'static>, reason: &'static [u8]) {
+        let report = std::format!("thread 't' panicked at src/lib.rs:1:1:\n{}\n", String::from_utf8_lossy(reason));
+        state.apply(&Event::Captured { id, stdout: (report.as_bytes(), 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: Err(reason) });
+    }
+
+    #[test]
+    fn a_rerun_that_changes_the_excerpt_while_the_first_block_is_pending_leaves_the_first_attempt_whole() {
+        let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+        let mut state = State::<8192>::new(&mut arena, &mut ledger);
+        state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
+        capture_with_reason(&mut state, FAILING, b"src/lib.rs is unreadable: first attempt");
+        state.keep_views(FAILING, FIRST_VIEWS);
+        assert_eq!(state.queue_block(FAILING, 41), Some(0), "the first attempt is ledger entry 0");
+
+        capture_with_reason(&mut state, FAILING, b"src/lib.rs moved: the rerun");
+        state.keep_views(FAILING, RERUN_VIEWS);
+
+        assert_eq!(state.pending_block(0), Some((0, 41)), "the pending block is still the first attempt, at its own position");
+        assert_eq!(state.block_excerpt(0), Err(b"src/lib.rs is unreadable: first attempt".as_slice()), "its excerpt is the first attempt's");
+        assert_eq!(state.block_views(0), FIRST_VIEWS, "its chains are the first attempt's");
+        assert_eq!(state.block_excerpt(1), Err(b"src/lib.rs moved: the rerun".as_slice()), "the rerun is a new ledger entry with its own excerpt");
+        assert_eq!(state.block_views(1), RERUN_VIEWS);
+    }
+
+    #[test]
+    fn forty_failures_queue_forty_blocks_in_settle_order_with_no_fixed_cap() {
+        let names: Vec<String> = (0..40).map(|index| std::format!("fixture::bulk_{index:02}")).collect();
+        let (mut arena, mut ledger) = (std::vec![0_u8; 64 * 1024], [0_u32; 64]);
+        let mut state = State::<8192>::new(&mut arena, &mut ledger);
+        for (position, name) in names.iter().enumerate() {
+            let id: Identity<'_> = (b"views_pair", name.as_bytes());
+            state.apply(&Event::Settled { id, outcome: Outcome::Failed, at_ms: None, solo: false });
+            state.apply(&Event::Captured { id, stdout: (REPORT, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
+            state.keep_views(id, FIRST_VIEWS);
+            assert_eq!(state.queue_block(id, position as u64 * 10), Some(position), "failure {position} queues");
+        }
+
+        let mut printed = Vec::new();
+        let mut head = 0;
+        while let Some((index, position)) = state.pending_block(head) {
+            printed.push((index, position));
+            state.finish_block(index);
+            head = index + 1;
+        }
+
+        assert_eq!(printed, (0..40).map(|index| (index, index as u64 * 10)).collect::<Vec<_>>(), "every block is pending, in settle order, at its own position");
+        assert_eq!(state.pending_block(0), None, "all forty printed");
     }
 }
