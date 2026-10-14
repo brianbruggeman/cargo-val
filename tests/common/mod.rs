@@ -27,6 +27,9 @@ pub use cargo_val::edge_exit_macos::MacosExit as ExitSource;
 #[cfg(windows)]
 pub use cargo_val::edge_exit_windows::WindowsExit as ExitSource;
 
+#[cfg(windows)]
+pub(crate) use cargo_val::edge_signal_windows::release_group;
+
 // a cold fixture build under load 85-96 took up to ~63 s in shard_process; 240 s leaves ~3.8x headroom and matches isolated_target's WAIT_LINE_DEADLINE
 pub const FIXTURE_DEADLINE: Duration = Duration::from_secs(240);
 
@@ -64,6 +67,7 @@ pub async fn output_until(command: &mut Command, expire: impl Future<Output = ()
             (finished, Some(failures))
         }
     };
+    release_group(leader);
     let ((stdout, stdout_fault), (stderr, stderr_fault), waited) = finished;
     let read_faults: Vec<String> = [("stdout", stdout_fault), ("stderr", stderr_fault)]
         .into_iter()
@@ -192,3 +196,7 @@ pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
         String::from_utf8_lossy(&output.stderr).trim(),
     ))
 }
+
+// windows registers each group's job in a process-wide table of eight at spawn and kills the group when a full table closes it, so a child that is not released leaves the ninth spawn dead on arrival
+#[cfg(not(windows))]
+pub(crate) fn release_group(_leader: u32) {}
