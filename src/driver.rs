@@ -541,6 +541,7 @@ struct Settings {
     filterset: Option<Filterset>,
     link_template: Option<String>,
     editor: Vec<u8>,
+    probe_ms: u64,
     jobs: usize,
     max_fail: Option<usize>,
     no_tests: NoTestsPolicy,
@@ -555,7 +556,8 @@ struct Settings {
     source_root: PathBuf,
 }
 
-const SETTING_KEYS: [&str; 27] = [
+const SETTING_KEYS: [&str; 28] = [
+    "CARGO_VAL_EDITOR_PROBE_MS",
     "RUST_TEST_THREADS",
     "CARGO_VAL_JOBS",
     "CARGO_VAL_MAX_FAIL",
@@ -675,6 +677,7 @@ fn runtime_settings(
         filterset,
         link_template: links_enabled(output, color, true).then(|| String::from_utf8_lossy(editor_template(editor_url.as_deref(), &source)).into_owned()),
         editor: crate::editor_launch::editor_command(source.get("VISUAL"), source.get("EDITOR")),
+        probe_ms: source.get("CARGO_VAL_EDITOR_PROBE_MS").map(|text| text.parse::<u64>().map_err(|_| RunError::Settings)).transpose()?.unwrap_or(crate::editor_launch::PROBE_DEADLINE_MS),
         jobs,
         max_fail,
         no_tests,
@@ -1763,7 +1766,7 @@ impl ListingRun<'_> {
         match crate::editor_launch::spawn_detached(argv, self.environment, directory.as_bytes()) {
             Ok((group, child)) => {
                 attach(&lanes[EDITOR_LANE], child)?;
-                *self.probe.borrow_mut() = Some((group, monotonic_millis().saturating_add(crate::editor_launch::PROBE_DEADLINE_MS), request.0, (request.1, request.2)));
+                *self.probe.borrow_mut() = Some((group, monotonic_millis().saturating_add(self.settings.probe_ms), request.0, (request.1, request.2)));
                 Ok(true)
             }
             Err(_) => self.dispatch(lanes, request, None).map(|()| true),
@@ -4607,6 +4610,7 @@ mod listing_allocation_tests {
             filterset: None,
             link_template: None,
             editor: std::vec::Vec::new(),
+            probe_ms: 300,
             jobs: 2,
             max_fail: None,
             no_tests: NoTestsPolicy::Pass,
