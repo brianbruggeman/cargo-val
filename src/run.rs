@@ -22,7 +22,7 @@ use crate::edge_signal::SignalPipe;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, emit, monotonic_millis, restore_cursor, run_body, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, emit, monotonic_millis, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
@@ -42,6 +42,7 @@ pub(crate) type Lane = (
     RefCell<Option<Box<ChildStream>>>,
     RefCell<Option<ExitSource>>,
     Cell<bool>,
+    RefCell<Option<SignalSource>>,
 );
 
 pub(crate) type Lanes = [Lane; LANES];
@@ -56,6 +57,7 @@ pub(crate) fn empty_lanes() -> Lanes {
             RefCell::new(None),
             RefCell::new(None),
             Cell::new(true),
+            RefCell::new(None),
         )
     })
 }
@@ -106,6 +108,7 @@ pub(crate) enum Item {
     Err(usize, io::Result<Range<u32>>),
     ErrEnd(usize),
     Exit(usize, io::Result<ExitStatus>),
+    Cancel(usize),
     Signal(io::Result<()>),
     Interrupt,
     Tick,
@@ -124,7 +127,10 @@ impl UnpinPipe for Edge<'_> {
                 stream_step(&lane.0, lane.3.get(), context, (*id, Item::Out, Item::OutEnd))
             }
             Edge::Err(id, lane) => stream_step(&lane.1, true, context, (*id, Item::Err, Item::ErrEnd)),
-            Edge::Exit(id, lane) => exit_step(&lane.2, lane.3.get() || *id < JOB_BASE, *id, context),
+            Edge::Exit(id, lane) => match cancel_step(&lane.4, *id, context) {
+                Poll::Pending => exit_step(&lane.2, lane.3.get() || *id < JOB_BASE, *id, context),
+                cancelled @ Poll::Ready(_) => cancelled,
+            },
             Edge::Signal(gate) => {
                 gate.map_or(Poll::Ready(Err(Exhausted)), |gate| signal_step(gate, context))
             }
@@ -194,6 +200,21 @@ fn exit_step(
             Poll::Pending
         }
         Poll::Pending => Poll::Pending,
+    }
+}
+
+// the lane's scope fired: the lane's exit arm yields it once, ahead of the exit, so the session is ended exactly once and its exit then reads as cancelled
+fn cancel_step(slot: &RefCell<Option<SignalSource>>, id: usize, context: &mut Context<'_>) -> Poll<Result<Item, Exhausted>> {
+    let mut guard = slot.borrow_mut();
+    let Some(source) = guard.as_ref() else {
+        return Poll::Pending;
+    };
+    match step(source, context) {
+        Poll::Ready(Ok(())) => {
+            *guard = None;
+            Poll::Ready(Ok(Item::Cancel(id)))
+        }
+        Poll::Ready(Err(Exhausted)) | Poll::Pending => Poll::Pending,
     }
 }
 
@@ -403,7 +424,11 @@ fn handle(
         Item::Signal(ready) => {
             ready.map_err(|_| RunError::Reactor)?;
             run.drain_signals()?;
-            run.interrupt_sessions(ledger, watches);
+            run.interrupted();
+            Ok(())
+        }
+        Item::Cancel(lane) => {
+            session_cancelled(ledger, watches, lane - JOB_BASE);
             Ok(())
         }
         Item::Interrupt => Ok(()),
@@ -473,7 +498,7 @@ fn handle_doc(
             doc.exited(exit_code(status)?);
             Ok(())
         }
-        Item::Signal(_) | Item::Interrupt | Item::Tick => Ok(()),
+        Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick => Ok(()),
     }
 }
 
@@ -536,7 +561,7 @@ pub(crate) async fn collect_child(
             Item::OutEnd(_) => out_ended = true,
             Item::ErrEnd(_) => err_ended = true,
             Item::Exit(_, status) => code = Some(exit_code(status)?),
-            Item::Err(..) | Item::Signal(_) | Item::Interrupt | Item::Tick => {}
+            Item::Err(..) | Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick => {}
         }
         Ok(if code.is_some() && out_ended && err_ended {
             ControlFlow::Break(())
@@ -813,7 +838,7 @@ mod tests {
                     }
                     Item::OutEnd(_) => out_ended = true,
                     Item::ErrEnd(_) => err_ended = true,
-                    Item::Signal(_) | Item::Interrupt | Item::Tick => {}
+                    Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick => {}
                 }
                 Ok(if exited && out_ended && err_ended {
                     ControlFlow::Break(())
