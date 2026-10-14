@@ -194,6 +194,10 @@ impl<const RERUN: usize> State<'_, RERUN> {
         }
     }
 
+    fn binaries_known(&self) -> bool {
+        self.listed_binaries > 0 || self.binaries_total.is_some_and(|total| total > 0)
+    }
+
     fn note_width(&self) -> usize {
         4 + digits(self.listed_binaries) + digits(self.binaries_total.unwrap_or(0)) + 7
     }
@@ -201,7 +205,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
     fn room_for_bar(&self, (with_note, with_word): (bool, bool)) -> usize {
         let avail = usize::from(self.cols).saturating_sub(1);
         let word = if with_word { 6 } else { 0 };
-        let note = if with_note { self.note_width() } else { 0 };
+        let note = if with_note && self.binaries_known() { self.note_width() } else { 0 };
         avail.saturating_sub(BAR_COLUMN + 1 + COUNT_COLUMNS + word + 2 + digits(self.failed_count()) + 7 + note)
     }
 
@@ -405,8 +409,12 @@ impl<const RERUN: usize> State<'_, RERUN> {
         frame.text(b" ");
         let mut count = Line::<48>::new();
         count.number(self.done);
-        count.text(if exact { b"/" } else { b"/~" });
-        count.number(total);
+        if self.binaries_known() || self.previous.is_some() || self.done > 0 {
+            count.text(if exact { b"/" } else { b"/~" });
+            count.number(total);
+        } else {
+            count.text(b"/?");
+        }
         spaces(frame, COUNT_COLUMNS.saturating_sub(columns(count.bytes())));
         frame.text(count.bytes());
         if with_word {
@@ -417,7 +425,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         failures.number(failed);
         failures.text(b" failed");
         paint(frame, color, if failed == 0 { Tone::Dim } else { Tone::Red }, failures.bytes());
-        if with_note && !exact {
+        if with_note && !exact && self.binaries_known() {
             let mut note = Line::<64>::new();
             note.text(b"  ~ ");
             note.number(self.listed_binaries);
@@ -789,7 +797,43 @@ mod tests {
         state.project_live(&begin, &mut frame).expect("the frame holds one redraw");
 
         let drawn = String::from_utf8_lossy(frame.bytes());
-        assert!(drawn.contains("0/~0"), "{drawn}");
+        assert!(drawn.contains(" 0/?"), "{drawn}");
+        assert!(!drawn.contains("listed"), "{drawn}");
+    }
+
+    fn predata_row(cols: u16, previous: Option<u32>) -> String {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
+        if let Some(tests) = previous {
+            state.apply(&Event::Previous { wall_ms: 258_230, tests });
+        }
+        state.apply(&Event::Resize { cols });
+        state.apply(&Event::Tick { now_ms: 1200 });
+        let mut frame = Line::<4096>::new();
+        state.project_rich(false, &mut frame).expect("the frame holds one redraw");
+        let drawn = String::from_utf8_lossy(frame.bytes()).into_owned();
+        String::from(test_row(&drawn))
+    }
+
+    #[test]
+    fn no_data_and_no_binaries_show_an_unknown_count_and_no_listed_note_at_eighty_columns() {
+        assert_eq!(predata_row(80, None), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░      0/? tests  0 failed");
+    }
+
+    #[test]
+    fn no_data_and_no_binaries_show_an_unknown_count_at_sixty_columns() {
+        assert_eq!(predata_row(60, None), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░      0/?  0 failed");
+    }
+
+    #[test]
+    fn a_previous_run_with_no_binaries_shows_the_previous_total_and_no_listed_note_at_eighty_columns() {
+        assert_eq!(predata_row(80, Some(383)), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0/~383 tests  0 failed");
+    }
+
+    #[test]
+    fn a_previous_run_with_no_binaries_shows_the_previous_total_at_sixty_columns() {
+        assert_eq!(predata_row(60, Some(383)), " test  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0/~383  0 failed");
     }
 
     #[test]
