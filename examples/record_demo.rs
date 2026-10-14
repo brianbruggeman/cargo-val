@@ -13,15 +13,25 @@ const FONT_SIZE: &str = "16";
 const MAX_GIF_BYTES: u64 = 2 * 1024 * 1024;
 
 // recorder dwell times: a viewer needs to read each screen before the next key changes it
+#[cfg(unix)]
 const HOLD_LIVE_RUN_MS: u64 = 0;
+#[cfg(unix)]
 const HOLD_REVIEW_LIST_MS: u64 = 2000;
+#[cfg(unix)]
 const HOLD_AFTER_J_MS: u64 = 1200;
+#[cfg(unix)]
 const HOLD_AFTER_K_MS: u64 = 1200;
+#[cfg(unix)]
 const HOLD_DETAIL_MS: u64 = 3000;
+#[cfg(unix)]
 const HOLD_BACK_TO_LIST_MS: u64 = 0;
+#[cfg(unix)]
 const HOLD_RERUN_RUNNING_MS: u64 = 0;
+#[cfg(unix)]
 const HOLD_RERUN_RESULT_MS: u64 = 2000;
+#[cfg(unix)]
 const HOLD_CONFIRM_QUIT_MS: u64 = 1000;
+#[cfg(unix)]
 const HOLD_RECEIPT_MS: u64 = 3000;
 
 fn main() -> ExitCode {
