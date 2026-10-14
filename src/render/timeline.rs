@@ -57,6 +57,20 @@ impl<const RERUN: usize> State<'_, RERUN> {
         })
     }
 
+    /// Each in-flight test as `(start, now)` in milliseconds since `Begin`; empty once the run has finished, so the finished plot is the settled-only plot.
+    fn running_spans(&self) -> impl Iterator<Item = (u64, u64)> {
+        let origin = self.origin_ms.unwrap_or(self.now_ms);
+        let now = self.elapsed_ms();
+        let mut offset = 0;
+        core::iter::from_fn(move || {
+            (self.wall_ms.is_none() && offset < self.inflight_used).then(|| {
+                let (started, _, _, next) = self.inflight_at(offset);
+                offset = next;
+                (started.saturating_sub(origin).min(now), now)
+            })
+        })
+    }
+
     fn elapsed_ms(&self) -> u64 {
         self.now_ms.saturating_sub(self.origin_ms.unwrap_or(self.now_ms))
     }
@@ -151,15 +165,11 @@ impl<const RERUN: usize> State<'_, RERUN> {
     /// Per column: eighths of plot height held by passing tests, and by passing plus failing tests.
     fn timeline_levels(&self, chart: usize, wall: u64, (pass, stacked): (&mut [u8; MAX_CHART], &mut [u8; MAX_CHART])) {
         let mut overlap = [[0_u64; MAX_CHART]; 2];
-        for timed in self.timed_records() {
-            let (start, stop, failed, _) = timed;
-            let end = stop.min(wall);
-            let first = column_of(start, chart, wall);
-            let last = column_of(end.saturating_sub(1).max(start), chart, wall);
-            for (column, held_ms) in overlap[usize::from(failed)].iter_mut().enumerate().take(last.min(chart - 1) + 1).skip(first) {
-                let (low, high) = slice_of(column, chart, wall);
-                *held_ms += end.min(high).saturating_sub(start.max(low));
-            }
+        for (start, stop, failed, _) in self.timed_records() {
+            hold(&mut overlap[usize::from(failed)], (start, stop), (chart, wall));
+        }
+        for (start, now) in self.running_spans() {
+            hold(&mut overlap[0], (start, now), (chart, wall));
         }
         let jobs = self.jobs.max(1) as u64;
         for column in 0..chart {
@@ -367,6 +377,16 @@ impl<const RERUN: usize> State<'_, RERUN> {
             ellipsis_end(frame, id.1, room.max(8));
             frame.text(b"\n");
         }
+    }
+}
+
+fn hold(held: &mut [u64; MAX_CHART], (start, stop): (u64, u64), (chart, wall): (usize, u64)) {
+    let end = stop.min(wall);
+    let first = column_of(start, chart, wall);
+    let last = column_of(end.saturating_sub(1).max(start), chart, wall);
+    for (column, held_ms) in held.iter_mut().enumerate().take(last.min(chart - 1) + 1).skip(first) {
+        let (low, high) = slice_of(column, chart, wall);
+        *held_ms += end.min(high).saturating_sub(start.max(low));
     }
 }
 
@@ -861,7 +881,7 @@ mod tests {
         run_events().take(4).for_each(|event| state.apply(&event));
         state.apply(&Event::Previous { wall_ms: 30_000, tests: 383 });
         let mut frame = Line::<8192>::new();
-        let mut drawn_live_axes = 0_usize;
+        let (mut drawn_live_axes, mut drawn_running) = (0_usize, 0_usize);
 
         let ((), allocations) = measure_allocations(|| {
             for round in 0..10_000_usize {
@@ -869,10 +889,51 @@ mod tests {
                 frame.clear();
                 state.project_timeline([80, 60, 40][round % 3], &mut frame).expect("the frame holds one timeline");
                 drawn_live_axes += usize::from(frame.bytes().windows(8).any(|window| window == b"~30.000s"));
+                drawn_running += usize::from(frame.bytes().windows(2).any(|window| window == [0xe2, 0x96]));
             }
         });
 
+        assert_eq!(state.inflight_len(), 3, "three tests stayed in flight for every frame");
         assert_eq!(drawn_live_axes, 10_000, "every frame drew the fixed live axis, so a zero is not an empty loop");
+        assert!(drawn_running >= 9_999, "frames drew in-flight columns, so a zero is not an empty plot: {drawn_running}");
         assert_eq!(allocations, 0);
+    }
+
+    fn levels_with(running: bool) -> ([u8; MAX_CHART], [u8; MAX_CHART]) {
+        let (mut arena, mut ledger, mut timed, mut inflight) = ([0_u8; 512], [0_u32; 4], [0_u8; 512], [0_u8; 512]);
+        let mut state = State::<64>::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_timeline(&mut timed);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: ORIGIN });
+        state.apply(&Event::Previous { wall_ms: 66_000, tests: 383 });
+        state.apply(&Event::Started { id: SHORT, solo: false, at_ms: ORIGIN + 2_000, limit_ms: None });
+        state.apply(&Event::Settled { id: SHORT, outcome: Outcome::Passed, at_ms: Some(ORIGIN + 9_000), solo: false });
+        if running {
+            state.apply(&Event::Started { id: SLOW, solo: false, at_ms: ORIGIN + 5_000, limit_ms: None });
+        }
+        state.apply(&Event::Tick { now_ms: ORIGIN + 20_000 });
+        let (mut pass, mut stacked) = ([0_u8; MAX_CHART], [0_u8; MAX_CHART]);
+        state.timeline_levels(66, 66_000, (&mut pass, &mut stacked));
+        (pass, stacked)
+    }
+
+    #[test]
+    fn an_in_flight_test_raises_the_columns_between_its_start_and_now_by_one_tests_worth_and_nothing_else() {
+        let (base_pass, base_stacked) = levels_with(false);
+        let (with_pass, with_stacked) = levels_with(true);
+
+        for column in 0..66 {
+            let inside = (5..20).contains(&column);
+            let one_test = if inside { PLOT_ROWS_EIGHTHS / 8 } else { 0 };
+            assert_eq!(with_pass[column] - base_pass[column], one_test, "pass column {column}");
+            assert_eq!(with_stacked[column] - base_stacked[column], one_test, "stacked column {column}");
+        }
+    }
+
+    #[test]
+    fn a_live_frame_lists_only_settled_tests_among_the_longest_while_two_are_in_flight() {
+        let text = live(Some(30_000), 9_000);
+
+        assert!(text.contains("Running now: 2 tests."), "{text}");
+        assert!(text.contains("counts::adds_up") && text.contains("counts::rolls_over"), "{text}");
+        assert!(!text.contains("sleeps_sixteen_seconds") && !text.contains("fails_after_ten_seconds"), "{text}");
     }
 }

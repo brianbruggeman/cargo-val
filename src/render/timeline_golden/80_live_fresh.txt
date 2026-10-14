@@ -1,14 +1,14 @@
  cargo val where the time went                                    so far 9.000s
  how many tests ran at once, over time, up to 3 at once
  tests at once
-       3                                                                   
-                                                                           
-                                                                           
-                                                                           
-       1                                                                   
-         ▆▆▆▆▆▆▆▆▂                                                         
-         █████████                                                         
-       0 █████████                                                         
+       3   ▄█████▄                                                         
+           ███████                                                         
+         ▃▃███████                                                         
+         █████████▇                                                        
+       1 ██████████                                                        
+         ██████████                                                        
+         ██████████                                                        
+       0 ██████████                                                        
          ┬──────────┬──────────┬──────────┬──────────┬──────────┬─────────┤
  seconds 0s         10s        20s        30s        40s           ~60.000s
  █ tests running
