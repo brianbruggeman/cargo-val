@@ -55,6 +55,13 @@ fn open_held(path: &Path) -> ChildStream {
     ChildStream::new(OwnedFd::from(file))
 }
 
+// the sampled frame must point at the statement that blocks, found in the fixture source so editing the fixture cannot silently stale a hardcoded line
+fn blocking_line_of_fixture() -> u32 {
+    let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/blocked_test/src/lib.rs")).expect("the fixture source is readable");
+    let index = source.lines().position(|line| line.contains("block.read(")).expect("the fixture blocks on a read of the block fifo");
+    u32::try_from(index + 1).expect("the fixture is shorter than u32 lines")
+}
+
 async fn build_fixture_test_binary() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/blocked_test/Cargo.toml");
     let mut command = Command::new(env!("CARGO"));
@@ -116,7 +123,7 @@ async fn macos_sample_of_a_real_blocked_child_finds_the_user_frame_at_its_file_a
             .rfind(|frame| frame.thread.contains("unit_blocks_when_requested"))
             .expect("the blocked test thread has a user frame");
         assert!(blocked.symbol.contains("unit_blocks_when_requested"), "{}", blocked.symbol);
-        assert_eq!((blocked.file, blocked.line), (Some("lib.rs"), Some(26)));
+        assert_eq!((blocked.file, blocked.line), (Some("lib.rs"), Some(blocking_line_of_fixture())));
         assert_eq!(dropped, 0);
     })
     .await;

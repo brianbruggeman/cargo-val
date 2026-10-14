@@ -5,6 +5,7 @@ use core::future::Future;
 use core::time::Duration;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -251,12 +252,16 @@ async fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finis
 
             kill_intermediary(leader);
 
-            // a nonblocking write open fails with ENXIO unless the blocked test is still waiting to read, so a run that died with its parent fails here
-            let release = OpenOptions::new()
+            // the blocked test opens this fifo read-write before announcing itself, so a nonblocking write open fails with ENXIO only if that process is gone, which is how a run that died with its parent fails here
+            let mut release = OpenOptions::new()
                 .write(true)
                 .custom_flags(libc::O_NONBLOCK)
                 .open(directory.join("block"))
-                .unwrap_or_else(|error| panic!("the blocked test (pid {blocked}) is gone after its parent died: {error}"));
+                .unwrap_or_else(|error| {
+                    let path = directory.join("block");
+                    panic!("open(O_WRONLY|O_NONBLOCK) of {} failed with {error} (errno {:?}): no process holds the block fifo open, and the blocked test (pid {blocked}, alive={}) opens it read-write before announcing itself", path.display(), error.raw_os_error(), unsafe { libc::kill(blocked, 0) } == 0)
+                });
+            release.write_all(b"1").expect("the release byte fits the fifo the blocked test reads");
             drop(release);
             await_cargo_val_gone(lifeline, "the released run").await;
             timeout(GONE_DEADLINE, fifo::until_eof(&held, "the released test"))
@@ -269,4 +274,21 @@ async fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finis
 
     let report = fs::read_to_string(&stdout_file).expect("the run wrote its report to the stdout file");
     assert!(report.lines().any(|line| line.starts_with("SUMMARY  passed=1 failed=0")), "the run did not finish normally:\n{report}");
+}
+
+#[test]
+fn a_nonblocking_write_open_of_a_fifo_needs_a_holder_and_fails_enxio_without_one() {
+    let directory = probe_directory("enxio-control");
+    let block = directory.join("block");
+    let write_open = || OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&block);
+
+    let unheld = write_open().expect_err("no process holds the fifo, as when the blocked test has not yet reached its open");
+    assert_eq!(unheld.raw_os_error(), Some(libc::ENXIO), "{unheld} opening {}", block.display());
+
+    let holder = OpenOptions::new().read(true).write(true).open(&block).expect("a read-write open of a fifo never waits for a peer");
+    write_open().expect("a held fifo accepts the harness's nonblocking write open");
+
+    drop(holder);
+    let released = write_open().expect_err("the holder died, which is what a run killed with its parent looks like");
+    assert_eq!(released.raw_os_error(), Some(libc::ENXIO), "{released} opening {}", block.display());
 }
