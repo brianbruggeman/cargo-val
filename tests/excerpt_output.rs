@@ -33,6 +33,7 @@ async fn run_manifest(manifest: &Path, mode: &str, target: &str, arguments: &[&s
         .env_remove("CARGO_VAL_COLOR")
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
+        .env("CARGO_VAL_LOG", "debug")
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(target));
     fixture_output(&mut command).await
 }
@@ -41,9 +42,14 @@ fn stdout_of(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("output is UTF-8")
 }
 
+fn report(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    format!("status {:?}\nstderr ({} bytes):\n{}\nstdout ({} bytes):\n{}", output.status, output.stderr.len(), String::from_utf8_lossy(&output.stderr), output.stdout.len(), stdout.chars().take(2000).collect::<String>())
+}
+
 async fn run_abort(mode: &str) -> String {
     let output = run_manifest(&fixture("failure_class"), mode, "excerpt-absent-target", &["-E", "test(=failing::abort_crash)"]).await;
-    assert_eq!(output.status.code(), Some(1), "{}", stdout_of(&output));
+    assert_eq!(output.status.code(), Some(1), "{}", report(&output));
     stdout_of(&output)
 }
 
@@ -60,7 +66,7 @@ async fn run_wide(mode: &str) -> String {
     let directory = tempfile::tempdir().expect("tempdir is creatable");
     let manifest = wide_line_crate(directory.path());
     let output = run_manifest(&manifest, mode, "excerpt-wide-target", &[]).await;
-    assert_eq!(output.status.code(), Some(1), "{}", stdout_of(&output).chars().take(2000).collect::<String>());
+    assert_eq!(output.status.code(), Some(1), "{}", report(&output));
     stdout_of(&output)
 }
 
@@ -120,7 +126,7 @@ const BYTES_PANIC_SITE: &str = "/bytes-1.12.1/src/bytes.rs:533";
 
 async fn run_external(mode: &str) -> String {
     let output = run_manifest(&fixture("failure_class"), mode, "excerpt-external-target", &["-E", "test(=failing::registry_panic_under_user_call)"]).await;
-    assert_eq!(output.status.code(), Some(1), "{}", stdout_of(&output));
+    assert_eq!(output.status.code(), Some(1), "{}", report(&output));
     stdout_of(&output)
 }
 

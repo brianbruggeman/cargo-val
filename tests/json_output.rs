@@ -10,6 +10,7 @@ mod binary;
 use fixture::fixture_output;
 
 const ESCAPE: u8 = 0x1b;
+const REFUSED: i32 = 2;
 
 type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
@@ -35,8 +36,11 @@ async fn run(mode: &str, fixture_name: &str, environment: &[(&str, &str)], argum
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("json-fixture-target"))
+        .env("CARGO_VAL_LOG", "debug")
         .envs(environment.iter().copied());
-    fixture_output(&mut command).await
+    let output = fixture_output(&mut command).await;
+    assert_ne!(output.status.code(), Some(REFUSED), "cargo-val refused the invocation: {:?}\nstderr:\n{}\nstdout:\n{}", output.status, String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+    output
 }
 
 fn lines_of(output: &Output) -> Vec<String> {
