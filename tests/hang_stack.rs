@@ -15,6 +15,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use cargo_val::stack_frames::{Class, Frame, frames};
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/fifo.rs"]
 mod fifo;
 #[path = "common/supervise.rs"]
@@ -22,7 +24,7 @@ mod supervise;
 #[path = "../src/test_alloc.rs"]
 mod test_alloc;
 
-use common::{fixture_deadline, fixture_output};
+use fixture::{fixture_deadline, fixture_output};
 use supervise::supervised;
 
 const WORKSPACE: [&str; 1] = ["cargo_val_blocked_fixture"];

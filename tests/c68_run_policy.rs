@@ -10,13 +10,15 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
 
 use cargo_val::render::Outcome;
-use common::fixture_output;
+use fixture::fixture_output;
 
 
 struct Run {

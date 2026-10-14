@@ -1,15 +1,27 @@
 #![cfg(unix)]
 
 use std::fs::File;
-use std::io::Read;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::num::NonZeroI32;
 use std::process::{ExitStatus, Stdio};
+
+#[cfg(target_os = "linux")]
+use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
+#[cfg(target_os = "macos")]
+use cargo_val::edge_exit_macos::MacosExit as ExitSource;
+use cargo_val::edge_stream_unix::ChildStream;
+use futures::future::join;
+use proxima_primitives::pipe::Pipe;
 
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/drain.rs"]
+mod drain;
 #[path = "common/group.rs"]
 mod group;
+#[path = "common/lead.rs"]
+mod lead;
 
 const FRAME_START: &str = "\x1b[?25l";
 const COLUMNS: u16 = 80;
@@ -35,7 +47,7 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
 fn spawn_on(slave: &OwnedFd, fixture: &str, release: &Path) -> std::process::Child {
     let stream = || Stdio::from(slave.try_clone().expect("the slave descriptor duplicates"));
     let mut command = binary::command();
-    group::lead_group(&mut command);
+    lead::lead_group(&mut command);
     command
         .arg("--manifest-path")
         .arg(fixture_manifest(fixture))
@@ -87,42 +99,38 @@ fn released_frame(frame: &str) -> bool {
     clock_shows_elapsed(frame) && settled_count(frame).is_some_and(|settled| settled > 0)
 }
 
-fn read_until_exit(mut master: File, release: &Path) -> String {
-    let mut output = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    let mut released = false;
-    while let Ok(length) = master.read(&mut chunk) {
-        if length == 0 {
-            break;
-        }
-        output.extend_from_slice(&chunk[..length]);
-        let text = String::from_utf8_lossy(&output);
-        if !released && live_frames(&text).iter().any(|frame| released_frame(frame)) {
-            File::create(release).expect("the release file is creatable");
-            released = true;
-        }
-    }
+async fn read_until_exit(master: &ChildStream, release: &Path) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| live_frames(&String::from_utf8_lossy(bytes)).iter().any(|frame| released_frame(frame))).await;
+    File::create(release).expect("the release file is creatable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
     String::from_utf8_lossy(&output).into_owned()
 }
 
-fn run_on_pty(fixture: &str) -> (String, ExitStatus) {
+async fn run_on_pty(fixture: &str) -> (String, ExitStatus) {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("the release directory is creatable");
     let release = directory.join("release");
     let Pty { master, slave } = open_pty();
     let mut child = spawn_on(&slave, fixture, &release);
     drop(slave);
-    let (cancel, fired) = group::watchdog(child.id(), group::sync_deadline());
-    let output = read_until_exit(master, &release);
-    let status = child.wait().expect("cargo-val is reaped");
-    drop(cancel);
-    assert!(!fired.join().unwrap_or(false), "cargo-val outlived {:?} and its group was killed", group::sync_deadline());
+    let leader = child.id();
+    let exit = ExitSource::new(NonZeroI32::new(leader.cast_signed()).expect("a spawned child has a nonzero pid"));
+    // boxed: the stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
+    let master = Box::new(ChildStream::new(OwnedFd::from(master)));
+    let waiting = join(read_until_exit(&master, &release), exit.call(()));
+    let (output, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
+        Ok(finished) => finished,
+        Err((report, _)) => panic!("{report}"),
+    };
+    let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
+    let _ = child.try_wait();
     (output, status)
 }
 
-#[test]
-fn a_later_live_frame_shows_nonzero_built_and_settled_counts() {
-    let (output, status) = run_on_pty("rich_pty");
+#[proxima::test]
+async fn a_later_live_frame_shows_nonzero_built_and_settled_counts() {
+    let (output, status) = run_on_pty("rich_pty").await;
 
     let frames = live_frames(&output);
     println!("first frame:\n{}", shown(frames.first().expect("a live frame was drawn")));
@@ -133,9 +141,9 @@ fn a_later_live_frame_shows_nonzero_built_and_settled_counts() {
     assert!(later.is_some(), "no live frame showed a nonzero built count with a nonzero settled count among {} frames", frames.len());
 }
 
-#[test]
-fn a_later_live_frame_clock_shows_elapsed_time_from_the_run_start() {
-    let (output, status) = run_on_pty("rich_pty");
+#[proxima::test]
+async fn a_later_live_frame_clock_shows_elapsed_time_from_the_run_start() {
+    let (output, status) = run_on_pty("rich_pty").await;
 
     let frames = live_frames(&output);
     assert!(status.success(), "cargo-val exited {status}");
@@ -143,9 +151,9 @@ fn a_later_live_frame_clock_shows_elapsed_time_from_the_run_start() {
     assert!(frames.iter().any(|frame| clock_shows_elapsed(frame)), "every one of {} frames read 0:00: {clocks:?}", frames.len());
 }
 
-#[test]
-fn a_fresh_build_prints_no_cargo_status_lines_into_or_between_frames() {
-    let (output, status) = run_on_pty("rich_pty");
+#[proxima::test]
+async fn a_fresh_build_prints_no_cargo_status_lines_into_or_between_frames() {
+    let (output, status) = run_on_pty("rich_pty").await;
 
     assert!(status.success(), "cargo-val exited {status}");
     assert!(!live_frames(&output).is_empty(), "no live frame was drawn");
@@ -154,9 +162,9 @@ fn a_fresh_build_prints_no_cargo_status_lines_into_or_between_frames() {
     }
 }
 
-#[test]
-fn a_failed_build_still_prints_rustcs_diagnostic_and_cargos_summary_after_the_frame_is_erased() {
-    let (output, status) = run_on_pty("build_error");
+#[proxima::test]
+async fn a_failed_build_still_prints_rustcs_diagnostic_and_cargos_summary_after_the_frame_is_erased() {
+    let (output, status) = run_on_pty("build_error").await;
 
     assert!(!status.success(), "a build error must fail the run");
     let diagnostic = output.find("error[E0308]: mismatched types").unwrap_or_else(|| panic!("rustc's E0308 line is missing:\n{}", shown(&output)));

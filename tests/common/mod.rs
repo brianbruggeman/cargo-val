@@ -1,15 +1,9 @@
-use core::future::Future;
-use core::pin::pin;
 use core::time::Duration;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io;
 use std::process::{Command, Output};
-#[cfg(windows)]
-use std::process::Stdio;
-
-use futures::future::{Either, join3, select};
-use proxima_core::time::{sleep, timeout};
+use futures::future::join3;
 use proxima_primitives::pipe::{Exhausted, Pipe};
 
 #[cfg(unix)]
@@ -32,55 +26,38 @@ pub use cargo_val::edge_exit_windows::WindowsExit as ExitSource;
 #[cfg(windows)]
 pub(crate) use cargo_val::edge_signal_windows::release_group;
 
+#[path = "group.rs"]
+pub mod group;
+#[path = "drain.rs"]
+mod drain;
+
+pub use drain::drain_until;
+
 pub mod settings {
     include!("settings.rs");
 }
 
-pub fn fixture_deadline() -> Duration {
-    settings::bound("FIXTURE_DEADLINE")
-}
+use group::bounded;
 
-pub(crate) fn interrupt_grace() -> Duration {
-    settings::bound("INTERRUPT_GRACE")
-}
-
-#[cfg(windows)]
-fn taskkill_deadline() -> Duration {
-    settings::bound("TASKKILL_DEADLINE")
-}
-
-/// Runs a fixture command to completion, failing the test with the captured output if it outlives the fixture deadline (`CARGO_VAL_TEST_FIXTURE_DEADLINE`).
-pub async fn fixture_output(command: &mut Command) -> Output {
-    output_within(command, fixture_deadline()).await.unwrap_or_else(|failure| panic!("{failure}\nraise CARGO_VAL_TEST_FIXTURE_DEADLINE if the fixture is only slow"))
-}
-
-/// Like `Command::output`, but the child leads its own process group and a missed `deadline` interrupts it, then kills the whole group.
-///
-/// # Errors
-///
-/// Returns the spawn failure, or the deadline report carrying everything the child printed.
-pub async fn output_within(command: &mut Command, deadline: Duration) -> Result<Output, String> {
-    output_until(command, sleep(deadline)).await
-}
-
-/// The deadline path of [`output_within`] with the clock replaced by `expire`: the child's exit and both its streams are read on the calling prime worker, and once `expire` resolves first the group is interrupted, given [`interrupt_grace()`], then killed.
+/// Like `Command::output`, but the child leads its own process group and a deadline of `setting` (the `CARGO_VAL_TEST_<setting>` bound) is raced against it by [`bounded`], which interrupts the group, gives it [`interrupt_grace()`], then kills it.
 ///
 /// # Errors
 ///
 /// Returns the spawn failure, or the expiry report carrying everything the child printed and any signal that failed to land.
-pub async fn output_until(command: &mut Command, expire: impl Future<Output = ()>) -> Result<Output, String> {
+pub async fn output_within(command: &mut Command, deadline: Duration, setting: &str) -> Result<Output, String> {
     let (leader, stdout, stderr, exit) = launch(command)?;
-    let mut collect = pin!(join3(drain(&stdout), drain(&stderr), exit.call(())));
-    let mut expire = pin!(expire);
-    let raced = select(collect.as_mut(), expire.as_mut()).await;
-    let (finished, signal_failures) = match raced {
-        Either::Left((finished, _)) => (finished, None),
-        Either::Right(((), _)) => {
-            let (finished, failures) = interrupt_then_kill(leader, collect.as_mut()).await;
-            (finished, Some(failures))
-        }
-    };
+    let collect = join3(drain(&stdout), drain(&stderr), exit.call(()));
+    let settled = bounded(leader, deadline, setting, collect).await;
     release_group(leader);
+    match settled {
+        Ok(finished) => finish(command, leader, finished, None),
+        Err((report, finished)) => finish(command, leader, finished, Some(report)),
+    }
+}
+
+pub(crate) type Finished = ((Vec<u8>, Option<io::Error>), (Vec<u8>, Option<io::Error>), Result<io::Result<std::process::ExitStatus>, Exhausted>);
+
+pub(crate) fn finish(command: &Command, leader: u32, finished: Finished, expiry: Option<String>) -> Result<Output, String> {
     let ((stdout, stdout_fault), (stderr, stderr_fault), waited) = finished;
     let read_faults: Vec<String> = [("stdout", stdout_fault), ("stderr", stderr_fault)]
         .into_iter()
@@ -89,9 +66,9 @@ pub async fn output_until(command: &mut Command, expire: impl Future<Output = ()
     let status = waited
         .map_err(|Exhausted| format!("{command:?}: the exit source was already spent"))?
         .map_err(|error| format!("{command:?}: wait failed: {error}"))?;
-    if let Some(failures) = signal_failures {
+    if let Some(report) = expiry {
         return Err(format!(
-            "{command:?} (pid {leader}) outlived its deadline and its process group was killed\nsignal failures: {failures:?}\nread faults: {read_faults:?}\nstdout:\n{}\nstderr:\n{}",
+            "{command:?} (pid {leader}) outlived its deadline and its process group was killed\n{report}\nread faults: {read_faults:?}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr),
         ));
@@ -129,89 +106,11 @@ fn environment_entry(key: &OsStr, value: &OsStr) -> Vec<u8> {
     [key.as_encoded_bytes(), b"=", value.as_encoded_bytes()].concat()
 }
 
+// windows registers each group's job in a process-wide table of eight at spawn and kills the group when a full table closes it, so a child that is not released leaves the ninth spawn dead on arrival
+#[cfg(not(windows))]
+pub(crate) fn release_group(_leader: u32) {}
+
 /// Reads `stream` to EOF.
 pub async fn drain(stream: &ChildStream) -> (Vec<u8>, Option<io::Error>) {
     drain_until(stream, |_| false).await
 }
-
-/// Reads `stream` until `done` accepts everything read so far, or to EOF.
-pub async fn drain_until(stream: &ChildStream, done: impl Fn(&[u8]) -> bool) -> (Vec<u8>, Option<io::Error>) {
-    let mut bytes = Vec::new();
-    while !done(&bytes) {
-        match stream.call(()).await {
-            Ok(Ok(range)) => match stream.window(range) {
-                Some(window) => bytes.extend_from_slice(&window),
-                None => return (bytes, Some(io::Error::other("a yielded range reached past the capture window"))),
-            },
-            Ok(Err(fault)) => return (bytes, Some(fault)),
-            Err(Exhausted) => break,
-        }
-    }
-    (bytes, None)
-}
-
-/// SIGINT to the group, [`interrupt_grace()`] for `collect` to finish on its own, then SIGKILL to the group and the rest of `collect`.
-pub(crate) async fn interrupt_then_kill<Collect>(leader: u32, mut collect: Collect) -> (Collect::Output, Vec<String>)
-where
-    Collect: Future + Unpin,
-{
-    let mut failures: Vec<String> = interrupt(leader).err().into_iter().collect();
-    let graceful = timeout(interrupt_grace(), &mut collect).await;
-    failures.extend(kill_group(leader).err());
-    match graceful {
-        Ok(finished) => (finished, failures),
-        Err(_) => (collect.await, failures),
-    }
-}
-
-#[cfg(unix)]
-pub(crate) fn interrupt(leader: u32) -> Result<(), String> {
-    signal_group(leader, libc::SIGINT)
-}
-
-#[cfg(unix)]
-pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
-    signal_group(leader, libc::SIGKILL)
-}
-
-// ESRCH means the group already exited, which is the goal of both signals
-#[cfg(unix)]
-fn signal_group(leader: u32, signal: libc::c_int) -> Result<(), String> {
-    // safety: killpg takes plain integers and reports failure through its status
-    if unsafe { libc::killpg(leader.cast_signed(), signal) } == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(()),
-        _ => Err(format!("killpg({leader}, signal {signal}) failed: {error}")),
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn interrupt(leader: u32) -> Result<(), String> {
-    kill_group(leader)
-}
-
-// taskkill /T walks the parent chain, the closest std-only reach to a job object; its exit is awaited on a thread so a hung taskkill is reported at taskkill_deadline() instead of blocking
-#[cfg(windows)]
-pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
-    let mut child = Command::new("taskkill")
-        .args(["/PID", &leader.to_string(), "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("taskkill for pid {leader} did not run: {error}"))?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || sender.send(child.wait()));
-    match receiver.recv_timeout(taskkill_deadline()) {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(format!("taskkill for pid {leader} exited {status}")),
-        Ok(Err(error)) => Err(format!("taskkill for pid {leader} could not be waited on: {error}")),
-        Err(_) => Err(format!("taskkill for pid {leader} did not exit within {:?}", taskkill_deadline())),
-    }
-}
-
-// windows registers each group's job in a process-wide table of eight at spawn and kills the group when a full table closes it, so a child that is not released leaves the ninth spawn dead on arrival
-#[cfg(not(windows))]
-pub(crate) fn release_group(_leader: u32) {}

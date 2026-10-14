@@ -1,14 +1,16 @@
 use std::path::PathBuf;
-use std::time::Duration;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
 
 use cargo_val::render::Outcome;
-use common::{fixture_output, output_within};
+use common::output_within;
+use fixture::fixture_output;
 
 #[cfg(unix)]
 #[path = "common/supervise.rs"]
@@ -106,10 +108,6 @@ async fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, 
 const BINARY: &str = "ignore_modes: discovered";
 #[cfg(unix)]
 const TEST_NAME: &str = "the_bin_target_exists_when_the_test_starts";
-
-fn help_deadline() -> Duration {
-    common::settings::bound("HELP_DEADLINE")
-}
 
 #[proxima::test(timeout = "310s")]
 async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
@@ -322,7 +320,8 @@ mod bin_gate_hold {
     use proxima_primitives::pipe::Pipe;
 
     use super::{Run, TEST_NAME, manifest, target_directory};
-    use crate::common::{ChildStream, fixture_deadline, drain, drain_until};
+    use crate::common::{ChildStream, drain, drain_until};
+    use crate::fixture::fixture_deadline;
     use crate::supervise::supervised;
 
     const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
@@ -463,7 +462,7 @@ async fn the_same_fixture_fails_with_the_bin_gate_off() {
 
 #[proxima::test]
 async fn help_prints_the_banner_file_and_documents_the_new_options() {
-    let output = output_within(binary::command().arg("--help"), help_deadline()).await.unwrap_or_else(|failure| panic!("{failure}"));
+    let output = output_within(binary::command().arg("--help"), common::settings::bound("HELP_DEADLINE"), "HELP_DEADLINE").await.unwrap_or_else(|failure| panic!("{failure}"));
     let banner = include_str!("fixtures/help-banner.txt");
 
     assert_eq!(output.status.code(), Some(0));

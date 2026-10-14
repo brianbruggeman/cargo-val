@@ -13,6 +13,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use proxima_primitives::pipe::Pipe;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -20,7 +22,8 @@ mod fifo;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{fixture_deadline, drain, drain_until, fixture_output};
+use common::{drain, drain_until};
+use fixture::{fixture_deadline, fixture_output};
 use supervise::supervised;
 
 const BINARY: &str = "cargo_val_blocked_fixture";

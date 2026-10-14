@@ -19,6 +19,8 @@ use futures::FutureExt;
 use proxima_core::time::timeout;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -26,7 +28,8 @@ mod fifo;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{fixture_deadline, drain, drain_until, fixture_output};
+use common::{drain, drain_until};
+use fixture::{fixture_deadline, fixture_output};
 use binary::EXIT_WITH_PARENT;
 use supervise::supervised;
 
