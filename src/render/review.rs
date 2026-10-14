@@ -94,6 +94,8 @@ pub enum Rerun {
     Idle,
     Running { elapsed_ms: u64, expected_ms: Option<u64> },
     Passed { millis: u64 },
+    /// The rerun ended failing again; the row keeps its class and shows how long this attempt took.
+    Failed { millis: u64 },
 }
 
 /// What the state holds for one failure: its class, its source location, the classifier's reason, the source-excerpt rows
@@ -103,7 +105,7 @@ pub type Detail<'a> = (Class, Option<Location<'a>>, Reason<'a>, &'a [u8], &'a [u
 /// The classifier's message and, for an assertion, its left and right values; both borrow from the retained capture.
 pub type Reason<'a> = (&'a [u8], Option<(&'a [u8], &'a [u8])>);
 
-type Shown<'a> = (Identity<'a>, u64, Option<Verdict>, Rerun, Detail<'a>);
+type Shown<'a> = (Identity<'a>, u64, Option<Verdict>, Rerun, Detail<'a>, u8);
 
 pub(super) fn clamp(selected: u16, open: usize) -> u16 {
     let last = u16::try_from(open.saturating_sub(1)).unwrap_or(u16::MAX);
@@ -291,9 +293,9 @@ impl<const RERUN: usize> State<'_, RERUN> {
 
     fn review_action<'s, 'a: 's>(&'s self, selected: u16, armed: bool, key: Key, detail: impl Fn(Identity<'s>) -> Detail<'a>) -> Action<'s> {
         let row = self.listed(selected).map(|index| self.ledger_entry(index));
-        let any_idle = (0..self.stored).any(|index| self.is_listed(index) && self.ledger_entry(index).3 == Rerun::Idle);
+        let any_idle = (0..self.stored).any(|index| self.is_listed(index) && matches!(self.ledger_entry(index).3, Rerun::Idle | Rerun::Failed { .. }));
         match key {
-            Key::Char(b'r') => row.filter(|(_, _, _, rerun)| *rerun == Rerun::Idle).map_or(Action::None, |(id, ..)| Action::RerunOne { id }),
+            Key::Char(b'r') => row.filter(|(_, _, _, rerun)| matches!(rerun, Rerun::Idle | Rerun::Failed { .. })).map_or(Action::None, |(id, ..)| Action::RerunOne { id }),
             Key::Char(b'R') if any_idle => Action::RerunFailed,
             Key::Char(b'e') => row
                 .and_then(|(id, ..)| detail(id).1)
@@ -347,7 +349,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
 
     fn shown<'s, 'a: 's>(&'s self, index: usize, detail: &impl Fn(Identity<'_>) -> Detail<'a>) -> Shown<'s> {
         let (id, millis, verdict, rerun) = self.ledger_entry(index);
-        (id, millis, verdict, rerun, detail(id))
+        (id, millis, verdict, rerun, detail(id), self.attempts(index))
     }
 
     fn page<'a, const FRAME: usize>(
@@ -382,7 +384,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         if let Some(index) = self.listed(selected) {
             detail_view(frame, look, &self.shown(index, detail), (top, self.links()));
         }
-        footer(frame, look, if top.is_some() { &SCROLL_KEYS } else { &KEYS }, armed);
+        footer(frame, look, if top.is_some() { &SCROLL_KEYS } else { &KEYS }, (armed, self.notice()));
     }
 
     fn empty<const FRAME: usize>(&self, frame: &mut Line<FRAME>, look: Look, armed: bool) {
@@ -394,7 +396,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         text.text(b" passed. q then q to leave.");
         paint(frame, look.1, FAINT, text.bytes());
         frame.text(b"\n\n");
-        footer(frame, look, &EMPTY_KEYS, armed);
+        footer(frame, look, &EMPTY_KEYS, (armed, self.notice()));
     }
 
     fn header<const FRAME: usize>(&self, frame: &mut Line<FRAME>, look: Look, title: &[u8]) {
@@ -543,16 +545,16 @@ fn rule<const FRAME: usize>(frame: &mut Line<FRAME>, width: usize) {
 }
 
 fn list_row<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, selected: bool, verdict_width: usize) {
-    let (id, millis, verdict, rerun, (class, ..)) = *row;
+    let (id, millis, verdict, rerun, (class, ..), _) = *row;
     if selected {
         paint(frame, look.1, CYAN_BOLD, "\u{203a}".as_bytes());
     } else {
         frame.text(b" ");
     }
     let prefix = match rerun {
-        Rerun::Idle => {
+        Rerun::Idle | Rerun::Failed { .. } => {
             let mut text = Line::<24>::new();
-            centiseconds(&mut text, millis);
+            centiseconds(&mut text, if let Rerun::Failed { millis: again } = rerun { again } else { millis });
             field(frame, look.1, RED_BOLD, class_word(class), text.bytes(), FAINT);
             frame.text(b"   ");
             CLASS_FIELD + SECONDS_FIELD + 3
@@ -668,8 +670,8 @@ fn middle<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, room: u
 }
 
 fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, (top, links): (Option<u16>, (&[u8], &[u8]))) {
-    let (id, millis, verdict, _, (class, location, reason, rows, output)) = *row;
-    wrapped_name(frame, look, id);
+    let (id, millis, verdict, _, (class, location, reason, rows, output), attempts) = *row;
+    wrapped_name(frame, look, (id, attempts));
     class_line(frame, look, (class, millis, location), links);
     if let Some(verdict) = verdict {
         verdict_line(frame, look, verdict, millis);
@@ -684,9 +686,10 @@ fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Sh
     }
 }
 
-fn wrapped_name<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, id: Identity<'_>) {
+fn wrapped_name<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, (id, attempts): (Identity<'_>, u8)) {
     let total = joined_len(id);
-    if total <= look.0.saturating_sub(2).max(1) {
+    let label = if attempts == 0 { 0 } else { 8 + digits(usize::from(attempts)) };
+    if total + label <= look.0.saturating_sub(2).max(1) {
         frame.text(b" ");
         if look.1 {
             frame.text(b"\x1b[1m");
@@ -695,11 +698,27 @@ fn wrapped_name<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, id: Ide
         if look.1 {
             frame.text(RESET);
         }
+        attempt_label(frame, look, attempts);
         frame.text(b"\n");
         return;
     }
     hard_wrapped(frame, look, id.0, 0);
     hard_wrapped(frame, look, id.1, NAME_INDENT);
+    if attempts != 0 {
+        attempt_label(frame, look, attempts);
+        frame.text(b"\n");
+    }
+}
+
+fn attempt_label<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, attempts: u8) {
+    if attempts == 0 {
+        return;
+    }
+    let mut text = Line::<16>::new();
+    text.text(b"rerun ");
+    text.number(usize::from(attempts));
+    frame.text(b"  ");
+    paint(frame, look.1, FAINT, text.bytes());
 }
 
 fn hard_wrapped<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, text: &[u8], indent: usize) {
@@ -882,12 +901,17 @@ fn output_block<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, output:
     elided(frame, look, total.saturating_sub(start + OUTPUT_LINES), b"below");
 }
 
-fn footer<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, keys: &[(&[u8], &[u8])], armed: bool) {
+fn footer<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, keys: &[(&[u8], &[u8])], (armed, notice): (bool, &[u8])) {
     if armed {
         frame.text(b" ");
         paint(frame, look.1, CYAN_BOLD, b"q again to confirm, any key cancels");
         frame.text(b"\n");
         return;
+    }
+    if !notice.is_empty() {
+        frame.text(b" ");
+        paint(frame, look.1, YELLOW, &notice[..notice.len().min(look.0.saturating_sub(2))]);
+        frame.text(b"\n");
     }
     keys_line(frame, look, keys);
 }

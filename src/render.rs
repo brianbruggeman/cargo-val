@@ -54,6 +54,7 @@ const HEARTBEAT_MS: u64 = HEARTBEAT_SECS as u64 * 1000;
 const INFLIGHT_HEAD: usize = 13;
 const FAILURE_HEAD: usize = 13;
 const LOCK_BYTES: usize = 32;
+const NOTICE_BYTES: usize = 120;
 const TIMED_HEAD: usize = 9;
 const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
@@ -259,6 +260,8 @@ pub struct State<'storage, const RERUN: usize> {
     color: bool,
     lock: [u8; LOCK_BYTES],
     lock_len: usize,
+    notice: [u8; NOTICE_BYTES],
+    notice_len: usize,
     armed_until_ms: u64,
     passed: usize,
     skipped: usize,
@@ -313,6 +316,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             color: false,
             lock: [0; LOCK_BYTES],
             lock_len: 0,
+            notice: [0; NOTICE_BYTES],
+            notice_len: 0,
             armed_until_ms: 0,
             passed: 0,
             skipped: 0,
@@ -470,11 +475,21 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                 }
             }
             Event::Tick { now_ms } => self.beat(now_ms),
-            Event::Warned { .. } => self.warnings += 1,
+            Event::Warned { what, .. } => {
+                self.warnings += 1;
+                self.keep_notice(what);
+            }
             Event::Retried { id, verdict } => _ = self.edit(id, |tail| entry::set_verdict(tail, verdict)),
             Event::Reran { id, rerun } => {
                 let now_ms = self.now_ms;
                 _ = self.edit(id, |tail| entry::set_rerun(tail, rerun, now_ms));
+                if matches!(rerun, Rerun::Failed { .. }) {
+                    _ = self.edit(id, entry::note_attempt);
+                }
+            }
+            Event::Key(key) => {
+                self.notice_len = 0;
+                self.start_reruns(key);
             }
             Event::Finished { wall_ms, .. } => {
                 self.wall_ms = Some(wall_ms);
@@ -498,6 +513,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.listed_tests = 0;
         (self.passed, self.skipped, self.warnings) = (0, 0, 0);
         self.reason_len = 0;
+        self.notice_len = 0;
         self.origin_ms = Some(at_ms);
         self.now_ms = at_ms;
         self.lock_len = 0;
@@ -523,6 +539,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
 
     fn beat(&mut self, now_ms: u64) {
         self.now_ms = now_ms;
+        (0..self.stored).for_each(|index| {
+            let start = self.failure_tail_start(index);
+            entry::tick_running(&mut self.arena[start..start + entry::TAIL], now_ms);
+        });
         self.origin_ms.get_or_insert(now_ms);
         let due = self.inflight_count != 0 && now_ms.saturating_sub(self.last_beat_ms) >= self.heartbeat_ms;
         self.beat_at = due.then_some(now_ms);
@@ -673,23 +693,29 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         true
     }
 
-    /// Keeps the newest failure's exit, source-excerpt rows and captured bytes after its record, as much as the arena has room for.
+    /// Keeps a failure's exit, source-excerpt rows and captured bytes after its record, as much as the arena has room for.
     ///
-    /// Only the last record can grow, so a capture that arrives after a later failure settled is not kept and the
-    /// review shows that row without output. The bytes are what [`State::detail`] classifies and shows verbatim; the
-    /// rows are what review and the pinned frame draw, bounded by `EXCERPT_ROWS` rows of `EXCERPT_ROW_BYTES` bytes.
+    /// The first capture can only grow the last record, so one that arrives after a later failure settled is not kept and
+    /// the review shows that row without output. A rerun's capture replaces the one already kept, whichever record holds
+    /// it: the records after it slide to make room, and the same bound applies. The bytes are what [`State::detail`]
+    /// classifies and shows verbatim; the rows are what review and the pinned frame draw, bounded by `EXCERPT_ROWS` rows
+    /// of `EXCERPT_ROW_BYTES` bytes.
     fn retain(&mut self, id: Identity<'_>, exit: Exit, capture: &[u8], rows: &[u8]) {
         let Some(index) = self.find_failure(id) else {
             return;
         };
         let start = self.failure_tail_start(index) + entry::TAIL;
-        let room = self.arena.len().saturating_sub(start);
-        if start != self.used || room < PAYLOAD_HEAD {
+        let old = entry::payload(self.failure_tail(index));
+        let trailing = self.used.saturating_sub(start + old);
+        let room = self.arena.len().saturating_sub(start + trailing);
+        if (old == 0 && start != self.used) || room < PAYLOAD_HEAD {
             return;
         }
-        let kept_rows = excerpt::keep(rows, &mut self.arena[start + PAYLOAD_HEAD..]);
+        let end = self.arena.len();
+        self.arena.copy_within(start + old..self.used, end - trailing);
+        let kept_rows = excerpt::keep(rows, &mut self.arena[start + PAYLOAD_HEAD..start + room]);
         let body = start + PAYLOAD_HEAD + kept_rows;
-        let kept = capture.len().min(self.arena.len() - body);
+        let kept = capture.len().min(start + room - body);
         let (tag, value) = match exit {
             Exit::Code(code) => (0, code),
             Exit::Signal(signal) => (1, signal),
@@ -699,8 +725,12 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.arena[start + 1..start + EXIT_HEAD].copy_from_slice(&value.to_le_bytes());
         self.arena[start + EXIT_HEAD..start + PAYLOAD_HEAD].copy_from_slice(&u16::try_from(kept_rows).unwrap_or(0).to_le_bytes());
         self.arena[body..body + kept].copy_from_slice(&capture[..kept]);
-        self.used = body + kept;
-        _ = self.edit(id, |tail| entry::set_payload(tail, PAYLOAD_HEAD + kept_rows + kept));
+        self.arena.copy_within(end - trailing..end, body + kept);
+        self.used = body + kept + trailing;
+        let length = PAYLOAD_HEAD + kept_rows + kept;
+        let (before, after) = (u32::try_from(old).unwrap_or(0), u32::try_from(length).unwrap_or(0));
+        self.failures[index + 1..self.stored].iter_mut().for_each(|offset| *offset = *offset + after - before);
+        _ = self.edit(id, |tail| entry::set_payload(tail, length));
     }
 
     /// The source-excerpt rows [`State::retain`] kept for the failure at ledger `index`; empty when there are none.
@@ -773,10 +803,63 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         (open, lines)
     }
 
+    // a launch that failed in review is said once, on the footer, until the next key
+    fn keep_notice(&mut self, what: &[u8]) {
+        if matches!(self.mode, Mode::Review { .. }) {
+            let kept = what.len().min(NOTICE_BYTES);
+            self.notice[..kept].copy_from_slice(&what[..kept]);
+            self.notice_len = kept;
+        }
+    }
+
+    pub(super) fn attempts(&self, index: usize) -> u8 {
+        entry::attempts(self.failure_tail(index))
+    }
+
+    pub(super) fn notice(&self) -> &[u8] {
+        &self.notice[..self.notice_len]
+    }
+
+    // r and R are state before they are processes: the row flips to RERUN here, and the driver launches whichever rows read RERUN with no child behind them
+    fn start_reruns(&mut self, key: Key) {
+        let Mode::Review { selected, .. } = self.mode else {
+            return;
+        };
+        match key {
+            Key::Char(b'r') => self.listed(selected).into_iter().for_each(|index| self.begin_rerun(index)),
+            Key::Char(b'R') => {
+                for index in 0..self.stored {
+                    if self.is_listed(index) {
+                        self.begin_rerun(index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn begin_rerun(&mut self, index: usize) {
+        if !matches!(entry::rerun(self.failure_tail(index)), Rerun::Idle | Rerun::Failed { .. }) {
+            return;
+        }
+        let last = self.resolve(self.failures[index]).1;
+        let now_ms = self.now_ms;
+        let start = self.failure_tail_start(index);
+        let running = Rerun::Running { elapsed_ms: 0, expected_ms: last.filter(|millis| *millis != 0) };
+        entry::set_rerun(&mut self.arena[start..start + entry::TAIL], running, now_ms);
+    }
+
+    /// The failures whose rerun the review started and no child has settled yet, in ledger order.
+    pub fn rerunning(&self) -> impl Iterator<Item = Identity<'_>> {
+        (0..self.stored)
+            .filter(|index| matches!(entry::rerun(self.failure_tail(*index)), Rerun::Running { .. }))
+            .map(|index| self.resolve(self.failures[index]).0)
+    }
+
     pub(super) fn is_listed(&self, index: usize) -> bool {
         match entry::rerun(self.failure_tail(index)) {
             Rerun::Passed { .. } => self.now_ms < entry::cleared_at(self.failure_tail(index)).saturating_add(PASS_SHOWN_MS),
-            Rerun::Idle | Rerun::Running { .. } => true,
+            Rerun::Idle | Rerun::Running { .. } | Rerun::Failed { .. } => true,
         }
     }
 
@@ -942,6 +1025,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
     }
 
+    fn passed_alone(&self, index: usize) -> bool {
+        matches!(entry::rerun(self.failure_tail(index)), Rerun::Passed { .. })
+    }
+
+    fn unresolved(&self) -> impl Iterator<Item = Identity<'_>> {
+        (0..self.stored).filter(|index| !self.passed_alone(*index)).map(|index| self.resolve(self.failures[index]).0)
+    }
+
     fn closing<const FRAME: usize>(
         &self,
         frame: &mut Line<FRAME>,
@@ -950,8 +1041,18 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         manifest: Option<&[u8]>,
         extras: Option<[usize; 2]>,
     ) {
+        let flaky = (0..self.stored).filter(|index| self.passed_alone(*index)).count();
+        let failed = failed.saturating_sub(flaky);
         label(frame, b"SUMMARY");
-        for (key, value) in [(&b"passed="[..], passed), (b" failed=", failed), (b" ignored=", ignored), (b" not_run=", not_run)] {
+        for (key, value) in [(&b"passed="[..], passed), (b" failed=", failed)] {
+            frame.text(key);
+            frame.number(value);
+        }
+        if flaky != 0 {
+            frame.text(b" flaky=");
+            frame.number(flaky);
+        }
+        for (key, value) in [(&b" ignored="[..], ignored), (b" not_run=", not_run)] {
             frame.text(key);
             frame.number(value);
         }
@@ -966,8 +1067,15 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             frame.number(filtered);
         }
         frame.text(b"\n");
-        for (target, name) in self.failures() {
+        for (target, name) in self.unresolved() {
             label(frame, b"FAILED");
+            frame.text(target);
+            frame.text(b" ");
+            frame.text(name);
+            frame.text(b"\n");
+        }
+        for (target, name) in (0..self.stored).filter(|index| self.passed_alone(*index)).map(|index| self.resolve(self.failures[index]).0) {
+            label(frame, b"FLAKY");
             frame.text(target);
             frame.text(b" ");
             frame.text(name);
@@ -995,7 +1103,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             frame.text(b"'");
         }
         frame.text(b" --no-fail-fast -E '");
-        for (position, (target, name)) in self.failures().take(included).enumerate() {
+        for (position, (target, name)) in self.unresolved().take(included).enumerate() {
             if position != 0 {
                 frame.text(FILTER_JOIN);
             }
@@ -1006,7 +1114,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             frame.text(b"))");
         }
         frame.text(b"'");
-        let omitted = self.stored - included + self.unstored;
+        let omitted = self.unresolved().count() - included + self.unstored;
         if omitted != 0 {
             frame.text(b"  (");
             frame.number(omitted);
@@ -1018,7 +1126,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     fn clauses_within(&self, budget: usize) -> usize {
         let mut used = 0;
         let mut included = 0;
-        for (target, name) in self.failures() {
+        for (target, name) in self.unresolved() {
             let join = if included == 0 { 0 } else { FILTER_JOIN.len() };
             let clause = FILTER_OVERHEAD + target.len() + name.len();
             if used + join + clause > budget {
@@ -1717,5 +1825,33 @@ mod tests {
              RUNNING  sched_records  the_host_binary_format  40.904s  killed group=48230\n\
              SUMMARY  passed=381 failed=0 ignored=0 not_run=2  wall=75.000s discovered=383 run=381 filtered=0\n"
         );
+    }
+
+    #[test]
+    fn a_rerun_capture_replaces_the_kept_output_of_a_middle_failure_and_leaves_the_failures_around_it_intact() {
+        let (mut arena, mut ledger) = ([0_u8; 2048], [0_u32; 8]);
+        let mut state = Small::new(&mut arena, &mut ledger);
+        let second: Identity<'static> = (b"cli_run", b"fixture::second");
+        let third: Identity<'static> = (b"cli_run", b"fixture::third");
+        let captures = [(FAILING, &b"first message\n"[..]), (second, &b"second message\n"[..]), (third, &b"third message\n"[..])];
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+        for (id, bytes) in captures {
+            state.apply(&Event::Settled { id, outcome: Outcome::Failed, at_ms: None, solo: false });
+            state.apply(&Event::Captured { id, stdout: (bytes, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
+        }
+        let later = Event::Captured { id: second, stdout: (b"a much longer second message from the rerun\n", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
+
+        state.apply(&later);
+
+        assert_eq!(state.detail(second).4, b"a much longer second message from the rerun\n");
+        assert_eq!(state.detail(FAILING).4, b"first message\n");
+        assert_eq!(state.detail(third).4, b"third message\n");
+        let shorter = Event::Captured { id: second, stdout: (b"short\n", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
+
+        state.apply(&shorter);
+
+        assert_eq!(state.detail(second).4, b"short\n");
+        assert_eq!(state.detail(third).4, b"third message\n");
+        assert_eq!(state.detail(FAILING).4, b"first message\n");
     }
 }

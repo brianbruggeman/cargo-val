@@ -64,7 +64,7 @@ impl OwnedArtifact {
         target_kind_length: 0,
     };
 
-    fn copy_of(artifact: &TestArtifact<'_>) -> Result<Self, ParkFault> {
+    pub(crate) fn copy_of(artifact: &TestArtifact<'_>) -> Result<Self, ParkFault> {
         let mut owned = Self::EMPTY;
         owned.executable_length = store(&mut owned.executable, artifact.executable)?;
         owned.manifest_length = store(&mut owned.manifest_path, artifact.manifest_path)?;

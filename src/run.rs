@@ -719,29 +719,39 @@ pub(crate) async fn observe_cargo(
     .await?;
     if run.open_review()? {
         let review_beat = Beat::new(None);
-        pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&review_beat), |item| review_item(item, &lanes, run)).await?;
+        pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&review_beat), |item| review_item(item, (&lanes, run), (driver, ledger, watches))).await?;
     }
     Ok(())
 }
 
-// only the key lane and the tick act while a finished run waits in review; the tick resolves a held escape, and a signal or a closed terminal ends the wait
-fn review_item(item: Item, lanes: &Lanes, run: &ListingRun<'_>) -> Result<ControlFlow<()>, RunError> {
+// the key lane, the tick and the rerun children's lanes act while a finished run waits in review; a signal, a quit or a closed terminal ends the wait
+// only once every rerun child has been cancelled and settled, so none outlives cargo-val
+fn review_item(
+    item: Item,
+    (lanes, run): (&Lanes, &ListingRun<'_>),
+    (driver, ledger, watches): (&mut CargoDriver<'_>, &mut Ledger<'_>, &mut Watches),
+) -> Result<ControlFlow<()>, RunError> {
+    let mut leaving = false;
     match item {
-        Item::Out(KEY_LANE, range) => keys_chunk(lanes, range, run)?,
-        Item::Tick => {
-            emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })?;
-            flush_keys(run)?;
+        Item::OutEnd(KEY_LANE) | Item::Signal(Err(_)) => leaving = true,
+        Item::Interrupt => {
+            run.interrupted();
+            run.report_interrupt(ledger, watches)?;
+            leaving = true;
         }
-        Item::OutEnd(KEY_LANE) | Item::Interrupt | Item::Signal(Err(_)) => return Ok(ControlFlow::Break(())),
         Item::Signal(Ok(())) => {
             run.drain_signals()?;
-            if run.interrupted() {
-                return Ok(ControlFlow::Break(()));
-            }
+            run.report_interrupt(ledger, watches)?;
+            leaving = run.interrupted();
         }
-        _ => {}
+        other => handle(other, lanes, driver, run, ledger, watches)?,
     }
-    Ok(if run.reviewing() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) })
+    leaving |= run.interrupted() || !run.reviewing();
+    if !leaving {
+        driver.launch_reruns(lanes, run, ledger, watches)?;
+    }
+    let draining = watches.iter().any(Option::is_some);
+    Ok(if leaving && !draining { ControlFlow::Break(()) } else { ControlFlow::Continue(()) })
 }
 
 /// The whole run as one prime root: argument parsing, setup, the awaited cargo child, and the delegated remainder.
