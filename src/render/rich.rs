@@ -247,13 +247,33 @@ impl<const RERUN: usize> State<'_, RERUN> {
     ///
     /// Returns the bytes cut when the frame buffer was too small.
     pub fn project_rich<const FRAME: usize>(&mut self, color: bool, frame: &mut Line<FRAME>) -> Result<(), usize> {
+        let erased = self.drawn_rows;
         self.erase_rich(frame);
+        self.frame_debug(frame, erased);
         frame.text(HIDE_CURSOR);
+        let start = frame.bytes().len();
         self.drawn_rows = self.rich_rows(color, frame);
+        if self.written_rows.is_some() {
+            self.written_rows = Some(u16::try_from(memchr::memchr_iter(b'\n', &frame.bytes()[start..]).count()).unwrap_or(u16::MAX));
+        }
         match frame.lost() {
             0 => Ok(()),
             lost => Err(lost),
         }
+    }
+
+    // written in band, after the erase, so it is scrollback above the next frame and never a write behind the frame's back; erased_rows != written_rows is the redraw landing on the wrong row
+    fn frame_debug<const FRAME: usize>(&self, frame: &mut Line<FRAME>, erased: u16) {
+        let Some(written) = self.written_rows.filter(|_| erased != 0) else {
+            return;
+        };
+        frame.text(b"cargo-val: debug: frame cols=");
+        frame.number(usize::from(self.cols));
+        frame.text(b" erased_rows=");
+        frame.number(usize::from(erased));
+        frame.text(b" written_rows=");
+        frame.number(usize::from(written));
+        frame.text(b"\n");
     }
 
     /// The live-run projection of one event: the frame on a tick, the plain lines for events that outlive the frame, nothing otherwise.

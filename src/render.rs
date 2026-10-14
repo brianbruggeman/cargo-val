@@ -279,6 +279,7 @@ pub struct State<'storage, const RERUN: usize> {
     cols: u16,
     origin_ms: Option<u64>,
     drawn_rows: u16,
+    written_rows: Option<u16>,
     reason: [u8; REASON_BYTES],
     reason_len: usize,
     color: bool,
@@ -341,6 +342,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             cols: 80,
             origin_ms: None,
             drawn_rows: 0,
+            written_rows: None,
             reason: [0; REASON_BYTES],
             reason_len: 0,
             color: false,
@@ -375,6 +377,13 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
     pub const fn with_color(mut self, color: bool) -> Self {
         self.color = color;
+        self
+    }
+
+    /// Makes every live redraw start with one `cargo-val: debug: frame` scrollback line: the width, the rows the erase moves up by, and the rows the erased frame really wrote.
+    #[must_use]
+    pub const fn with_debug(mut self, debug: bool) -> Self {
+        self.written_rows = if debug { Some(0) } else { None };
         self
     }
 
