@@ -19,6 +19,8 @@ use std::path::Path;
 use std::time::Duration;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
@@ -27,7 +29,7 @@ mod plain;
 mod plain_summary;
 
 use cargo_val::render::Outcome;
-use common::fixture_output;
+use fixture::fixture_output;
 #[cfg(unix)]
 use common::{ChildStream, drain, drain_until};
 #[cfg(unix)]

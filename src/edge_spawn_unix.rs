@@ -288,10 +288,8 @@ pub mod pipe_pair {
     #[cfg(test)]
     pub(crate) mod descriptor_probe {
         use super::last_error;
-        use std::time::{Duration, Instant};
 
         const EOF_WAIT_MILLISECONDS: libc::c_int = 5_000;
-        const BROKEN_WAIT: Duration = Duration::from_secs(5);
 
         pub(crate) fn probe_of(descriptor: i32) -> i32 {
             let probe = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
@@ -315,24 +313,17 @@ pub mod pipe_pair {
         }
 
         fn await_write_hangup(probe: i32) {
-            let deadline = Instant::now() + BROKEN_WAIT;
-            loop {
-                let mut waiting = libc::pollfd {
-                    fd: probe,
-                    events: libc::POLLOUT,
-                    revents: 0,
-                };
-                let ready = unsafe { libc::poll(&raw mut waiting, 1, 0) };
-                assert!(ready >= 0, "poll on a write probe must not fail");
-                if waiting.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
-                    return;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "a write probe with no read ends must report error or hangup"
-                );
-                std::thread::yield_now();
-            }
+            let mut waiting = libc::pollfd {
+                fd: probe,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&raw mut waiting, 1, EOF_WAIT_MILLISECONDS) };
+            assert_eq!(ready, 1, "a write probe with no read ends must become ready");
+            assert!(
+                waiting.revents & (libc::POLLERR | libc::POLLHUP) != 0,
+                "a write probe with no read ends must report error or hangup"
+            );
         }
 
         pub(crate) fn assert_broken_pipe(probe: i32) {

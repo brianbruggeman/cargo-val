@@ -5,13 +5,15 @@ use std::fs;
 use std::path::PathBuf;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
 
 use cargo_val::render::Outcome;
-use common::fixture_output;
+use fixture::fixture_output;
 
 
 fn target_directory() -> PathBuf {

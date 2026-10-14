@@ -9,19 +9,20 @@ use std::process::{Child, Stdio};
 use std::time::Duration;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[cfg(unix)]
-#[path = "common/group.rs"]
-mod group;
+use common::group;
 #[cfg(unix)]
-#[path = "common/output.rs"]
-mod output;
+#[path = "common/lead.rs"]
+mod lead;
 #[cfg(unix)]
 #[path = "common/wait.rs"]
 mod wait;
 #[path = "common/binary.rs"]
 mod binary;
 
-use common::fixture_output;
+use fixture::fixture_output;
 #[cfg(unix)]
 use common::{drain, drain_until};
 #[cfg(unix)]
@@ -63,10 +64,10 @@ struct Holder {
 
 #[cfg(unix)]
 impl Holder {
-    fn release(self) {
-        let Self { mut child, release } = self;
+    async fn release(self) {
+        let Self { child, release } = self;
         drop(release);
-        let status = wait::wait_bounded(&mut child, group::sync_deadline()).expect("the holder cargo build finishes once released");
+        let status = wait::wait_within(&child, "SYNC_DEADLINE").await.expect("the holder cargo build finishes once released");
         assert!(status.success(), "the holder build finishes once released");
     }
 
@@ -96,7 +97,7 @@ fn hold_build_lock(scratch: &Path, shared_target: &Path) -> Holder {
     let made = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo is runnable");
     assert!(made.success(), "mkfifo creates {}", fifo.display());
     let mut holder_build = Command::new("cargo");
-    group::lead_group(&mut holder_build);
+    lead::lead_group(&mut holder_build);
     let child = holder_build
         .arg("build")
         .arg("--manifest-path")
@@ -181,7 +182,7 @@ async fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lo
     assert!(directory_blocks.is_empty(), "no child blocked on a target directory lock: {stderr}");
     assert!(!stderr.lines().any(directory_wait), "no wait line named a target directory: {stderr}");
     assert!(shared.join("cargo-val").is_dir(), "the run built under the isolated subtree");
-    holder.release();
+    holder.release().await;
 }
 
 #[cfg(unix)]
@@ -196,7 +197,7 @@ async fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
         let watched_stderr = async {
             let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).lines().any(directory_wait)).await;
             assert!(fault.is_none(), "stderr failed to read before a wait line: {fault:?}");
-            holder.release();
+            holder.release().await;
             let (rest, _) = drain(stderr).await;
             [seen, rest].concat()
         };
@@ -258,10 +259,10 @@ async fn an_empty_target_dir_setting_is_refused_before_any_build() {
 
 
 #[cfg(unix)]
-fn children_matching(parent: u32, pattern: &str) -> usize {
+async fn children_matching(parent: u32, pattern: &str) -> usize {
     let mut pgrep = Command::new("pgrep");
     pgrep.arg("-P").arg(parent.to_string()).arg("-f").arg(pattern);
-    let found = output::output_bounded(&mut pgrep, group::sync_deadline()).expect("pgrep finishes within its deadline");
+    let found = common::output_within(&mut pgrep, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE").await.expect("pgrep finishes within its deadline");
     String::from_utf8_lossy(&found.stdout).lines().count()
 }
 
@@ -283,8 +284,8 @@ async fn the_doc_cargo_starts_only_after_the_test_build_has_output() {
             let watched_stderr = async {
                 let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).lines().any(directory_wait)).await;
                 assert!(fault.is_none(), "stderr failed to read before a wait line: {fault:?}");
-                let counts = (children_matching(leader, "test --no-run"), children_matching(leader, "test --doc"));
-                holder.release();
+                let counts = (children_matching(leader, "test --no-run").await, children_matching(leader, "test --doc").await);
+                holder.release().await;
                 let (rest, _) = drain(stderr).await;
                 ([seen, rest].concat(), counts)
             };
@@ -322,7 +323,7 @@ async fn a_doc_cargo_started_beside_a_held_test_build_blocks_on_the_build_direct
         let watched_stderr = async {
             let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).contains("Blocking waiting for file lock on build directory")).await;
             assert!(fault.is_none(), "stderr failed to read before the lock line: {fault:?}");
-            holder.release();
+            holder.release().await;
             let (rest, _) = drain(stderr).await;
             (String::from_utf8_lossy(&seen).into_owned(), String::from_utf8_lossy(&rest).into_owned())
         };

@@ -24,6 +24,7 @@ fn build_default(name: &str) -> u64 {
         "TASKKILL_DEADLINE" => build_defaults::TASKKILL_DEADLINE,
         "HELP_DEADLINE" => build_defaults::HELP_DEADLINE,
         "BOUNDED_WAIT" => build_defaults::BOUNDED_WAIT,
+        "EXAMPLE_DEADLINE" => build_defaults::EXAMPLE_DEADLINE,
         _ => panic!("{name} is not a test bound declared in build.rs TestDefaults"),
     }
 }

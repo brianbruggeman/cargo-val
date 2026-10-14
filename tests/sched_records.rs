@@ -6,10 +6,12 @@ use cargo_val::sched_binary::{Absent, RECORD_BYTES, decode};
 use cargo_val::sched_file::{Loaded, load};
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 
-use common::fixture_output;
+use fixture::fixture_output;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sched/Cargo.toml");
 

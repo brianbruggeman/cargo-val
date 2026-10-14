@@ -163,6 +163,8 @@ struct TestDefaults {
     help_deadline: u64,
     #[setting(default = 3)]
     bounded_wait: u64,
+    #[setting(default = 3600)]
+    example_deadline: u64,
 }
 
 impl Validate for TestDefaults {
@@ -177,6 +179,7 @@ impl Validate for TestDefaults {
             ("taskkill_deadline", self.taskkill_deadline),
             ("help_deadline", self.help_deadline),
             ("bounded_wait", self.bounded_wait),
+            ("example_deadline", self.example_deadline),
         ];
         let errors: Vec<_> = bounds.iter().filter(|(_, secs)| *secs == 0).map(|(name, _)| ValidationMessage::new(*name, "must be greater than zero")).collect();
         if errors.is_empty() {

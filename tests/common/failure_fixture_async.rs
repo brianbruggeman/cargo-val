@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::common::fixture_output;
+use crate::fixture::fixture_output;
 use crate::failure_fixture::{Captured, build_command, captured_of, executable_of, run_command};
 
 pub async fn build(fixture: &str) -> PathBuf {

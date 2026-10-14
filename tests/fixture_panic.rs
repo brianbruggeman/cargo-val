@@ -13,6 +13,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use futures::FutureExt;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -20,7 +22,7 @@ mod fifo;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{fixture_deadline, fixture_output};
+use fixture::{fixture_deadline, fixture_output};
 use supervise::supervised;
 
 const CALLER_PANIC: &str = "the caller panics while the blocked test is running";
