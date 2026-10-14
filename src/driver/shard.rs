@@ -984,6 +984,7 @@ mod pause_tests {
             jobs: 1,
             max_fail: None,
             test_limit_ms: None,
+            heartbeat_ms: 10_000,
             no_tests: NoTestsPolicy::Pass,
             process: ProcessMode::Shard,
             output: crate::config::OutputMode::Rich,
