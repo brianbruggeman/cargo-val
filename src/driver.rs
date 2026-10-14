@@ -1,7 +1,7 @@
 //! One poll-driven owner of Cargo discovery, libtest listings, and child outcomes.
 
 use core::cell::{Cell, RefCell};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::ops::Range;
 use core::task::{Context, Poll, Waker};
 
@@ -36,7 +36,7 @@ use crate::render::review::{Action, Key, Rerun as Standing};
 use crate::render::{Event, Mode, Outcome, State, Stream, located};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
-    CARGO_LANE, DOC_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
+    CARGO_LANE, DOC_LANE, EDITOR_LANE, JOB_BASE, KEY_LANE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
     observe_cargo, observe_doc,
 };
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
@@ -48,6 +48,8 @@ use std::format;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::string::String;
+use std::io;
+use std::process::ExitStatus;
 use std::sync::OnceLock;
 use std::time::Instant;
 use std::vec::Vec;
@@ -538,6 +540,7 @@ struct Settings {
     ignore: IgnoreMode,
     filterset: Option<Filterset>,
     link_template: Option<String>,
+    editor: Vec<u8>,
     jobs: usize,
     max_fail: Option<usize>,
     no_tests: NoTestsPolicy,
@@ -671,6 +674,7 @@ fn runtime_settings(
         ignore,
         filterset,
         link_template: links_enabled(output, color, true).then(|| String::from_utf8_lossy(editor_template(editor_url.as_deref(), &source)).into_owned()),
+        editor: crate::editor_launch::editor_command(source.get("VISUAL"), source.get("EDITOR")),
         jobs,
         max_fail,
         no_tests,
@@ -1024,6 +1028,14 @@ fn summarize_status_lines(bytes: &[u8], render: &Render<'_>) -> Result<(), RunEr
     Ok(())
 }
 
+/// The events whose rich projection is a frame redraw, recomputed from the state by the next one; while the editor owns the terminal they are not projected, and every other event is scrollback that waits in the status queue.
+const fn redraws_frame(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Tick { .. } | Event::Key(_) | Event::Notice { .. } | Event::Resize { .. } | Event::Begin { .. } | Event::Previous { .. } | Event::Waiting { .. } | Event::Reran { .. } | Event::Retried { .. }
+    )
+}
+
 /// Applies `event` to the render state and writes its projection to standard output; a frame that was too small says so on stderr.
 pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
     let (output, state, frame) = render;
@@ -1036,6 +1048,9 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
         OutputMode::Rich => {
             if matches!(event, Event::Begin { .. }) {
                 CURSOR_HIDDEN.store(true, Ordering::SeqCst);
+            }
+            if editor_reserved() && redraws_frame(event) {
+                return Ok(());
             }
             let projected = state.project_live(event, frame);
             MOUSE_REPORTING.store(state.mouse_on(), Ordering::SeqCst);
@@ -1086,12 +1101,46 @@ static MOUSE_REPORTING: AtomicBool = AtomicBool::new(false);
 /// Set once the terminal is in key-at-a-time mode and a key lane reads it; [`restore_cursor`] puts the mode back.
 static KEYS_RAW: AtomicBool = AtomicBool::new(false);
 
+/// Set from the moment the editor is asked for until it has exited: the editor owns the terminal, so frame redraws are not projected meanwhile and scrollback waits in the status queue.
+static EDITOR_RESERVED: AtomicBool = AtomicBool::new(false);
+
+/// The running editor's process group, or zero; [`restore_cursor`] ends it and takes the terminal back on any exit path.
+static EDITOR_GROUP: AtomicU32 = AtomicU32::new(0);
+
+const EXIT_FAULT_CODE: i32 = 5;
+
+fn editor_reserved() -> bool {
+    EDITOR_RESERVED.load(Ordering::SeqCst)
+}
+
+pub(crate) fn editor_running() -> bool {
+    EDITOR_GROUP.load(Ordering::SeqCst) != 0
+}
+
+// each tick: an exit source cannot see a stop, so a stopped editor is continued here
+pub(crate) fn keep_editor_running() {
+    let group = EDITOR_GROUP.load(Ordering::SeqCst);
+    if group != 0 {
+        crate::editor_launch::keep_running(group);
+    }
+}
+
+// the terminal goes back first: leaving raw mode from a background group would stop this process on SIGTTOU
+fn abandon_editor() {
+    EDITOR_RESERVED.store(false, Ordering::SeqCst);
+    let group = EDITOR_GROUP.swap(0, Ordering::SeqCst);
+    if group != 0 {
+        crate::editor_launch::abandon(group);
+    }
+}
+
 /// Whether the run put the terminal in key-at-a-time mode, so the key lane should read it.
 pub(crate) fn keys_raw() -> bool {
     KEYS_RAW.load(Ordering::SeqCst)
 }
 
 const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
 
 /// Shows the cursor if the live frame hid it, writing directly: the fallback for the panic hook and for exits that never reached the queued close.
 /// The normal close queues its show-cursor through `close_cursor` so it lands behind the erase and the closing block, never ahead of them.
@@ -1099,6 +1148,7 @@ pub fn restore_cursor() {
     if MOUSE_REPORTING.swap(false, Ordering::SeqCst) {
         let _ = crate::edge_output::write(1, crate::render::review::MOUSE_OFF);
     }
+    abandon_editor();
     if KEYS_RAW.swap(false, Ordering::SeqCst) {
         crate::edge_output::leave_raw_mode(0);
     }
@@ -1513,6 +1563,8 @@ pub(crate) struct ListingRun<'run> {
     interrupt_reported: Cell<usize>,
     interrupt_not_run: Cell<usize>,
     store: Rc<edge_store::Store>,
+    editing: RefCell<Option<Vec<Vec<u8>>>>,
+    editor_program: RefCell<Vec<u8>>,
     root: Signal,
     trip: Signal,
 }
@@ -1581,6 +1633,9 @@ impl ListingRun<'_> {
 
     pub(crate) fn drain_signals(&self) -> Result<(), RunError> {
         self.signals.drain().map_err(|_| RunError::Reactor)?;
+        if self.signals.received().is_some() {
+            abandon_editor();
+        }
         if self.signals.take_resized() {
             self.refresh_width()?;
         }
@@ -1645,6 +1700,10 @@ impl ListingRun<'_> {
         let action = state.action(key, |id| state.detail(id));
         let interrupting = matches!(action, Action::Interrupt);
         let leaving = interrupting || matches!(action, Action::Quit);
+        let editing = match action {
+            Action::OpenEditor { file, line, col } => Some(self.editor_argv(file, line, col)),
+            _ => None,
+        };
         drop(state);
         if interrupting {
             self.signals.raise_interrupt();
@@ -1653,8 +1712,81 @@ impl ListingRun<'_> {
         if leaving {
             self.root.fire();
         }
+        editing.map_or(Ok(()), |argv| self.begin_edit(argv))
+    }
+
+    // the editor is resolved here, at the driver edge, from the run's settings: render only ever sees the action
+    fn editor_argv(&self, file: &[u8], line: u32, col: u32) -> Vec<Vec<u8>> {
+        let directory = absolute_directory(&self.settings.source_root);
+        let located = if file.first() == Some(&b'/') { file.to_vec() } else { [directory.as_bytes(), b"/", file].concat() };
+        crate::editor_launch::editor_argv(&self.settings.editor, &located, line, col)
+    }
+
+    // the terminal cannot be handed over until the queued frame, erase and show-cursor reach it, so the launch waits for the pump to drain: `edit_pending` ends the pump and `launch_editor` spawns the editor into its lane
+    fn begin_edit(&self, argv: Vec<Vec<u8>>) -> Result<(), RunError> {
+        if editor_reserved() {
+            return Ok(());
+        }
+        erase_live(self.render())?;
+        write_fd(1, SHOW_CURSOR)?;
+        MOUSE_REPORTING.store(false, Ordering::SeqCst);
+        if self.render().1.borrow_mut().pause_mouse() {
+            write_fd(1, crate::render::review::MOUSE_OFF)?;
+        }
+        EDITOR_RESERVED.store(true, Ordering::SeqCst);
+        *self.editing.borrow_mut() = Some(argv);
         Ok(())
     }
+
+    pub(crate) fn edit_pending(&self) -> bool {
+        self.editing.borrow().is_some()
+    }
+
+    // the editor is a lane of the pump: the key lane is gated off so the editor reads the terminal, and its exit arrives as an item like any child's
+    pub(crate) fn launch_editor(&self, lanes: &Lanes) -> Result<bool, RunError> {
+        let Some(argv) = self.editing.borrow_mut().take() else {
+            return Ok(false);
+        };
+        let program = argv.first().cloned().unwrap_or_default();
+        if self.signals.received().is_some() {
+            EDITOR_RESERVED.store(false, Ordering::SeqCst);
+            return Ok(false);
+        }
+        let directory = absolute_directory(&self.settings.source_root);
+        crate::edge_output::leave_raw_mode(0);
+        *self.editor_program.borrow_mut() = program;
+        match crate::editor_launch::spawn(&argv, self.environment, directory.as_bytes()) {
+            Ok((group, exit)) => {
+                EDITOR_GROUP.store(group, Ordering::SeqCst);
+                *lanes[EDITOR_LANE].2.borrow_mut() = Some(exit);
+                lanes[KEY_LANE].3.set(false);
+                Ok(true)
+            }
+            Err(code) => self.editor_ended(lanes, Err(code)).map(|()| true),
+        }
+    }
+
+    pub(crate) fn editor_exited(&self, lanes: &Lanes, status: io::Result<ExitStatus>) -> Result<(), RunError> {
+        // the group is cleared before anything else: the reaped pid may be reused, and a tick that still saw it would continue a stranger's group
+        if EDITOR_GROUP.swap(0, Ordering::SeqCst) == 0 {
+            return Ok(());
+        }
+        crate::editor_launch::reclaim_terminal();
+        let outcome = status.map(crate::editor_launch::exit_code).map_err(|error| error.raw_os_error().unwrap_or(EXIT_FAULT_CODE));
+        self.editor_ended(lanes, outcome)
+    }
+
+    // an editor that fails, exits non-zero or cannot start is a footer message on the same review, never an error exit
+    fn editor_ended(&self, lanes: &Lanes, outcome: Result<i32, i32>) -> Result<(), RunError> {
+        EDITOR_RESERVED.store(false, Ordering::SeqCst);
+        lanes[KEY_LANE].3.set(true);
+        let raw = crate::edge_output::enter_raw_mode(0);
+        write_fd(1, HIDE_CURSOR)?;
+        let mut notice = Line::<96>::new();
+        crate::editor_launch::write_notice(&mut notice, outcome, raw, &self.editor_program.borrow());
+        emit(self.render(), &Event::Notice { what: notice.bytes() })
+    }
+
 
     // a finished rich run on a terminal with failures keeps the screen: review opens (a half-pressed quit is cancelled first) and the caller pumps keys until it is left
     pub(crate) fn open_review(&self) -> Result<bool, RunError> {
@@ -1683,6 +1815,7 @@ impl ListingRun<'_> {
         let received = self.signals.received().is_some();
         if received {
             self.root.fire();
+            abandon_editor();
         }
         received
     }
@@ -3078,8 +3211,8 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         sched: RefCell::new(SchedTable::new(sched_bytes)),
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
-            interrupt_reported: Cell::new(0),
-            interrupt_not_run: Cell::new(0),
+            interrupt_reported: Cell::new(0), interrupt_not_run: Cell::new(0),
+            editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()),
             trip: root.child(),
             root,
     });
@@ -4327,6 +4460,7 @@ mod tests {
 #[cfg(all(test, unix))]
 mod listing_allocation_tests {
     use core::cell::{Cell, RefCell};
+    use std::vec::Vec;
 
     use proxima_core::signal::Signal;
 
@@ -4365,6 +4499,7 @@ mod listing_allocation_tests {
             ignore: IgnoreMode::Include,
             filterset: None,
             link_template: None,
+            editor: std::vec::Vec::new(),
             jobs: 2,
             max_fail: None,
             no_tests: NoTestsPolicy::Pass,
@@ -4410,6 +4545,8 @@ mod listing_allocation_tests {
             sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
+            editing: RefCell::new(None),
+            editor_program: RefCell::new(Vec::new()),
             trip: root.child(),
             root,
         };
@@ -4491,11 +4628,12 @@ mod close_sequence_tests {
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
 
-    use super::{FRAME_BYTES, MOUSE_REPORTING, Render, RenderState, close_cursor, emit, erase_frame, restore_cursor};
+    use super::{EDITOR_RESERVED, FRAME_BYTES, MOUSE_REPORTING, Render, RenderState, close_cursor, emit, erase_frame, erase_live, restore_cursor};
     use crate::config::OutputMode;
     use crate::edge_exit::fixture::in_single_threaded_process;
+    use crate::failure_class::Exit;
     use crate::line::Line;
-    use crate::render::Event;
+    use crate::render::{Event, UNREAD};
     use crate::status_queue::{Capture, Sinks};
 
     const STDOUT: i32 = 1;
@@ -4572,6 +4710,56 @@ mod close_sequence_tests {
             let after_erase = &delivered[erase..];
             assert!(position(after_erase, HIDE_CURSOR).is_none(), "no frame is drawn once the erase has begun:\n{text:?}");
             assert!(position(after_erase, b"SUMMARY  passed=1 failed=1 ignored=1").is_some_and(|summary| summary < after_erase.len() - SHOW_CURSOR.len()), "the closing block sits between the erase and the cursor:\n{text:?}");
+        });
+    }
+
+    const FAILURE_BLOCK: &[u8] = b"------ stdout: cli_run fixture::fails_when_requested ------";
+
+    // the editor opens over a drawn frame, a tick and a failure settle while it owns the terminal, then it exits and the frame is redrawn
+    fn failure_settles_while_the_editor_is_open() -> Vec<u8> {
+        let (reader, writer) = pipe_pair();
+        let saved_stdout = unsafe { libc::fcntl(STDOUT, libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(saved_stdout >= 0, "stdout is duplicated for restore");
+        assert!(unsafe { libc::dup2(writer.as_raw_fd(), STDOUT) } >= 0, "stdout points at the pipe");
+        let outcome = run_on_this_thread(CoreId(0), async move {
+            let _capture = Capture::enter();
+            let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 4]);
+            let mut frame = Line::<FRAME_BYTES>::new();
+            let live: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+            emit(&live, &begin()).expect("begin draws the first frame");
+            erase_live(&live).expect("the editor launch erases the frame");
+            EDITOR_RESERVED.store(true, Ordering::SeqCst);
+            emit(&live, &Event::Tick { now_ms: 250 }).expect("a tick under the editor is accepted");
+            let captured = Event::Captured { id: (b"cli_run", b"fixture::fails_when_requested"), stdout: (b"requested fixture failure", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
+            emit(&live, &captured).expect("the failure block queues under the editor");
+            EDITOR_RESERVED.store(false, Ordering::SeqCst);
+            emit(&live, &Event::Tick { now_ms: 500 }).expect("the tick after the editor redraws");
+            let mut sinks = Sinks::new();
+            poll_fn(|context| sinks.poll_drain(context)).await.expect("the queue drains");
+        });
+        unsafe {
+            libc::dup2(saved_stdout, STDOUT);
+            libc::close(saved_stdout);
+        }
+        outcome.expect("root completes");
+        drop(writer);
+        let mut delivered = Vec::new();
+        std::fs::File::from(reader).read_to_end(&mut delivered).expect("the pipe reads to its end");
+        delivered
+    }
+
+    #[proxima::test]
+    async fn a_failure_that_settles_while_the_editor_is_open_prints_its_block_once_before_the_redrawn_frame() {
+        in_single_threaded_process(|| {
+            let delivered = failure_settles_while_the_editor_is_open();
+            let text = std::string::String::from_utf8_lossy(&delivered);
+
+            let frames = delivered.windows(HIDE_CURSOR.len()).filter(|window| *window == HIDE_CURSOR).count();
+            assert_eq!(frames, 2, "the tick under the editor drew nothing, the first frame and the redraw did:\n{text:?}");
+            assert_eq!(delivered.windows(FAILURE_BLOCK.len()).filter(|window| *window == FAILURE_BLOCK).count(), 1, "the failure block arrives once:\n{text:?}");
+            let block = position(&delivered, FAILURE_BLOCK).expect("the failure block arrives");
+            let redraw = rposition(&delivered, HIDE_CURSOR).expect("the frame is redrawn");
+            assert!(block < redraw, "the block precedes the redrawn frame:\n{text:?}");
         });
     }
 

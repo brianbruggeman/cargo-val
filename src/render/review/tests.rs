@@ -466,7 +466,7 @@ fn keys_become_actions_the_driver_executes_later() {
     keys(&mut state, &[Key::Char(b'j')]);
     assert_eq!(state.action(Key::Char(b'r'), detail), Action::RerunOne { id: SHARD });
     assert_eq!(state.action(Key::Char(b'R'), detail), Action::RerunFailed);
-    assert_eq!(state.action(Key::Char(b'e'), detail), Action::OpenEditor { file: b"tests/shard_process.rs", line: 575 });
+    assert_eq!(state.action(Key::Char(b'e'), detail), Action::OpenEditor { file: b"tests/shard_process.rs", line: 575, col: 31 });
     assert_eq!(state.action(Key::Char(b'c'), detail), Action::Interrupt);
 
     state.apply(&Event::Reran { id: SCHED, rerun: Rerun::Running { elapsed_ms: 1, expected_ms: None } });
@@ -1131,7 +1131,7 @@ fn a_click_on_a_footer_hint_performs_the_action_of_its_key_at_80_and_40_columns(
         let edit = state.action(press(cell(&lines, "e edit", true)), detail);
         assert_eq!(rerun, Action::RerunOne { id: SCHED }, "{width}: r rerun");
         assert_eq!(all, Action::RerunFailed, "{width}: R rerun all");
-        assert_eq!(edit, Action::OpenEditor { file: b"tests/sched_records.rs", line: 55 }, "{width}: e opens");
+        assert_eq!(edit, Action::OpenEditor { file: b"tests/sched_records.rs", line: 55, col: 1 }, "{width}: e opens");
 
         let mut timeline = state;
         timeline.apply(&Event::Key(press(cell(&lines, "s timeline", true))));
@@ -1344,4 +1344,33 @@ fn a_cursor_reply_is_taken_only_while_a_position_query_is_outstanding() {
 
     state.apply(&Event::Key(stray));
     assert_eq!(state.frame_line(ORIGIN_ROW), Some(0), "a second reply with no query outstanding is dropped");
+}
+
+#[test]
+fn a_notice_is_one_footer_row_above_the_keys_until_the_next_key() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = scenario("list", &mut arena, &mut ledger);
+    let before = frame_of(&state, 80, false);
+
+    state.apply(&Event::Notice { what: b"editor exited with status 3: vim" });
+    let shown = frame_of(&state, 80, false);
+    keys(&mut state, &[Key::Char(b'j')]);
+    let after = frame_of(&state, 80, false);
+
+    assert_eq!(shown.lines().count(), before.lines().count() + 1, "the notice is exactly one row");
+    assert_eq!(shown.lines().filter(|line| line.contains("editor exited with status 3: vim")).count(), 1);
+    let notice_row = shown.lines().position(|line| line.contains("editor exited")).expect("the notice row");
+    assert!(shown.lines().nth(notice_row + 1).is_some_and(|line| line.contains("move")), "the keys row follows the notice");
+    assert!(!after.contains("editor exited"), "the next key clears the notice");
+}
+
+#[test]
+fn a_notice_wider_than_the_terminal_is_cut_to_one_row() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = scenario("list", &mut arena, &mut ledger);
+    let before = frame_of(&state, 40, false);
+
+    state.apply(&Event::Notice { what: b"editor failed to start: /very/long/path/to/some/editor (os error 13)" });
+
+    assert_eq!(frame_of(&state, 40, false).lines().count(), before.lines().count() + 1);
 }

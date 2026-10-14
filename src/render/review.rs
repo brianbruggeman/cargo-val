@@ -102,7 +102,7 @@ pub enum Action<'a> {
     None,
     RerunOne { id: Identity<'a> },
     RerunFailed,
-    OpenEditor { file: &'a [u8], line: u32 },
+    OpenEditor { file: &'a [u8], line: u32, col: u32 },
     /// Write the closing block to scrollback; cancel the run first if it is still live.
     Quit,
     Interrupt,
@@ -406,7 +406,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             Key::Char(b'R') if any_idle => Action::RerunFailed,
             Key::Char(b'e') => row
                 .and_then(|(id, ..)| detail(id).1)
-                .map_or(Action::None, |location| Action::OpenEditor { file: location.file, line: location.line }),
+                .map_or(Action::None, |location| Action::OpenEditor { file: location.file, line: location.line, col: location.col }),
             Key::Char(b'q') if armed => Action::Quit,
             Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
             Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down | Key::Pointer { .. } | Key::Cursor { .. } => Action::None,

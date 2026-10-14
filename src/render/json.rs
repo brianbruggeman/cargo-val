@@ -32,7 +32,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 self.rerun_record(frame, manifest);
                 exit(frame, code);
             }
-            Event::Begin { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Tick { .. } | Event::Warned { .. } | Event::BlockOpened { .. } | Event::BlockClosed | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } => {}
+            Event::Begin { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Tick { .. } | Event::Warned { .. } | Event::BlockOpened { .. } | Event::BlockClosed | Event::Key(_) | Event::Notice { .. } | Event::Retried { .. } | Event::Reran { .. } => {}
         }
     }
 

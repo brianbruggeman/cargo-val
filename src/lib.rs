@@ -30,6 +30,8 @@ pub mod discover_cargo;
 pub mod failure_class;
 pub mod filter_glob;
 pub mod filterset;
+#[cfg(feature = "edge-os")]
+pub mod editor_launch;
 pub mod hyperlink;
 pub mod ignored_set;
 pub mod isolated_target;
