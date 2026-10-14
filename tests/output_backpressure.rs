@@ -3,6 +3,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -18,7 +20,11 @@ const STALL_BOUND: Duration = Duration::from_secs(120);
 const SIGINT_STATUS: i32 = 130;
 
 fn open(stream: &str, test: &str) -> String {
-    format!("------ {stream}: views_pair fixture::{test} ------\n")
+    open_in("views_pair", stream, test)
+}
+
+fn open_in(binary: &str, stream: &str, test: &str) -> String {
+    format!("------ {stream}: {binary} fixture::{test} ------\n")
 }
 
 fn close(stream: &str) -> String {
@@ -43,10 +49,14 @@ fn directory(label: &str) -> PathBuf {
 }
 
 fn spawn(label: &str, process: &str, environment: &[(&str, String)]) -> Child {
+    spawn_in("views_pair", (label, process, if process == "shard" { "1" } else { "4" }), environment, Stdio::null())
+}
+
+fn spawn_in(fixture: &str, (label, process, jobs): (&str, &str, &str), environment: &[(&str, String)], stderr: Stdio) -> Child {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
-        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/views_pair/Cargo.toml"))
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{fixture}/Cargo.toml")))
         .args(["--tests", "--no-fail-fast"])
         .env_remove("CI")
         .env_remove("GITHUB_ACTIONS")
@@ -57,10 +67,10 @@ fn spawn(label: &str, process: &str, environment: &[(&str, String)]) -> Child {
         .env_remove("RUST_TEST_THREADS")
         .env("CARGO_VAL_OUTPUT", "plain")
         .env("CARGO_VAL_PROCESS", process)
-        .env("CARGO_VAL_JOBS", if process == "shard" { "1" } else { "4" })
+        .env("CARGO_VAL_JOBS", jobs)
         .env("CARGO_TARGET_DIR", directory(&format!("{label}-target")).join("target"))
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     command.envs(environment.iter().cloned());
     command.spawn().expect("cargo-val starts")
 }
@@ -95,8 +105,12 @@ fn finish(mut child: Child, mut head: Vec<u8>) -> (Vec<u8>, Option<i32>) {
 }
 
 fn stream_digests(output: &[u8], test: &str, seed: usize, total: usize) -> (u64, u64) {
+    digests_in("views_pair", output, test, (seed, total))
+}
+
+fn digests_in(binary: &str, output: &[u8], test: &str, (seed, total): (usize, usize)) -> (u64, u64) {
     let expected = pattern(seed, total);
-    let (stdout, stderr) = (fenced(output, &open("stdout", test), &close("stdout")), fenced(output, &open("stderr", test), &close("stderr")));
+    let (stdout, stderr) = (fenced(output, &open_in(binary, "stdout", test), &close("stdout")), fenced(output, &open_in(binary, "stderr", test), &close("stderr")));
     let begin = |block: &[u8]| memmem::find(block, &expected[..4096]).unwrap_or_else(|| panic!("the {test} pattern starts inside its fence"));
     let (from_stdout, from_stderr) = (begin(stdout), begin(stderr));
     (digest(&stdout[from_stdout..from_stdout + total]), digest(&stderr[from_stderr..from_stderr + total]))
@@ -183,4 +197,109 @@ fn an_interrupt_during_a_block_prints_it_whole_then_the_interrupted_block_then_t
     assert!(memmem::rfind(&output, close("stderr").as_bytes()).is_some_and(|closed| closed < interrupted), "every block closes before INTERRUPTED");
     assert!(interrupted < summary, "INTERRUPTED precedes SUMMARY");
     assert_eq!(code, Some(SIGINT_STATUS));
+}
+
+const SETTLERS: usize = 2000;
+const BULK_FAILURES: usize = 40;
+const BULK_BYTES: usize = 64 * 1024;
+const PAUSE_NOTICE: &str = "tests pause until it catches up\n";
+
+fn settled_in_order(output: &[u8]) -> Vec<usize> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter(|line| line.starts_with("PASS"))
+        .filter_map(|line| line.split_once("fixture::settle_"))
+        .filter_map(|(_, rest)| rest.get(..4)?.parse().ok())
+        .collect()
+}
+
+fn target_of(label: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("output-backpressure-{label}-target-{}", std::process::id())).join("target")
+}
+
+fn store_bytes(label: &str) -> Vec<u8> {
+    let runs = target_of(label).join("cargo-val/run");
+    let run = std::fs::read_dir(&runs).expect("the run store directory exists").next().expect("one run directory").expect("the run directory reads");
+    std::fs::read(run.path().join("data")).expect("the run store data file reads")
+}
+
+fn release_and_count(go: &Path, done: &Path, count: usize) -> (File, mpsc::Receiver<bool>) {
+    let reader = File::options().read(true).custom_flags(libc::O_NONBLOCK).open(done).expect("the done fifo opens for reading");
+    let keeper = File::options().write(true).open(done).expect("the done fifo is held open so the reader sees no end of file between settlers");
+    assert_eq!(unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, 0) }, 0, "the done reader blocks again");
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut finished = vec![0_u8; count];
+        let _ = sender.send(reader.read_exact(&mut finished).is_ok());
+        drop(keeper);
+    });
+    let mut release = File::options().write(true).open(go).expect("a settler is waiting on the go fifo");
+    release.write_all(&vec![b'g'; count]).expect("every settler is released");
+    (release, receiver)
+}
+
+#[test]
+fn two_thousand_settlers_finish_behind_an_unread_eight_mebibyte_block_and_print_in_order_after_it_from_the_store() {
+    let scratch = directory("flood");
+    let (go, done) = (fifo(&scratch, "go"), fifo(&scratch, "done"));
+    let environment = [("VIEWS_FLOOD_BIG_BYTES", (8 * MEBIBYTE).to_string()), ("VIEWS_FLOOD_GO", go.display().to_string()), ("VIEWS_FLOOD_DONE", done.display().to_string())];
+    let mut child = spawn_in("views_flood", ("flood", "test", "1"), &environment, Stdio::null());
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let head = read_until(&mut stdout, &open_in("views_flood", "stdout", "fails_big"));
+
+    let (_release, receiver) = release_and_count(&go, &done, SETTLERS);
+    let settlers_finished = receiver.recv_timeout(STALL_BOUND);
+    if settlers_finished != Ok(true) {
+        let _ = child.kill();
+    }
+    assert_eq!(settlers_finished, Ok(true), "all {SETTLERS} settlers ran and settled while the 8 MiB block was still unread on the screen");
+
+    child.stdout = Some(stdout);
+    let (output, code) = finish(child, head);
+    let expected = digest(&pattern(3, 8 * MEBIBYTE));
+    assert_eq!(code, Some(1));
+    assert_eq!(digests_in("views_flood", &output, "fails_big", (3, 8 * MEBIBYTE)), (expected, expected), "the block prints whole");
+    assert_eq!(settled_in_order(&output), (0..SETTLERS).collect::<Vec<_>>(), "every settle line printed once, in the order the tests settled");
+    assert!(at(&output, "fixture::settle_0000") > at(&output, &close("stderr")), "the settle lines print after the block they settled behind");
+    let kept = store_bytes("flood");
+    let in_store = memmem::find_iter(&kept, b"PASS     views_flood  fixture::settle_").count();
+    println!("settle lines found in the run store scrollback: {in_store} of {SETTLERS}");
+    assert!(in_store > 0, "the lines the ring had no room for were sealed into the run store");
+    assert!(memmem::find(&kept, b"fixture::settle_1999").is_some(), "the last settle line is in the store");
+}
+
+#[test]
+fn forty_failing_tests_with_sixty_four_kibibytes_each_all_print_in_full() {
+    let child = spawn_in("views_flood", ("bulk", "test", "4"), &[("VIEWS_FLOOD_BULK_BYTES", BULK_BYTES.to_string())], Stdio::null());
+
+    let (output, code) = finish(child, Vec::new());
+
+    assert_eq!(code, Some(1));
+    for index in 0..BULK_FAILURES {
+        let expected = digest(&pattern(index, BULK_BYTES));
+        assert_eq!(digests_in("views_flood", &output, &format!("bulk_{index:02}"), (index, BULK_BYTES)), (expected, expected), "block {index} is whole, not a bounded window");
+    }
+    assert_eq!((count(&output, "------ stdout: views_flood"), count(&output, &close("stdout"))), (BULK_FAILURES, BULK_FAILURES), "stdout fences balance");
+    assert_eq!((count(&output, "------ stderr: views_flood"), count(&output, &close("stderr"))), (BULK_FAILURES, BULK_FAILURES), "stderr fences balance");
+}
+
+#[test]
+fn a_read_only_target_pauses_with_one_notice_and_loses_no_line_or_order() {
+    let target = directory("memory").join("target");
+    std::fs::create_dir_all(target.join("cargo-val")).expect("the store directory is creatable");
+    std::fs::set_permissions(target.join("cargo-val"), std::fs::Permissions::from_mode(0o555)).expect("the store directory turns read-only");
+    let environment = [("VIEWS_FLOOD_BIG_BYTES", (2 * MEBIBYTE).to_string()), ("CARGO_TARGET_DIR", target.display().to_string())];
+    let mut child = spawn_in("views_flood", ("memory", "test", "1"), &environment, Stdio::piped());
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let mut seen = read_until(&mut stderr, PAUSE_NOTICE);
+
+    let (output, code) = finish(child, Vec::new());
+    stderr.read_to_end(&mut seen).expect("the rest of stderr is readable");
+    std::fs::set_permissions(target.join("cargo-val"), std::fs::Permissions::from_mode(0o755)).expect("the store directory is writable again");
+
+    assert_eq!(code, Some(1));
+    assert_eq!(count(&seen, PAUSE_NOTICE), 1, "the pause says so once");
+    assert_eq!((count(&output, "------ stdout: views_flood"), count(&output, &close("stdout"))), (1, 1), "the failure block opens and closes, from the capture window the memory-only run kept");
+    assert_eq!(settled_in_order(&output), (0..SETTLERS).collect::<Vec<_>>(), "nothing was lost and the order held while the run paused");
 }
