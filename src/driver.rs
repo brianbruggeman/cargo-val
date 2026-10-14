@@ -14,7 +14,7 @@ use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
     FILTERSET, FailFastError, FailFastSources, HarnessFault, HarnessRequest, IgnoreMode, NO_TESTS, NoTestsPolicy,
-    EXIT_WITH_PARENT, ExitWithParent, OUTPUT, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
+    EXIT_WITH_PARENT, ExitWithParent, OUTPUT, exit_with_parent_unsupported, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
     ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
@@ -2652,8 +2652,11 @@ fn resolve_exit_with_parent(
         .build_default(Some(crate::build_defaults::EXIT_WITH_PARENT))
         .from_settings(source, parser.exit_with_parent())
         .resolve::<ExitWithParent>()
-        .map(|(setting, _)| setting)
         .map_err(RunError::Setting)
+        .and_then(|(setting, source)| match (setting, cfg!(windows)) {
+            (ExitWithParent::On, true) => Err(RunError::Setting(exit_with_parent_unsupported(source))),
+            _ => Ok(setting),
+        })
 }
 
 fn resolve_output(
@@ -3314,6 +3317,20 @@ mod tests {
     fn rendered(cause: LaunchCause) -> std::string::String {
         let line: ErrorLine = RunError::Launch(cause).render();
         std::string::String::from_utf8(line.bytes().to_vec()).expect("launch line is UTF-8")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_exit_with_parent_from_the_environment_with_the_setting_named() {
+        let pairs = [("CARGO_VAL_EXIT_WITH_PARENT", "1")];
+        let source = conflaguration::BorrowedSettings::new(&pairs);
+
+        let refused = super::resolve_exit_with_parent(&source, &crate::cli::CliParser::new());
+
+        let Err(RunError::Setting(error)) = refused else {
+            panic!("windows accepted exit-with-parent: {refused:?}");
+        };
+        assert_eq!(error.message(), b"cargo-val: CARGO_VAL_EXIT_WITH_PARENT=on is not supported on windows\n");
     }
 
     #[proxima::test]
