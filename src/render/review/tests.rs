@@ -28,10 +28,10 @@ fn tracked<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32]) -> 
 fn detail(id: Identity<'_>) -> Detail<'static> {
     if id == SCHED {
         let location = Location { file: b"tests/sched_records.rs", line: 55, col: 1 };
-        (Class::Timeout { enforced_by: Enforcer::Val }, Some(location), SCHED_OUTPUT)
+        (Class::Timeout { enforced_by: Enforcer::Val }, Some(location), (b"", None), SCHED_OUTPUT)
     } else {
         let location = Location { file: b"tests/shard_process.rs", line: 575, col: 31 };
-        (Class::Panic, Some(location), SHARD_OUTPUT)
+        (Class::Panic, Some(location), (b"the shard child reported its pid before the deadline", None), SHARD_OUTPUT)
     }
 }
 
@@ -328,7 +328,7 @@ fn enter_toggles_between_list_focus_and_detail_scroll_and_j_k_scroll_the_detail_
     assert_eq!(state.mode(), Mode::Review { selected: 0, armed: false, top: None }, "enter returns focus to the list, so k moves the cursor");
     assert!(list_frame.contains("j/k move") && !list_frame.contains("j/k scroll"));
     assert!(scrolling_frame.contains("j/k scroll  enter list"), "{scrolling_frame}");
-    assert!(scrolled_frame.contains("from line 2"), "{scrolled_frame}");
+    assert!(scrolled_frame.contains("+1 lines above"), "{scrolled_frame}");
     assert!(scrolled_frame.contains("the shard child reported its pid") && !scrolled_frame.contains("thread 'a_per_test"), "{scrolled_frame}");
 }
 
@@ -548,6 +548,30 @@ fn the_state_keeps_each_failures_output_and_classifies_it_for_the_detail_view() 
     let state = run(&mut arena, &mut ledger, 1);
 
     assert_eq!(state.detail(SHARD), detail(SHARD), "a panic keeps its class, its line and its bytes");
-    let (class, _, output) = state.detail(SCHED);
+    let (class, _, _, output) = state.detail(SCHED);
     assert_eq!((class, output), (Class::Timeout { enforced_by: Enforcer::Val }, SCHED_OUTPUT), "a val deadline keeps its class and its bytes");
+}
+
+const LONG_OUTPUT: &[u8] = b"\nrunning 1 test\ntest tests::settles_failing ... FAILED\n\nfailures:\n\n---- tests::settles_failing stdout ----\n\nthread 'tests::settles_failing' panicked at src/lib.rs:11:9:\nassertion `left == right` failed: expected three listeners, found [8080, 8443]\n  left: 2\n right: 3\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::settles_failing\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+
+#[test]
+fn a_long_capture_shows_the_assertion_first_then_the_lines_around_the_panic_with_both_elisions_counted() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = run(&mut arena, &mut ledger, 1);
+    keys(&mut state, &[Key::Char(b'f')]);
+    let long = |_: Identity<'_>| -> Detail<'static> {
+        let location = Location { file: b"src/lib.rs", line: 11, col: 9 };
+        let message: &[u8] = b"assertion `left == right` failed: expected three listeners, found [8080, 8443]";
+        (Class::Assert, Some(location), (message, Some((&b"2"[..], &b"3"[..]))), LONG_OUTPUT)
+    };
+    let mut frame = Line::<8192>::new();
+    state.screen(long, 100, false, &mut frame).expect("the frame holds one review screen");
+    let text = String::from_utf8(frame.bytes().to_vec()).expect("a review frame is utf-8");
+
+    let reason = text.find("   left   2").expect("the left value is shown");
+    let output = text.find("test output  verbatim").expect("the output section is shown");
+    assert!(text.find("assertion `left == right` failed").is_some_and(|message| message < reason && reason < output), "{text}");
+    assert!(text.contains("   right  3"), "{text}");
+    assert!(text.contains("panicked at src/lib.rs:11:9:") && !text.contains("running 1 test"), "{text}");
+    assert!(text.contains("above") && text.contains("below"), "{text}");
 }

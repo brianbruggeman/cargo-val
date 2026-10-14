@@ -386,6 +386,8 @@ async fn quitting_review_with_q_then_q_restores_the_terminal_and_prints_the_plai
     let last_frame = output.rfind(REVIEW_HEADER).unwrap_or_else(|| panic!("no review frame was drawn:\n{}", shown(&output)));
     let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(&output)));
     println!("last review frame onward:\n{}", shown(&output[output[..last_frame].rfind('\x1b').unwrap_or(last_frame)..]));
+    let review_frame = &output[last_frame..output.len().min(last_frame + output[last_frame..].find("\x1b[J").unwrap_or(output.len() - last_frame))];
+    assert!(review_frame.contains("expected three listeners"), "the last review frame must show the fixture's panic message:\n{}", shown(review_frame));
     assert_eq!(status.code(), Some(1), "a run with a failure exits 1 after leaving review: {status}");
     assert_eq!(plain_status.code(), Some(1), "the plain run of the same fixture exits 1: {plain_status}");
     assert!(shown_cursor > last_frame, "the cursor was shown at {shown_cursor}, before the last review frame at {last_frame}");

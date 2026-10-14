@@ -13,11 +13,12 @@
 
 use super::{Identity, Mode, State, seconds};
 use crate::failure_class::{Class, Enforcer, Location};
+use memchr::memmem;
 use crate::line::Line;
 
 const MIN_WIDTH: usize = 30;
 const LIST_ROWS: usize = 3;
-const OUTPUT_LINES: usize = 2;
+const OUTPUT_LINES: usize = 6;
 const CLASS_FIELD: usize = 8;
 const SECONDS_FIELD: usize = 10;
 const MINI_BAR: usize = 6;
@@ -99,7 +100,10 @@ pub enum Rerun {
 
 /// What the driver's capture buffers hold for one failure: its class, its source location and the child's bytes, shown
 /// verbatim.
-pub type Detail<'a> = (Class, Option<Location<'a>>, &'a [u8]);
+pub type Detail<'a> = (Class, Option<Location<'a>>, Reason<'a>, &'a [u8]);
+
+/// The classifier's message and, for an assertion, its left and right values; both borrow from the retained capture.
+pub type Reason<'a> = (&'a [u8], Option<(&'a [u8], &'a [u8])>);
 
 type Shown<'a> = (Identity<'a>, u64, Option<Verdict>, Rerun, Detail<'a>);
 
@@ -636,12 +640,13 @@ fn middle<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, room: u
 }
 
 fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, top: Option<u16>) {
-    let (id, millis, verdict, _, (class, location, output)) = *row;
+    let (id, millis, verdict, _, (class, location, reason, output)) = *row;
     wrapped_name(frame, look, id);
     class_line(frame, look, (class, millis, location));
     if let Some(verdict) = verdict {
         verdict_line(frame, look, verdict, millis);
     }
+    reason_block(frame, look, reason);
     output_block(frame, look, output, top);
     frame.text(b"\n");
     hint_line(frame, look, class, millis);
@@ -752,37 +757,76 @@ fn bisect_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, id: Iden
     frame.text(b"\n");
 }
 
+fn reason_block<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, (message, sides): Reason<'_>) {
+    if message.is_empty() && sides.is_none() {
+        return;
+    }
+    frame.text(b"\n");
+    let shown = if sides.is_some() { 1 } else { usize::MAX };
+    for line in message.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).take(shown) {
+        spaces(frame, 3);
+        let mut column = 3;
+        flow(frame, look.0 - 1, &mut column, 3, line);
+        frame.text(b"\n");
+    }
+    if let Some((left, right)) = sides {
+        side(frame, look, b"left   ", left);
+        side(frame, look, b"right  ", right);
+    }
+}
+
+fn indented<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, text: &[u8]) {
+    spaces(frame, 3);
+    let mut column = 3;
+    put(frame, look.0 - 1, &mut column, 3, text);
+    frame.text(b"\n");
+}
+
+fn side<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, word: &[u8], value: &[u8]) {
+    spaces(frame, 3);
+    paint(frame, look.1, FAINT, word);
+    let mut column = 3 + word.len();
+    put(frame, look.0 - 1, &mut column, 3 + word.len(), value);
+    frame.text(b"\n");
+}
+
+fn window_start(body: &[u8], total: usize, top: Option<u16>) -> usize {
+    let last = total.saturating_sub(OUTPUT_LINES);
+    if let Some(line) = top {
+        return usize::from(line).min(total - 1);
+    }
+    let panic = body.split(|byte| *byte == b'\n').position(|line| memmem::find(line, b"panicked at").is_some());
+    panic.map_or(0, |index| index.saturating_sub(OUTPUT_LINES / 2)).min(last)
+}
+
+fn elided<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, count: usize, side: &[u8]) {
+    if count == 0 {
+        return;
+    }
+    let mut text = Line::<40>::new();
+    text.text(b"   +");
+    text.number(count);
+    text.text(b" lines ");
+    text.text(side);
+    paint(frame, look.1, FAINT, text.bytes());
+    frame.text(b"\n");
+}
+
 fn output_block<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, output: &[u8], top: Option<u16>) {
     let body = output.trim_ascii_end();
     if body.is_empty() {
         return;
     }
     let total = output_lines(body);
-    let start = usize::from(top.unwrap_or(0)).min(total - 1);
+    let start = window_start(body, total, top);
     frame.text(b"\n ");
     paint(frame, look.1, FAINT, b"test output  verbatim");
-    if start > 0 {
-        let mut text = Line::<32>::new();
-        text.text(b"  from line ");
-        text.number(start + 1);
-        paint(frame, look.1, FAINT, text.bytes());
-    }
     frame.text(b"\n");
+    elided(frame, look, start, b"above");
     for line in body.split(|byte| *byte == b'\n').skip(start).take(OUTPUT_LINES) {
-        spaces(frame, 3);
-        let mut column = 3;
-        put(frame, look.0 - 1, &mut column, 3, line);
-        frame.text(b"\n");
+        indented(frame, look, line);
     }
-    let below = total.saturating_sub(start + OUTPUT_LINES);
-    if below > 0 {
-        let mut text = Line::<32>::new();
-        text.text(b"   +");
-        text.number(below);
-        text.text(b" lines");
-        paint(frame, look.1, FAINT, text.bytes());
-        frame.text(b"\n");
-    }
+    elided(frame, look, total.saturating_sub(start + OUTPUT_LINES), b"below");
 }
 
 fn footer<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, keys: &[(&[u8], &[u8])], armed: bool) {

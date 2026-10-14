@@ -17,7 +17,7 @@ pub mod review;
 use memchr::memchr;
 
 use crate::line::Line;
-use crate::failure_class::{Class, Exit, Record, Reject, classify};
+use crate::failure_class::{Absent, Class, Exit, Record, Reject, classify};
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
 use review::{Back, Key, Rerun, Verdict};
 
@@ -669,7 +669,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     pub fn detail(&self, id: Identity<'_>) -> review::Detail<'_> {
         let kept = self.find_failure(id).map(|index| (self.failure_tail_start(index) + entry::TAIL, entry::payload(self.failure_tail(index))));
         let Some((start, length)) = kept.filter(|(_, length)| *length >= PAYLOAD_HEAD) else {
-            return (Class::Panic, None, b"");
+            return (Class::Panic, None, (b"", None), b"");
         };
         let mut value = [0; 4];
         value.copy_from_slice(&self.arena[start + 1..start + PAYLOAD_HEAD]);
@@ -679,9 +679,16 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             _ => Exit::DeadlineKilled,
         };
         let capture = &self.arena[start + PAYLOAD_HEAD..start + length];
-        let location = classify(capture, exit, 0).ok().and_then(|record| record.location.ok());
-        let class = classify(capture, exit, 0).map_or(Class::Panic, |record| record.class);
-        (class, location, capture)
+        match classify(capture, exit, 0) {
+            Ok(record) => {
+                let located = match record.location {
+                    Ok(site) | Err(Absent::External(site)) => Some(site),
+                    Err(Absent::NoPanicSite) => None,
+                };
+                (record.class, located, (record.message, record.sides), capture)
+            }
+            Err(_) => (Class::Panic, None, (b"", None), capture),
+        }
     }
 
     fn failure_tail_start(&self, index: usize) -> usize {
