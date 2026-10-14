@@ -314,6 +314,18 @@ pub fn write(descriptor: i32, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether `descriptor` (standard output `1` or standard error `2`) is a console: `GetConsoleMode` fails on a pipe or a file.
+#[must_use]
+pub fn is_terminal(descriptor: i32) -> bool {
+    let slot = match descriptor {
+        STANDARD_OUTPUT => STD_OUTPUT_HANDLE,
+        STANDARD_ERROR => STD_ERROR_HANDLE,
+        _ => return false,
+    };
+    let handle = unsafe { GetStdHandle(slot) };
+    !handle.is_null() && handle != INVALID_HANDLE_VALUE && is_console(handle)
+}
+
 fn file_type(handle: HANDLE) -> io::Result<u32> {
     let kind = unsafe { GetFileType(handle) };
     if kind == 0 && unsafe { GetLastError() } != 0 {

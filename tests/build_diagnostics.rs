@@ -121,6 +121,7 @@ async fn coloured_diagnostics_still_precede_cargos_coloured_summary() {
         .arg("--lib")
         .env_remove("NO_COLOR")
         .env("CARGO_VAL_COLOR", "true")
+        .env("CARGO_VAL_OUTPUT", "rich")
         .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-coloured-fixture"));
     let output = fixture_output(&mut command).await;
     let text = String::from_utf8_lossy(&output.stderr);
