@@ -11,6 +11,9 @@ mod fixture {
         if std::env::var_os("CARGO_VAL_C52D_FAIL").is_some() {
             panic!("requested fixture failure");
         }
+        if std::env::var_os("CARGO_VAL_C52D_ESCAPES").is_some() {
+            panic!("path \"C:\\tmp\\out\" is missing\nsecond line");
+        }
     }
 
     #[test]
