@@ -392,7 +392,7 @@ fn assert_cursor_shown_last(output: &str) {
 #[proxima::test(timeout = "310s")]
 async fn an_interrupted_run_leaves_the_earlier_last_run_record_intact() {
     let record = target_directory().join("c74-fixture-record-int").join("cargo-val").join("last-run");
-    let earlier = cargo_val::last_run::encode((258_230, 383, 0));
+    let earlier = cargo_val::last_run::encode((258_230, 383, 0, 0, 0, 0));
     fs::create_dir_all(record.parent().expect("record has a directory")).expect("record directory is creatable");
     fs::write(&record, earlier).expect("earlier record is writable");
 

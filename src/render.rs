@@ -23,6 +23,9 @@ use crate::hyperlink::write_linked;
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
 use review::{Key, Rerun, Verdict};
 
+const ARRIVALS: usize = 14;
+const ARRIVAL_SPAN_MS: u32 = 350;
+
 mod rich;
 mod timeline;
 
@@ -118,9 +121,11 @@ pub enum Mode {
 pub enum Event<'a> {
     Begin { version: &'a [u8], shard: bool, jobs: usize, github: bool, why: Option<&'a [u8]>, json: bool, at_ms: u64 },
     Waiting { lock: &'a [u8] },
-    Previous { wall_ms: u64, tests: u32 },
+    /// The last run's record: its wall time, its test count and `build` as `(units, build_ms)`; `matched` says its fingerprint equals this run's, so `units` is this run's exact unit total.
+    Previous { wall_ms: u64, tests: u32, build: (u16, u64), matched: bool },
     Listed { binaries: usize, of: Option<usize>, tests: usize },
-    Built { done: u16, total: Option<u16> },
+    /// Compile units reported so far (`done`) against the expected `total`, which is exact only when `exact`; `binaries` is how many test binaries are built.
+    Built { done: u16, total: Option<u16>, exact: bool, binaries: u16, at_ms: u64 },
     Resize { cols: u16 },
     Started { id: Identity<'a>, solo: bool, at_ms: u64, limit_ms: Option<u32> },
     Settled { id: Identity<'a>, outcome: Outcome, at_ms: Option<u64>, solo: bool },
@@ -264,6 +269,8 @@ pub struct State<'storage, const RERUN: usize> {
     busy_ms: u64,
     wall_ms: Option<u64>,
     previous: Option<(u64, u32)>,
+    previous_build: (u16, u64),
+    matched_units: Option<u16>,
     heartbeat_ms: u64,
     last_beat_ms: u64,
     now_ms: u64,
@@ -273,6 +280,10 @@ pub struct State<'storage, const RERUN: usize> {
     done: usize,
     built: u16,
     units: Option<u16>,
+    binaries_built: u16,
+    build_finished_ms: Option<u64>,
+    arrivals: [(u32, u16); ARRIVALS],
+    arrivals_len: usize,
     listed_binaries: usize,
     binaries_total: Option<usize>,
     listed_tests: usize,
@@ -326,6 +337,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             busy_ms: 0,
             wall_ms: None,
             previous: None,
+            previous_build: (0, 0),
+            matched_units: None,
             heartbeat_ms: HEARTBEAT_MS,
             last_beat_ms: 0,
             now_ms: 0,
@@ -335,6 +348,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             done: 0,
             built: 0,
             units: None,
+            binaries_built: 0,
+            build_finished_ms: None,
+            arrivals: [(0, 0); ARRIVALS],
+            arrivals_len: 0,
             listed_binaries: 0,
             binaries_total: None,
             listed_tests: 0,
@@ -508,10 +525,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { github, why, json, jobs, at_ms, .. } => self.begin((github, why.is_some(), json), jobs, at_ms),
             Event::Waiting { lock } => self.wait_on(lock),
-            Event::Previous { wall_ms, tests } => self.previous = Some((wall_ms, tests)),
+            Event::Previous { wall_ms, tests, build, matched } => {
+                self.previous = Some((wall_ms, tests));
+                (self.previous_build, self.matched_units) = (build, matched.then_some(build.0));
+            }
             Event::Listed { binaries, of, tests } => (self.listed_binaries, self.binaries_total, self.listed_tests) = (binaries, of, tests),
-            Event::Built { done, total } => {
-                (self.built, self.units) = (done, total);
+            Event::Built { done, total, exact, binaries, at_ms } => {
+                self.note_built(done, (total, exact), at_ms);
+                self.binaries_built = binaries;
                 self.lock_len = 0;
             }
             Event::Resize { cols } => self.cols = cols,
@@ -577,6 +598,11 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.done = 0;
         self.built = 0;
         self.units = None;
+        self.binaries_built = 0;
+        self.build_finished_ms = None;
+        self.arrivals_len = 0;
+        self.previous_build = (0, 0);
+        self.matched_units = None;
         self.listed_binaries = 0;
         self.binaries_total = None;
         self.listed_tests = 0;
@@ -600,6 +626,28 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.busy_ms = 0;
         self.wall_ms = None;
         self.clear_inflight();
+    }
+
+    // an arrival is a unit count at an elapsed time; arrivals within ARRIVAL_SPAN_MS of the newest share its slot, so ARRIVALS slots cover about five seconds
+    fn note_built(&mut self, done: u16, (total, exact): (Option<u16>, bool), at_ms: u64) {
+        let elapsed = u32::try_from(at_ms.saturating_sub(self.origin_ms.unwrap_or(at_ms))).unwrap_or(u32::MAX);
+        if done > self.built || self.arrivals_len == 0 {
+            let newest = self.arrivals_len.checked_sub(1).map(|index| self.arrivals[index]);
+            if newest.is_some_and(|(at, _)| elapsed.saturating_sub(at) < ARRIVAL_SPAN_MS) {
+                self.arrivals[self.arrivals_len - 1].1 = done;
+            } else {
+                if self.arrivals_len == ARRIVALS {
+                    self.arrivals.copy_within(1.., 0);
+                    self.arrivals_len -= 1;
+                }
+                self.arrivals[self.arrivals_len] = (elapsed, done);
+                self.arrivals_len += 1;
+            }
+        }
+        if exact && total == Some(done) && self.build_finished_ms.is_none() {
+            self.build_finished_ms = Some(u64::from(elapsed));
+        }
+        (self.built, self.units) = (done, total);
     }
 
     const fn clear_inflight(&mut self) {
@@ -1669,7 +1717,7 @@ mod tests {
             let mut state = Small::new(&mut arena, &mut ledger);
             state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why, json, at_ms: 0 });
             assert_eq!(state.previous(), None);
-            let previous = Event::Previous { wall_ms: 258_230, tests: 383 };
+            let previous = Event::Previous { wall_ms: 258_230, tests: 383, build: (0, 0), matched: false };
             let mut frame = Line::<256>::new();
 
             let ((), allocations) = measure_allocations(|| {
@@ -1690,7 +1738,7 @@ mod tests {
         let mut state = Small::new(&mut arena, &mut ledger);
         let mut frame = Line::<4096>::new();
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
-        let previous = Event::Previous { wall_ms: 1, tests: 2 };
+        let previous = Event::Previous { wall_ms: 1, tests: 2, build: (0, 0), matched: false };
         state.apply(&previous);
 
         state.project_live(&previous, &mut frame).expect("the live view accepts the event");

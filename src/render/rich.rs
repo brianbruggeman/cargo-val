@@ -5,6 +5,7 @@
 //! previous frame drew, then clear to the end of the screen) is part of the bytes, so one redraw is one write.
 //! Colour roles are the terminal's own 16 ANSI colours; without colour the bars keep their state as glyph textures.
 
+use crate::eta;
 use crate::line::Line;
 use crate::render::{Event, Identity, Mode, State, excerpt, review};
 use crate::view_defaults::{BAR_COLUMNS, INFLIGHT_ROWS};
@@ -29,6 +30,7 @@ const SLOW_MS: u64 = 30_000;
 const JOINED: usize = 512;
 const LABEL: &str = " failed at";
 const SEARCHING: &[u8] = b"searching for tests";
+const BUILT: &[u8] = b"built";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tone {
@@ -363,8 +365,14 @@ impl<const RERUN: usize> State<'_, RERUN> {
         bold(frame, color, b"cargo val");
         frame.text(b"  ");
         paint(frame, color, Tone::Dim, jobs.bytes());
-        let used = 1 + 9 + 2 + columns(jobs.bytes()) + columns(stamp.bytes());
+        let mut remaining = Line::<32>::new();
+        if let Some(remaining_ms) = self.eta_ms() {
+            eta::write_eta(&mut remaining, remaining_ms);
+            remaining.text(b"  ");
+        }
+        let used = 1 + 9 + 2 + columns(jobs.bytes()) + columns(remaining.bytes()) + columns(stamp.bytes());
         spaces(frame, usize::from(self.cols).saturating_sub(used + 1));
+        paint(frame, color, Tone::Dim, remaining.bytes());
         bold(frame, color, stamp.bytes());
         frame.text(b"\n");
     }
@@ -409,17 +417,43 @@ impl<const RERUN: usize> State<'_, RERUN> {
 
     fn build_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>, bar_width: usize) {
         paint(frame, color, Tone::Dim, b" build ");
-        let (done, total) = (usize::from(self.built), self.units.map(usize::from));
+        let done = usize::from(self.binaries_built);
+        let total = self.binaries_total.map(|total| total.max(done));
         let settled = total.map_or(0, |total| done * bar_width * 8 / total.max(1));
         bar(frame, color, bar_width, (settled, 0), Tone::Plain);
-        frame.text(b" ");
-        padded(frame, done, 2);
-        frame.text(b"/");
+        let mut count = Line::<48>::new();
+        count.text(b" ");
+        padded(&mut count, done, 2);
+        count.text(b"/");
         match total {
-            Some(total) => frame.number(total),
-            None => frame.text(b"?"),
+            Some(total) => count.number(total),
+            None => count.text(b"?"),
         }
-        frame.text(b" compile units\n");
+        count.text(b" test binaries");
+        frame.text(count.bytes());
+        let finished = self.build_finished_ms.is_some();
+        let room = usize::from(self.cols).saturating_sub(1 + BAR_COLUMN + bar_width + columns(count.bytes()));
+        if finished && room > BUILT.len() {
+            spaces(frame, room - BUILT.len());
+            paint(frame, color, Tone::Dim, BUILT);
+        }
+        frame.text(b"\n");
+    }
+
+    fn eta_ms(&self) -> Option<u64> {
+        let elapsed = self.now_ms.saturating_sub(self.origin_ms?);
+        let expected = self.estimate().0;
+        let test_phase = self.previous.map(|(wall_ms, tests)| (wall_ms.saturating_sub(self.previous_build.1), tests));
+        let Some(finished_ms) = self.build_finished_ms else {
+            let total = self.units?;
+            let build = if self.matched_units.is_some() {
+                eta::recorded_build_remaining_ms(self.previous_build.1, self.built, total)?
+            } else {
+                eta::build_remaining_ms(&self.arrivals[..self.arrivals_len], total)?
+            };
+            return Some(build + eta::test_remaining_ms(0, expected, (0, test_phase)).unwrap_or(0));
+        };
+        eta::test_remaining_ms(self.done, expected, (elapsed.saturating_sub(finished_ms), test_phase))
     }
 
     fn rule_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
@@ -601,10 +635,10 @@ mod tests {
         let mut state = State::<200>::new(arena, ledger).with_inflight(inflight);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
         if let Some(tests) = previous {
-            state.apply(&Event::Previous { wall_ms: 258_230, tests });
+            state.apply(&Event::Previous { wall_ms: 258_230, tests, build: (0, 0), matched: false });
         }
         state.apply(&Event::Resize { cols });
-        state.apply(&Event::Built { done: 19, total: Some(19) });
+        state.apply(&Event::Built { done: 19, total: Some(19), exact: true, binaries: 19, at_ms: 0 });
         state.apply(&Event::Listed { binaries, of: Some(19), tests });
         state.apply(&Event::Tick { now_ms: 1000 });
         for _ in 0..305 {
@@ -632,10 +666,10 @@ mod tests {
 
     #[test]
     fn eighty_columns_with_colour_draw_solid_bars_in_role_colours() {
-        let expected = "\x1b[?25l \x1b[1mcargo val\x1b[0m  \x1b[2m8 jobs\x1b[0m                                                         \x1b[1m0:47\x1b[0m\n\
+        let expected = "\x1b[?25l \x1b[1mcargo val\x1b[0m  \x1b[2m8 jobs\x1b[0m                                              \x1b[2meta ~0:51  \x1b[0m\x1b[1m0:47\x1b[0m\n\
 \x1b[31m\x1b[1m FAIL 1  \x1b[0msched_records::the_\u{2026}d_with_flags_and_group  \x1b[31massertion failed: left ==\u{2026}\x1b[0m\n\
 \n\
-\x1b[2m build \x1b[0m██████████████████████████████ 19/19 compile units\n \
+\x1b[2m build \x1b[0m██████████████████████████████ 19/19 test binaries                 \x1b[2mbuilt\x1b[0m\n \
 \x1b[2m──────────────────────────────────────────────────────────────────────────────\x1b[0m\n\
 \x1b[2m test  \x1b[0m\x1b[32m████████████████████████\x1b[0m\x1b[36m█\x1b[0m\x1b[2m█████\x1b[0m 306/~380\x1b[2m tests\x1b[0m  \x1b[31m1 failed\x1b[0m\x1b[2m  ~ 12/19 listed\x1b[0m\n\
 \x1b[2m failed at\x1b[0m                     \x1b[31m\u{2573}\x1b[0m     \n\
@@ -649,10 +683,10 @@ mod tests {
 
     #[test]
     fn eighty_columns_without_colour_keep_every_state_as_a_glyph_texture() {
-        let expected = "\x1b[?25l cargo val  8 jobs                                                         0:47\n\
+        let expected = "\x1b[?25l cargo val  8 jobs                                              eta ~0:51  0:47\n\
 \x20FAIL 1  sched_records::the_\u{2026}d_with_flags_and_group  assertion failed: left ==\u{2026}\n\
 \n\
-\x20build ██████████████████████████████ 19/19 compile units\n\
+\x20build ██████████████████████████████ 19/19 test binaries                 built\n\
 \x20──────────────────────────────────────────────────────────────────────────────\n\
 \x20test  ████████████████████████▒░░░░░ 306/~380 tests  1 failed  ~ 12/19 listed\n\
 \x20failed at                     \u{2573}     \n\
@@ -666,10 +700,10 @@ mod tests {
 
     #[test]
     fn sixty_columns_drop_the_listed_note_and_ellipsise_names() {
-        let expected = "\x1b[?25l cargo val  8 jobs                                     0:47\n\
+        let expected = "\x1b[?25l cargo val  8 jobs                          eta ~0:51  0:47\n\
 \x20FAIL 1  sched_records:\u{2026}flags_and_group  assertion failed:\u{2026}\n\
 \n\
-\x20build ██████████████████████████████ 19/19 compile units\n\
+\x20build ██████████████████████████████ 19/19 test binaries\n\
 \x20──────────────────────────────────────────────────────────\n\
 \x20test  ████████████████████████▒░░░░░ 306/~380  1 failed\n\
 \x20failed at                     \u{2573}     \n\
@@ -683,10 +717,10 @@ mod tests {
 
     #[test]
     fn forty_columns_shrink_the_bars_and_keep_the_counts_whole() {
-        let expected = "\x1b[?25l cargo val  8 jobs                 0:47\n\
+        let expected = "\x1b[?25l cargo val  8 jobs      eta ~0:51  0:47\n\
 \x20FAIL 1  sched_re\u{2026}and_group  assertion\u{2026}\n\
 \n\
-\x20build █████████████ 19/19 compile units\n\
+\x20build █████████████ 19/19 test binaries\n\
 \x20──────────────────────────────────────\n\
 \x20test  ██████████▍▒░ 306/~380  1 failed\n\
 \x20failed at       \u{2573}  \n\
@@ -813,7 +847,7 @@ mod tests {
         state.apply(&Event::Waiting { lock: b"package cache" });
         let mut waiting = Line::<4096>::new();
         state.project_rich(false, &mut waiting).expect("fits");
-        state.apply(&Event::Built { done: 1, total: Some(3) });
+        state.apply(&Event::Built { done: 1, total: Some(3), exact: false, binaries: 1, at_ms: 0 });
         let mut moving = Line::<4096>::new();
         state.project_rich(false, &mut moving).expect("fits");
 
@@ -842,7 +876,7 @@ mod tests {
         let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
         if let Some(tests) = previous {
-            state.apply(&Event::Previous { wall_ms: 258_230, tests });
+            state.apply(&Event::Previous { wall_ms: 258_230, tests, build: (0, 0), matched: false });
         }
         state.apply(&Event::Resize { cols });
         state.apply(&Event::Tick { now_ms: 1200 });
@@ -882,7 +916,7 @@ mod tests {
         let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
         if let Some(count) = previous {
-            state.apply(&Event::Previous { wall_ms: 258_230, tests: count });
+            state.apply(&Event::Previous { wall_ms: 258_230, tests: count, build: (0, 0), matched: false });
         }
         state.apply(&Event::Resize { cols });
         state.apply(&Event::Listed { binaries, of: Some(of), tests });
@@ -1084,5 +1118,97 @@ mod tests {
             assert_eq!(allocations, 0, "{cols} columns");
             assert!(String::from_utf8_lossy(frame.bytes()).contains("panicked here"), "the last frame at {cols} columns drew the excerpt");
         }
+    }
+
+    fn building<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], previous: Option<Event<'_>>) -> State<'storage, 200> {
+        let mut state = State::<200>::new(arena, ledger);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
+        if let Some(event) = previous {
+            state.apply(&event);
+        }
+        state.apply(&Event::Resize { cols: 80 });
+        state.apply(&Event::Listed { binaries: 0, of: Some(19), tests: 0 });
+        state
+    }
+
+    fn arrive(state: &mut State<'_, 200>, (done, at_ms): (u16, u64), total: (u16, bool)) {
+        state.apply(&Event::Built { done, total: Some(total.0), exact: total.1, binaries: 7, at_ms });
+        state.apply(&Event::Tick { now_ms: at_ms });
+    }
+
+    fn lines_of(state: &mut State<'_, 200>) -> Vec<String> {
+        let mut frame = Line::<4096>::new();
+        state.project_rich(false, &mut frame).expect("the frame holds one redraw");
+        String::from_utf8_lossy(frame.bytes()).lines().map(String::from).collect()
+    }
+
+    #[test]
+    fn the_build_row_counts_test_binaries_against_the_metadata_total_and_has_no_built_tag_yet() {
+        let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 2]);
+        let mut state = building(&mut arena, &mut ledger, None);
+        arrive(&mut state, (533, 5_000), (1204, false));
+
+        let lines = lines_of(&mut state);
+
+        assert_eq!(lines[3], " build \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}  7/19 test binaries");
+    }
+
+    #[test]
+    fn two_arrivals_are_too_few_for_a_build_eta_so_the_header_shows_none() {
+        let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 2]);
+        let mut state = building(&mut arena, &mut ledger, None);
+        arrive(&mut state, (100, 10_000), (400, false));
+        arrive(&mut state, (110, 11_000), (400, false));
+
+        assert!(!lines_of(&mut state)[0].contains("eta"), "{:?}", lines_of(&mut state)[0]);
+    }
+
+    #[test]
+    fn four_arrivals_without_a_record_give_the_mean_implied_estimate_plus_the_previous_test_phase() {
+        let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 2]);
+        let previous = Event::Previous { wall_ms: 200_000, tests: 380, build: (0, 0), matched: false };
+        let mut state = building(&mut arena, &mut ledger, Some(previous));
+        for (done, at_ms) in [(100, 10_000), (110, 11_000), (120, 12_000), (130, 13_000)] {
+            arrive(&mut state, (done, at_ms), (400, false));
+        }
+
+        let header = lines_of(&mut state)[0].clone();
+
+        assert!(header.ends_with("eta ~3:49  0:13"), "{header:?}");
+    }
+
+    #[test]
+    fn a_matching_record_scales_its_build_time_by_the_units_left_and_adds_its_test_phase() {
+        let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 2]);
+        let previous = Event::Previous { wall_ms: 200_000, tests: 380, build: (400, 120_000), matched: true };
+        let mut state = building(&mut arena, &mut ledger, Some(previous));
+        arrive(&mut state, (100, 30_000), (400, true));
+
+        let header = lines_of(&mut state)[0].clone();
+
+        assert!(header.ends_with("eta ~2:50  0:30"), "{header:?}");
+    }
+
+    #[test]
+    fn a_frame_stream_with_arrivals_landing_every_round_allocates_nothing_and_always_carries_an_eta() {
+        let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 2]);
+        let previous = Event::Previous { wall_ms: 200_000, tests: 380, build: (0, 0), matched: false };
+        let mut state = building(&mut arena, &mut ledger, Some(previous));
+        let mut frame = Line::<4096>::new();
+        let mut with_eta = 0_usize;
+
+        let ((), allocations) = measure_allocations(|| {
+            for round in 1..=10_000_u64 {
+                frame.clear();
+                let done = u16::try_from(round % 300).expect("fits") + 1;
+                state.apply(&Event::Built { done, total: Some(400), exact: false, binaries: 7, at_ms: 1_000 + round * 40 });
+                state.apply(&Event::Tick { now_ms: 1_000 + round * 40 });
+                state.project_rich(false, &mut frame).expect("the frame holds one redraw");
+                with_eta += usize::from(frame.bytes().windows(5).any(|window| window == b"eta ~"));
+            }
+        });
+
+        assert_eq!(allocations, 0);
+        assert!(with_eta > 9_000, "{with_eta} of 10000 frames carried an eta");
     }
 }

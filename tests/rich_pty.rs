@@ -83,7 +83,7 @@ fn count_before_slash(frame: &str, is_row: impl Fn(&str) -> bool) -> Option<usiz
 }
 
 fn built_count(frame: &str) -> Option<usize> {
-    count_before_slash(frame, |line| line.contains("compile units"))
+    count_before_slash(frame, |line| line.contains("test binaries"))
 }
 
 fn settled_count(frame: &str) -> Option<usize> {
@@ -96,7 +96,7 @@ fn clock_shows_elapsed(frame: &str) -> bool {
 }
 
 fn live_frames(output: &str) -> Vec<&str> {
-    output.split(FRAME_START).skip(1).filter(|frame| frame.contains("compile units")).collect()
+    output.split(FRAME_START).skip(1).filter(|frame| frame.contains("test binaries")).collect()
 }
 
 fn shown(frame: &str) -> String {
@@ -679,7 +679,7 @@ fn test_row_count(frame: &str) -> Option<String> {
 
 fn second_run_row_is_valid(row: &str, total: &str) -> bool {
     let Some(count) = row.split_whitespace().find(|word| word.contains('/')) else {
-        return row.ends_with("searching for tests");
+        return row.ends_with("searching for tests") || (row.contains(" searching ") && (row.ends_with(" test binary") || row.ends_with(" test binaries")));
     };
     let (_, shown_total) = count.split_once('/').expect("the count is done/total");
     if shown_total == format!("~{total}") {

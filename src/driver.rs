@@ -2372,17 +2372,28 @@ fn spawn_cargo(
     spawn(b"cargo", &arguments, environment, &[term_color], None).map_err(|_| RunError::Spawn)
 }
 
-const METADATA_VALUE_FLAGS: [&[u8]; 4] = [b"--manifest-path", b"-m", b"--config", b"-Z"];
-const METADATA_BOOLEAN_FLAGS: [&[u8]; 3] = [b"--locked", b"--frozen", b"--offline"];
+const METADATA_VALUE_FLAGS: [&[u8]; 6] = [b"--manifest-path", b"-m", b"--config", b"-Z", b"--features", b"-F"];
+const METADATA_BOOLEAN_FLAGS: [&[u8]; 5] = [b"--locked", b"--frozen", b"--offline", b"--all-features", b"--no-default-features"];
 
-// the bin set comes from one `cargo metadata --no-deps`; a spawn failure just leaves build-finished as the signal
-fn spawn_metadata(parser: &CliParser<'_>, environment: &[&[u8]]) -> Result<Child, RunError> {
+const HOST_TRIPLE: &str = match option_env!("CARGO_VAL_HOST_TRIPLE") {
+    Some(triple) => triple,
+    None => "",
+};
+
+// the bin set and the compile-unit prediction come from one `cargo metadata` filtered to the platform being built; a spawn failure just leaves build-finished as the signal
+fn spawn_metadata(parser: &CliParser<'_>, environment: &[&[u8]], with_deps: bool) -> Result<Child, RunError> {
+    let forwarded = parser.cargo_arguments();
+    let platform = target_triple(forwarded).unwrap_or(HOST_TRIPLE.as_bytes());
     let mut arguments: Vec<&[u8]> = Vec::from([
         b"metadata".as_slice(),
-        b"--no-deps".as_slice(),
         b"--format-version=1".as_slice(),
     ]);
-    let forwarded = parser.cargo_arguments();
+    if !with_deps {
+        arguments.push(b"--no-deps");
+    } else if !platform.is_empty() {
+        arguments.push(b"--filter-platform");
+        arguments.push(platform);
+    }
     let mut locked = false;
     let mut index = 0;
     while index < forwarded.len() {
@@ -2414,7 +2425,16 @@ fn spawn_metadata(parser: &CliParser<'_>, environment: &[&[u8]]) -> Result<Child
 }
 
 // the short-lived metadata child is awaited alone; none of the run's own children are polled meanwhile
-async fn read_metadata(child: Child, parser: &CliParser<'_>) -> Option<Box<MetadataFacts>> {
+// a workspace with no Cargo.lock yet cannot be resolved under `--locked`, so a failed read retries once as `--no-deps`, which needs no lock and loses only the unit prediction
+async fn read_metadata(child: Child, (parser, environment): (&CliParser<'_>, &[&[u8]])) -> Option<Box<MetadataFacts>> {
+    if let Some(facts) = scan_metadata(child, parser).await {
+        return Some(facts);
+    }
+    let retry = spawn_metadata(parser, environment, false).ok()?;
+    scan_metadata(retry, parser).await
+}
+
+async fn scan_metadata(child: Child, parser: &CliParser<'_>) -> Option<Box<MetadataFacts>> {
     // the scanner's tens of KiB of text storage would otherwise sit in every enclosing future
     let mut scan = Box::new(MetadataScan::selecting(parser.cargo_arguments()));
     let mut usable = true;
@@ -2453,6 +2473,9 @@ pub(crate) struct CargoDriver<'buffer> {
     diagnostics_reported: bool,
     output: OutputMode,
     built: u16,
+    unit_total: Option<(u16, bool)>,
+    binaries_built: u16,
+    build_ms: u64,
     listed_binaries: usize,
     test_targets: Option<usize>,
 }
@@ -2650,14 +2673,22 @@ fn start_listing(
     spawn_listing(artifact, run, linked.as_str(), build_script, slot, environments).map(Some)
 }
 
-fn note_built(built: &mut u16, run: &ListingRun<'_>) -> Result<(), RunError> {
-    *built = built.saturating_add(1);
-    emit_live(run.render(), &Event::Built { done: *built, total: None })
-}
 
 pub(crate) type Ledger<'ledger> =
     OutcomeLedger<'ledger, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>;
 pub(crate) type Watches = [Option<TestWatch>];
+
+// the total never trails the count: a unit past the expected total raises it and drops the exactness
+fn announce_built(render: &Render<'_>, (built, binaries): (u16, u16), unit_total: Option<(u16, bool)>) -> Result<(), RunError> {
+    let (total, exact) = unit_total.map_or((None, false), |(total, exact)| (Some(total.max(built)), exact && built <= total));
+    emit_live(render, &Event::Built { done: built, total, exact, binaries, at_ms: monotonic_millis() })
+}
+
+fn note_built(built: &mut u16, binaries: &mut u16, unit_total: Option<(u16, bool)>, (run, test_binary): (&ListingRun<'_>, bool)) -> Result<(), RunError> {
+    *built = built.saturating_add(1);
+    *binaries = binaries.saturating_add(u16::from(test_binary));
+    announce_built(run.render(), (*built, *binaries), unit_total)
+}
 
 impl CargoDriver<'_> {
     fn drained(&self, unaccounted: usize) -> bool {
@@ -2803,7 +2834,8 @@ impl CargoDriver<'_> {
         success: bool,
         (run, ledger, lanes): (&ListingRun<'_>, &Ledger<'_>, &Lanes),
     ) -> Result<(), RunError> {
-        emit_live(run.render(), &Event::Built { done: self.built, total: Some(self.built) })?;
+        self.build_ms = monotonic_millis().saturating_sub(run.started_millis);
+        emit_live(run.render(), &Event::Built { done: self.built, total: Some(self.built), exact: true, binaries: self.binaries_built, at_ms: monotonic_millis() })?;
         let (event, reason): (&[u8], &'static [u8]) = if success {
             (b" build-finished success=true", b"build-succeeded")
         } else {
@@ -2863,7 +2895,7 @@ impl CargoDriver<'_> {
             let progressed = consumed > 0 || ready_before;
             match step {
                 CargoSourceStep::Artifact(artifact) => {
-                    note_built(&mut self.built, run)?;
+                    note_built(&mut self.built, &mut self.binaries_built, self.unit_total, (run, true))?;
                     let gated = matches!(artifact.target_kind, "test" | "bench")
                         && self.discovery.waits(artifact.package_id);
                     debug_artifact(run.settings.debug, gated, self.discovery.gate(), &artifact);
@@ -2883,12 +2915,12 @@ impl CargoDriver<'_> {
                         self.queue_listing(started, &kept, lanes)?;
                     }
                 }
-                CargoSourceStep::Compiled { .. } => note_built(&mut self.built, run)?,
+                CargoSourceStep::Compiled { .. } => note_built(&mut self.built, &mut self.binaries_built, self.unit_total, (run, false))?,
                 CargoSourceStep::BinBuilt {
                     package_id,
                     executable,
                 } => {
-                    note_built(&mut self.built, run)?;
+                    note_built(&mut self.built, &mut self.binaries_built, self.unit_total, (run, false))?;
                     debug_bin_built(run.settings.debug, executable, package_id);
                     self.discovery.bin_built(package_id);
                     self.reason = b"bin-built";
@@ -3358,14 +3390,17 @@ const fn explicit_root(mode: TargetDirMode<'_>) -> Option<&[u8]> {
 fn open_last_run(
     render: &Render<'_>,
     settings: &Settings,
-    location: &mut Option<PathBuf>,
-    sources: [Option<&[u8]>; 3],
-) -> Result<(), RunError> {
-    *location = last_run::target_directory(sources);
-    let Some((wall_ms, tests, _)) = location.as_deref().and_then(last_run::read) else {
-        return Ok(());
+    location: &mut Located,
+    (sources, fingerprint): ([Option<&[u8]>; 3], u64),
+) -> Result<Option<(u16, bool)>, RunError> {
+    location.0 = last_run::target_directory(sources);
+    location.1[0] = fingerprint;
+    let Some((wall_ms, tests, _, recorded, units, build_ms)) = location.0.as_deref().and_then(last_run::read) else {
+        return Ok(None);
     };
-    emit(render, &Event::Previous { wall_ms, tests })?;
+    let units = u16::try_from(units).unwrap_or(u16::MAX);
+    let matched = fingerprint != 0 && recorded == fingerprint;
+    emit(render, &Event::Previous { wall_ms, tests, build: (units, build_ms), matched })?;
     if let (true, Some((wall_ms, tests))) = (settings.debug, render.1.borrow().previous()) {
         let mut line = Line::<256>::new();
         line.text(b"cargo-val: debug: last-run previous wall_ms=");
@@ -3375,13 +3410,20 @@ fn open_last_run(
         line.text(b"\n");
         let _ = line.write(2);
     }
-    Ok(())
+    if settings.debug {
+        let mut line = Line::<64>::new();
+        line.text(b"cargo-val: debug: eta fingerprint-matched=");
+        line.text(if matched { b"yes" } else { b"no" });
+        line.text(b"\n");
+        let _ = line.write(2);
+    }
+    Ok(matched.then_some((units, true)))
 }
 
 // only a run that produced a summary records; build failures, refusals and interrupts keep the earlier record
-fn last_run_record(wall_ms: u64, outcome: &Result<RunSummary, RunError>) -> Option<last_run::Record> {
+fn last_run_record(wall_ms: u64, [fingerprint, units, build_ms]: [u64; 3], outcome: &Result<RunSummary, RunError>) -> Option<last_run::Record> {
     match outcome {
-        Ok(summary) => Some((wall_ms, u32::try_from(summary.discovered).unwrap_or(u32::MAX), exit_byte(summary.exit_code()))),
+        Ok(summary) => Some((wall_ms, u32::try_from(summary.discovered).unwrap_or(u32::MAX), exit_byte(summary.exit_code()), fingerprint, u32::try_from(units).unwrap_or(u32::MAX), build_ms)),
         Err(_) => None,
     }
 }
@@ -3391,8 +3433,8 @@ fn exit_byte(code: i32) -> u8 {
 }
 
 // edge write: runs once when the run is over, outside the event loop
-fn persist_last_run(location: Option<&Path>, wall_ms: u64, outcome: &Result<RunSummary, RunError>) {
-    let (Some(target), Some(record)) = (location, last_run_record(wall_ms, outcome)) else {
+fn persist_last_run(location: &Located, wall_ms: u64, outcome: &Result<RunSummary, RunError>) {
+    let (Some(target), Some(record)) = (location.0.as_deref(), last_run_record(wall_ms, location.1, outcome)) else {
         return;
     };
     if let Err(error) = last_run::write(target, record) {
@@ -3418,13 +3460,16 @@ fn begin_rich(render: &Render<'_>, mouse: bool) -> Result<(), RunError> {
 /// Returns [`RunError`] naming the stage that failed.
 pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
     let started_millis = monotonic_millis();
-    let mut location = None;
+    let mut location: Located = (None, [0; 3]);
     let outcome = run_located(parser, started_millis, &mut location).await;
-    persist_last_run(location.as_deref(), monotonic_millis().saturating_sub(started_millis), &outcome);
+    persist_last_run(&location, monotonic_millis().saturating_sub(started_millis), &outcome);
     outcome
 }
 
-async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut Option<PathBuf>) -> Result<RunSummary, RunError> {
+/// Where the last-run record lives and what this run adds to it: `[fingerprint, units, build_ms]`.
+type Located = (Option<PathBuf>, [u64; 3]);
+
+async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut Located) -> Result<RunSummary, RunError> {
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
@@ -3459,16 +3504,15 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         bins,
         gate,
         test_targets,
+        eta,
         lock_watch,
         metadata_directory,
         workspace_root,
-    } = start_children(parser, &settings, target_mode, inherited).await?;
-    open_last_run(&render, &settings, location, [explicit_root(target_mode), utf8_variable(&environment, b"CARGO_TARGET_DIR")?.map(str::as_bytes), metadata_directory.as_deref()])?;
-    let cargo_process_id = cargo_child.process_id();
+    } = start_children(parser, &settings, target_mode, (inherited, environment.get(b"RUSTC"))).await?;
+    let units = open_units(&render, &settings, location, [explicit_root(target_mode), utf8_variable(&environment, b"CARGO_TARGET_DIR")?.map(str::as_bytes), metadata_directory.as_deref()], eta)?;
     let shared_directory = lock_watch.directory().to_vec();
-    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, test_targets, lock_watch, settings.output)?;
-    driver.workspace_root = workspace_root;
-    emit_live(&render, &Event::Listed { binaries: 0, of: test_targets, tests: 0 })?;
+    let mut driver = new_driver(cargo_storage, cargo_child.process_id(), (bins, gate, test_targets), lock_watch, (workspace_root, settings.output))?;
+    announce_start(&render, &mut driver, units)?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .await
@@ -3476,7 +3520,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let prepared = held(settings.filterset.as_ref().map(Filterset::prepare));
     let doc_wanted = parser.doc_selection() == DocSelection::Included;
     let root = Signal::new();
-    let store = open_store(&render, location.as_deref());
+    let store = open_store(&render, location.0.as_deref());
     let run = held(ListingRun {
         signals: &signals,
         store: Rc::clone(&store),
@@ -3518,6 +3562,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         Ok(doc)
     });
     observe_cargo(cargo_child, &mut driver, &run, &mut ledger, watches, &mut launch_doc).await?;
+    location.1 = [eta.0, u64::from(driver.built), driver.build_ms];
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
         return Err(RunError::CargoStream);
     }
@@ -3612,11 +3657,9 @@ fn held<Value>(value: Value) -> std::boxed::Box<Value> {
 fn new_driver(
     (frame, scratch, linked, scripts, listing_frame, ignored_frame, environments, ignored): &mut CargoStorage,
     process_id: u32,
-    bins: BinCounts,
-    gate: BinGate,
-    test_targets: Option<usize>,
+    (bins, gate, test_targets): (BinCounts, BinGate, Option<usize>),
     lock_watch: LockWatch,
-    output: OutputMode,
+    (workspace_root, output): (PathBuf, OutputMode),
 ) -> Result<Box<CargoDriver<'_>>, RunError> {
     Ok(Box::new(CargoDriver {
         process_id,
@@ -3642,11 +3685,14 @@ fn new_driver(
         dropped: 0,
         lock_watch,
         diagnostics: Vec::new(),
-        workspace_root: PathBuf::new(),
+        workspace_root,
         stderr_held: Vec::new(),
         diagnostics_reported: false,
         output,
         built: 0,
+        unit_total: None,
+        binaries_built: 0,
+        build_ms: 0,
         listed_binaries: 0,
         test_targets,
     }))
@@ -3684,33 +3730,81 @@ struct StartedChildren {
     bins: BinCounts,
     gate: BinGate,
     test_targets: Option<usize>,
+    eta: (u64, Option<u16>),
     lock_watch: LockWatch,
     metadata_directory: Option<Box<[u8]>>,
     workspace_root: PathBuf,
 }
 
-// isolated mode reads the metadata first because the build directories come from it; the other modes overlap the read with the builds
+// the unit total the first frame shows: the recorded exact count when the fingerprint matched, else the metadata prediction, else none
+fn open_units(render: &Render<'_>, settings: &Settings, location: &mut Located, sources: [Option<&[u8]>; 3], (fingerprint, predicted): (u64, Option<u16>)) -> Result<Option<(u16, bool)>, RunError> {
+    let expected = open_last_run(render, settings, location, (sources, fingerprint))?;
+    if settings.debug {
+        let mut line = Line::<64>::new();
+        line.text(b"cargo-val: debug: eta units predicted=");
+        match predicted {
+            Some(total) => line.number(usize::from(total)),
+            None => line.text(b"unavailable"),
+        }
+        line.text(b"\n");
+        let _ = line.write(2);
+    }
+    Ok(expected.or(predicted.map(|total| (total, false))))
+}
+
+fn announce_start(render: &Render<'_>, driver: &mut CargoDriver<'_>, units: Option<(u16, bool)>) -> Result<(), RunError> {
+    driver.unit_total = units;
+    emit_live(render, &Event::Listed { binaries: 0, of: driver.test_targets, tests: 0 })?;
+    announce_built(render, (0, 0), units)
+}
+
+// edge read: the bytes that decide a build's unit set; zero means the metadata was unavailable, so no record can match
+fn build_fingerprint(facts: Option<&MetadataFacts>, parser: &CliParser<'_>, toolchain: &[u8]) -> u64 {
+    let Some(found) = facts else {
+        return 0;
+    };
+    let root = found.workspace_root().and_then(|bytes| core::str::from_utf8(bytes).ok()).map(Path::new);
+    let lock = root.map(|directory| std::fs::read(directory.join("Cargo.lock")).unwrap_or_default());
+    let manifests: Vec<Vec<u8>> = found
+        .bins
+        .member_directories()
+        .filter_map(|bytes| core::str::from_utf8(bytes).ok())
+        .map(|directory| std::fs::read(Path::new(directory).join("Cargo.toml")).unwrap_or_default())
+        .collect();
+    let arguments = parser.cargo_arguments().join(&0_u8);
+    let mut inputs: Vec<&[u8]> = Vec::from([lock.as_deref().unwrap_or_default(), toolchain, b"test".as_slice(), arguments.as_slice()]);
+    inputs.extend(manifests.iter().map(Vec::as_slice));
+    last_run::fingerprint(&inputs)
+}
+
+// the toolchain's identity is `rustc -vV`; a rustc that will not run leaves it empty, which still fingerprints the rest
+fn read_toolchain(rustc: Option<&[u8]>) -> Vec<u8> {
+    let program = rustc.and_then(|bytes| core::str::from_utf8(bytes).ok()).unwrap_or("rustc");
+    match std::process::Command::new(program).arg("-vV").output() {
+        Ok(output) if output.status.success() => output.stdout,
+        Ok(_) | Err(_) => Vec::new(),
+    }
+}
+
+// the metadata is read before cargo starts: the full resolve takes cargo's package cache lock, which a running build would make it wait on
 async fn start_children(
     parser: &CliParser<'_>,
     settings: &Settings,
     target_mode: TargetDirMode<'_>,
-    environment: &[&[u8]],
+    (environment, environment_rustc): (&[&[u8]], Option<&[u8]>),
 ) -> Result<StartedChildren, RunError> {
     let isolating = target_mode == TargetDirMode::Isolated;
     let mut metadata_child = (settings.bin_gate || isolating || settings.output == OutputMode::Rich)
-        .then(|| spawn_metadata(parser, environment))
+        .then(|| spawn_metadata(parser, environment, true))
         .and_then(Result::ok);
     let spawned = metadata_child.is_some();
     let mut facts = None;
-    if isolating && let Some(child) = metadata_child.take() {
-        facts = read_metadata(child, parser).await;
+    if let Some(child) = metadata_child.take() {
+        facts = read_metadata(child, (parser, environment)).await;
     }
     let directories = build_directories(target_mode, facts.as_deref())?;
     let cargo = spawn_reserved(|| spawn_cargo(parser, settings.color, environment, directories.as_ref().map(|chosen| &chosen.test)))?;
     track(cargo.process_id())?;
-    if let Some(child) = metadata_child {
-        facts = read_metadata(child, parser).await;
-    }
     let mut lock_watch = LockWatch::new();
     match (&directories, facts.as_deref().and_then(MetadataFacts::target_directory)) {
         (Some(chosen), _) => lock_watch.set_directory(chosen.test.directory()),
@@ -3723,6 +3817,9 @@ async fn start_children(
     let test_targets = facts.as_deref().and_then(|found| found.test_targets);
     test_binaries_debug(settings.debug, test_targets);
     let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory).map(Box::from);
+    let predicted_units = facts.as_deref().and_then(|found| found.bins.predicted_units()).and_then(|units| u16::try_from(units).ok());
+    let toolchain = read_toolchain(environment_rustc);
+    let fingerprint = build_fingerprint(facts.as_deref(), parser, &toolchain);
     let (bins, gate) = resolve_bin_gate(settings, spawned, facts);
     Ok(StartedChildren {
         cargo,
@@ -3730,6 +3827,7 @@ async fn start_children(
         bins,
         gate,
         test_targets,
+        eta: (fingerprint, predicted_units),
         lock_watch,
         metadata_directory,
         workspace_root,
@@ -4421,20 +4519,20 @@ async fn run_doc_only<'run>(
     parser: &CliParser<'_>,
     (settings, render): (&Settings, &'run Render<'run>),
     target_mode: TargetDirMode<'_>,
-    (started_millis, location): (u64, &mut Option<PathBuf>),
+    (started_millis, location): (u64, &mut Located),
     (environment, target_variable): (&[&[u8]], Option<&str>),
 ) -> Result<RunSummary, RunError> {
     let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
     watch_parent(&signals, settings.exit_with_parent)?;
     let metadata_child = (!matches!(target_mode, TargetDirMode::Path(_)))
-        .then(|| spawn_metadata(parser, environment))
+        .then(|| spawn_metadata(parser, environment, true))
         .and_then(Result::ok);
     let facts = match metadata_child {
-        Some(child) => read_metadata(child, parser).await,
+        Some(child) => read_metadata(child, (parser, environment)).await,
         None => None,
     };
     let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory);
-    open_last_run(render, settings, location, [explicit_root(target_mode), target_variable.map(str::as_bytes), metadata_directory])?;
+    open_last_run(render, settings, location, ([explicit_root(target_mode), target_variable.map(str::as_bytes), metadata_directory], 0))?;
     let directories = build_directories(target_mode, facts.as_deref())?;
     let mut doc = spawn_doc_tests(
         parser,
@@ -4472,7 +4570,7 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, Environment, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, RunSummary, is_status_line, last_run, last_run_record, persist_last_run, runtime_settings, validated_harness, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, Environment, ErrorLine, LaunchCause, Located, OutcomeError, OutputMode, RunError, RunSummary, is_status_line, last_run, last_run_record, persist_last_run, runtime_settings, validated_harness, whole_lines_len};
     use std::string::String;
     use std::vec::Vec;
 
@@ -4484,9 +4582,9 @@ mod tests {
     fn only_runs_with_a_summary_map_to_a_record() {
         let ran = |failed, discovered, no_tests| RunSummary { passed: 5, failed, stop: None, no_tests, doc_tests: None, discovered };
         let cases = [
-            (Ok(ran(0, 383, None)), Some((900, 383, 0))),
-            (Ok(ran(2, 383, None)), Some((900, 383, 1))),
-            (Ok(ran(0, 0, Some(NoTestsPolicy::Fail))), Some((900, 0, 4))),
+            (Ok(ran(0, 383, None)), Some((900, 383, 0, 77, 1204, 600))),
+            (Ok(ran(2, 383, None)), Some((900, 383, 1, 77, 1204, 600))),
+            (Ok(ran(0, 0, Some(NoTestsPolicy::Fail))), Some((900, 0, 4, 77, 1204, 600))),
             (Err(RunError::CargoFailed), None),
             (Err(RunError::CargoRefused), None),
             (Err(RunError::Spawn), None),
@@ -4494,21 +4592,22 @@ mod tests {
             (Err(RunError::Interrupted(15)), None),
         ];
         for (outcome, expected) in cases {
-            assert_eq!(last_run_record(900, &outcome), expected, "{outcome:?}");
+            assert_eq!(last_run_record(900, [77, 1204, 600], &outcome), expected, "{outcome:?}");
         }
     }
 
     #[test]
     fn persisting_replaces_the_record_only_for_a_summary() {
         let target = tempdir().expect("tempdir is creatable");
-        last_run::write(target.path(), (1, 2, 0)).expect("earlier record is writable");
-        persist_last_run(Some(target.path()), 50, &Err(RunError::Interrupted(2)));
-        assert_eq!(last_run::read(target.path()), Some((1, 2, 0)));
+        last_run::write(target.path(), (1, 2, 0, 3, 4, 5)).expect("earlier record is writable");
+        let located: Located = (Some(target.path().to_path_buf()), [9, 120, 30]);
+        persist_last_run(&located, 50, &Err(RunError::Interrupted(2)));
+        assert_eq!(last_run::read(target.path()), Some((1, 2, 0, 3, 4, 5)));
         let summary = RunSummary { passed: 4, failed: 0, stop: None, no_tests: None, doc_tests: None, discovered: 4 };
-        persist_last_run(Some(target.path()), 50, &Ok(summary));
-        assert_eq!(last_run::read(target.path()), Some((50, 4, 0)));
-        persist_last_run(None, 60, &Ok(summary));
-        assert_eq!(last_run::read(target.path()), Some((50, 4, 0)));
+        persist_last_run(&located, 50, &Ok(summary));
+        assert_eq!(last_run::read(target.path()), Some((50, 4, 0, 9, 120, 30)));
+        persist_last_run(&(None, [1, 1, 1]), 60, &Ok(summary));
+        assert_eq!(last_run::read(target.path()), Some((50, 4, 0, 9, 120, 30)));
     }
 
     const RICH_WITH_COLOUR: [(&str, Option<&str>); 3] = [("CARGO_VAL_OUTPUT", Some("rich")), ("CARGO_VAL_COLOR", Some("true")), ("NO_COLOR", None)];
