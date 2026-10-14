@@ -1262,6 +1262,73 @@ async fn detached_edit(editor: &Path, extra: &[(&str, &str)], count: usize, hold
     (output, status, lines)
 }
 
+const BUSY_NOTICE: &str = "opening the editor…";
+
+fn process_is_gone(pid: &str) -> bool {
+    let pid: libc::pid_t = pid.parse().expect("the recorded group id is a pid");
+    unsafe { libc::kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
+}
+
+fn editors_recorded(log: &Path, (count, reaped): (usize, bool), started: Instant) -> bool {
+    let lines = std::fs::read_to_string(log).map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
+    let pids: Vec<&str> = lines.iter().filter_map(|line| line.strip_prefix("pgid=")).collect();
+    assert!(started.elapsed().as_secs() < 30, "editors {pids:?} of {count} never arrived (reaped required: {reaped})");
+    pids.len() >= count && (!reaped || pids.iter().all(|pid| process_is_gone(pid)))
+}
+
+async fn press_e_twice(master: &ChildStream, mut keys: File, (log, count, hold): (&Path, usize, PathBuf)) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(b"e").expect("the first editor key is writable");
+    let started = Instant::now();
+    let (first, _) = drain::drain_until(master, |_| editors_recorded(log, (1, false), started)).await;
+    output.extend_from_slice(&first);
+    keys.write_all(b"e").expect("the second editor key is writable");
+    let (busy, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(BUSY_NOTICE)).await;
+    output.extend_from_slice(&busy);
+    File::create(hold).expect("the hold file releases the editor");
+    let (exited, _) = drain::drain_until(master, |_| editors_recorded(log, (count, true), started)).await;
+    output.extend_from_slice(&exited);
+    keys.write_all(b"q").expect("the quit-arm key is writable");
+    let (armed, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("q again to confirm")).await;
+    output.extend_from_slice(&armed);
+    keys.write_all(b"q").expect("the quit key is writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn double_press_edit(editor: &Path, extra: &[(&str, &str)], count: usize) -> (String, ExitStatus, Vec<String>) {
+    let log = editor_log();
+    let release = log.with_extension("hold");
+    let visual = editor.display().to_string();
+    let mut environment = vec![("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_HOLD_FILE", release.to_str().expect("the hold path is UTF-8"))];
+    environment.extend_from_slice(extra);
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| press_e_twice(master, keys, (&log, count, release.clone())).await).await;
+    (output, status, recorded(&log))
+}
+
+#[proxima::test]
+async fn a_second_e_while_a_detached_editor_runs_shows_a_notice_starts_nothing_and_leaves_no_zombie() {
+    let (output, status, lines) = double_press_edit(&fake_editor_named("code"), &[], 1).await;
+
+    assert_eq!(lines.iter().filter(|line| line.starts_with("pgid=")).count(), 1, "one press, one editor: {lines:?}");
+    assert!(output.contains(BUSY_NOTICE), "the second press shows the busy notice:\n{}", shown(&output));
+    assert!(output.contains("SUMMARY"), "{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
+
+#[proxima::test]
+async fn a_second_e_during_the_first_nvim_step_runs_both_steps_once_in_order() {
+    let (output, status, lines) = double_press_edit(&fake_editor_named("nvim"), &[("NVIM", "/run/user/501/nvim.4242.0")], 2).await;
+
+    let site = failure_site();
+    let expected = ["--server", "/run/user/501/nvim.4242.0", "--remote", site.as_str(), "--server", "/run/user/501/nvim.4242.0", "--remote-send", ":call cursor(11,9)<CR>"];
+    assert_eq!(recorded_arguments(&lines), expected);
+    assert_eq!(lines.iter().filter(|line| line.starts_with("pgid=")).count(), 2, "two steps, each once: {lines:?}");
+    assert!(output.contains(BUSY_NOTICE), "the second press shows the busy notice:\n{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
+
 #[proxima::test]
 async fn e_with_a_code_editor_runs_it_detached_while_review_keeps_taking_keys_in_raw_mode() {
     let (output, status, lines) = detached_edit(&fake_editor_named("code"), &[], 1, true).await;

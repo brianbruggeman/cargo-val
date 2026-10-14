@@ -1570,6 +1570,7 @@ pub(crate) struct ListingRun<'run> {
     editor_program: RefCell<Vec<u8>>,
     request: RefCell<Option<(Vec<u8>, u32, u32)>>,
     outside: RefCell<Vec<Vec<Vec<u8>>>>,
+    detached_running: Cell<bool>,
     probe: RefCell<Option<(u32, u64)>>,
     probe_site: RefCell<(Vec<u8>, u32, u32)>,
     probe_output: RefCell<(Vec<u8>, Option<bool>, bool)>,
@@ -1720,10 +1721,19 @@ impl ListingRun<'_> {
         if leaving {
             self.root.fire();
         }
-        if let Some(request) = editing.filter(|_| !editor_reserved() && self.probe.borrow().is_none()) {
-            *self.request.borrow_mut() = Some(request);
+        match editing.filter(|_| !editor_reserved()) {
+            Some(_) if self.editor_in_flight() => emit(self.render(), &Event::Notice { what: "opening the editor…".as_bytes() }),
+            Some(request) => {
+                *self.request.borrow_mut() = Some(request);
+                Ok(())
+            }
+            None => Ok(()),
         }
-        Ok(())
+    }
+
+    // the exit source of EDITOR_LANE holds one child: a further press must not replace it before it is reaped
+    fn editor_in_flight(&self) -> bool {
+        self.probe.borrow().is_some() || self.detached_running.get() || self.request.borrow().is_some() || self.editing.borrow().is_some()
     }
 
     // the editor is resolved here, at the driver edge, from the run's settings: render only ever sees the action
@@ -1790,18 +1800,23 @@ impl ListingRun<'_> {
     // the next queued detached command goes onto the exit lane; the one before it must have exited 0
     fn start_detached(&self, lanes: &Lanes) -> Result<(), RunError> {
         let Some(argv) = self.outside.borrow_mut().pop() else {
+            self.detached_running.set(false);
             return Ok(());
         };
         *self.editor_program.borrow_mut() = argv.first().cloned().unwrap_or_default();
         let directory = absolute_directory(&self.settings.source_root);
         match crate::editor_launch::spawn_detached(&argv, self.environment, directory.as_bytes()) {
-            Ok((_, child)) => attach(&lanes[EDITOR_LANE], child).map(|_| ()),
+            Ok((_, child)) => {
+                self.detached_running.set(true);
+                attach(&lanes[EDITOR_LANE], child).map(|_| ())
+            }
             Err(code) => self.detached_failed(Err(code)),
         }
     }
 
     fn detached_failed(&self, outcome: Result<i32, i32>) -> Result<(), RunError> {
         self.outside.borrow_mut().clear();
+        self.detached_running.set(false);
         let mut notice = Line::<96>::new();
         crate::editor_launch::write_notice(&mut notice, outcome, true, &self.editor_program.borrow());
         emit(self.render(), &Event::Notice { what: notice.bytes() })
@@ -3325,7 +3340,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0), interrupt_not_run: Cell::new(0),
-            editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
+            editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), detached_running: Cell::new(false), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
     });
@@ -4660,7 +4675,7 @@ mod listing_allocation_tests {
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
             editing: RefCell::new(None),
-            editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
+            editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), detached_running: Cell::new(false), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
         };
