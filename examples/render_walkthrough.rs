@@ -38,7 +38,7 @@ fn run_with_failure() -> Result<(), String> {
     show(&mut state, Event::Started { id: PASSING, solo: false })?;
     show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Passed, millis: Some(3123), solo: false })?;
     show(&mut state, Event::Settled { id: FAILING, outcome: Outcome::Failed, millis: Some(71_660), solo: false })?;
-    show(&mut state, Event::Captured { id: FAILING, stdout: (b"", false), stderr: (b"body did not complete within the timeout", false), exit: Exit::Code(101) })?;
+    show(&mut state, Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (b"body did not complete within the timeout", 0), exit: Exit::Code(101) })?;
     show(&mut state, Event::Warned { id: FAILING, what: b"solo rerun passed" })?;
     show(&mut state, finished(1))
 }
