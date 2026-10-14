@@ -11,12 +11,15 @@
 NO-RETRY not retried alone: it failed after 120.030s, over
   the 30s retry budget. r retries it now
 
+   the shard child reported its pid before the deadline
+
  test output  verbatim
    thread 'a_per_test_interrupt_ends_a_blocked_child_and_ca
    rgo_val_exits_promptly' panicked at tests/shard_process.
    rs:575:31:
    the shard child reported its pid before the deadline
-   +1 lines
+   note: run with `RUST_BACKTRACE=1` environment variable t
+   o display a backtrace
 
 find the commit  cargo val bisect shard_process
   a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_e
