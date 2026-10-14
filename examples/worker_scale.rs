@@ -6,15 +6,31 @@
 //! Arm two times only the feed against a pool kept warm across rounds.
 //! `SCALE_TESTS` (default 13000) passing tests are split over `SCALE_BINARIES` (default 4) binaries with 8 planted failures.
 
+use core::future::{Future, poll_fn};
+use core::ops::Range;
+use core::pin::Pin;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use futures::future::{join3, join_all};
+use proxima_core::markers::DropSafe;
+use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
+
+#[cfg(unix)]
+use core::num::NonZeroI32;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsHandle, OwnedHandle};
+
+use common::{ChildStream, ExitSource};
+use common::group::bounded;
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -173,10 +189,31 @@ struct Context {
 struct Worker {
     child: Child,
     stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
-    stderr: JoinHandle<io::Result<String>>,
+    // boxed: each stream owns a capture window and scratch tail, which would bloat every future that holds a worker
+    stdout: Box<ChildStream>,
+    stderr: Box<ChildStream>,
+    exit: ExitSource,
+    pending: Vec<u8>,
     chunks: usize,
     round_trip: Duration,
+}
+
+struct Tagged<'stream>(bool, &'stream ChildStream);
+
+impl DropSafe for Tagged<'_> {}
+
+impl UnpinPipe for Tagged<'_> {
+    type In = ();
+    type Out = (bool, io::Result<Range<u32>>);
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> + Unpin {
+        let (is_stderr, stream) = (self.0, self.1);
+        poll_fn(move |context| {
+            let mut read = UnpinPipe::call(stream, ());
+            Pin::new(&mut read).poll(context).map_ok(|item| (is_stderr, item))
+        })
+    }
 }
 
 const PHASE_PREFIX: &str = "worker_phases: ";
@@ -331,12 +368,39 @@ fn find_binary(context: &Context, binary: usize) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("no test executable {prefix}* in {}", deps.display()))
 }
 
-fn list_names(executable: &Path) -> Result<Vec<String>, String> {
+async fn list_names(executable: &Path) -> Result<Vec<String>, String> {
     let mut listing = Command::new(executable);
     listing.arg("--list");
-    let output = block_on::output_blocking(listing, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE").map_err(|failure| format!("list {}: {failure}", executable.display()))?;
+    let output = common::output_within(&mut listing, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE").await.map_err(|failure| format!("list {}: {failure}", executable.display()))?;
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text.lines().filter_map(|line| line.strip_suffix(": test")).map(str::to_string).collect())
+}
+
+#[cfg(unix)]
+fn stream_of(pipe: impl Into<OwnedFd>) -> Result<Box<ChildStream>, String> {
+    let descriptor: OwnedFd = pipe.into();
+    // std pipes are blocking; a ChildStream read must return EAGAIN so its readiness gate can park
+    let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(format!("make worker pipe nonblocking: {}", io::Error::last_os_error()));
+    }
+    Ok(Box::new(ChildStream::new(descriptor)))
+}
+
+#[cfg(windows)]
+fn stream_of(_pipe: impl Into<OwnedHandle>) -> Result<Box<ChildStream>, String> {
+    Err(String::from("worker_scale needs a nonblocking stdin pipe pair; windows ChildStream reads overlapped pipe ends that std::process cannot create"))
+}
+
+#[cfg(unix)]
+fn exit_of(child: &Child) -> Result<ExitSource, String> {
+    let target = NonZeroI32::new(child.id().cast_signed()).ok_or("a spawned child has a nonzero pid")?;
+    Ok(ExitSource::new(target))
+}
+
+#[cfg(windows)]
+fn exit_of(child: &Child) -> Result<ExitSource, String> {
+    ExitSource::new(child.as_handle()).map_err(|error| format!("worker exit source: {error}"))
 }
 
 fn spawn_worker(executable: &Path, directory: &Path) -> Result<Worker, String> {
@@ -350,17 +414,47 @@ fn spawn_worker(executable: &Path, directory: &Path) -> Result<Worker, String> {
         .spawn()
         .map_err(|error| format!("spawn worker {}: {error}", executable.display()))?;
     let stdin = child.stdin.take().ok_or("worker stdin not piped")?;
-    let stdout = child.stdout.take().ok_or("worker stdout not piped")?;
-    let mut stderr = child.stderr.take().ok_or("worker stderr not piped")?;
-    // stderr is drained as the worker writes it, so a full stderr pipe can never block the worker while this side waits on its stdout
-    let stderr = thread::spawn(move || {
-        let mut report = String::new();
-        stderr.read_to_string(&mut report).map(|_| report)
-    });
-    Ok(Worker { child, stdin, reader: BufReader::new(stdout), stderr, chunks: 0, round_trip: Duration::ZERO })
+    let stdout = stream_of(child.stdout.take().ok_or("worker stdout not piped")?)?;
+    let stderr = stream_of(child.stderr.take().ok_or("worker stderr not piped")?)?;
+    let exit = exit_of(&child)?;
+    Ok(Worker { child, stdin, stdout, stderr, exit, pending: Vec::new(), chunks: 0, round_trip: Duration::ZERO })
 }
 
-fn run_chunk(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)>, String> {
+async fn next_line<Merged>(merged: &Merged, stdout: &ChildStream, pending: &mut Vec<u8>) -> Result<String, String>
+where
+    Merged: UnpinPipe<In = (), Out = (bool, io::Result<Range<u32>>), Err = Exhausted>,
+{
+    loop {
+        if let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(&pending[..end]).into_owned();
+            pending.drain(..=end);
+            return Ok(line);
+        }
+        match UnpinPipe::call(merged, ()).await {
+            Ok((false, Ok(range))) => pending.extend_from_slice(&stdout.window(range).ok_or("a stdout range reached past the capture window")?),
+            Ok((true, Ok(_))) => {}
+            Ok((_, Err(fault))) => return Err(format!("read from worker: {fault}")),
+            Err(Exhausted) => return Err(String::from("worker closed its pipes before answering")),
+        }
+    }
+}
+
+async fn read_answers(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)>, String> {
+    let merged = FanIn::new([Tagged(false, &worker.stdout), Tagged(true, &worker.stderr)], Select::RoundRobin);
+    let mut results = Vec::with_capacity(names.len());
+    for name in names {
+        let line = next_line(&merged, &worker.stdout, &mut worker.pending).await?;
+        let mut fields = line.splitn(3, ' ');
+        let (verdict, reported) = (fields.next(), fields.next());
+        if reported != Some(name.as_str()) {
+            return Err(format!("worker answered {line:?} for {name}"));
+        }
+        results.push((name.clone(), verdict == Some("ok")));
+    }
+    Ok(results)
+}
+
+async fn run_chunk(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)>, String> {
     let request = names.iter().fold(String::new(), |mut text, name| {
         text.push_str(name);
         text.push('\n');
@@ -368,42 +462,25 @@ fn run_chunk(worker: &mut Worker, names: &[String]) -> Result<Vec<(String, bool)
     });
     let started = Instant::now();
     worker.stdin.write_all(request.as_bytes()).and_then(|()| worker.stdin.flush()).map_err(|error| format!("write to worker: {error}"))?;
-    let results = names
-        .iter()
-        .map(|name| {
-            let mut line = String::new();
-            let read = worker.reader.read_line(&mut line).map_err(|error| format!("read from worker: {error}"))?;
-            let mut fields = line.trim_end().splitn(3, ' ');
-            let (verdict, reported) = (fields.next(), fields.next());
-            if read == 0 || reported != Some(name.as_str()) {
-                return Err(format!("worker answered {line:?} for {name}"));
-            }
-            Ok((name.clone(), verdict == Some("ok")))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let leader = worker.child.id();
+    let results = match bounded(leader, worker_deadline(), "EXAMPLE_DEADLINE", read_answers(worker, names)).await {
+        Ok(answered) => answered?,
+        Err((report, _)) => return Err(report),
+    };
     worker.round_trip += started.elapsed();
     worker.chunks += 1;
     Ok(results)
 }
 
-fn drive(worker: &mut Worker, names: &[String], cursor: &AtomicUsize) -> Result<Vec<(String, bool)>, String> {
+async fn drive(worker: &mut Worker, names: &[String], cursor: &AtomicUsize) -> Result<Vec<(String, bool)>, String> {
     let mut results = Vec::new();
     loop {
         let start = cursor.fetch_add(CHUNK, Ordering::Relaxed);
         if start >= names.len() {
             return Ok(results);
         }
-        results.extend(run_chunk(worker, &names[start..(start + CHUNK).min(names.len())])?);
+        results.extend(run_chunk(worker, &names[start..(start + CHUNK).min(names.len())]).await?);
     }
-}
-
-fn run_binary(workers: &mut [Worker], names: &[String]) -> Result<Vec<(String, bool)>, String> {
-    let cursor = AtomicUsize::new(0);
-    let gathered = std::thread::scope(|scope| {
-        let handles = workers.iter_mut().map(|worker| scope.spawn(|| drive(worker, names, &cursor))).collect::<Vec<_>>();
-        handles.into_iter().map(|handle| handle.join().map_err(|_| String::from("driver thread panicked"))?).collect::<Result<Vec<_>, String>>()
-    })?;
-    Ok(gathered.into_iter().flatten().collect())
 }
 
 fn parse_phases(report: &str) -> Result<WorkerPhases, String> {
@@ -426,21 +503,25 @@ fn parse_phases(report: &str) -> Result<WorkerPhases, String> {
     Ok(parsed)
 }
 
-fn shut_down(workers: Vec<Worker>) -> Result<Vec<WorkerPhases>, String> {
-    workers
-        .into_iter()
-        .map(|worker| {
-            let Worker { mut child, stdin, reader, stderr, chunks, round_trip } = worker;
-            drop(stdin);
-            drop(reader);
-            let report = stderr.join().map_err(|_| String::from("worker stderr reader panicked"))?;
-            let waited = child.wait();
-            waited.map_err(|error| format!("wait for worker: {error}"))?;
-            let report = report.map_err(|error| format!("read worker stderr: {error}"))?;
-            let round_trip_micros = u64::try_from(round_trip.as_micros()).unwrap_or(u64::MAX);
-            parse_phases(&report).map(|phases| WorkerPhases { chunks, round_trip_micros, ..phases })
-        })
-        .collect()
+async fn finish_worker(worker: Worker) -> Result<WorkerPhases, String> {
+    let Worker { child, stdin, stdout, stderr, exit, chunks, round_trip, .. } = worker;
+    drop(stdin);
+    let leader = child.id();
+    let collect = join3(common::drain(&stdout), common::drain(&stderr), Pipe::call(&exit, ()));
+    let ((_, stdout_fault), (report, stderr_fault), waited) = match bounded(leader, worker_deadline(), "EXAMPLE_DEADLINE", collect).await {
+        Ok(finished) => finished,
+        Err((expiry, _)) => return Err(expiry),
+    };
+    if let Some(fault) = stdout_fault.or(stderr_fault) {
+        return Err(format!("read worker output: {fault}"));
+    }
+    waited.map_err(|Exhausted| String::from("worker exit source was already spent"))?.map_err(|error| format!("wait for worker: {error}"))?;
+    let round_trip_micros = u64::try_from(round_trip.as_micros()).unwrap_or(u64::MAX);
+    parse_phases(&String::from_utf8_lossy(&report)).map(|phases| WorkerPhases { chunks, round_trip_micros, ..phases })
+}
+
+async fn shut_down(workers: Vec<Worker>) -> Result<Vec<WorkerPhases>, String> {
+    join_all(workers.into_iter().map(finish_worker)).await.into_iter().collect()
 }
 
 fn median(values: &[f64]) -> f64 {
@@ -469,40 +550,42 @@ fn coefficient_of_variation(values: &[f64]) -> f64 {
 
 type Pools = Vec<(Vec<Worker>, Vec<String>)>;
 
-fn start_pools(context: &Context) -> Result<Pools, String> {
-    (0..context.shape.binaries)
-        .map(|binary| {
-            let executable = find_binary(context, binary)?;
-            let names = list_names(&executable)?;
-            let workers = (0..context.jobs).map(|_| spawn_worker(&executable, &context.fixture)).collect::<Result<Vec<_>, _>>()?;
-            Ok((workers, names))
-        })
-        .collect()
+async fn start_pools(context: &Context) -> Result<Pools, String> {
+    let mut pools = Pools::new();
+    for binary in 0..context.shape.binaries {
+        let executable = find_binary(context, binary)?;
+        let names = list_names(&executable).await?;
+        let workers = (0..context.jobs).map(|_| spawn_worker(&executable, &context.fixture)).collect::<Result<Vec<_>, _>>()?;
+        pools.push((workers, names));
+    }
+    Ok(pools)
 }
 
-fn feed(pools: &mut Pools) -> Result<Outcomes, String> {
-    let gathered = std::thread::scope(|scope| {
-        let handles = pools.iter_mut().map(|(workers, names)| scope.spawn(move || run_binary(workers, names))).collect::<Vec<_>>();
-        handles.into_iter().map(|handle| handle.join().map_err(|_| String::from("binary driver thread panicked"))?).collect::<Result<Vec<_>, String>>()
-    })?;
+async fn feed(pools: &mut Pools) -> Result<Outcomes, String> {
+    let cursors = pools.iter().map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
+    let drivers = pools.iter_mut().zip(&cursors).flat_map(|((workers, names), cursor)| {
+        let names: &[String] = names;
+        workers.iter_mut().map(move |worker| drive(worker, names, cursor))
+    });
+    let gathered = join_all(drivers).await.into_iter().collect::<Result<Vec<_>, String>>()?;
     Ok(gathered.into_iter().flatten().collect())
 }
 
-fn end_to_end_round(context: &Context) -> Result<Round, String> {
+async fn end_to_end_round(context: &Context) -> Result<Round, String> {
     let start = Instant::now();
-    let mut pools = start_pools(context)?;
-    let outcomes = feed(&mut pools)?;
+    let mut pools = start_pools(context).await?;
+    let outcomes = feed(&mut pools).await?;
     let created = pools.iter().map(|(workers, _)| workers.len()).sum::<usize>();
     let mut phases = Vec::new();
     for (workers, _) in pools {
-        phases.extend(shut_down(workers)?);
+        phases.extend(shut_down(workers).await?);
     }
     Ok(Round { wall: start.elapsed(), outcomes, created, phases })
 }
 
-fn feed_round(pools: &mut Pools) -> Result<(Duration, Outcomes), String> {
+async fn feed_round(pools: &mut Pools) -> Result<(Duration, Outcomes), String> {
     let start = Instant::now();
-    let outcomes = feed(pools)?;
+    let outcomes = feed(pools).await?;
     Ok((start.elapsed(), outcomes))
 }
 
@@ -581,29 +664,33 @@ fn measure() -> Result<bool, String> {
     );
     generate(&context)?;
     build(&context)?;
+    block_on::block_on(async move { run_rounds(&context, &expected).await })
+}
+
+async fn run_rounds(context: &Context, expected: &Outcomes) -> Result<bool, String> {
     let mut problems = Vec::new();
-    let warm = end_to_end_round(&context)?;
-    check("warm end to end", &warm.outcomes, &expected, &mut problems);
+    let warm = end_to_end_round(context).await?;
+    check("warm end to end", &warm.outcomes, expected, &mut problems);
     let created = warm.created;
-    let mut warm_pool = start_pools(&context)?;
-    check("warm feed", &feed(&mut warm_pool)?, &expected, &mut problems);
+    let mut warm_pool = start_pools(context).await?;
+    check("warm feed", &feed(&mut warm_pool).await?, expected, &mut problems);
     let (mut end_to_end, mut feed_only) = (Vec::new(), Vec::new());
     let mut last = Outcomes::new();
     let (mut phases, mut timed_wall) = (Vec::new(), Duration::ZERO);
     for round in 1..=ROUNDS {
-        let timed = end_to_end_round(&context)?;
-        check(&format!("end to end round {round}"), &timed.outcomes, &expected, &mut problems);
+        let timed = end_to_end_round(context).await?;
+        check(&format!("end to end round {round}"), &timed.outcomes, expected, &mut problems);
         check_phases(&format!("end to end round {round}"), &timed, expected.len(), &mut problems);
         end_to_end.push(timed.wall.as_secs_f64());
         timed_wall += timed.wall;
         phases.extend(timed.phases);
-        let (wall, outcomes) = feed_round(&mut warm_pool)?;
-        check(&format!("feed only round {round}"), &outcomes, &expected, &mut problems);
+        let (wall, outcomes) = feed_round(&mut warm_pool).await?;
+        check(&format!("feed only round {round}"), &outcomes, expected, &mut problems);
         feed_only.push(wall.as_secs_f64());
         last = outcomes;
     }
     for (workers, _) in warm_pool {
-        shut_down(workers)?;
+        shut_down(workers).await?;
     }
     print_table(&end_to_end, &feed_only, &last, created);
     for problem in &problems {
