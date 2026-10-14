@@ -25,6 +25,7 @@ use crate::discover_listing::{
 use crate::discover_cargo::{BinGate, DiscoveryFsm};
 use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
+use crate::last_run;
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
 use crate::failure_class::Exit;
@@ -357,6 +358,8 @@ pub struct RunSummary {
     pub no_tests: Option<NoTestsPolicy>,
     /// Present when a doc-test child was part of the selection; its counts are already in the totals.
     pub doc_tests: Option<DocTotals>,
+    /// Tests discovered across every binary, the count the last-run record keeps.
+    pub discovered: usize,
 }
 
 /// Exit status when the selection ran no tests and the policy is `fail`.
@@ -2667,6 +2670,59 @@ fn emit_begin(render: &Render<'_>, settings: &Settings, environment: &Environmen
     )
 }
 
+const fn explicit_root(mode: TargetDirMode<'_>) -> Option<&[u8]> {
+    match mode {
+        TargetDirMode::Path(root) => Some(root),
+        TargetDirMode::Isolated | TargetDirMode::Shared => None,
+    }
+}
+
+// edge read: runs once after the target directory is known, before any test starts; the record reaches the state as `Event::Previous`
+fn open_last_run(
+    render: &Render<'_>,
+    settings: &Settings,
+    location: &mut Option<PathBuf>,
+    sources: [Option<&[u8]>; 3],
+) -> Result<(), RunError> {
+    *location = last_run::target_directory(sources);
+    let Some((wall_ms, tests, _)) = location.as_deref().and_then(last_run::read) else {
+        return Ok(());
+    };
+    emit(render, &Event::Previous { wall_ms, tests })?;
+    if let (true, Some((wall_ms, tests))) = (settings.debug, render.1.borrow().previous()) {
+        let mut line = Line::<256>::new();
+        line.text(b"cargo-val: debug: last-run previous wall_ms=");
+        line.number(usize::try_from(wall_ms).unwrap_or(usize::MAX));
+        line.text(b" tests=");
+        line.number(usize::try_from(tests).unwrap_or(usize::MAX));
+        line.text(b"\n");
+        let _ = line.write(2);
+    }
+    Ok(())
+}
+
+// only a run that produced a summary records; build failures, refusals and interrupts keep the earlier record
+fn last_run_record(wall_ms: u64, outcome: &Result<RunSummary, RunError>) -> Option<last_run::Record> {
+    match outcome {
+        Ok(summary) => Some((wall_ms, u32::try_from(summary.discovered).unwrap_or(u32::MAX), exit_byte(summary.exit_code()))),
+        Err(_) => None,
+    }
+}
+
+fn exit_byte(code: i32) -> u8 {
+    u8::try_from(code).unwrap_or(u8::MAX)
+}
+
+// edge write: runs once when the run is over, outside the event loop
+fn persist_last_run(location: Option<&Path>, wall_ms: u64, outcome: &Result<RunSummary, RunError>) {
+    let (Some(target), Some(record)) = (location, last_run_record(wall_ms, outcome)) else {
+        return;
+    };
+    if let Err(error) = last_run::write(target, record) {
+        proxima_telemetry::warn!(error = %error, path = %target.display(), "last-run record not written");
+    }
+}
+
 fn begin_rich(render: &Render<'_>) -> Result<(), RunError> {
     if !crate::edge_output::enable_virtual_terminal(1) {
         return Err(RunError::Settings);
@@ -2681,6 +2737,13 @@ fn begin_rich(render: &Render<'_>) -> Result<(), RunError> {
 /// Returns [`RunError`] naming the stage that failed.
 pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
     let started_millis = monotonic_millis();
+    let mut location = None;
+    let outcome = run_located(parser, started_millis, &mut location).await;
+    persist_last_run(location.as_deref(), monotonic_millis().saturating_sub(started_millis), &outcome);
+    outcome
+}
+
+async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut Option<PathBuf>) -> Result<RunSummary, RunError> {
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
@@ -2701,7 +2764,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let target_source = BorrowedSettings::new(&target_pairs[..usize::from(configured_target.is_some())]);
     let target_mode = resolve_target_dir(&target_source, parser)?;
     if parser.doc_selection() == DocSelection::Only {
-        return run_doc_only(parser, &settings, &render, target_mode, started_millis, inherited).await;
+        return run_doc_only(parser, (&settings, &render), target_mode, (started_millis, location), (inherited, utf8_variable(&environment, b"CARGO_TARGET_DIR")?)).await;
     }
     let queries = start_libdir_queries(&environment, parser, inherited)?;
     let inherited_dylib_path = utf8_variable(&environment, DYLIB_PATH_KEY.as_bytes())?;
@@ -2716,7 +2779,9 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         gate,
         test_targets,
         lock_watch,
+        metadata_directory,
     } = start_children(parser, &settings, target_mode, inherited).await?;
+    open_last_run(&render, &settings, location, [explicit_root(target_mode), utf8_variable(&environment, b"CARGO_TARGET_DIR")?.map(str::as_bytes), metadata_directory.as_deref()])?;
     let cargo_process_id = cargo_child.process_id();
     let shared_directory = lock_watch.directory().to_vec();
     let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, test_targets, lock_watch, settings.output)?;
@@ -2921,6 +2986,7 @@ struct StartedChildren {
     gate: BinGate,
     test_targets: Option<usize>,
     lock_watch: LockWatch,
+    metadata_directory: Option<Box<[u8]>>,
 }
 
 // isolated mode reads the metadata first because the build directories come from it; the other modes overlap the read with the builds
@@ -2954,6 +3020,7 @@ async fn start_children(
         (None, None) => {}
     }
     let test_targets = facts.as_deref().map(|found| found.test_targets);
+    let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory).map(Box::from);
     let (bins, gate) = resolve_bin_gate(settings, spawned, facts);
     Ok(StartedChildren {
         cargo,
@@ -2962,6 +3029,7 @@ async fn start_children(
         gate,
         test_targets,
         lock_watch,
+        metadata_directory,
     })
 }
 
@@ -3580,6 +3648,7 @@ fn conclude(
         stop,
         no_tests: empty.then_some(settings.no_tests),
         doc_tests,
+        discovered: total.discovered,
     })
 }
 
@@ -3608,11 +3677,10 @@ fn close_plain(
 
 async fn run_doc_only<'run>(
     parser: &CliParser<'_>,
-    settings: &Settings,
-    render: &'run Render<'run>,
+    (settings, render): (&Settings, &'run Render<'run>),
     target_mode: TargetDirMode<'_>,
-    started_millis: u64,
-    environment: &[&[u8]],
+    (started_millis, location): (u64, &mut Option<PathBuf>),
+    (environment, target_variable): (&[&[u8]], Option<&str>),
 ) -> Result<RunSummary, RunError> {
     let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
     watch_parent(&signals, settings.exit_with_parent)?;
@@ -3623,6 +3691,8 @@ async fn run_doc_only<'run>(
         Some(child) => read_metadata(child).await,
         None => None,
     };
+    let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory);
+    open_last_run(render, settings, location, [explicit_root(target_mode), target_variable.map(str::as_bytes), metadata_directory])?;
     let directories = build_directories(target_mode, facts.as_deref())?;
     let mut doc = spawn_doc_tests(
         parser,
@@ -3660,7 +3730,40 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, is_status_line, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, RunSummary, is_status_line, last_run, last_run_record, persist_last_run, whole_lines_len};
+    use crate::config::NoTestsPolicy;
+    use crate::test_dir::tempdir;
+
+    #[test]
+    fn only_runs_with_a_summary_map_to_a_record() {
+        let ran = |failed, discovered, no_tests| RunSummary { passed: 5, failed, stop: None, no_tests, doc_tests: None, discovered };
+        let cases = [
+            (Ok(ran(0, 383, None)), Some((900, 383, 0))),
+            (Ok(ran(2, 383, None)), Some((900, 383, 1))),
+            (Ok(ran(0, 0, Some(NoTestsPolicy::Fail))), Some((900, 0, 4))),
+            (Err(RunError::CargoFailed), None),
+            (Err(RunError::CargoRefused), None),
+            (Err(RunError::Spawn), None),
+            (Err(RunError::Interrupted(2)), None),
+            (Err(RunError::Interrupted(15)), None),
+        ];
+        for (outcome, expected) in cases {
+            assert_eq!(last_run_record(900, &outcome), expected, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn persisting_replaces_the_record_only_for_a_summary() {
+        let target = tempdir().expect("tempdir is creatable");
+        last_run::write(target.path(), (1, 2, 0)).expect("earlier record is writable");
+        persist_last_run(Some(target.path()), 50, &Err(RunError::Interrupted(2)));
+        assert_eq!(last_run::read(target.path()), Some((1, 2, 0)));
+        let summary = RunSummary { passed: 4, failed: 0, stop: None, no_tests: None, doc_tests: None, discovered: 4 };
+        persist_last_run(Some(target.path()), 50, &Ok(summary));
+        assert_eq!(last_run::read(target.path()), Some((50, 4, 0)));
+        persist_last_run(None, 60, &Ok(summary));
+        assert_eq!(last_run::read(target.path()), Some((50, 4, 0)));
+    }
 
     #[proxima::test]
     async fn cargo_status_lines_are_recognised_with_or_without_colour_and_diagnostics_are_not() {

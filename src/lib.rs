@@ -32,6 +32,8 @@ pub mod filter_glob;
 pub mod filterset;
 pub mod ignored_set;
 pub mod isolated_target;
+#[cfg(feature = "edge-os")]
+pub mod last_run;
 pub mod life;
 pub mod line;
 pub mod metadata_scan;
