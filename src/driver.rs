@@ -35,6 +35,7 @@ use crate::run::{
 };
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
 use prime::os::readiness::Readiness;
+use proxima_core::signal::Signal;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
 use std::sync::OnceLock;
@@ -59,7 +60,7 @@ use crate::runner::{
 };
 use crate::schedule::{SessionSlotId, SessionSlots};
 use crate::sched_binary::{GROUP_CAPACITY, RECORD_BYTES};
-use crate::shard_arena::{DECLARED_BYTES, ShardArena};
+use crate::shard_arena::{DECLARED_BYTES, Rerun, ShardArena};
 use crate::shard_sched::{SchedTable, SpecialPlan};
 
 mod shard;
@@ -368,6 +369,7 @@ impl RunSummary {
 pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: u32,
+    scope: Signal,
     output: ChildOutput,
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
@@ -661,7 +663,7 @@ fn start_session(
     watches: &mut Watches,
     lanes: &Lanes,
     slot: SessionSlotId,
-    shard: Option<ShardWatch>,
+    (shard, scope): (Option<ShardWatch>, Signal),
 ) -> Result<(), RunError> {
     let child = ledger
         .sessions()
@@ -674,6 +676,7 @@ fn start_session(
     watches[slot.index()] = Some(TestWatch {
         slot,
         process_id,
+        scope,
         output: ChildOutput::new(),
         shard,
         group: [0; GROUP_CAPACITY],
@@ -1293,13 +1296,21 @@ fn launch_listed(
         run.ready.set(Some(slot));
     }
     run.targets.borrow_mut().tally(target, Tally::Launched);
-    start_session(ledger, watches, scan.lanes, slot, None)?;
+    start_session(ledger, watches, scan.lanes, slot, (None, run.session_scope(None)))?;
     let targets = run.targets.borrow();
     let id = (targets.id(target), intent.test_name().as_bytes());
     emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
     drop(targets);
     shard::note_group(run, watches, slot.index(), intent.test_name());
     Ok(())
+}
+
+// an output-only rerun is the only place a tripping test's block is printed, so only an interrupt scopes it
+pub(crate) fn scope_for(rerun: Option<Rerun>, (root, trip): (&Signal, &Signal)) -> Signal {
+    match rerun {
+        Some(Rerun::OutputOnly) => root.child(),
+        _ => trip.child(),
+    }
 }
 
 pub(crate) struct ListingRun<'run> {
@@ -1327,6 +1338,8 @@ pub(crate) struct ListingRun<'run> {
     specials: RefCell<SpecialPlan<'run>>,
     sched_target: Cell<Option<usize>>,
     stop_sent: Cell<bool>,
+    root: Signal,
+    trip: Signal,
 }
 
 pub(crate) struct DocObservation<'run> {
@@ -1402,8 +1415,16 @@ impl ListingRun<'_> {
         }
     }
 
+    pub(crate) fn session_scope(&self, rerun: Option<Rerun>) -> Signal {
+        scope_for(rerun, (&self.root, &self.trip))
+    }
+
     fn interrupted(&self) -> bool {
-        self.signals.received().is_some()
+        let received = self.signals.received().is_some();
+        if received {
+            self.root.fire();
+        }
+        received
     }
 
     // sessions admitted at once: the jobs that run plus the frozen children this platform creates ahead of a free slot
@@ -1428,8 +1449,9 @@ impl ListingRun<'_> {
             self.policy
                 .borrow_mut()
                 .record_trip(self.started_sessions(ledger), doc);
+            self.trip.fire();
         }
-        observation != Observation::Clear
+        self.trip.is_fired()
     }
 
     // a child terminated while still frozen never ran, so it is not in flight even while its exit is pending
@@ -2561,6 +2583,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         .inspect_err(|_| cargo_child.terminate())?;
     let prepared = held(settings.filterset.as_ref().map(Filterset::prepare));
     let doc_wanted = parser.doc_selection() == DocSelection::Included;
+    let root = Signal::new();
     let run = held(ListingRun {
         signals: &signals,
         filter,
@@ -2589,6 +2612,8 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
+            trip: root.child(),
+            root,
     });
     let mut launch_doc = doc_wanted.then_some(|| {
         let mut doc = spawn_doc_tests(parser, (settings.ignore, settings.output), inherited, directories.as_ref().map(|chosen| &chosen.doc))?;
@@ -3627,6 +3652,8 @@ mod tests {
 mod listing_allocation_tests {
     use core::cell::{Cell, RefCell};
 
+    use proxima_core::signal::Signal;
+
     use super::{DocObservation, ENVIRONMENT_CAPACITY, LISTING_SLOTS, ListingRun, PendingListing, Settings, TargetTable, spawn_listing};
     use crate::edge_spawn::held_launch_storage;
     use crate::cargo_message::TestArtifact;
@@ -3676,6 +3703,7 @@ mod listing_allocation_tests {
         let mut ledger = [0_u32; 4];
         let mut frame = crate::line::Line::new();
         let render = (crate::config::OutputMode::Rich, RefCell::new(super::RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+        let root = Signal::new();
         let run = ListingRun {
             signals: &signals,
             filter: "",
@@ -3701,6 +3729,8 @@ mod listing_allocation_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
+            trip: root.child(),
+            root,
         };
         let artifact = TestArtifact {
             executable,
