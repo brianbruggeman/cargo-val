@@ -29,7 +29,7 @@ use crate::line::Line;
 use crate::render::{Event, Outcome, State, Stream};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
-    CARGO_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
+    CARGO_LANE, DOC_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
     observe_cargo, observe_doc,
 };
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
@@ -1250,6 +1250,7 @@ pub(crate) struct ListingRun<'run> {
     docs: DocObservation<'run>,
     policy: RefCell<StopPolicy>,
     doc: RefCell<Option<Box<DocRun>>>,
+    doc_pending: Cell<bool>,
     launch_storage: RefCell<HeldLaunchStorage>,
     ready: Cell<Option<SessionSlotId>>,
     withdrawn_ready: Cell<Option<SessionSlotId>>,
@@ -1371,8 +1372,25 @@ impl ListingRun<'_> {
             .unwrap_or(DocAtTrip::NotSpawned)
     }
 
-    pub(crate) fn take_doc_child(&self) -> Option<Child> {
-        self.doc.borrow_mut().as_mut().and_then(|doc| doc.take_child())
+    // the doc cargo starts once the test build's cargo has output or exited: both are past its package-cache phases, so the two never contend for that lock
+    pub(crate) fn start_doc(
+        &self,
+        lanes: &Lanes,
+        launch: &mut Option<impl FnOnce() -> Result<Box<DocRun>, RunError>>,
+    ) -> Result<(), RunError> {
+        let Some(spawn) = launch.take() else {
+            return Ok(());
+        };
+        self.doc_pending.set(false);
+        if self.interrupted() {
+            return Ok(());
+        }
+        let mut doc = spawn()?;
+        if let Some(child) = doc.take_child() {
+            attach(&lanes[DOC_LANE], child)?;
+        }
+        *self.doc.borrow_mut() = Some(doc);
+        Ok(())
     }
 
     pub(crate) fn with_doc(
@@ -1386,7 +1404,7 @@ impl ListingRun<'_> {
     }
 
     fn doc_tests_finished(&self) -> bool {
-        self.doc.borrow().as_ref().is_none_or(|doc| doc.finished())
+        !self.doc_pending.get() && self.doc.borrow().as_ref().is_none_or(|doc| doc.finished())
     }
 }
 
@@ -2394,18 +2412,20 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let signals = SignalPipe::install().map_err(|_| RunError::Reactor)?;
     let StartedChildren {
         cargo: cargo_child,
-        doc_tests,
+        directories,
         bins,
         gate,
         lock_watch,
     } = start_children(parser, &settings, target_mode, inherited).await?;
     let cargo_process_id = cargo_child.process_id();
+    let shared_directory = lock_watch.directory().to_vec();
     let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .await
         .inspect_err(|_| cargo_child.terminate())?;
     let prepared = held(settings.filterset.as_ref().map(Filterset::prepare));
+    let doc_wanted = parser.doc_selection() == DocSelection::Included;
     let run = held(ListingRun {
         signals: &signals,
         filter,
@@ -2424,7 +2444,8 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         prepared: (*prepared).as_ref(),
         docs: DocObservation::new(&render),
         policy: RefCell::new(StopPolicy::new(settings.max_fail)),
-        doc: RefCell::new(doc_tests),
+        doc: RefCell::new(None),
+        doc_pending: Cell::new(doc_wanted),
         launch_storage: RefCell::new(held_launch_storage()),
         ready: Cell::new(None),
         withdrawn_ready: Cell::new(None),
@@ -2434,7 +2455,14 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
     });
-    observe_cargo(cargo_child, &mut driver, &run, &mut ledger, watches).await?;
+    let mut launch_doc = doc_wanted.then_some(|| {
+        let mut doc = spawn_doc_tests(parser, (settings.ignore, settings.output), inherited, directories.as_ref().map(|chosen| &chosen.doc))?;
+        if directories.is_none() {
+            doc.lock_watch.set_directory(&shared_directory);
+        }
+        Ok(doc)
+    });
+    observe_cargo(cargo_child, &mut driver, &run, &mut ledger, watches, &mut launch_doc).await?;
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
         return Err(RunError::CargoStream);
     }
@@ -2570,7 +2598,7 @@ const fn ignore_arguments(mode: IgnoreMode) -> &'static [&'static [u8]] {
 
 struct StartedChildren {
     cargo: Child,
-    doc_tests: Option<Box<DocRun>>,
+    directories: Option<BuildDirectories>,
     bins: BinCounts,
     gate: BinGate,
     lock_watch: LockWatch,
@@ -2595,15 +2623,6 @@ async fn start_children(
     let directories = build_directories(target_mode, facts.as_deref())?;
     let cargo = spawn_reserved(|| spawn_cargo(parser, settings.color, environment, directories.as_ref().map(|chosen| &chosen.test)))?;
     track(cargo.process_id())?;
-    let mut doc_tests = match parser.doc_selection() {
-        DocSelection::Excluded | DocSelection::Only => None,
-        DocSelection::Included => Some(spawn_doc_tests(
-            parser,
-            (settings.ignore, settings.output),
-            environment,
-            directories.as_ref().map(|chosen| &chosen.doc),
-        )?),
-    };
     if let Some(child) = metadata_child {
         facts = read_metadata(child).await;
     }
@@ -2612,16 +2631,13 @@ async fn start_children(
         (Some(chosen), _) => lock_watch.set_directory(chosen.test.directory()),
         (None, Some(shared)) => {
             lock_watch.set_directory(shared);
-            if let Some(doc) = doc_tests.as_mut() {
-                doc.lock_watch.set_directory(shared);
-            }
         }
         (None, None) => {}
     }
     let (bins, gate) = resolve_bin_gate(settings, spawned, facts);
     Ok(StartedChildren {
         cargo,
-        doc_tests,
+        directories,
         bins,
         gate,
         lock_watch,
@@ -3493,6 +3509,7 @@ mod listing_allocation_tests {
             docs: DocObservation::new(&render),
             policy: RefCell::new(StopPolicy::new(None)),
             doc: RefCell::new(None),
+            doc_pending: Cell::new(false),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: core::cell::Cell::new(None),
             withdrawn_ready: Cell::new(None),

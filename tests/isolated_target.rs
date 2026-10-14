@@ -241,3 +241,87 @@ async fn an_empty_target_dir_setting_is_refused_before_any_build() {
     );
     assert!(!shared.exists());
 }
+
+
+#[cfg(unix)]
+fn children_matching(parent: u32, pattern: &str) -> usize {
+    let found = Command::new("pgrep")
+        .arg("-P")
+        .arg(parent.to_string())
+        .arg("-f")
+        .arg(pattern)
+        .output()
+        .expect("pgrep is runnable");
+    String::from_utf8_lossy(&found.stdout).lines().count()
+}
+
+#[cfg(unix)]
+fn package_cache_wait(line: &str) -> bool {
+    line.contains("waiting for file lock on package cache") || line.starts_with("cargo-val: waiting for package cache")
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
+async fn the_doc_cargo_starts_only_after_the_test_build_has_output() {
+    let scratch = scratch("doc-after-build");
+    let shared = scratch.join("shared-target");
+    let holder = hold_build_lock(&scratch, &shared);
+
+    let mut command = cargo_val(&scratch, &shared, &["--target-dir", "shared"]);
+    let (status, stdout, lines, building, documenting) =
+        supervised(&mut command, WAIT_LINE_DEADLINE, async |leader, stdout, stderr, exit| {
+            let watched_stderr = async {
+                let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).lines().any(directory_wait)).await;
+                assert!(fault.is_none(), "stderr failed to read before a wait line: {fault:?}");
+                let counts = (children_matching(leader, "test --no-run"), children_matching(leader, "test --doc"));
+                holder.release();
+                let (rest, _) = drain(stderr).await;
+                ([seen, rest].concat(), counts)
+            };
+            let ((stdout, _), (stderr_bytes, counts), exit) = join3(drain(stdout), watched_stderr, exit.call(())).await;
+            let status = exit.expect("cargo-val exit is observed once").expect("cargo-val is waitable");
+            let lines = String::from_utf8_lossy(&stderr_bytes).lines().map(String::from).collect::<Vec<_>>();
+            (status, String::from_utf8_lossy(&stdout).into_owned(), lines, counts.0, counts.1)
+        })
+        .await;
+
+    assert_eq!(building, 1, "the test build is the child that waits on the held lock: {lines:?}");
+    assert_eq!(documenting, 0, "no doc cargo exists while the test build has produced nothing: {lines:?}");
+    assert_eq!(status.code(), Some(0), "{stdout}{lines:?}");
+    assert!(stdout.lines().any(|line| line.starts_with("doc-tests: ")), "the doc tests ran after the build: {stdout}");
+    assert!(!lines.iter().any(|line| package_cache_wait(line)), "cargo val's own children never contended for the package cache: {lines:?}");
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
+async fn a_doc_cargo_started_beside_a_held_test_build_blocks_on_the_build_directory() {
+    let scratch = scratch("doc-beside-build");
+    let shared = scratch.join("shared-target");
+    let holder = hold_build_lock(&scratch, &shared);
+
+    let mut command = Command::new("cargo");
+    command
+        .arg("test")
+        .arg("--doc")
+        .arg("--manifest-path")
+        .arg(fixture_manifest())
+        .env("CARGO_HOME", scratch.join("cargo-home"))
+        .env("CARGO_TARGET_DIR", &shared)
+        .env("CARGO_TERM_COLOR", "never");
+    let (status, blocked, released) = supervised(&mut command, WAIT_LINE_DEADLINE, async |_, stdout, stderr, exit| {
+        let watched_stderr = async {
+            let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).contains("Blocking waiting for file lock on build directory")).await;
+            assert!(fault.is_none(), "stderr failed to read before the lock line: {fault:?}");
+            holder.release();
+            let (rest, _) = drain(stderr).await;
+            (String::from_utf8_lossy(&seen).into_owned(), String::from_utf8_lossy(&rest).into_owned())
+        };
+        let (_, (blocked, released), exit) = join3(drain(stdout), watched_stderr, exit.call(())).await;
+        let status = exit.expect("the doc cargo exit is observed once").expect("the doc cargo is waitable");
+        (status, blocked, released)
+    })
+    .await;
+
+    assert!(blocked.contains("build directory"), "the overlapping doc cargo printed the lock line: {blocked}");
+    assert!(status.success(), "the doc cargo finishes once released: {released}");
+}
