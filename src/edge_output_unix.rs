@@ -287,6 +287,7 @@ mod tests {
     use core::future::poll_fn;
     use core::pin::Pin;
     use core::task::Poll;
+    use libc::c_int;
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::net::UnixStream;
@@ -303,6 +304,25 @@ mod tests {
 
     const REPORT_LINE: &[u8] = b"cargo-val: 12 passed; 0 failed; 3 ignored; finished in 4.21s\n";
     const FILL_CHUNK: [u8; 4096] = [b'x'; 4096];
+    const READ_DEADLINE_MILLIS: c_int = 10_000;
+
+    // a pty master hands over what the line discipline has pushed so far, so one read can end before the line does
+    fn read_exactly(descriptor: c_int, buffer: &mut [u8]) -> usize {
+        let mut filled = 0;
+        while filled < buffer.len() {
+            let mut watch = libc::pollfd { fd: descriptor, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&raw mut watch, 1, READ_DEADLINE_MILLIS) } <= 0 {
+                break;
+            }
+            let rest = &mut buffer[filled..];
+            let count = unsafe { libc::read(descriptor, rest.as_mut_ptr().cast(), rest.len()) };
+            match usize::try_from(count) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => filled += count,
+            }
+        }
+        filled
+    }
 
     fn line(text: &[u8]) -> Line<LINE_CAPACITY> {
         let mut line = Line::new();
@@ -561,13 +581,14 @@ mod tests {
             })
             .expect("root completes");
             let mut received = [0_u8; 14];
-            let count = unsafe { libc::read(master.as_raw_fd(), received.as_mut_ptr().cast(), 14) };
+            let count = read_exactly(master.as_raw_fd(), &mut received);
 
             drop(held_open);
             assert!(outcome.is_ok());
             assert_eq!(
-                &received[..usize::try_from(count).expect("master read")],
-                b"cargo-val ok\r\n"
+                &received[..count],
+                b"cargo-val ok\r\n",
+                "the master receives the slave line with its newline expanded to CR LF"
             );
         });
     }

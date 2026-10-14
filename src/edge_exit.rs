@@ -1,11 +1,13 @@
 pub(crate) mod fixture {
     use core::num::NonZeroI32;
     use std::os::fd::RawFd;
+    use std::string::String;
 
     use prime::os::child;
 
     const RELEASE_BYTE: u8 = b'R';
     const PASSED_BYTE: u8 = b'P';
+    const PIPE_BUF_BYTES: usize = 512;
 
     pub struct ForkedChild {
         pub pid: NonZeroI32,
@@ -86,17 +88,30 @@ pub(crate) mod fixture {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork isolated process");
         if pid == 0 {
-            let passed = std::panic::catch_unwind(core::panic::AssertUnwindSafe(body)).is_ok();
-            let verdict = if passed { PASSED_BYTE } else { b'F' };
+            let outcome = std::panic::catch_unwind(core::panic::AssertUnwindSafe(body));
+            let message = match &outcome {
+                Ok(()) => "",
+                Err(payload) => payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("panic payload is not text"),
+            };
+            let mut report = [0_u8; PIPE_BUF_BYTES + 1];
+            report[0] = if outcome.is_ok() { PASSED_BYTE } else { b'F' };
+            let carried = message.len().min(PIPE_BUF_BYTES);
+            report[1..=carried].copy_from_slice(&message.as_bytes()[..carried]);
             unsafe {
-                libc::write(verdict_pipe[1], (&raw const verdict).cast(), 1);
+                libc::write(verdict_pipe[1], report.as_ptr().cast(), carried + 1);
                 libc::_exit(0);
             }
         }
         unsafe { libc::close(verdict_pipe[1]) };
-        let mut verdict = 0_u8;
-        let count = unsafe { libc::read(verdict_pipe[0], (&raw mut verdict).cast(), 1) };
+        let mut report = [0_u8; PIPE_BUF_BYTES + 1];
+        let count = unsafe { libc::read(verdict_pipe[0], report.as_mut_ptr().cast(), report.len()) };
         unsafe { libc::close(verdict_pipe[0]) };
+        let verdict = report[0];
+        let message = String::from_utf8_lossy(&report[1..usize::try_from(count).unwrap_or(0).max(1)]).into_owned();
         let mut info: libc::siginfo_t = unsafe { core::mem::zeroed() };
         let reaped = unsafe {
             libc::waitid(
@@ -108,8 +123,8 @@ pub(crate) mod fixture {
         };
         assert_eq!(reaped, 0, "reap isolated process");
         assert!(
-            count == 1 && verdict == PASSED_BYTE,
-            "isolated process body failed, read {count} bytes"
+            count >= 1 && verdict == PASSED_BYTE,
+            "isolated process body failed, read {count} bytes, verdict {verdict}: {message}"
         );
     }
 }
