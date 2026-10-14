@@ -1,0 +1,10 @@
+[package]
+name = "cargo_val_failure_harness_fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+proxima = { package = "proxima-lib", version = "0.1.0", default-features = false, features = ["test-support", "test-prime"] }
