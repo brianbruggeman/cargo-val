@@ -3127,13 +3127,13 @@ mod spawn {
 
         #[test]
         fn child_environment_probe() {
-            if !env::args().any(|argument| argument == "--exact") {
+            let Ok(expectation) = env::var(EXPECT_PRESENT_KEY) else {
                 return;
-            }
+            };
             assert!(env::var("SystemRoot").is_ok());
-            match env::var(EXPECT_PRESENT_KEY).as_deref() {
-                Ok("1") => assert_eq!(env::var(CHILD_VALUE_KEY).as_deref(), Ok("λ🚀")),
-                Ok("0") => assert!(matches!(
+            match expectation.as_str() {
+                "1" => assert_eq!(env::var(CHILD_VALUE_KEY).as_deref(), Ok("λ🚀")),
+                "0" => assert!(matches!(
                     env::var(CHILD_VALUE_KEY),
                     Err(VarError::NotPresent)
                 )),
@@ -3143,11 +3143,9 @@ mod spawn {
 
         #[test]
         fn child_working_directory_probe() {
-            if !env::args().any(|argument| argument == "--exact") {
+            let Some(expected_directory) = env::var_os(EXPECT_DIRECTORY_KEY) else {
                 return;
-            }
-            let expected_directory = env::var_os(EXPECT_DIRECTORY_KEY)
-                .expect("child receives expected directory from its explicit environment");
+            };
             let actual_directory = env::current_dir().expect("child current directory is readable");
             assert_eq!(actual_directory, PathBuf::from(expected_directory));
         }
