@@ -68,3 +68,7 @@ panic = "abort"
 [[bench]]
 name = "failure_class"
 harness = false
+
+[[bench]]
+name = "source_excerpt"
+harness = false
