@@ -16,6 +16,8 @@ Options:
                    What a run that selects zero tests does (default: fail)
       --process <auto|shard|test>
                    Tests per OS process: shard groups them, test runs one each (default: auto)
+      --output <auto|rich|plain>
+                   Rich display for terminals, append-only lines for logs (default: auto)
   -E, --filterset <EXPR>
                    Select tests with a nextest filterset subset (see below)
       --target-dir <isolated|shared|PATH>
@@ -57,6 +59,14 @@ auto shards on a Windows target and runs one test per process elsewhere. A shard
 runs a contiguous group of a binary's tests (about one child per job; fewer names when
 the command line limit is reached) and every test is still reported on its own line; a
 test that takes its process down is reported FAIL and the tests behind it run again.
+
+Output mode, highest precedence first (default: auto):
+  1. --output <auto|rich|plain>
+  2. CARGO_VAL_OUTPUT
+  3. the build-time default (CARGO_VAL_BUILD_OUTPUT)
+auto is rich only when standard output is an interactive terminal (a console on Windows)
+and CI is unset or empty and TERM is not dumb; a pipe, a file, CI, or a dumb terminal gets
+plain. plain never emits ANSI escapes. NO_COLOR suppresses color in every mode.
 
 Ignored tests: `#[ignore]`d tests are listed per test binary with `--list --ignored`, are
 not launched by default, and are reported IGNORED and counted separately. CARGO_VAL_IGNORED

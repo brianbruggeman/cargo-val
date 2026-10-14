@@ -18,6 +18,8 @@ struct BuildDefaults {
     target_dir: String,
     #[setting(default = "auto")]
     process: String,
+    #[setting(default = "auto")]
+    output: String,
     #[setting(default = 4096)]
     shard_names: usize,
     #[setting(default = 64)]
@@ -51,6 +53,9 @@ impl Validate for BuildDefaults {
         }
         if !matches!(self.process.as_str(), "auto" | "shard" | "test") {
             errors.push(ValidationMessage::new("process", "must be auto, shard, or test"));
+        }
+        if !matches!(self.output.as_str(), "auto" | "rich" | "plain") {
+            errors.push(ValidationMessage::new("output", "must be auto, rich, or plain"));
         }
         if self.shard_retry_slots < MAX_JOBS {
             errors.push(ValidationMessage::new(
