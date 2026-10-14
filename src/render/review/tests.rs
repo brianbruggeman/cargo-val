@@ -827,3 +827,68 @@ fn ten_thousand_details_and_frames_with_excerpts_allocate_nothing() {
     assert_eq!(allocations, 0);
     assert!(String::from_utf8_lossy(frame.bytes()).contains("> 575 |"), "the last frame drew the excerpt");
 }
+
+const ABORT_OUTPUT: &[u8] = b"running 1 test\ntest tests::recurses_forever ... \nthread 'tests::recurses_forever' (4242) has overflowed its stack\nfatal runtime error: stack overflow, aborting\nstack backtrace:\n   0: rust_begin_unwind\n   1: core::panicking::panic_fmt\n   2: tests::recurses_forever\n   3: core::ops::function::FnOnce::call_once\n   4: std::sys::backtrace::__rust_begin_short_backtrace\n   5: std::rt::lang_start\n";
+const TIMEOUT_OUTPUT: &[u8] = b"running 1 test\ntest tests::waits_for_a_peer ... \nwaiting for peer 10.0.0.7:4433\nwaiting for peer 10.0.0.7:4433\nwaiting for peer 10.0.0.7:4433\nwaiting for peer 10.0.0.7:4433\nwaiting for peer 10.0.0.7:4433\nwaiting for peer 10.0.0.7:4433\nwaiting for peer 10.0.0.7:4433\nproxima::test: body did not complete within the timeout\n";
+
+fn output_window(class: Class, output: &'static [u8]) -> String {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = run(&mut arena, &mut ledger, 1);
+    keys(&mut state, &[Key::Char(b'f')]);
+    let shown = move |_: Identity<'_>| -> Detail<'static> { (class, None, (b"", None), b"", output) };
+    let mut frame = Line::<8192>::new();
+    state.screen(shown, 100, false, &mut frame).expect("the frame holds one review screen");
+    String::from_utf8(frame.bytes().to_vec()).expect("a review frame is utf-8")
+}
+
+fn elisions(text: &str) -> (Option<&str>, Option<&str>) {
+    let find = |side: &str| text.lines().map(str::trim).find(|line| line.starts_with('+') && line.ends_with(side));
+    (find("lines above"), find("lines below"))
+}
+
+#[test]
+fn a_panic_capture_of_nineteen_lines_centres_on_the_panic_with_five_above_and_eight_below() {
+    let text = output_window(Class::Assert, LONG_OUTPUT);
+
+    assert_eq!(elisions(&text), (Some("+5 lines above"), Some("+8 lines below")), "{text}");
+    let window: Vec<&str> = text.lines().skip_while(|line| !line.contains("test output  verbatim")).skip(2).take(6).map(str::trim).collect();
+    let expected = ["", "---- tests::settles_failing stdout ----", "", "thread 'tests::settles_failing' panicked at src/lib.rs:11:9:", "assertion `left == right` failed: expected three listeners, found [8080, 8443]", "left: 2"];
+    assert_eq!(window, expected, "the window is lines 5 to 10 of 19, the panic line fourth\n{text}");
+}
+
+#[test]
+fn captures_without_a_panic_line_show_the_head_with_only_the_below_count() {
+    let mut checked = 0;
+    for (name, class, output, below) in [
+        ("abort", Class::Crash { signal: 6 }, ABORT_OUTPUT, "+5 lines below"),
+        ("timeout", Class::Timeout { enforced_by: Enforcer::Val }, TIMEOUT_OUTPUT, "+4 lines below"),
+    ] {
+        let text = output_window(class, output);
+
+        assert_eq!(elisions(&text), (None, Some(below)), "{name}\n{text}");
+        let head: Vec<&str> = text.lines().skip_while(|line| !line.contains("test output  verbatim")).skip(1).take(2).map(str::trim).collect();
+        assert_eq!(head[0], "running 1 test", "{name} starts at the first captured line\n{text}");
+        assert!(!text.contains("panicked at"), "{name}");
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "the abort and timeout classes were both checked");
+}
+
+#[test]
+fn the_state_classifies_a_signal_death_and_a_silent_deadline_kill_without_a_panic_site() {
+    let mut checked = 0;
+    for (name, exit, capture, expected) in [
+        ("abort", Exit::Signal(6), ABORT_OUTPUT, Class::Crash { signal: 6 }),
+        ("deadline with output", Exit::DeadlineKilled, TIMEOUT_OUTPUT, Class::Timeout { enforced_by: Enforcer::Val }),
+        ("deadline without output", Exit::DeadlineKilled, b"", Class::Hang),
+    ] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let mut state = tracked(&mut arena, &mut ledger);
+        settle(&mut state, SCHED, Outcome::Failed, 5_000);
+        state.apply(&Event::Captured { id: SCHED, stdout: (capture, 0), stderr: (b"", 0), exit, excerpt: UNREAD });
+
+        assert_eq!(state.detail(SCHED), (expected, None, (&b""[..], None), &b""[..], capture), "{name}");
+        checked += 1;
+    }
+    assert_eq!(checked, 3);
+}
