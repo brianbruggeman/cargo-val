@@ -77,6 +77,11 @@ fn strip_sgr(text: &str) -> String {
     kept
 }
 
+fn timeline_section(text: &str) -> String {
+    let title = text.lines().position(|line| line.contains("where the time went")).expect("the timeline title is drawn");
+    text.lines().skip(title).collect::<Vec<_>>().join("\n")
+}
+
 fn plot_rows(text: &str) -> Vec<&str> {
     let lines: Vec<&str> = text.lines().collect();
     let first = lines.iter().position(|line| line.contains("tests at once")).expect("the plot title row is drawn") + 1;
@@ -145,8 +150,9 @@ async fn a_no_color_rich_run_with_a_failure_draws_the_plot_the_colour_run_draws_
     assert_eq!(uncoloured.status.code(), Some(1), "{uncoloured_text}");
     assert!(colour_sequences(&coloured.stdout) > 0, "the control run must carry the colour layer:\n{coloured_text}");
     assert_eq!(colour_sequences(&uncoloured.stdout), 0, "{uncoloured_text}");
-    assert!(!uncoloured_text.contains(STIPPLE) && !coloured_text.contains(STIPPLE));
-    let (uncoloured_rows, coloured_rows) = (plot_rows(&uncoloured_text), plot_rows(&coloured_text));
+    let (uncoloured_plot, coloured_plot) = (timeline_section(&uncoloured_text), timeline_section(&coloured_text));
+    assert!(!uncoloured_plot.contains(STIPPLE) && !coloured_plot.contains(STIPPLE), "the timeline plot is one solid layer; run-frame bars may stipple:\n{uncoloured_plot}");
+    let (uncoloured_rows, coloured_rows) = (plot_rows(&uncoloured_plot), plot_rows(&coloured_plot));
     assert_eq!(plot_shape(&uncoloured_rows), plot_shape(&coloured_rows), "same rows, labels and axis frame with the colour layer ignored:\n{uncoloured_text}\n{coloured_text}");
     let plot_glyphs = |rows: &[&str]| rows.iter().flat_map(|row| row.chars()).filter(|glyph| !glyph.is_ascii()).all(|glyph| BLOCKS.contains(&glyph) || "┬─┤".contains(glyph));
     assert!(plot_glyphs(&uncoloured_rows) && plot_glyphs(&coloured_rows), "one solid total layer draws only block glyphs and the axis frame");
@@ -158,8 +164,9 @@ async fn a_no_color_rich_run_prints_the_timeline_after_the_receipt_with_no_colou
     let text = stdout_of(&output);
 
     assert_eq!(colour_sequences(&output.stdout), 0, "NO_COLOR suppresses every SGR sequence");
-    assert!(!text.contains(STIPPLE), "{text}");
     let title = text.lines().position(|line| line.contains("where the time went")).expect("the timeline is printed in rich mode");
+    let timeline_plot = timeline_section(&text);
+    assert!(!timeline_plot.contains(STIPPLE), "the timeline plot is one solid layer; run-frame bars may stipple:\n{timeline_plot}");
     let receipt = summary_line_index(&text);
     assert!(receipt < title, "the timeline follows the receipt:\n{text}");
     let last_show = text.rfind(SHOW_CURSOR).expect("the rich run shows the cursor again");

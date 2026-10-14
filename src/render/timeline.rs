@@ -516,6 +516,27 @@ mod tests {
     }
 
     #[test]
+    fn a_no_color_frame_stipples_the_in_flight_bar_while_its_timeline_projection_stays_one_solid_layer() {
+        let (mut arena, mut ledger, mut timed, mut inflight) = ([0_u8; 512], [0_u32; 4], [0_u8; 512], [0_u8; 512]);
+        let mut state = State::<64>::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_timeline(&mut timed).with_color(false);
+        let mut events = run_events().take(7);
+        events.next().iter().for_each(|begin| state.apply(begin));
+        state.apply(&Event::Resize { cols: 80 });
+        state.apply(&Event::Built { done: 1, total: Some(1) });
+        state.apply(&Event::Listed { binaries: 1, of: Some(1), tests: 4 });
+        events.for_each(|event| state.apply(&event));
+        state.apply(&Event::Tick { now_ms: ORIGIN + 9_000 });
+        let (mut rich, mut timeline) = (Line::<8192>::new(), Line::<8192>::new());
+
+        state.project_rich(false, &mut rich).expect("the frame holds one redraw");
+        state.project_timeline(80, &mut timeline).expect("the frame holds one timeline");
+
+        let (rich, timeline) = (std::string::String::from_utf8(rich.bytes().to_vec()).expect("utf-8"), std::string::String::from_utf8(timeline.bytes().to_vec()).expect("utf-8"));
+        assert!(rich.contains('\u{2592}'), "an in-flight test stipples the run-frame bar under NO_COLOR:\n{rich}");
+        assert!(!timeline.contains('\u{2592}'), "the timeline plot is one solid layer:\n{timeline}");
+    }
+
+    #[test]
     fn a_live_axis_ends_at_the_previous_wall_time_marked_approximate() {
         let text = live(Some(258_230), 9_000);
 
