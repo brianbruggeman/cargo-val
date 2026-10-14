@@ -102,7 +102,7 @@ impl Mode {
         match (self, event) {
             (Self::Running, Event::BuildFailed { .. }) => Self::BuildError,
             (Self::Running, Event::Interrupted { signal, .. }) => Self::Interrupted { signal: *signal },
-            (Self::Running, Event::Finished { failed: 0, wall_ms, .. }) => Self::Done { wall_ms: *wall_ms },
+            (Self::Running, Event::Finished { wall_ms, .. }) => Self::Done { wall_ms: *wall_ms },
             (
                 Self::Running,
                 Event::Begin { .. }
@@ -118,8 +118,7 @@ impl Mode {
                 | Event::BlockClosed
                 | Event::Running { .. }
                 | Event::Exited { .. }
-                | Event::Tick { .. }
-                | Event::Finished { .. },
+                | Event::Tick { .. },
             ) => Self::Running,
             (Self::BuildError | Self::Interrupted { .. } | Self::Done { .. }, _) => self,
         }
@@ -966,7 +965,7 @@ mod tests {
              FAILED   cli_run fixture::fails_when_requested\n\
              RERUN    cargo val --manifest-path '/w/Cargo.toml' --no-fail-fast -E '(binary(=cli_run) & test(=fixture::fails_when_requested))'\n"
         );
-        assert_eq!(state.mode(), Mode::Running, "failures keep the run on screen");
+        assert_eq!(state.mode(), Mode::Done { wall_ms: 8400 }, "a finish with failures closes the screen too, so no tick redraws a frame under the closing block");
     }
 
     #[test]
@@ -1040,7 +1039,7 @@ mod tests {
             (Mode::Running, Event::BuildFailed { diagnostic: b"E0308", exit: 3 }, Mode::BuildError),
             (Mode::Running, Event::Interrupted { signal: 2, groups: 0 }, Mode::Interrupted { signal: 2 }),
             (Mode::Running, finished(0), Mode::Done { wall_ms: 5 }),
-            (Mode::Running, finished(1), Mode::Running),
+            (Mode::Running, finished(1), Mode::Done { wall_ms: 5 }),
             (Mode::Running, Event::Started { id: PASSING, solo: false, at_ms: 0, limit_ms: None }, Mode::Running),
             (Mode::Done { wall_ms: 5 }, Event::Interrupted { signal: 2, groups: 0 }, Mode::Done { wall_ms: 5 }),
             (Mode::BuildError, finished(0), Mode::BuildError),
