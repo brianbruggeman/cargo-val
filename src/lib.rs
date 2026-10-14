@@ -37,6 +37,7 @@ pub mod sched_binary;
 pub mod sched_file;
 pub mod shard_sched;
 pub mod shard_arena;
+pub mod stack_capture;
 pub mod stack_frames;
 pub mod stop;
 pub mod summary;
