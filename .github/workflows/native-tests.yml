@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -132,6 +133,7 @@ jobs:
         run: cargo run --locked --release --example parity
 
   windows-pipe:
+    timeout-minutes: 15
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,12 +158,12 @@ jobs:
         run: cargo test --locked --lib edge_ -- --test-threads=1
 
   scale:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

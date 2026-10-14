@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   selftest:
+    timeout-minutes: 25
     name: selftest (${{ matrix.source }}, ${{ matrix.os }})
     strategy:
       fail-fast: false
