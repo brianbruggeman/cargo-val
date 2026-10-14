@@ -5,8 +5,8 @@
 ›TIMEOUT    71.66s   NO-RETRY sched_records::the_host_…ord_with_flags_and_group
  PANIC     120.03s   NO-RETRY shard_process::a_per_tes…cargo_val_exits_promptly
  ──────────────────────────────────────────────────────────────────────────────
- sched_records::the_host_binary_format_yields_every_declared_record_with_flags_
- and_group
+ sched_records
+   the_host_binary_format_yields_every_declared_record_with_flags_and_group
  TIMEOUT after 71.66s                        tests/sched_records.rs:55  e opens
 NO-RETRY not retried alone: it failed after 71.660s, over the 30s retry budget.
   r retries it now

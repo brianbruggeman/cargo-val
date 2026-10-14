@@ -11,7 +11,7 @@
 //! The quit receipt is not drawn here: after `q q` the mode is [`Mode::Receipt`] and the driver projects
 //! `Event::Finished` through `State::project`, so the bytes are the plain closing block by construction.
 
-use super::{Identity, Mode, State, seconds};
+use super::{Identity, Mode, State, excerpt, seconds};
 use crate::failure_class::{Class, Enforcer, Location};
 use memchr::memmem;
 use crate::line::Line;
@@ -26,6 +26,7 @@ const INTERRUPT_SIGNAL: u8 = 2;
 const ESCAPE: u8 = 0x1b;
 const RESET: &[u8] = b"\x1b[0m";
 const BOLD: &[u8] = b"1";
+const NAME_INDENT: usize = 2;
 const FAINT: &[u8] = b"2";
 const RED_BOLD: &[u8] = b"1;31";
 const GREEN_BOLD: &[u8] = b"1;32";
@@ -93,9 +94,9 @@ pub enum Rerun {
     Passed { millis: u64 },
 }
 
-/// What the driver's capture buffers hold for one failure: its class, its source location and the child's bytes, shown
-/// verbatim.
-pub type Detail<'a> = (Class, Option<Location<'a>>, Reason<'a>, &'a [u8]);
+/// What the state holds for one failure: its class, its source location, the classifier's reason, the source-excerpt rows
+/// (empty when there are none) and the child's bytes, shown verbatim.
+pub type Detail<'a> = (Class, Option<Location<'a>>, Reason<'a>, &'a [u8], &'a [u8]);
 
 /// The classifier's message and, for an assertion, its left and right values; both borrow from the retained capture.
 pub type Reason<'a> = (&'a [u8], Option<(&'a [u8], &'a [u8])>);
@@ -665,13 +666,14 @@ fn middle<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, room: u
 }
 
 fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, top: Option<u16>) {
-    let (id, millis, verdict, _, (class, location, reason, output)) = *row;
+    let (id, millis, verdict, _, (class, location, reason, rows, output)) = *row;
     wrapped_name(frame, look, id);
     class_line(frame, look, (class, millis, location));
     if let Some(verdict) = verdict {
         verdict_line(frame, look, verdict, millis);
     }
     reason_block(frame, look, reason);
+    excerpt_block(frame, look, rows);
     output_block(frame, look, output, top);
     frame.text(b"\n");
     hint_line(frame, look, class, millis);
@@ -682,21 +684,33 @@ fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Sh
 
 fn wrapped_name<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, id: Identity<'_>) {
     let total = joined_len(id);
-    let room = look.0.saturating_sub(2).max(1);
-    let mut position = 0;
-    while position < total {
-        let mut end = (position + room).min(total);
-        while end < total && is_continuation(byte_at(id, end)) {
-            end += 1;
-        }
+    if total <= look.0.saturating_sub(2).max(1) {
         frame.text(b" ");
         if look.1 {
             frame.text(b"\x1b[1m");
         }
-        joined_range(frame, id, position, end);
+        joined_range(frame, id, 0, total);
         if look.1 {
             frame.text(RESET);
         }
+        frame.text(b"\n");
+        return;
+    }
+    hard_wrapped(frame, look, id.0, 0);
+    hard_wrapped(frame, look, id.1, NAME_INDENT);
+}
+
+fn hard_wrapped<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, text: &[u8], indent: usize) {
+    let room = look.0.saturating_sub(2 + indent).max(1);
+    let mut position = 0;
+    while position < text.len() {
+        let mut end = (position + room).min(text.len());
+        while end < text.len() && is_continuation(text[end]) {
+            end += 1;
+        }
+        frame.text(b" ");
+        spaces(frame, indent);
+        paint(frame, look.1, BOLD, &text[position..end]);
         frame.text(b"\n");
         position = end;
     }
@@ -798,6 +812,14 @@ fn reason_block<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, (messag
         side(frame, look, b"left   ", left);
         side(frame, look, b"right  ", right);
     }
+}
+
+fn excerpt_block<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, rows: &[u8]) {
+    if rows.is_empty() {
+        return;
+    }
+    frame.text(b"\n");
+    excerpt::draw(frame, rows, (3, look.0 - 1, look.1));
 }
 
 fn indented<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, text: &[u8]) {

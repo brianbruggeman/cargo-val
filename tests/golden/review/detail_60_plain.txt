@@ -5,8 +5,9 @@
  TIMEOUT    71.66s   NO-RETRY sched_records:…lags_and_group
 ›PANIC     120.03s   NO-RETRY shard_process:…exits_promptly
  ──────────────────────────────────────────────────────────
- shard_process::a_per_test_interrupt_ends_a_blocked_child_a
- nd_cargo_val_exits_promptly
+ shard_process
+   a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_
+   exits_promptly
  PANIC after 120.03s    tests/shard_process.rs:575  e opens
 NO-RETRY not retried alone: it failed after 120.030s, over
   the 30s retry budget. r retries it now

@@ -6,9 +6,9 @@
 [1;36m›[0m[1;31mTIMEOUT[0m    [2m71.66s[0m   [1;33mNO-RETRY[0m sche…roup
  [1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shar…ptly
  ──────────────────────────────────────
- [1msched_records::the_host_binary_format_[0m
- [1myields_every_declared_record_with_flag[0m
- [1ms_and_group[0m
+ [1msched_records[0m
+   [1mthe_host_binary_format_yields_every_[0m
+   [1mdeclared_record_with_flags_and_group[0m
  [1;31mTIMEOUT[0m[2m after 71.66s[0m
  tests/sched_records.rs:55[2m  e opens[0m
 [1;33mNO-RETRY[0m not retried alone: it failed

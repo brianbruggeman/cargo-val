@@ -188,6 +188,24 @@ where
     (output, status)
 }
 
+async fn release_then_quit(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| {
+        let screen = without_sgr(&String::from_utf8_lossy(bytes));
+        live_frames(&screen).iter().any(|frame| released_frame(frame))
+    }).await;
+    File::create(release).expect("the release file is creatable");
+    let (review, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(REVIEW_HEADER)).await;
+    output.extend_from_slice(&review);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn run_failing_on_pty(environment: &[(&str, &str)]) -> (String, ExitStatus) {
+    run_driven("rich_pty", "rich", environment, async |master, keys, release, _leader| release_then_quit(master, keys, release).await).await
+}
+
 async fn quit_from_review(master: &ChildStream, mut keys: File) -> String {
     let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
     assert!(!output.windows(7).any(|window| window == b"SUMMARY"), "the receipt printed before any key was sent:\n{}", shown(&String::from_utf8_lossy(&output)));
@@ -284,7 +302,7 @@ fn failure_source_block(output: &str) -> &str {
 
 #[proxima::test]
 async fn after_the_frame_is_erased_the_failure_block_has_the_source_fence_and_the_marker_row() {
-    let (output, status) = run_on_pty_with("rich_pty", &[FAILING_RUN, ("NO_COLOR", "1")]).await;
+    let (output, status) = run_failing_on_pty(&[FAILING_RUN, ("NO_COLOR", "1")]).await;
 
     assert!(!status.success(), "a failing test must fail the run");
     let block = failure_source_block(&output);
@@ -296,17 +314,53 @@ async fn after_the_frame_is_erased_the_failure_block_has_the_source_fence_and_th
 
 #[proxima::test]
 async fn with_no_color_set_the_failure_source_block_has_zero_escape_bytes() {
-    let (output, _) = run_on_pty_with("rich_pty", &[FAILING_RUN, ("NO_COLOR", "1")]).await;
+    let (output, _) = run_failing_on_pty(&[FAILING_RUN, ("NO_COLOR", "1")]).await;
 
     let block = failure_source_block(&output);
 
     assert_eq!(block.bytes().filter(|byte| *byte == 0x1b).count(), 0, "{}", shown(block));
 }
 
+async fn release_open_detail_quit(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| {
+        let screen = without_sgr(&String::from_utf8_lossy(bytes));
+        live_frames(&screen).iter().any(|frame| released_frame(frame))
+    }).await;
+    File::create(release).expect("the release file is creatable");
+    let (review, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    output.extend_from_slice(&review);
+    let opened_at = output.len();
+    keys.write_all(b"\r").expect("the open key is writable");
+    let (detail, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(EXCERPT_MARKER)).await;
+    output.extend_from_slice(&detail);
+    assert!(opened_at < output.len(), "the detail screen drew after the open key");
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+const EXCERPT_MARKER: &str = "panic!(\"requested fixture failure\");";
+
+#[proxima::test]
+async fn with_no_color_set_the_pinned_and_review_detail_excerpt_rows_have_zero_escape_bytes() {
+    let environment = [FAILING_RUN, ("NO_COLOR", "1")];
+    let (output, _) = run_driven("rich_pty", "rich", &environment, async |master, keys, release, _leader| release_open_detail_quit(master, keys, release).await).await;
+
+    let lines: Vec<&str> = output.split('\n').collect();
+    let marker_lines: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| line.contains(EXCERPT_MARKER)).map(|(index, _)| index).collect();
+    let rows: Vec<&str> = marker_lines.iter().flat_map(|index| [lines[index - 1], lines[*index], lines[index + 1]]).filter(|line| line.contains(" | ")).collect();
+
+    assert!(marker_lines.len() >= 3, "a pinned frame, the review detail and the closing block each carried the marker row, got {}:\n{}", marker_lines.len(), shown(&output));
+    assert!(rows.len() >= 6, "the marker rows and their neighbours were scanned, got {}", rows.len());
+    let escaped: Vec<String> = rows.iter().filter(|row| row.bytes().any(|byte| byte == 0x1b)).map(|row| shown(row)).collect();
+    assert!(escaped.is_empty(), "excerpt rows with escape bytes: {escaped:?}");
+}
+
 #[cfg(feature = "highlight")]
 #[proxima::test]
 async fn with_highlight_and_colour_on_the_failure_source_block_colours_the_if_keyword_with_the_keyword_role() {
-    let (output, _) = run_on_pty_with("rich_pty", &[FAILING_RUN]).await;
+    let (output, _) = run_failing_on_pty(&[FAILING_RUN]).await;
 
     let block = failure_source_block(&output);
 
@@ -487,4 +541,61 @@ async fn sigint_sent_to_the_process_group_during_review_exits_130_with_the_termi
     let (output, status) = run_driven("rich_pty_fail", "rich", &NO_COLOR, async |master, keys, _release, leader| interrupt_in_review(master, keys, leader, false).await).await;
 
     assert_interrupted_exit(&output, status);
+}
+
+fn csi_final(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) -> (String, char) {
+    let mut parameters = String::new();
+    for next in characters.by_ref() {
+        if ('@'..='~').contains(&next) {
+            return (parameters, next);
+        }
+        parameters.push(next);
+    }
+    (parameters, ' ')
+}
+
+fn final_scrollback(output: &str) -> Vec<String> {
+    let (mut lines, mut row) = (vec![String::new()], 0_usize);
+    let mut characters = output.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\x1b' if characters.peek() == Some(&'[') => {
+                characters.next();
+                match csi_final(&mut characters) {
+                    (count, 'A') => row = row.saturating_sub(count.parse().unwrap_or(1)),
+                    (_, 'J') => {
+                        lines[row].clear();
+                        lines.truncate(row + 1);
+                    }
+                    _ => {}
+                }
+            }
+            '\n' => {
+                row += 1;
+                if row == lines.len() {
+                    lines.push(String::new());
+                }
+            }
+            '\r' | '\x1b' => {}
+            other => lines[row].push(other),
+        }
+    }
+    lines
+}
+
+#[proxima::test]
+async fn the_final_scrollback_holds_the_excerpt_once_and_no_pinned_row_after_the_closing_block() {
+    let (output, status) = run_failing_on_pty(&[FAILING_RUN, ("NO_COLOR", "1")]).await;
+
+    let scrollback = final_scrollback(&output);
+    let marker = "panic!(\"requested fixture failure\");";
+    let drawn_in_all_bytes = output.matches(marker).count();
+    let kept: Vec<&String> = scrollback.iter().filter(|line| line.contains(marker)).collect();
+    let summary = scrollback.iter().position(|line| line.starts_with("SUMMARY")).unwrap_or_else(|| panic!("no closing block in:\n{}", shown(&output)));
+    assert!(!status.success(), "a failing test must fail the run");
+    assert!(drawn_in_all_bytes >= 2, "the block and at least one live pinned frame carried the row, {drawn_in_all_bytes} times:\n{}", shown(&output));
+    assert_eq!(kept.len(), 1, "the settled scrollback keeps the excerpt row once: {kept:?}\n{}", shown(&scrollback.join("\n")));
+    assert!(kept[0].starts_with("> "), "the surviving row is the printed block's marker row: {:?}", kept[0]);
+    assert!(scrollback[summary..].iter().all(|line| !line.contains(marker) && !line.starts_with(" FAIL 1")), "{}", shown(&scrollback.join("\n")));
+    assert!(scrollback.iter().all(|line| !line.starts_with(" FAIL 1")), "no pinned row survives the erase:\n{}", shown(&scrollback.join("\n")));
 }

@@ -1,0 +1,47 @@
+ [1mcargo val[0m  [1;36mreview[0m                 [2m2:18[0m
+
+ [1;31m2 failed[0m  [32m381 passed[0m  [2m0 skipped[0m
+ [2m0 warnings[0m
+
+ [1;31mTIMEOUT[0m    [2m71.66s[0m   [1;33mNO-RETRY[0m sche…roup
+[1;36m›[0m[1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shar…ptly
+ ──────────────────────────────────────
+ [1mshard_process[0m
+   [1ma_per_test_interrupt_ends_a_blocked_[0m
+   [1mchild_and_cargo_val_exits_promptly[0m
+ [1;31mPANIC[0m[2m after 120.03s[0m
+ tests/shard_process.rs:575[2m  e opens[0m
+[1;33mNO-RETRY[0m not retried alone: it failed
+  after 120.030s, over the 30s retry
+  budget. r retries it now
+
+   the shard child reported its pid
+   before the deadline
+
+     572 |         .arg("--manifest-pa…
+     573 |         .arg(manifest)
+     574 |         .args(["--process",…
+   > 575 |         .env_remove("RUST_T…
+         |                            …
+     576 |         .env_remove("CARGO_…
+     577 |         .env_remove("CARGO_…
+     578 |         .env_remove("CARGO_…
+
+ [2mtest output  verbatim[0m
+   thread 'a_per_test_interrupt_ends_a_
+   blocked_child_and_cargo_val_exits_pr
+   omptly' panicked at tests/shard_proc
+   ess.rs:575:31:
+   the shard child reported its pid bef
+   ore the deadline
+   note: run with `RUST_BACKTRACE=1` en
+   vironment variable to display a back
+   trace
+
+[1;36mfind the commit[0m  cargo val bisect
+  shard_process
+  a_per_test_interrupt_ends_a_blocked_c
+  hild_and_cargo_val_exits_promptly
+ [36mj/k[0m move  [36mr[0m rerun  [36mR[0m all  [36me[0m edit
+ [36m/[0m find  [36mi[0m skip  [36mw[0m warn  [36ms[0m timeline
+ [36mq[0m quit
