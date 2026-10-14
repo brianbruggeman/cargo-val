@@ -33,6 +33,7 @@ fn record() -> Result<(), String> {
         .map_err(|error| format!("assets directory: {error}"))?;
     let target_directory = demo_target_directory(&root);
     prebuild_demo(&root, &target_directory)?;
+    clean_demo_crate(&root, &target_directory)?;
 
     record_session(&root, &target_directory)?;
     run(Command::new("agg").current_dir(&root).args([
@@ -97,6 +98,24 @@ fn prebuild_demo(root: &Path, target_directory: &Path) -> Result<(), String> {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null()))
+}
+
+// the prebuild leaves every unit cached, so the recording would open on a build bar that jumps to done; cleaning the demo crate alone keeps its dependencies warm and gives the cast a visible build phase
+fn clean_demo_crate(root: &Path, target_directory: &Path) -> Result<(), String> {
+    let workspaces = target_directory.join("cargo-val");
+    let entries = fs::read_dir(&workspaces)
+        .map_err(|error| format!("{}: {error}", workspaces.display()))?;
+    for entry in entries.flatten() {
+        let test_directory = entry.path().join("test");
+        if test_directory.is_dir() {
+            run(Command::new("cargo")
+                .current_dir(root)
+                .envs(isolated_cargo(target_directory))
+                .args(["clean", "--package", "tinyserve", "--manifest-path", "examples/demo/Cargo.toml", "--target-dir"])
+                .arg(&test_directory))?;
+        }
+    }
+    Ok(())
 }
 
 fn path_with_built_binary() -> Result<OsString, String> {
@@ -195,7 +214,45 @@ mod terminal {
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
 
-    const KEYS: [(&str, &[u8]); 2] = [("\x1b[1;36mreview", b"\r"), ("scroll", b"qq")];
+    // each step names the screen text that must be drawn before its keys are typed; an empty key list only waits for the screen
+    const KEYS: [(&str, &[u8]); 10] = [
+        ("searching for tests", b""),
+        ("\u{203a}ASSERT", b"j"),
+        ("\u{203a}PANIC", b"k"),
+        ("\u{203a}ASSERT", b"\r"),
+        ("enter list", b"\r"),
+        ("j/k move", b"r"),
+        ("RERUN", b""),
+        ("rerun 1", b"q"),
+        ("again to confirm", b"q"),
+        ("SUMMARY", b""),
+    ];
+
+    // the screen is matched as the text a reader sees, so colour and hyperlink escapes between words do not hide a marker
+    fn visible_text(raw: &str) -> String {
+        let mut text = String::with_capacity(raw.len());
+        let mut characters = raw.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character != '\x1b' {
+                text.push(character);
+                continue;
+            }
+            match characters.next() {
+                Some('[') => {
+                    characters.by_ref().find(|byte| ('\x40'..='\x7e').contains(byte));
+                }
+                Some(']') => {
+                    while let Some(byte) = characters.next() {
+                        if byte == '\x07' || (byte == '\x1b' && characters.next() == Some('\\')) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        text
+    }
 
     // asciinema records output only, so the recorded command is this example again: it owns the pty cargo val runs on and types the keys when the screen each one answers has been drawn
     pub fn drive() -> Result<(), String> {
@@ -216,7 +273,7 @@ mod terminal {
                 .and_then(|()| stdout.flush())
                 .map_err(|error| format!("stdout: {error}"))?;
             shown.push_str(&String::from_utf8_lossy(&buffer[..read]));
-            while let Some((screen, bytes)) = next.filter(|(screen, _)| shown.contains(screen)) {
+            while let Some((screen, bytes)) = next.filter(|(screen, _)| visible_text(&shown).contains(screen)) {
                 master
                     .write_all(bytes)
                     .map_err(|error| format!("keys after {screen:?}: {error}"))?;
