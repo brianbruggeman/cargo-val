@@ -1,0 +1,11 @@
+[package]
+name = "tinyserve"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A small request router with an LRU cache, used as the cargo-val demo fixture."
+
+[workspace]
+
+[dev-dependencies]
+proxima = { package = "proxima-lib", version = "0.1.0", default-features = false, features = ["test-support", "test-prime"] }
