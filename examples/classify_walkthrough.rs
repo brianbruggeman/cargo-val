@@ -7,9 +7,11 @@
 
 #[path = "../tests/common/failure_fixture.rs"]
 mod failure_fixture;
+#[path = "../tests/common/failure_fixture_sync.rs"]
+mod failure_fixture_sync;
 
 use cargo_val::failure_class::{Exit, Record, classify};
-use failure_fixture::{build, run};
+use failure_fixture_sync::{build, run};
 
 fn show(case: &str, record: &Record<'_>) {
     let location = match record.location {
