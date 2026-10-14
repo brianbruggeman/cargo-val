@@ -9,6 +9,15 @@ use std::process::{Child, Stdio};
 use std::time::Duration;
 
 mod common;
+#[cfg(unix)]
+#[path = "common/group.rs"]
+mod group;
+#[cfg(unix)]
+#[path = "common/output.rs"]
+mod output;
+#[cfg(unix)]
+#[path = "common/wait.rs"]
+mod wait;
 #[path = "common/binary.rs"]
 mod binary;
 
@@ -60,7 +69,7 @@ impl Holder {
     fn release(self) {
         let Self { mut child, release } = self;
         drop(release);
-        let status = child.wait().expect("the holder cargo build is waitable");
+        let status = wait::wait_bounded(&mut child, group::SYNC_DEADLINE).expect("the holder cargo build finishes once released");
         assert!(status.success(), "the holder build finishes once released");
     }
 
@@ -89,7 +98,9 @@ fn hold_build_lock(scratch: &Path, shared_target: &Path) -> Holder {
     let fifo = scratch.join("hold.fifo");
     let made = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo is runnable");
     assert!(made.success(), "mkfifo creates {}", fifo.display());
-    let child = Command::new("cargo")
+    let mut holder_build = Command::new("cargo");
+    group::lead_group(&mut holder_build);
+    let child = holder_build
         .arg("build")
         .arg("--manifest-path")
         .arg(holder.join("Cargo.toml"))
@@ -246,13 +257,9 @@ async fn an_empty_target_dir_setting_is_refused_before_any_build() {
 
 #[cfg(unix)]
 fn children_matching(parent: u32, pattern: &str) -> usize {
-    let found = Command::new("pgrep")
-        .arg("-P")
-        .arg(parent.to_string())
-        .arg("-f")
-        .arg(pattern)
-        .output()
-        .expect("pgrep is runnable");
+    let mut pgrep = Command::new("pgrep");
+    pgrep.arg("-P").arg(parent.to_string()).arg("-f").arg(pattern);
+    let found = output::output_bounded(&mut pgrep, group::SYNC_DEADLINE).expect("pgrep finishes within its deadline");
     String::from_utf8_lossy(&found.stdout).lines().count()
 }
 

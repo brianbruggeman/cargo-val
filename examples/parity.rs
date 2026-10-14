@@ -7,6 +7,9 @@ use std::io::{Read, pipe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+#[path = "../tests/common/group.rs"]
+mod group;
+
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/workspace/Cargo.toml");
 const LIBRARY: &str = "lib";
 const DOC_TESTS: &str = "doc-tests";
@@ -68,6 +71,7 @@ fn observe(binary: &Path, target: &Path) -> Result<(), String> {
 
 fn run(mut command: Command, target: &Path) -> Result<String, String> {
     let (mut reader, writer) = pipe().map_err(|error| format!("pipe: {error}"))?;
+    group::lead_group(&mut command);
     let mut child = command
         .args(["--manifest-path", FIXTURE, "--target-dir"])
         .arg(target)
@@ -76,9 +80,16 @@ fn run(mut command: Command, target: &Path) -> Result<String, String> {
         .spawn()
         .map_err(|error| format!("spawn: {error}"))?;
     drop(command);
+    let (cancel, fired) = group::watchdog(child.id(), group::SYNC_DEADLINE);
     let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(|error| format!("read: {error}"))?;
-    let status = child.wait().map_err(|error| format!("wait: {error}"))?;
+    let read = reader.read_to_string(&mut text);
+    let waited = child.wait();
+    drop(cancel);
+    if fired.join().unwrap_or(false) {
+        return Err(format!("outlived {:?} and its process group was killed: {text}", group::SYNC_DEADLINE));
+    }
+    read.map_err(|error| format!("read: {error}"))?;
+    let status = waited.map_err(|error| format!("wait: {error}"))?;
     if status.success() {
         return Ok(text);
     }

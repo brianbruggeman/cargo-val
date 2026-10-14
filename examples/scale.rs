@@ -12,7 +12,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
+#[path = "../tests/common/group.rs"]
+mod group;
+#[path = "../tests/common/output.rs"]
+mod output;
+
 const PLANTED: usize = 8;
+const ARM_DEADLINE: Duration = Duration::from_secs(3600);
 const ARMS: [Arm; 7] = [
     Arm::Test,
     Arm::Nextest,
@@ -188,13 +194,13 @@ fn expected(shape: &Shape) -> Outcomes {
 }
 
 fn build(context: &Context) -> Result<(), String> {
-    let output = Command::new("cargo")
+    let mut build = Command::new("cargo");
+    build
         .args(["test", "--lib", "--no-run", "--target-dir"])
         .arg(&context.target)
         .current_dir(&context.fixture)
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .map_err(|error| format!("spawn cargo test --no-run: {error}"))?;
+        .env_remove("CARGO_TARGET_DIR");
+    let output = output::output_bounded(&mut build, ARM_DEADLINE)?;
     if output.status.success() {
         return Ok(());
     }
@@ -202,10 +208,9 @@ fn build(context: &Context) -> Result<(), String> {
 }
 
 fn nextest_available() -> bool {
-    Command::new("cargo")
-        .args(["nextest", "--version"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let mut probe = Command::new("cargo");
+    probe.args(["nextest", "--version"]);
+    output::output_bounded(&mut probe, group::SYNC_DEADLINE).is_ok_and(|output| output.status.success())
 }
 
 fn build_command(arm: Arm, context: &Context) -> Command {
@@ -246,7 +251,7 @@ fn build_command(arm: Arm, context: &Context) -> Command {
 fn run_arm(arm: Arm, context: &Context) -> Result<Observation, String> {
     let mut command = build_command(arm, context);
     let start = Instant::now();
-    let output = command.output().map_err(|error| format!("spawn {}: {error}", arm.label()))?;
+    let output = output::output_bounded(&mut command, ARM_DEADLINE).map_err(|failure| format!("{}: {failure}", arm.label()))?;
     let wall = start.elapsed();
     let text = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     Ok(Observation { wall, status: output.status.code(), outcomes: parse(arm, &text) })
