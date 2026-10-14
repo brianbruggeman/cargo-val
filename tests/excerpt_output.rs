@@ -115,3 +115,63 @@ async fn a_source_line_over_200_kb_is_cut_and_marked_so_the_json_fail_record_sta
     assert!(fail.starts_with('{') && fail.ends_with('}') && fail.contains("\"rerun\":"), "{} bytes", fail.len());
     assert!(fail.contains("\"excerpt_absent\":null") && fail.contains('…'), "{} bytes", fail.len());
 }
+
+const BYTES_PANIC_SITE: &str = "/bytes-1.12.1/src/bytes.rs:533";
+
+async fn run_external(mode: &str) -> String {
+    let output = run_manifest(&fixture("failure_class"), mode, "excerpt-external-target", &["-E", "test(=failing::registry_panic_under_user_call)"]).await;
+    assert_eq!(output.status.code(), Some(1), "{}", stdout_of(&output));
+    stdout_of(&output)
+}
+
+fn external_reason(text: &str) -> String {
+    let line = text.lines().find(|line| line.contains("panicked at ")).expect("the captured panic line");
+    let site = line.split_once("panicked at ").expect("the panic marker").1;
+    let mut parts = site.splitn(2, ':');
+    let file = parts.next().expect("a file");
+    let line_number = parts.next().expect("a line").split(':').next().expect("a line number");
+    let reason = format!("external:{file}:{line_number}");
+    assert!(reason.ends_with(BYTES_PANIC_SITE) && reason.contains("/registry/src/"), "{reason}");
+    reason
+}
+
+#[proxima::test(timeout = "310s")]
+async fn a_failure_with_no_panic_site_prints_the_exact_absent_record_in_agent_output() {
+    let text = run_abort("agent").await;
+
+    let records: Vec<&str> = text.lines().filter(|line| line.starts_with("EXCERPT")).collect();
+    assert_eq!(records, ["EXCERPT  absent:no_panic_site"], "{text}");
+}
+
+#[proxima::test(timeout = "310s")]
+async fn a_panic_inside_a_registry_dependency_prints_the_exact_external_reason_in_plain_output() {
+    let text = run_external("plain").await;
+
+    let reason = external_reason(&text);
+    let expected = [
+        "------ source: cargo_val_failure_class_fixture failing::registry_panic_under_user_call ------".to_string(),
+        format!("source absent: {reason}"),
+        PLAIN_CLOSE.to_string(),
+    ]
+    .join("\n");
+    assert!(text.contains(&expected), "{text}");
+}
+
+#[proxima::test(timeout = "310s")]
+async fn a_panic_inside_a_registry_dependency_reports_the_exact_external_reason_in_json_output() {
+    let text = run_external("json").await;
+
+    let fail = text.lines().find(|line| line.contains("\"t\":\"fail\"")).expect("a fail record");
+    let capture = text.lines().find(|line| line.contains("\"t\":\"output\"")).expect("an output record").replace("\\u000a", "\n");
+    let reason = external_reason(&capture);
+    assert!(fail.contains(&format!("\"excerpt\":null,\"excerpt_absent\":\"{reason}\",")), "{fail}");
+}
+
+#[proxima::test(timeout = "310s")]
+async fn a_panic_inside_a_registry_dependency_prints_the_exact_external_record_in_agent_output() {
+    let text = run_external("agent").await;
+
+    let reason = external_reason(&text);
+    let records: Vec<&str> = text.lines().filter(|line| line.starts_with("EXCERPT")).collect();
+    assert_eq!(records, [format!("EXCERPT  absent:{reason}")], "{text}");
+}

@@ -202,6 +202,8 @@ const FAILING_RUN: (&str, &str) = ("CARGO_VAL_FIXTURE_FAIL", "1");
 const ERASE_FRAME: &str = "\x1b[J";
 const SOURCE_OPEN: &str = "------ source: ";
 const SOURCE_CLOSE: &str = "------ end source ------";
+#[cfg(feature = "highlight")]
+const KEYWORD_SGR: &str = "\x1b[35mif\x1b[0m";
 
 fn failure_source_block(output: &str) -> &str {
     let open = output.rfind(SOURCE_OPEN).unwrap_or_else(|| panic!("no source fence after the frame:\n{}", shown(output)));
@@ -234,10 +236,10 @@ async fn with_no_color_set_the_failure_source_block_has_zero_escape_bytes() {
 
 #[cfg(feature = "highlight")]
 #[proxima::test]
-async fn with_highlight_and_colour_on_the_failure_source_block_carries_sgr_bytes() {
+async fn with_highlight_and_colour_on_the_failure_source_block_colours_the_if_keyword_with_the_keyword_role() {
     let (output, _) = run_on_pty_with("rich_pty", &[FAILING_RUN]).await;
 
     let block = failure_source_block(&output);
 
-    assert!(block.contains("\x1b["), "{}", shown(block));
+    assert!(block.contains(KEYWORD_SGR), "{}", shown(block));
 }

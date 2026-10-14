@@ -186,6 +186,23 @@ mod tests {
     }
 
     #[test]
+    fn a_coloured_row_cut_inside_a_string_closes_its_style_before_the_cut_mark() {
+        let source = format!("fn main() {{\n    let banner = \"{}\";\n}}\n", "segment flushed to disk ".repeat(30));
+        let excerpt = Excerpt::new(source.as_bytes(), 2, 5).expect("three lines");
+        let mut out = Vec::new();
+
+        assert_eq!(excerpt.write(&mut out, b"", true), None);
+
+        let text = String::from_utf8(out).expect("UTF-8");
+        let row = text.lines().find(|row| row.starts_with('>')).expect("the failing row");
+        assert!(row.ends_with("\x1b[0m\u{2026}"), "{row:?}");
+        let opened = row.matches("\x1b[").count() - row.matches("\x1b[0m").count();
+        assert!(opened >= 2, "keyword and string were both styled: {row:?}");
+        assert_eq!(opened, row.matches("\x1b[0m").count(), "{row:?}");
+        assert!(row.len() < 1024, "{} bytes", row.len());
+    }
+
+    #[test]
     fn every_capture_name_in_the_table_is_one_the_grammar_query_defines() {
         let missing: Vec<&str> = ROLES.iter().map(|(name, _)| *name).filter(|name| !tree_sitter_rust::HIGHLIGHTS_QUERY.contains(&format!("@{name}"))).collect();
 

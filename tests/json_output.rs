@@ -284,14 +284,17 @@ async fn a_fail_record_carries_the_bounded_unhighlighted_source_excerpt() {
     let lines = lines_of(&output);
 
     let fail = lines.iter().find(|line| line.contains("\"t\":\"fail\"")).expect("a fail record");
-    let expected = concat!(
-        "\"excerpt\":\"     9 |             print!(\\\"{}\\\", \\\"X\\\".repeat(5000));\\u000a",
-        "    10 |         }\\u000a",
-        "    11 |         if std::env::var_os(\\\"CARGO_VAL_C52D_FAIL\\\").is_some() {\\u000a",
-        ">   12 |             panic!(\\\"requested fixture failure\\\");\\u000a",
-        "      |             ^^^^^ panicked here\\u000a",
-    );
-    assert!(fail.contains(expected), "{fail}");
-    assert!(fail.contains("\"excerpt_absent\":null"), "{fail}");
+    let rows = [
+        r#"     9 |             print!(\"{}\", \"X\".repeat(5000));"#,
+        r"    10 |         }",
+        r#"    11 |         if std::env::var_os(\"CARGO_VAL_C52D_FAIL\").is_some() {"#,
+        r#">   12 |             panic!(\"requested fixture failure\");"#,
+        r"      |             ^^^^^ panicked here",
+        r"    13 |         }",
+        r#"    14 |         if std::env::var_os(\"CARGO_VAL_C52D_ESCAPES\").is_some() {"#,
+        r#"    15 |             panic!(\"path \\\"C:\\\\tmp\\\\out\\\" is missing\\nsecond line\");"#,
+    ];
+    let expected = format!("\"excerpt\":\"{}\\u000a\",\"excerpt_absent\":null,", rows.join("\\u000a"));
+    assert!(fail.contains(&expected), "{fail}");
     assert_no_escape(&output);
 }

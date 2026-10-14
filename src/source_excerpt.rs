@@ -429,6 +429,27 @@ mod tests {
         assert!(text.contains("let after = 2;\n"), "rows after the cut row survive");
     }
 
+    #[proxima::test]
+    #[case::three_byte_euro_straddles_the_budget(511, '\u{20AC}', 511)]
+    #[case::four_byte_crab_straddles_after_two_bytes(510, '\u{1F980}', 510)]
+    #[case::four_byte_crab_straddles_after_one_byte(511, '\u{1F980}', 511)]
+    #[case::three_byte_euro_ending_exactly_on_the_budget_stays_whole(509, '\u{20AC}', 512)]
+    async fn a_multibyte_char_straddling_byte_512_is_dropped_whole_and_the_row_ends_with_the_cut_mark(#[case] pad: usize, #[case] straddler: char, #[case] kept_bytes: usize) {
+        let source = format!("{}{straddler}let tail = 0;\n", "a".repeat(pad));
+        let excerpt = Excerpt::new(source.as_bytes(), 1, 1).expect("one line");
+        let mut out = Vec::new();
+
+        excerpt.write_plain(&mut out, b"");
+
+        let kept = core::str::from_utf8(excerpt.row(0)).expect("the cut kept every char whole");
+        assert_eq!(kept.len(), kept_bytes);
+        assert!(source.starts_with(kept));
+        let text = String::from_utf8(out).expect("the whole excerpt is valid UTF-8");
+        let row = text.lines().next().expect("the failing row");
+        assert!(row.ends_with(&format!("{kept}\u{2026}")), "{row}");
+        assert!(!row.contains(straddler) || kept_bytes == 512, "{row}");
+    }
+
     #[test]
     fn a_file_shorter_than_the_window_shows_all_of_itself() {
         let excerpt = Excerpt::new(b"fn main() {}\nlet x = 1;\n", 2, 5).expect("two lines");
