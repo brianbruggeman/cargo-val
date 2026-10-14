@@ -728,6 +728,12 @@ fn review_item(item: Item, lanes: &Lanes, run: &ListingRun<'_>) -> Result<Contro
     match item {
         Item::Out(KEY_LANE, range) => keys_chunk(lanes, range, run)?,
         Item::OutEnd(KEY_LANE) | Item::Interrupt | Item::Signal(Err(_)) => return Ok(ControlFlow::Break(())),
+        Item::Signal(Ok(())) => {
+            run.drain_signals()?;
+            if run.interrupted() {
+                return Ok(ControlFlow::Break(()));
+            }
+        }
         _ => {}
     }
     Ok(if run.reviewing() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) })

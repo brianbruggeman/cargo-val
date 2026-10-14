@@ -204,6 +204,15 @@ impl SignalPipe {
         false
     }
 
+    /// Records SIGINT as received the way the control handler would, for a key that asks for the same interrupt.
+    pub fn raise_interrupt(&self) {
+        if self.received.get().is_none() {
+            self.received.set(Some(SIGINT));
+            self.interrupt.fire();
+        }
+        terminate_children();
+    }
+
     /// Takes the pending control event and ends every child of the run.
     ///
     /// # Errors
