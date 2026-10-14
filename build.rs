@@ -105,6 +105,12 @@ struct ViewDefaults {
     heartbeat_secs: usize,
     #[setting(default = 250)]
     tick_ms: usize,
+    #[setting(default = 7)]
+    inflight_rows: usize,
+    #[setting(default = 30)]
+    bar_columns: usize,
+    #[setting(default = 160)]
+    reason_bytes: usize,
 }
 
 impl Validate for ViewDefaults {
@@ -121,6 +127,9 @@ impl Validate for ViewDefaults {
         }
         if self.tick_ms == 0 || self.tick_ms > self.heartbeat_secs * 1000 {
             errors.push(ValidationMessage::new("tick_ms", "must be nonzero and no longer than the heartbeat"));
+        }
+        if self.bar_columns < 10 || self.inflight_rows == 0 || self.reason_bytes == 0 {
+            errors.push(ValidationMessage::new("bar_columns", "must be at least 10, with nonzero inflight_rows and reason_bytes"));
         }
         if self.frame_bytes < self.rerun_bytes + 4096 {
             errors.push(ValidationMessage::new("frame_bytes", "must hold the rerun command plus a line, at least rerun_bytes + 4096"));
