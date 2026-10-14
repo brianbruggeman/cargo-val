@@ -31,7 +31,7 @@ use crate::line::Line;
 use crate::failure_class::Exit;
 use crate::source_excerpt::{colour_allowed, for_failure, for_span, splice_excerpt};
 use crate::render::review::{Action, Key};
-use crate::render::{Event, Outcome, State, Stream, located};
+use crate::render::{Event, Mode, Outcome, State, Stream, located};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
     CARGO_LANE, DOC_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
@@ -1542,6 +1542,28 @@ impl ListingRun<'_> {
             self.root.fire();
         }
         Ok(())
+    }
+
+    // a finished rich run on a terminal with failures keeps the screen: review opens (a half-pressed quit is cancelled first) and the caller pumps keys until it is left
+    pub(crate) fn open_review(&self) -> Result<bool, RunError> {
+        let waiting = {
+            let state = self.render().1.borrow();
+            self.render().0 == OutputMode::Rich && keys_raw() && state.failures().next().is_some() && state.mode().is_live()
+        };
+        if !waiting {
+            return Ok(false);
+        }
+        if self.render().1.borrow().mode() == Mode::QuitArmed {
+            self.key(Key::Esc)?;
+        }
+        if self.render().1.borrow().mode() == Mode::Running {
+            self.key(Key::Char(b'f'))?;
+        }
+        Ok(self.reviewing())
+    }
+
+    pub(crate) fn reviewing(&self) -> bool {
+        self.render().1.borrow().mode().is_live()
     }
 
     // a forwarded signal only reaches children that honor it, so receiving one fires the root every session scope descends from

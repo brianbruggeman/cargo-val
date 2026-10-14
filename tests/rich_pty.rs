@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::fs::File;
+use std::io::Write;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::num::NonZeroI32;
@@ -26,7 +27,9 @@ mod lead;
 
 const FRAME_START: &str = "\x1b[?25l";
 static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
-
+const REVIEW_HEADER: &str = "cargo val  review";
+const SHOW_CURSOR: &str = "\x1b[?25h";
+const CLOSING_START: &str = "cargo_val_rich_pty_fail_fixture: discovered";
 const COLUMNS: u16 = 80;
 const ROWS: u16 = 40;
 
@@ -47,14 +50,14 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
 }
 
-fn spawn_on(slave: &OwnedFd, fixture: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
+fn spawn_on(slave: &OwnedFd, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
     let stream = || Stdio::from(slave.try_clone().expect("the slave descriptor duplicates"));
     let mut command = binary::command();
     lead::lead_group(&mut command);
     command
         .arg("--manifest-path")
         .arg(fixture_manifest(fixture))
-        .args(["--tests", "--no-fail-fast", "--output", "rich"])
+        .args(["--tests", "--no-fail-fast", "--output", mode])
         .env_remove("CI")
         .env_remove("GITHUB_ACTIONS")
         .env_remove("CARGO_VAL_OUTPUT")
@@ -133,18 +136,28 @@ async fn run_on_pty(fixture: &str) -> (String, ExitStatus) {
 }
 
 async fn run_on_pty_with(fixture: &str, environment: &[(&str, &str)]) -> (String, ExitStatus) {
+    run_driven(fixture, "rich", environment, async |master, _keys, release| read_until_exit(master, &release).await).await
+}
+
+const NO_COLOR: [(&str, &str); 1] = [("NO_COLOR", "1")];
+
+async fn run_driven<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], drive: Drive) -> (String, ExitStatus)
+where
+    Drive: AsyncFnOnce(&ChildStream, File, PathBuf) -> String,
+{
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{run}"));
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{mode}-{run}"));
     std::fs::create_dir_all(&directory).expect("the release directory is creatable");
     let release = directory.join("release");
     let Pty { master, slave } = open_pty();
-    let mut child = spawn_on(&slave, fixture, (&release, &run), environment);
+    let keys = master.try_clone().expect("the master descriptor duplicates for writing keys");
+    let mut child = spawn_on(&slave, fixture, mode, (&release, &run), environment);
     drop(slave);
     let leader = child.id();
     let exit = ExitSource::new(NonZeroI32::new(leader.cast_signed()).expect("a spawned child has a nonzero pid"));
     // boxed: the stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
     let master = Box::new(ChildStream::new(OwnedFd::from(master)));
-    let waiting = join(read_until_exit(&master, &release), exit.call(()));
+    let waiting = join(drive(&master, keys, release), exit.call(()));
     let (output, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("{report}"),
@@ -152,6 +165,25 @@ async fn run_on_pty_with(fixture: &str, environment: &[(&str, &str)]) -> (String
     let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
     let _ = child.try_wait();
     (output, status)
+}
+
+async fn quit_from_review(master: &ChildStream, mut keys: File) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(b"q").expect("the first quit key is writable");
+    keys.write_all(b"q").expect("the confirming quit key is writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn read_plain(master: &ChildStream) -> String {
+    let (output, _) = drain::drain_until(master, |_| false).await;
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn closing_block(output: &str) -> String {
+    let start = output.find("SUMMARY").unwrap_or_else(|| panic!("no closing block in:\n{}", shown(output)));
+    output[start..].lines().map(|line| line.split_once("wall").map_or(line, |(head, _)| head)).collect::<Vec<_>>().join("\n")
 }
 
 #[proxima::test]
@@ -344,4 +376,24 @@ async fn with_highlight_and_colour_on_the_build_error_excerpt_colours_the_keywor
     assert!(rows[0].contains("\x1b[35mfn\x1b[0m"), "{}", shown(&rows[0]));
     assert_eq!(without_sgr(&rows[0]), "     1 | pub fn answer() -> u32 {");
     assert_eq!(without_sgr(&rows[3]), BUILD_ERROR_MARKER);
+}
+
+#[proxima::test]
+async fn quitting_review_with_q_then_q_restores_the_terminal_and_prints_the_plain_closing_block() {
+    let (output, status) = run_driven("rich_pty_fail", "rich", &NO_COLOR, async |master, keys, _release| quit_from_review(master, keys).await).await;
+    let (plain, plain_status) = run_driven("rich_pty_fail", "plain", &NO_COLOR, async |master, _keys, _release| read_plain(master).await).await;
+
+    let last_frame = output.rfind(REVIEW_HEADER).unwrap_or_else(|| panic!("no review frame was drawn:\n{}", shown(&output)));
+    let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(&output)));
+    println!("last review frame onward:\n{}", shown(&output[output[..last_frame].rfind('\x1b').unwrap_or(last_frame)..]));
+    assert_eq!(status.code(), Some(1), "a run with a failure exits 1 after leaving review: {status}");
+    assert_eq!(plain_status.code(), Some(1), "the plain run of the same fixture exits 1: {plain_status}");
+    assert!(shown_cursor > last_frame, "the cursor was shown at {shown_cursor}, before the last review frame at {last_frame}");
+    let receipt = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(&output)));
+    assert!(receipt < shown_cursor, "the cursor returns only after the receipt: receipt at {receipt}, cursor at {shown_cursor}");
+    assert!(output.ends_with(SHOW_CURSOR), "the last bytes of the run show the cursor:\n{}", shown(&output));
+    let after_frame = output.rsplit_once("\x1b[J").map_or("", |(_, tail)| tail);
+    let after_frame = after_frame.strip_suffix(SHOW_CURSOR).unwrap_or(after_frame);
+    assert!(after_frame.starts_with(CLOSING_START), "the bytes after the last frame erase must open the closing block:\n{}", shown(after_frame));
+    assert_eq!(closing_block(after_frame), closing_block(&plain), "rich receipt differs from the plain closing block");
 }
