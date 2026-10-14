@@ -771,7 +771,7 @@ fn block_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (outpu
     };
     let targets = run.targets.borrow();
     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-    emit(run.render(), &Event::Captured { id, stdout: (body, stdout.1), stderr: (b"", 0), exit: Exit::from_status(status) })
+    run.emit_captured(id, ((body, stdout.1), (b"", 0)), Exit::from_status(status))
 }
 
 // the lines between libtest's `---- <name> stdout ----` header and the `failures:` that closes the section, found by the parser that streams them
@@ -807,7 +807,7 @@ fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (out
     let targets = run.targets.borrow();
     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
     let (stdout, stderr) = output.captured();
-    emit(run.render(), &Event::Captured { id, stdout, stderr, exit: Exit::from_status(status) })
+    run.emit_captured(id, (stdout, stderr), Exit::from_status(status))
 }
 
 // every name that did not settle on its clean shard line owes a solo run, and that solo run's exit decides it
@@ -945,6 +945,7 @@ mod pause_tests {
     use crate::config::{IgnoreMode, NoTestsPolicy, OutputMode, ProcessMode};
     use crate::driver::{DocObservation, Render, RenderState, Settings, TargetTable};
     use crate::line::Line;
+    use std::path::PathBuf;
     use crate::edge_exit::fixture::in_single_threaded_process;
     use crate::edge_signal::SignalPipe;
     use crate::edge_spawn::held_launch_storage;
@@ -1002,6 +1003,7 @@ mod pause_tests {
             max_fail: None,
             test_limit_ms: None,
             heartbeat_ms: 10_000,
+            source_root: PathBuf::new(),
             no_tests: NoTestsPolicy::Pass,
             process: ProcessMode::Shard,
             output: crate::config::OutputMode::Plain,

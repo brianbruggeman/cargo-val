@@ -561,3 +561,26 @@ mod plain_grammar {
         assert!(summary("START    cli_run  fixture::passes\n").is_none());
     }
 }
+
+#[proxima::test(timeout = "310s")]
+async fn a_failure_prints_the_seven_line_source_excerpt_with_a_marker_and_a_caret_row_and_no_escape_byte() {
+    let output = run(&[], &[]).await;
+    let text = stdout_of(&output);
+
+    let expected = [
+        "------ source: cli_run fixture::fails_when_requested ------",
+        "     9 |             print!(\"{}\", \"X\".repeat(5000));",
+        "    10 |         }",
+        "    11 |         if std::env::var_os(\"CARGO_VAL_C52D_FAIL\").is_some() {",
+        ">   12 |             panic!(\"requested fixture failure\");",
+        "      |             ^^^^^ panicked here",
+        "    13 |         }",
+        "    14 |         if std::env::var_os(\"CARGO_VAL_C52D_ESCAPES\").is_some() {",
+        "    15 |             panic!(\"path \\\"C:\\\\tmp\\\\out\\\" is missing\\nsecond line\");",
+        "------ end source ------",
+    ]
+    .join("\n");
+    assert!(text.contains(&expected), "the excerpt block is exact:\n{text}");
+    assert_eq!(text.lines().filter(|line| line.starts_with("> ")).count(), 1, "{text}");
+    assert!(!output.stdout.contains(&ESCAPE), "plain output carries no escape byte");
+}

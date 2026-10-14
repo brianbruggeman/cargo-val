@@ -7,7 +7,7 @@ use std::io::Write;
 
 use cargo_val::failure_class::Exit;
 use cargo_val::line::Line;
-use cargo_val::render::{Event, Identity, Mode, Outcome, State};
+use cargo_val::render::{Event, Identity, Mode, Outcome, State, UNREAD};
 use cargo_val::view_defaults::{FAILURES, INFLIGHT_BYTES, NAME_BYTES, RERUN_BYTES};
 
 const FAILING: Identity<'static> = (b"sched_records", b"the_host_binary_format_yields_every_declared_record");
@@ -41,7 +41,7 @@ fn run_with_failure() -> Result<(), String> {
     show(&mut state, Event::Tick { now_ms: 11_000 })?;
     show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Passed, at_ms: Some(4_123), solo: false })?;
     show(&mut state, Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: Some(72_860), solo: false })?;
-    show(&mut state, Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (b"body did not complete within the timeout", 0), exit: Exit::Code(101) })?;
+    show(&mut state, Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (b"body did not complete within the timeout", 0), exit: Exit::Code(101), excerpt: UNREAD })?;
     show(&mut state, Event::Warned { id: FAILING, what: b"solo rerun passed" })?;
     show(&mut state, finished(1))
 }

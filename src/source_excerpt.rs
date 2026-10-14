@@ -11,18 +11,22 @@
 use core::fmt;
 use core::ops::Range;
 use std::fs;
+use std::format;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::string::String;
+use std::string::{String, ToString};
 use std::vec::Vec;
 
 use memchr::{memchr, memchr_iter};
+
+use crate::failure_class::{Absent, Record, Reject};
 
 pub const WINDOW: usize = 7;
 const ABOVE: u32 = 3;
 const LAST_ROW: u32 = 6;
 const GUTTER_BLANK: &[u8] = b"      | ";
 const CARET: u8 = b'^';
+const PANIC_LABEL: &[u8] = b"panicked here";
 
 /// Why no excerpt exists: always a named reason, never an empty success.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +181,28 @@ impl<'a> Excerpt<'a> {
     }
 }
 
+/// The excerpt rows for one classified failure, or the named reason there are none: the classifier's absent reason,
+/// or the read error. Reads the source once; cold path. `colour` is `write`'s resolved answer.
+///
+/// # Errors
+///
+/// The reason text: `no_panic_site`, `external:<file>:<line>`, `no_panic_in_capture`, or the `SourceError` message.
+pub fn for_failure(root: &Path, colour: bool, record: &Result<Record<'_>, Reject>) -> Result<Vec<u8>, Vec<u8>> {
+    let site = match record {
+        Ok(Record { location: Ok(site), .. }) => site,
+        Ok(Record { location: Err(Absent::NoPanicSite), .. }) => return Err(b"no_panic_site".to_vec()),
+        Ok(Record { location: Err(Absent::External(site)), .. }) => {
+            return Err(format!("external:{}:{}", String::from_utf8_lossy(site.file), site.line).into_bytes());
+        }
+        Err(_) => return Err(b"no_panic_in_capture".to_vec()),
+    };
+    let source = read_source(root, site.file).map_err(|error| error.to_string().into_bytes())?;
+    let excerpt = Excerpt::new(&source, site.line, site.col).map_err(|error| error.to_string().into_bytes())?;
+    let mut rows = Vec::new();
+    excerpt.write(&mut rows, PANIC_LABEL, colour);
+    Ok(rows)
+}
+
 /// `NO_COLOR` present, even empty, disables colour (no-color.org); the one ambient read, so the
 /// renderer takes its answer as data.
 #[must_use]
@@ -237,6 +263,8 @@ mod tests {
     use core::fmt::Write;
     use std::format;
     use std::string::ToString;
+
+    use crate::failure_class::{Exit, classify};
 
     const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -424,5 +452,52 @@ mod tests {
         }
 
         assert_eq!(out, b"   7| 575|3189|12345|");
+    }
+
+    const PANIC_CAPTURE: &[u8] = b"\nthread 'fixture::fails_when_requested' (4242) panicked at src/lib.rs:12:13:\nrequested fixture failure\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n";
+
+    fn cli_run_root() -> PathBuf {
+        Path::new(ROOT).join("tests/fixtures/cli_run")
+    }
+
+    fn rows_for(capture: &[u8], exit: Exit, root: &Path, colour: bool) -> Result<Vec<u8>, Vec<u8>> {
+        for_failure(root, colour, &classify(capture, exit, 0))
+    }
+
+    #[test]
+    fn a_real_panic_in_the_cli_run_fixture_yields_plain_rows_with_the_marker_on_its_line_and_no_escape() {
+        let rows = rows_for(PANIC_CAPTURE, Exit::Code(101), &cli_run_root(), false).expect("the fixture source is readable");
+
+        let text = String::from_utf8(rows).expect("UTF-8");
+        let marked: Vec<&str> = text.lines().filter(|line| line.starts_with("> ")).collect();
+        assert_eq!(marked, [">   12 |             panic!(\"requested fixture failure\");"]);
+        assert!(text.contains("      |             ^^^^^ panicked here"), "{text}");
+        assert_eq!(text.lines().count(), 8, "{text}");
+        assert!(!text.contains('\x1b'));
+    }
+
+    #[test]
+    fn a_failure_with_no_panic_site_reports_the_classifiers_absent_reason() {
+        let reason = rows_for(b"", Exit::DeadlineKilled, &cli_run_root(), false).expect_err("a deadline kill has no location");
+
+        assert_eq!(reason, b"no_panic_site");
+    }
+
+    #[test]
+    fn a_missing_source_file_reports_the_read_error_naming_the_path() {
+        let reason = rows_for(PANIC_CAPTURE, Exit::Code(101), &Path::new(ROOT).join("tests/fixtures/absent"), false).expect_err("no such root");
+
+        let text = String::from_utf8(reason).expect("UTF-8");
+        assert!(text.starts_with("source not found: "), "{text}");
+        assert!(text.ends_with("src/lib.rs"), "{text}");
+    }
+
+    #[cfg(feature = "highlight")]
+    #[test]
+    fn with_colour_on_the_keyword_on_the_line_above_the_panic_carries_the_keyword_role() {
+        let rows = rows_for(PANIC_CAPTURE, Exit::Code(101), &cli_run_root(), true).expect("the fixture source is readable");
+
+        let text = String::from_utf8(rows).expect("UTF-8");
+        assert!(text.contains("\x1b[35mif\x1b[0m"), "{text}");
     }
 }

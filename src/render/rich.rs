@@ -490,7 +490,7 @@ mod tests {
 
     use crate::failure_class::Exit;
     use crate::line::Line;
-    use crate::render::{Event, Outcome, State};
+    use crate::render::{Event, Outcome, State, UNREAD};
     use crate::test_alloc::measure_allocations;
 
     const FAILING: (&[u8], &[u8]) = (b"sched_records", b"the_host_binary_format_yields_every_declared_record_with_flags_and_group");
@@ -508,7 +508,7 @@ mod tests {
             state.apply(&Event::Settled { id: (b"filler", b"passes"), outcome: Outcome::Passed, at_ms: None, solo: false });
         }
         state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
-        state.apply(&Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (PANIC, 0), exit: Exit::Code(101) });
+        state.apply(&Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (PANIC, 0), exit: Exit::Code(101), excerpt: UNREAD });
         state.apply(&Event::Started { id: FAILING, solo: false, at_ms: 5800, limit_ms: None });
         state.apply(&Event::Started { id: SHARD, solo: false, at_ms: 8100, limit_ms: Some(120_000) });
         state.apply(&Event::Tick { now_ms: 47_100 });

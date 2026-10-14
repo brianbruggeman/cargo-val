@@ -6,8 +6,8 @@
 //! and each invalid run becomes U+FFFD. No record allocates.
 
 use super::agent::{CARRIAGE_RETURN, ESCAPE, TRUNCATION_MARK, after_sequence, count_escapes, exit_word, libtest_body};
-use super::{Event, Identity, Outcome, State, Stream};
-use crate::failure_class::{Absent, Class, Enforcer, Exit, Location, Record, classify};
+use super::{Event, ExcerptRows, Identity, Outcome, State, Stream, located};
+use crate::failure_class::{Absent, Class, Enforcer, Exit, Location, Record};
 use crate::line::Line;
 use crate::view_defaults::{OUTPUT_BYTES, OUTPUT_HEAD_BYTES};
 
@@ -22,7 +22,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
             Event::Started { id, at_ms, limit_ms, .. } => started(frame, id, at_ms, limit_ms),
             Event::Settled { id, outcome, solo, .. } => settled(frame, id, outcome, self.settled_ms, solo),
-            Event::Captured { id, stdout, stderr, exit } => failure(frame, id, [stdout, stderr], exit),
+            Event::Captured { id, stdout, stderr, exit, excerpt } => failure(frame, id, [stdout, stderr], exit, excerpt),
             Event::BuildFailed { diagnostic, exit } => build_failed(frame, diagnostic, exit),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
             Event::Running { id } => running(frame, id),
@@ -212,21 +212,35 @@ fn settled<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, outcom
     close(frame);
 }
 
-fn failure<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, [stdout, stderr]: [Stream<'_>; 2], exit: Exit) {
+fn failure<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, [stdout, stderr]: [Stream<'_>; 2], exit: Exit, excerpt: ExcerptRows<'_>) {
     let (capture, dropped) = if stdout.0.is_empty() { stderr } else { stdout };
-    let record = classify(capture, exit, dropped).or_else(|_| classify(stderr.0, exit, stderr.1));
+    let record = located(stdout, stderr, exit);
     open(frame, b"fail");
     id_field(frame, id);
     match &record {
         Ok(found) => classified(frame, found),
         Err(_) => unclassified(frame),
     }
+    excerpt_fields(frame, excerpt);
     key(frame, b"rerun");
     frame.text(b"\"cargo val --no-fail-fast -E '");
     filter_clause(frame, id);
     frame.text(b"'\"");
     close(frame);
     output(frame, id, (capture, dropped), if stdout.0.is_empty() { b"stderr" } else { b"stdout" });
+}
+
+fn excerpt_fields<const FRAME: usize>(frame: &mut Line<FRAME>, excerpt: ExcerptRows<'_>) {
+    match excerpt {
+        Ok(rows) => {
+            text(frame, b"excerpt", rows);
+            null(frame, b"excerpt_absent");
+        }
+        Err(reason) => {
+            null(frame, b"excerpt");
+            text(frame, b"excerpt_absent", reason);
+        }
+    }
 }
 
 fn classified<const FRAME: usize>(frame: &mut Line<FRAME>, record: &Record<'_>) {
