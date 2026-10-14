@@ -7,6 +7,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use cargo_val::edge_stack::{FORMAT, capture};
 use cargo_val::edge_stream_unix::ChildStream;
@@ -100,6 +102,32 @@ async fn blocked_pid(ready: &ChildStream) -> u32 {
     line.trim().parse().expect("the fixture wrote its pid")
 }
 
+// a task's state reads S while it is still on a run queue and preempted just before it sleeps, so only a symbol in wchan (or a readable stack) proves it is off the CPU; a refused read cannot be waited out and capture names it as denied
+#[cfg(target_os = "linux")]
+fn until_every_thread_is_named_asleep(pid: u32) {
+    let started = Instant::now();
+    loop {
+        let tasks: Vec<PathBuf> = fs::read_dir(format!("/proc/{pid}/task"))
+            .expect("the blocked child's task directory is readable")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        if tasks.len() >= 2 && tasks.iter().all(|task| sleeps_by_the_kernels_account(task)) {
+            return;
+        }
+        assert!(started.elapsed() < FIXTURE_DEADLINE, "threads of {pid} never all named a sleep: {tasks:?}");
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sleeps_by_the_kernels_account(task: &Path) -> bool {
+    if fs::read(task.join("stack")).is_ok_and(|stack| !stack.trim_ascii().is_empty()) {
+        return true;
+    }
+    fs::read(task.join("wchan")).map_or(true, |symbol| !matches!(symbol.as_slice(), b"" | b"0"))
+}
+
 #[cfg(target_os = "macos")]
 #[proxima::test(timeout = "500s")]
 async fn macos_sample_of_a_real_blocked_child_finds_the_user_frame_at_its_file_and_line() {
@@ -139,6 +167,7 @@ async fn linux_proc_of_a_real_blocked_child_yields_a_kernel_frame_per_thread_or_
 
     supervised(&mut command, FIXTURE_DEADLINE, async |_, _, _, _| {
         let pid = blocked_pid(&ready).await;
+        until_every_thread_is_named_asleep(pid);
         let mut buffer = vec![0_u8; 32 * 1024];
 
         let (outcome, allocations) = test_alloc::measure_allocations(|| capture(pid, &mut buffer));
@@ -146,11 +175,13 @@ async fn linux_proc_of_a_real_blocked_child_yields_a_kernel_frame_per_thread_or_
         match outcome {
             Ok((written, dropped)) => {
                 let all: Vec<Frame<'_>> = frames(&buffer[..written], FORMAT, &WORKSPACE).expect("proc stacks are text").collect();
-                let mut threads: Vec<&str> = all.iter().map(|frame| frame.thread).collect();
-                threads.dedup();
+                let main_thread = format!("Thread_{pid}");
+                let main_frames = all.iter().filter(|frame| frame.thread == main_thread).count();
+                let test_frames = all.iter().filter(|frame| frame.thread != main_thread).count();
                 let symbols: Vec<&str> = all.iter().map(|frame| frame.symbol).collect();
-                println!("{{\"event\":\"hang_stack_capture\",\"pid\":{pid},\"written\":{written},\"dropped\":{dropped},\"allocations\":{allocations},\"threads\":{},\"symbols\":{symbols:?}}}", threads.len());
-                assert!(threads.len() >= 2, "a main thread and the test thread: {threads:?}");
+                println!("{{\"event\":\"hang_stack_capture\",\"pid\":{pid},\"written\":{written},\"dropped\":{dropped},\"allocations\":{allocations},\"main_frames\":{main_frames},\"test_frames\":{test_frames},\"symbols\":{symbols:?}}}");
+                assert!(main_frames >= 1, "the main thread sleeps in libtest's wait and has a kernel frame: {all:?}");
+                assert!(test_frames >= 1, "the test thread sleeps in its fifo open and has a kernel frame: {all:?}");
                 assert!(all.iter().all(|frame| frame.image == "kernel" && frame.class == Class::Runtime), "{all:?}");
             }
             Err(reason) => {
