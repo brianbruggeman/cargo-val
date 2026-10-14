@@ -3276,7 +3276,7 @@ fn close_plain(
     stop: Option<StopReport>,
     (started_millis, manifest): (u64, Option<&[u8]>),
 ) -> Result<(), RunError> {
-    emit(render, &Event::Listed { binaries, tests: total.discovered })?;
+    emit(render, &Event::Listed { binaries, of: Some(binaries), tests: total.discovered })?;
     emit(
         render,
         &Event::Finished {
