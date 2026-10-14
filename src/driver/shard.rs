@@ -13,26 +13,16 @@ use core::ops::Range;
 use crate::build_defaults::SHARD_COMMAND_UNITS;
 use crate::discover_listing::{DocEvent, DocOutcome, DocParser};
 use crate::edge_signal::release_child;
-#[cfg(unix)]
-use crate::edge_spawn::STOP_SIGNAL;
-#[cfg(not(unix))]
-use crate::edge_spawn::STATUS_CONTROL_C_EXIT;
 use crate::run::{JOB_BASE, Lanes};
 use crate::runner::LibtestVerdict;
 use crate::sched_file::{Loaded, load};
 use crate::shard_arena::{Located, PushError, Rerun, Reported, Shard, ShardArena};
 use crate::shard_sched::{Class, group_key};
 use crate::status_queue::{self, EVENT_RESERVE};
-use crate::stop::Observation;
 
 pub(super) const FAILURE_CAPACITY: usize = 16384;
 const FIXED_UNITS: usize = 3 + "--exact ".len();
 const GROUP_CAPACITY: usize = crate::sched_binary::GROUP_CAPACITY;
-// the status a child ends with when cargo-val terminated it: SIGKILL on unix, the exit code TerminateProcess sets elsewhere
-#[cfg(unix)]
-pub(super) const STOP_STATUS: i32 = -STOP_SIGNAL;
-#[cfg(not(unix))]
-pub(super) const STOP_STATUS: i32 = STATUS_CONTROL_C_EXIT.cast_signed();
 
 /// Per-child state for a shard: which of its names reported, the libtest report parser, and the failure blocks it has streamed.
 pub(super) struct ShardWatch {
@@ -182,8 +172,7 @@ fn count_reported(
 
 // a shard's failure is only counted when it would trip the stop policy; otherwise a solo run decides it
 fn would_trip(run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
-    let failures = ledger.snapshot().failed + run.docs.failed.get() + 1;
-    run.policy.borrow().observe_failures(failures) != Observation::Clear
+    run.budget_spent(ledger.snapshot().failed + run.docs.failed.get() + 1)
 }
 
 // a solo run cargo-val terminated is withdrawn: its exit says nothing about the test
@@ -192,31 +181,8 @@ pub(super) fn withdraw_solo(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, targe
     if let Some(target) = target {
         run.targets.borrow_mut().tally(target, Tally::Withdrawn);
     }
-    if !run.interrupted() {
-        run.policy.borrow_mut().listed_test_skipped();
-    }
+    run.shed(ledger, 1);
     Ok(())
-}
-
-// a failed test past --max-fail ends every shard, but an output-only rerun is spared: it is the only place a tripping test's block is printed
-// an interrupt ends everything, since nothing else will be read
-pub(super) fn stop_all(run: &ListingRun<'_>, ledger: &Ledger<'_>, watches: &Watches) {
-    run.stop_sent.set(true);
-    let interrupted = run.interrupted();
-    watches
-        .iter()
-        .flatten()
-        .filter(|watch| !spared_by_stop(interrupted, watch_rerun(watch)))
-        .filter_map(|watch| ledger.sessions().get(watch.slot))
-        .for_each(|session| session.child().terminate());
-}
-
-fn watch_rerun(watch: &TestWatch) -> Option<Rerun> {
-    watch.shard.as_ref().and_then(|shard_watch| shard_watch.shard.rerun)
-}
-
-fn spared_by_stop(interrupted: bool, rerun: Option<Rerun>) -> bool {
-    !interrupted && matches!(rerun, Some(Rerun::OutputOnly))
 }
 
 /// What one pass over a lane piece did: whether the stop policy tripped, and how many bytes the framer consumed before it paused.
@@ -240,6 +206,14 @@ pub(super) fn stall(watch: &mut TestWatch, window: Range<u32>, offset: usize) {
 /// Takes the paused window so the resume can feed its unframed remainder.
 pub(super) fn take_backlog(watch: &mut TestWatch) -> Option<(Range<u32>, usize)> {
     watch.shard.as_mut().and_then(|shard| shard.backlog.take())
+}
+
+// gate: In = one event, Out = the same event, Err = Cancelled once the trip fired; counted results and the closing tally both refuse to arrive after it
+fn trip_gate<'line>(run: &ListingRun<'_>, ledger: &Ledger<'_>, event: DocEvent<'line>) -> Result<DocEvent<'line>, RunError> {
+    match event {
+        DocEvent::Result { .. } | DocEvent::Finished { .. } if run.tripped(ledger) => Err(RunError::Cancelled),
+        admitted => Ok(admitted),
+    }
 }
 
 // frame: In = unframed lane bytes, Out = one line with its newline (a trailing partial line is the whole remainder), Err = none.
@@ -300,12 +274,9 @@ pub(super) fn observe(
     } = shard_watch;
     let shard = *shard;
     let mut stop = false;
-    let mut settle = |event: DocEvent<'_>| -> Result<(), RunError> {
+    let mut apply = |ledger: &mut Ledger<'_>, event: DocEvent<'_>| -> Result<(), RunError> {
         match event {
             DocEvent::Result { name, outcome, stray } => {
-                if run.tripped(ledger) {
-                    return Ok(());
-                }
                 let located = run.shards.borrow().locate(shard, *expected, name);
                 let Some(Located { ordinal, next }) = located else {
                     return write_fd(2, b"cargo-val: a shard child reported a test that was not in its shard\n");
@@ -351,13 +322,17 @@ pub(super) fn observe(
             }
             DocEvent::Finished { passed, failed: failed_count, ignored } => {
                 let expected_counts = (streamed.0 + deferred.0, streamed.1 + deferred.1, streamed.2 + deferred.2);
-                if !run.tripped(ledger) && (passed, failed_count, ignored) != expected_counts {
+                if (passed, failed_count, ignored) != expected_counts {
                     write_fd(2, b"cargo-val: a shard child's test result line disagrees with the results it streamed\n")?;
                 }
             }
             DocEvent::Running { .. } => {}
         }
         Ok(())
+    };
+    let mut settle = |event: DocEvent<'_>| match trip_gate(run, ledger, event).and_then(|admitted| apply(ledger, admitted)) {
+        Err(RunError::Cancelled) => Ok(()),
+        settled => settled,
     };
     let mut offset = 0;
     while offset < bytes.len() {
@@ -589,18 +564,20 @@ impl CargoDriver<'_> {
             }
         }
         if run.interrupted() {
-            stop_all(run, ledger, watches);
+            run.root.fire();
             let dropped = run.shards.borrow_mut().discard_everything() + run.specials.borrow_mut().discard();
             withdraw_unlaunched(run, ledger, active.target, dropped)?;
             return Ok(dropped > 0);
         }
-        let stopped = run.tripped(ledger);
+        let stopped = run.admit(ledger).is_err();
         let mut moved = false;
         if stopped {
-            let dropped = run.shards.borrow_mut().discard_unlaunched() + run.specials.borrow_mut().discard();
-            withdraw_unlaunched(run, ledger, active.target, dropped)?;
-            (0..dropped).for_each(|_| run.policy.borrow_mut().listed_test_skipped());
-            moved = dropped > 0;
+            let queued = core::iter::from_fn(|| run.shards.borrow_mut().pop_queued());
+            for names in queued.chain(Some(run.specials.borrow_mut().discard())) {
+                run.shed(ledger, names);
+                withdraw_unlaunched(run, ledger, active.target, names)?;
+                moved |= names > 0;
+            }
         }
         let executable = core::str::from_utf8(&active.path[..active.path_length]).map_err(|_| RunError::Arguments)?;
         let environment = &self.environments[slot_range(active.slot)];
@@ -643,7 +620,8 @@ impl CargoDriver<'_> {
             watch.announcing = 0..announcement_total(shard);
             announce_starts(run, active.target, &mut watch)?;
             let paused = !watch.announcing.is_empty();
-            start_session(ledger, watches, lanes, slot, Some(watch))?;
+            let scope = run.session_scope(shard.rerun);
+            start_session(ledger, watches, lanes, slot, (Some(watch), scope))?;
             lanes[JOB_BASE + slot.index()].3.set(!paused);
             moved = true;
         }
@@ -709,7 +687,7 @@ pub(super) fn finish(
     };
     shard_watch.flush_failures(run.render())?;
     if shard_watch.shard.rerun.is_some() {
-        finish_rerun(run, ledger, watches, target, (&shard_watch, &watch.output), status)?;
+        finish_rerun(run, ledger, target, (&shard_watch, &watch.output), (watch.exit(status), status))?;
         ledger.retire(watch.slot);
         run.shards.borrow_mut().finished(shard_watch.shard);
         return Ok(());
@@ -722,7 +700,7 @@ pub(super) fn finish(
         }
         settle_stopped(run, ledger, target, &shard_watch)?;
     } else {
-        queue_solo_reruns(run, ledger, watches, &mut run.shards.borrow_mut(), &shard_watch)?;
+        queue_solo_reruns(run, ledger, &mut run.shards.borrow_mut(), &shard_watch)?;
     }
     ledger.retire(watch.slot);
     run.shards.borrow_mut().finished(shard_watch.shard);
@@ -737,35 +715,32 @@ fn settle_stopped(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, target: Option<
         if let Some(target) = target {
             (0..withdrawn).for_each(|_| run.targets.borrow_mut().tally(target, Tally::Withdrawn));
         }
-        if !run.interrupted() {
-            (0..withdrawn).for_each(|_| run.policy.borrow_mut().listed_test_skipped());
-        }
+        run.shed(ledger, withdrawn);
     }
     Ok(())
 }
 
 // a deciding solo that cargo-val itself ended, by interrupt or by a fail-fast stop, reports nothing about its test
-fn withdrawn_solo(interrupted: bool, stop_sent: bool, rerun: Option<Rerun>, status: i32) -> bool {
-    matches!(rerun, Some(Rerun::Decides { .. })) && (interrupted || (stop_sent && status == STOP_STATUS))
+fn withdrawn_solo(interrupted: bool, exit: Result<i32, RunError>, rerun: Option<Rerun>) -> bool {
+    matches!(rerun, Some(Rerun::Decides { .. })) && (interrupted || exit == Err(RunError::Cancelled))
 }
 
 // a rerun child's exit is its verdict when the rerun decides; otherwise it only shows the output of a failure
 fn finish_rerun(
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
-    watches: &Watches,
     target: Option<usize>,
     (shard_watch, output): (&ShardWatch, &ChildOutput),
-    status: i32,
+    (exit, status): (Result<i32, RunError>, i32),
 ) -> Result<(), RunError> {
     let shard = shard_watch.shard;
     let arena = run.shards.borrow();
     let name = arena.nth(shard, 0).unwrap_or(b"");
-    if withdrawn_solo(run.interrupted(), run.stop_sent.get(), shard.rerun, status) {
+    if withdrawn_solo(run.interrupted(), exit, shard.rerun) {
         return withdraw_solo(run, ledger, target);
     }
     let solo = true;
-    match (shard.rerun, status == 0) {
+    match (shard.rerun, exit == Ok(0)) {
         (Some(Rerun::Decides { after_shard_failure }), true) => {
             if after_shard_failure {
                 warn_rerun(run, target, name, b"failed in a shared process, passed alone")?;
@@ -780,9 +755,7 @@ fn finish_rerun(
         (Some(Rerun::Decides { .. }), false) => {
             count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
             failure_output(run, target, name, (output, status))?;
-            if run.tripped(ledger) {
-                stop_all(run, ledger, watches);
-            }
+            run.tripped(ledger);
             Ok(())
         }
         (_, true) => warn_rerun(run, target, name, b"passed when re-run alone"),
@@ -841,7 +814,6 @@ fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (out
 fn queue_solo_reruns(
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
-    watches: &Watches,
     arena: &mut ShardArena<'_>,
     shard_watch: &ShardWatch,
 ) -> Result<(), RunError> {
@@ -851,9 +823,7 @@ fn queue_solo_reruns(
         .filter(|ordinal| !shard_watch.reported.has(*ordinal) || shard_watch.failed.has(*ordinal))
         .for_each(|ordinal| _ = owed.mark(ordinal));
     arena.owe_reruns(shard, (owed, shard_watch.failed), true).map_err(|_| RunError::Outcome)?;
-    if run.tripped(ledger) {
-        stop_all(run, ledger, watches);
-    }
+    run.tripped(ledger);
     Ok(())
 }
 
@@ -870,60 +840,91 @@ fn queue_output_reruns(arena: &mut ShardArena<'_>, shard_watch: &ShardWatch) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::scope_for;
+    use proxima_core::signal::Signal;
 
     const DECIDING: Option<Rerun> = Some(Rerun::Decides { after_shard_failure: false });
     const OUTPUT: Option<Rerun> = Some(Rerun::OutputOnly);
+
+    fn scopes() -> (Signal, Signal) {
+        let root = Signal::new();
+        let trip = root.child();
+        (root, trip)
+    }
 
     mod cases {
         use super::*;
 
         #[proxima::test]
         async fn fail_fast_spares_output_reruns() {
-            assert!(spared_by_stop(false, OUTPUT));
+            let (root, trip) = scopes();
+            let scope = scope_for(OUTPUT, (&root, &trip));
+            trip.fire();
+            assert!(!scope.is_fired());
         }
 
         #[proxima::test]
         async fn fail_fast_kills_deciding_and_plain_sessions() {
-            assert!(!spared_by_stop(false, DECIDING));
-            assert!(!spared_by_stop(false, None));
+            let (root, trip) = scopes();
+            let scoped = [scope_for(DECIDING, (&root, &trip)), scope_for(None, (&root, &trip))];
+            trip.fire();
+            assert!(scoped.iter().all(Signal::is_fired));
         }
 
         #[proxima::test]
         async fn interrupt_kills_everything() {
-            assert!(!spared_by_stop(true, OUTPUT));
-            assert!(!spared_by_stop(true, DECIDING));
-            assert!(!spared_by_stop(true, None));
+            let (root, trip) = scopes();
+            let scoped = [scope_for(OUTPUT, (&root, &trip)), scope_for(DECIDING, (&root, &trip)), scope_for(None, (&root, &trip))];
+            root.fire();
+            assert!(scoped.iter().all(Signal::is_fired));
+        }
+
+        #[proxima::test]
+        async fn a_frozen_session_exits_as_cancelled_once_an_interrupt_fires_its_scope() {
+            let (root, trip) = scopes();
+            let mut slots = crate::schedule::SessionSlots::<u8, 1>::new();
+            let frozen = TestWatch {
+                slot: slots.insert(0).expect("scratch table has a slot"),
+                process_id: 0,
+                scope: scope_for(None, (&root, &trip)),
+                output: ChildOutput::new(),
+                shard: None,
+                group: [0; GROUP_CAPACITY],
+                group_length: 0,
+                status: None,
+            };
+            assert_eq!(frozen.exit(0), Ok(0));
+            root.fire();
+            assert_eq!(frozen.exit(0), Err(RunError::Cancelled));
         }
 
         #[proxima::test]
         async fn deciding_solos_are_killed_on_fail_fast() {
-            assert!(!spared_by_stop(false, DECIDING));
-            assert!(!withdrawn_solo(false, true, DECIDING, 0));
+            assert!(!withdrawn_solo(false, Ok(0), DECIDING));
         }
 
         #[proxima::test]
         async fn interrupted_deciding_solo_is_withdrawn_for_any_status() {
-            assert!(withdrawn_solo(true, false, DECIDING, 0));
-            assert!(withdrawn_solo(true, false, DECIDING, 1));
-            assert!(withdrawn_solo(true, false, DECIDING, STOP_STATUS));
+            assert!(withdrawn_solo(true, Ok(0), DECIDING));
+            assert!(withdrawn_solo(true, Ok(1), DECIDING));
+            assert!(withdrawn_solo(true, Err(RunError::Cancelled), DECIDING));
         }
 
         #[proxima::test]
-        async fn fail_fast_stop_status_withdraws_deciding_solo() {
-            assert!(withdrawn_solo(false, true, DECIDING, STOP_STATUS));
+        async fn cancelled_deciding_solo_is_withdrawn() {
+            assert!(withdrawn_solo(false, Err(RunError::Cancelled), DECIDING));
         }
 
         #[proxima::test]
         async fn natural_exit_of_deciding_solo_is_not_withdrawn() {
-            assert!(!withdrawn_solo(false, false, DECIDING, 0));
-            assert!(!withdrawn_solo(false, false, DECIDING, 1));
-            assert!(!withdrawn_solo(false, true, DECIDING, 1));
+            assert!(!withdrawn_solo(false, Ok(0), DECIDING));
+            assert!(!withdrawn_solo(false, Ok(1), DECIDING));
         }
 
         #[proxima::test]
         async fn output_solo_is_never_withdrawn_by_the_decision() {
-            assert!(!withdrawn_solo(true, true, OUTPUT, STOP_STATUS));
-            assert!(!withdrawn_solo(false, true, OUTPUT, STOP_STATUS));
+            assert!(!withdrawn_solo(true, Err(RunError::Cancelled), OUTPUT));
+            assert!(!withdrawn_solo(false, Err(RunError::Cancelled), OUTPUT));
         }
     }
 }
@@ -937,6 +938,8 @@ mod pause_tests {
 
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
+
+    use proxima_core::signal::Signal;
 
     use super::{ChildOutput, GROUP_CAPACITY, Ledger, ListingRun, ShardArena, ShardWatch, TestWatch, status_queue};
     use crate::config::{IgnoreMode, NoTestsPolicy, OutputMode, ProcessMode};
@@ -1014,6 +1017,7 @@ mod pause_tests {
             arena.push(name).expect("name fits the arena");
         }
         arena.seal(1);
+        let root = Signal::new();
         ListingRun {
             signals,
             filter: "",
@@ -1033,13 +1037,13 @@ mod pause_tests {
             doc_pending: Cell::new(false),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: Cell::new(None),
-            withdrawn_ready: Cell::new(None),
-            shards: RefCell::new(arena),
+                shards: RefCell::new(arena),
             sched: RefCell::new(SchedTable::new(&mut [])),
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
-            stop_sent: Cell::new(false),
             interrupt_reported: Cell::new(0),
+            trip: root.child(),
+            root,
         }
     }
 
@@ -1049,6 +1053,7 @@ mod pause_tests {
         TestWatch {
             slot: scratch.insert(0).expect("scratch table has a slot"),
             process_id: 0,
+            scope: Signal::new(),
             output: ChildOutput::new(),
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],

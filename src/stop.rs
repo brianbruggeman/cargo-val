@@ -29,25 +29,11 @@ impl DocAtTrip {
     }
 }
 
-/// What a failure-count observation means for the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Observation {
-    Clear,
-    FirstTrip,
-    Tripped,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Trip {
-    in_flight: usize,
-    doc: DocAtTrip,
-}
-
-/// Trip accounting for `--max-fail`; the driver feeds it facts and performs the I/O.
+/// The counters a fail-fast stop reports; the trip itself is a signal the driver fires and reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopPolicy {
     max_fail: Option<usize>,
-    trip: Option<Trip>,
+    at_trip: Option<(usize, DocAtTrip)>,
     launched_after_trip: usize,
     listed_not_run: usize,
     targets_not_listed: usize,
@@ -59,7 +45,7 @@ impl StopPolicy {
     pub const fn new(max_fail: Option<usize>) -> Self {
         Self {
             max_fail,
-            trip: None,
+            at_trip: None,
             launched_after_trip: 0,
             listed_not_run: 0,
             targets_not_listed: 0,
@@ -67,24 +53,10 @@ impl StopPolicy {
         }
     }
 
-    #[must_use]
-    pub const fn observe_failures(&self, failures: usize) -> Observation {
-        match (self.max_fail, self.trip) {
-            (Some(max_fail), None) if failures >= max_fail => Observation::FirstTrip,
-            (Some(max_fail), Some(_)) if failures >= max_fail => Observation::Tripped,
-            _ => Observation::Clear,
-        }
-    }
-
     pub const fn record_trip(&mut self, in_flight: usize, doc: DocAtTrip) {
-        if self.trip.is_none() {
-            self.trip = Some(Trip { in_flight, doc });
+        if self.at_trip.is_none() {
+            self.at_trip = Some((in_flight, doc));
         }
-    }
-
-    #[must_use]
-    pub const fn tripped(&self) -> bool {
-        self.trip.is_some()
     }
 
     pub const fn launched(&mut self) {
@@ -93,19 +65,6 @@ impl StopPolicy {
 
     pub const fn listed_test_skipped(&mut self) {
         self.listed_not_run += 1;
-    }
-
-    /// Whether a listed test launches; a stopped run counts it as listed-not-run instead.
-    #[must_use]
-    pub const fn admit_listed(&mut self, interrupted: bool, stopped: bool) -> bool {
-        if interrupted {
-            return false;
-        }
-        if stopped {
-            self.listed_test_skipped();
-            return false;
-        }
-        true
     }
 
     pub const fn target_skipped(&mut self) {
@@ -120,16 +79,16 @@ impl StopPolicy {
 
     #[must_use]
     pub const fn report(&self) -> Option<StopReport> {
-        let (Some(max_fail), Some(trip)) = (self.max_fail, self.trip) else {
+        let (Some(max_fail), Some((in_flight, doc))) = (self.max_fail, self.at_trip) else {
             return None;
         };
         Some(StopReport {
             max_fail,
-            in_flight_at_trip: trip.in_flight,
+            in_flight_at_trip: in_flight,
             launched_after_trip: self.launched_after_trip,
             listed_not_run: self.listed_not_run,
             targets_not_listed: self.targets_not_listed,
-            doc_at_trip: trip.doc,
+            doc_at_trip: doc,
         })
     }
 }
@@ -145,20 +104,20 @@ mod tests {
     use super::*;
 
     #[proxima::test]
-    async fn never_trips_without_max_fail() {
-        let policy = StopPolicy::new(None);
+    async fn report_is_none_before_a_trip_is_recorded() {
+        let mut policy = StopPolicy::new(Some(2));
+        policy.launched();
+        policy.target_skipped();
 
-        assert_eq!(policy.observe_failures(1_000), Observation::Clear);
-        assert!(!policy.tripped());
         assert_eq!(policy.report(), None);
     }
 
     #[proxima::test]
-    async fn trips_exactly_at_max_fail() {
-        let policy = StopPolicy::new(Some(3));
+    async fn report_is_none_without_max_fail_even_after_a_recorded_trip() {
+        let mut policy = StopPolicy::new(None);
+        policy.record_trip(1, DocAtTrip::NotSpawned);
 
-        assert_eq!(policy.observe_failures(2), Observation::Clear);
-        assert_eq!(policy.observe_failures(3), Observation::FirstTrip);
+        assert_eq!(policy.report(), None);
     }
 
     #[proxima::test]
@@ -168,20 +127,9 @@ mod tests {
         policy.record_trip(4, DocAtTrip::NotSpawned);
         policy.record_trip(9, DocAtTrip::AlreadyFinished);
 
-        assert_eq!(policy.observe_failures(1), Observation::Tripped);
         let report = policy.report().expect("tripped policy reports");
         assert_eq!(report.in_flight_at_trip, 4);
         assert_eq!(report.doc_at_trip, DocAtTrip::NotSpawned);
-    }
-
-    #[proxima::test]
-    async fn report_is_none_before_trip() {
-        let mut policy = StopPolicy::new(Some(2));
-        policy.launched();
-        policy.target_skipped();
-
-        assert!(!policy.tripped());
-        assert_eq!(policy.report(), None);
     }
 
     #[proxima::test]
@@ -189,7 +137,6 @@ mod tests {
         let mut policy = StopPolicy::new(Some(2));
         assert_eq!(policy.target_listed(), 0);
         assert_eq!(policy.target_listed(), 1);
-        assert_eq!(policy.observe_failures(2), Observation::FirstTrip);
         policy.record_trip(3, DocAtTrip::ExecutingLeftToFinish);
         policy.launched();
         policy.launched();
@@ -209,23 +156,6 @@ mod tests {
                 doc_at_trip: DocAtTrip::ExecutingLeftToFinish,
             })
         );
-    }
-
-    #[proxima::test]
-    async fn real_ignore_modes_listing_admits_all_when_running_and_counts_when_stopped() {
-        const LISTING: &str = include_str!("../tests/fixtures/listing/ignore_modes_list.txt");
-        let tests = LISTING.lines().filter(|line| line.ends_with(": test")).count();
-        let mut running = StopPolicy::new(Some(1));
-        let mut stopped = StopPolicy::new(Some(1));
-        let mut interrupted = StopPolicy::new(Some(1));
-        stopped.record_trip(0, DocAtTrip::NotSpawned);
-
-        let admitted = (0..tests).filter(|_| running.admit_listed(false, false)).count();
-        let skipped = (0..tests).filter(|_| !stopped.admit_listed(false, true)).count();
-        let dropped = (0..tests).filter(|_| !interrupted.admit_listed(true, true)).count();
-
-        assert_eq!((tests, admitted, skipped, dropped), (3, 3, 3, 3));
-        assert_eq!(stopped.report().expect("tripped").listed_not_run, 3);
     }
 
     #[proxima::test]
