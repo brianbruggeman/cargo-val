@@ -1063,7 +1063,7 @@ mod pause_tests {
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
             editing: RefCell::new(None),
-            editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_output: RefCell::new((Vec::new(), None, false)),
+            editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
         }

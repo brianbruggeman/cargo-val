@@ -1570,7 +1570,8 @@ pub(crate) struct ListingRun<'run> {
     editor_program: RefCell<Vec<u8>>,
     request: RefCell<Option<(Vec<u8>, u32, u32)>>,
     outside: RefCell<Vec<Vec<Vec<u8>>>>,
-    probe: RefCell<Option<(u32, u64, Vec<u8>, (u32, u32))>>,
+    probe: RefCell<Option<(u32, u64)>>,
+    probe_site: RefCell<(Vec<u8>, u32, u32)>,
     probe_output: RefCell<(Vec<u8>, Option<bool>, bool)>,
     root: Signal,
     trip: Signal,
@@ -1766,7 +1767,8 @@ impl ListingRun<'_> {
         match crate::editor_launch::spawn_detached(argv, self.environment, directory.as_bytes()) {
             Ok((group, child)) => {
                 attach(&lanes[EDITOR_LANE], child)?;
-                *self.probe.borrow_mut() = Some((group, monotonic_millis().saturating_add(self.settings.probe_ms), request.0, (request.1, request.2)));
+                *self.probe.borrow_mut() = Some((group, monotonic_millis().saturating_add(self.settings.probe_ms)));
+                *self.probe_site.borrow_mut() = request;
                 Ok(true)
             }
             Err(_) => self.dispatch(lanes, request, None).map(|()| true),
@@ -1826,15 +1828,16 @@ impl ListingRun<'_> {
         let Some(succeeded) = exited.filter(|_| ended) else {
             return Ok(());
         };
-        let Some((_, _, file, (line, col))) = self.probe.borrow_mut().take() else {
+        if self.probe.borrow_mut().take().is_none() {
             return Ok(());
-        };
+        }
+        let (file, line, col) = self.probe_site.take();
         self.dispatch(lanes, (file, line, col), succeeded.then_some(stdout.as_slice()))
     }
 
     pub(crate) fn expire_probe(&self) {
-        let expired = self.probe.borrow().as_ref().is_some_and(|(_, deadline, _, _)| monotonic_millis() >= *deadline);
-        if expired && let Some((group, _, _, _)) = self.probe.borrow().as_ref() {
+        let expired = self.probe.borrow().as_ref().is_some_and(|(_, deadline)| monotonic_millis() >= *deadline);
+        if expired && let Some((group, _)) = self.probe.borrow().as_ref() {
             crate::editor_launch::terminate(*group);
             self.probe_output.borrow_mut().2 = true;
         }
@@ -3322,7 +3325,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0), interrupt_not_run: Cell::new(0),
-            editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_output: RefCell::new((Vec::new(), None, false)),
+            editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
     });
@@ -4657,7 +4660,7 @@ mod listing_allocation_tests {
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
             editing: RefCell::new(None),
-            editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_output: RefCell::new((Vec::new(), None, false)),
+            editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
         };
