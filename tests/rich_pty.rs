@@ -1304,7 +1304,7 @@ async fn e_with_vim_and_no_server_hands_over_a_cooked_terminal() {
 
 #[proxima::test]
 async fn e_with_vim_and_a_server_sends_the_file_to_it_detached() {
-    let (output, status, lines) = detached_edit(&fake_editor_named("vim"), &[("FAKE_EDITOR_SERVERLIST", "GVIM\n")], 1, false).await;
+    let (output, status, lines) = detached_edit(&fake_editor_named("vim"), &[("FAKE_EDITOR_SERVERLIST", "GVIM\n"), ("CARGO_VAL_EDITOR_PROBE_MS", "20000")], 1, false).await;
 
     println!("recorded by the fake vim editor:\n{}", lines.join("\n"));
     assert_eq!(recorded_arguments(&lines), ["--servername", "GVIM", "--remote-silent", "+11", failure_site().as_str()]);
@@ -1547,7 +1547,7 @@ async fn e_mid_run_settles_every_test_of_a_stderr_storm_while_the_editor_is_open
 
 #[proxima::test]
 async fn a_vim_probe_that_misses_its_deadline_counts_as_no_server_and_launches_with_the_terminal() {
-    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_SERVERLIST_HANG", "1")], (false, "")).await;
+    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_SERVERLIST_HANG", "1"), ("CARGO_VAL_EDITOR_PROBE_MS", "100")], (false, "")).await;
 
     let lines = recorded(&log);
     assert_eq!(recorded_arguments(&lines), ["+11", failure_site().as_str()]);

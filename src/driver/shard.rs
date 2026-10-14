@@ -1013,6 +1013,7 @@ mod pause_tests {
             filterset: None,
             link_template: None,
             editor: std::vec::Vec::new(),
+            probe_ms: 300,
             jobs: 1,
             max_fail: None,
             test_limit_ms: None,
