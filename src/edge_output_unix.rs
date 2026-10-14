@@ -199,6 +199,21 @@ pub fn write(descriptor: i32, mut bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// The terminal width in columns from `TIOCGWINSZ`; `None` when `descriptor` is not a terminal or reports zero columns.
+#[must_use]
+pub fn columns(descriptor: i32) -> Option<u16> {
+    let mut size: libc::winsize = unsafe { core::mem::zeroed() };
+    // safety: the request fills a local winsize and the descriptor is a plain integer.
+    let status = unsafe { libc::ioctl(descriptor, libc::TIOCGWINSZ, &raw mut size) };
+    (status == 0 && size.ws_col != 0).then_some(size.ws_col)
+}
+
+/// Unix terminals interpret escape sequences natively, so there is nothing to enable.
+#[must_use]
+pub const fn enable_virtual_terminal(_descriptor: i32) -> bool {
+    true
+}
+
 /// Whether `descriptor` is an interactive terminal: a character device that answers `isatty`, so a file, a pipe, or /dev/null is not.
 #[must_use]
 pub fn is_terminal(descriptor: i32) -> bool {

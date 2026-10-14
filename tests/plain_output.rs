@@ -4,6 +4,8 @@ use std::process::{Command, Output};
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use std::process::Stdio;
@@ -11,6 +13,10 @@ use std::process::Stdio;
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/plain.rs"]
+mod plain;
+#[path = "common/plain_summary.rs"]
+mod plain_summary;
 
 use common::fixture_output;
 #[cfg(unix)]
@@ -59,6 +65,34 @@ fn line_starting<'text>(text: &'text str, prefix: &str) -> &'text str {
     text.lines()
         .find(|line| line.starts_with(prefix))
         .unwrap_or_else(|| panic!("no line starts with {prefix:?} in:\n{text}"))
+}
+
+const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+#[cfg(unix)]
+const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+#[cfg(unix)]
+fn rposition(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).rposition(|window| window == needle)
+}
+
+// the end of the last `ESC [ <digits> A`, the cursor-up that opens an in-place redraw
+fn last_cursor_up(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).rposition(|window| window[0] == ESCAPE && window[1] == b'[' && window[2].is_ascii_digit() && window[3] == b'A').or_else(|| {
+        bytes.windows(5).rposition(|window| window[0] == ESCAPE && window[1] == b'[' && window[2].is_ascii_digit() && window[3].is_ascii_digit() && window[4] == b'A')
+    })
+}
+
+fn colour_sequences(bytes: &[u8]) -> usize {
+    bytes
+        .split(|byte| *byte == ESCAPE)
+        .skip(1)
+        .filter(|rest| rest.first() == Some(&b'[') && rest[1..].iter().find(|byte| !byte.is_ascii_digit() && **byte != b';') == Some(&b'm'))
+        .count()
 }
 
 fn has_three_decimal_seconds(token: &str) -> bool {
@@ -200,13 +234,17 @@ async fn without_github_actions_no_workflow_commands_are_printed() {
 }
 
 #[proxima::test(timeout = "310s")]
-async fn rich_forced_on_a_pipe_keeps_the_colored_labels_and_no_color_still_wins() {
+async fn rich_forced_on_a_pipe_draws_the_frame_in_colour_and_no_color_keeps_the_frame_but_drops_the_colour() {
     let colored = run(&[], &["--output", "rich"]).await;
     let bare = run(&[("NO_COLOR", "1")], &["--output", "rich"]).await;
 
-    assert!(colored.stdout.contains(&ESCAPE), "rich output keeps its ANSI labels");
-    assert!(!bare.stdout.contains(&ESCAPE), "NO_COLOR suppresses ANSI in rich mode");
-    assert!(!stdout_of(&colored).contains("START"), "rich output is today's output");
+    assert!(colour_sequences(&colored.stdout) > 0 && contains(&colored.stdout, "\u{2588}".as_bytes()), "colour draws solid bars");
+    assert_eq!(colour_sequences(&bare.stdout), 0, "NO_COLOR suppresses every SGR sequence");
+    assert!(contains(&bare.stdout, "\u{2591}".as_bytes()), "no colour draws the bar as glyph textures");
+    for output in [&colored, &bare] {
+        assert!(contains(&output.stdout, HIDE_CURSOR) && last_cursor_up(&output.stdout).is_some(), "the frame hides the cursor and redraws in place");
+        assert!(!stdout_of(output).contains("START"), "rich output is the frame, not the plain lines");
+    }
 }
 
 #[proxima::test(timeout = "310s")]
@@ -232,7 +270,7 @@ async fn shard_mode_reruns_a_shard_failure_alone_and_tags_those_lines() {
 }
 
 #[cfg(unix)]
-fn on_a_pty(environment: &[(&str, &str)], arguments: &[&str]) -> Vec<u8> {
+fn spawn_on_pty(invocation: &mut Command) -> (OwnedFd, std::process::Child) {
     let (mut master, mut slave) = (-1, -1);
     let status = unsafe {
         libc::openpty(&raw mut master, &raw mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
@@ -243,13 +281,79 @@ fn on_a_pty(environment: &[(&str, &str)], arguments: &[&str]) -> Vec<u8> {
         assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) }, 0, "close-on-exec is settable");
     }
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    let mut invocation = command(environment, arguments);
     invocation.env(EXIT_WITH_PARENT, "1").process_group(0).stdin(Stdio::null()).stdout(Stdio::from(slave)).stderr(Stdio::null());
-    let mut child = invocation.spawn().expect("cargo-val is spawnable");
+    let child = invocation.spawn().expect("cargo-val is spawnable");
+    (master, child)
+}
+
+#[cfg(unix)]
+fn on_a_pty(environment: &[(&str, &str)], arguments: &[&str]) -> Vec<u8> {
+    let mut invocation = command(environment, arguments);
+    let (master, mut child) = spawn_on_pty(&mut invocation);
     drop(invocation);
     let received = read_until_hangup(&master, child.id());
     child.wait().expect("cargo-val ends");
     received
+}
+
+#[cfg(unix)]
+fn blocked_command(directory: &std::path::Path) -> Command {
+    let mut invocation = binary::command();
+    invocation
+        .arg("--manifest-path")
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/blocked_test/Cargo.toml"))
+        .args(["--output", "rich", "--lib", "unit_blocks_when_requested"])
+        .env_remove("CI")
+        .env_remove("NO_COLOR")
+        .env_remove("CARGO_VAL_COLOR")
+        .env_remove("RUST_TEST_THREADS")
+        .env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", directory)
+        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pty-sigint-fixture-target"));
+    invocation
+}
+
+#[cfg(unix)]
+fn make_fifo(path: &std::path::Path) {
+    let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).expect("fifo path has no nul byte");
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
+}
+
+// read+write keeps a reader-side fifo open without a writer; the fixture opens the other end itself
+#[cfg(unix)]
+fn open_fifo(path: &std::path::Path, writable: bool) -> std::fs::File {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(writable)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open {}: {error}", path.display()))
+}
+
+// the blocked test announces its pid on `ready` once it is running; the pty is drained meanwhile so the frame never stalls on a full buffer
+#[cfg(unix)]
+fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, screen: &mut Vec<u8>) {
+    let started = std::time::Instant::now();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let remaining = FIXTURE_DEADLINE.saturating_sub(started.elapsed());
+        let mut watched = [
+            libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(master), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(ready), events: libc::POLLIN, revents: 0 },
+        ];
+        let timeout = i32::try_from(remaining.as_millis()).expect("the deadline fits poll");
+        if unsafe { libc::poll(watched.as_mut_ptr(), 2, timeout) } == 0 {
+            let failures = kill_group(leader).err();
+            panic!("the blocked test never reached the rendezvous within {FIXTURE_DEADLINE:?}; group kill: {failures:?}\n{}", String::from_utf8_lossy(screen));
+        }
+        if watched[1].revents & libc::POLLIN != 0 {
+            return;
+        }
+        let count = unsafe { libc::read(std::os::fd::AsRawFd::as_raw_fd(master), chunk.as_mut_ptr().cast(), chunk.len()) };
+        match usize::try_from(count) {
+            Ok(1..) => screen.extend_from_slice(&chunk[..usize::try_from(count).expect("a positive count fits usize")]),
+            _ => panic!("cargo-val hung up before the blocked test was ready:\n{}", String::from_utf8_lossy(screen)),
+        }
+    }
 }
 
 // the master reads to the hangup that follows the last slave end closing; a run that outlives FIXTURE_DEADLINE is killed with its group
@@ -289,8 +393,57 @@ async fn auto_on_a_terminal_is_rich_unless_ci_is_set() {
     let rich = on_a_pty(&[], &[]);
     let in_ci = on_a_pty(&[("CI", "true")], &[]);
 
-    assert!(rich.contains(&ESCAPE) && !String::from_utf8_lossy(&rich).contains("SUMMARY  "), "terminal gets today's output");
+    assert!(contains(&rich, HIDE_CURSOR) && contains(&rich, "\u{2588}".as_bytes()), "a terminal gets the frame");
     assert!(!in_ci.contains(&ESCAPE) && String::from_utf8_lossy(&in_ci).contains("SUMMARY  "), "CI gets plain even on a terminal");
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
+async fn rich_on_a_pty_draws_the_frame_ends_with_the_closing_block_and_shows_the_cursor_after_the_last_frame() {
+    let screen = on_a_pty(&[], &["--output", "rich"]);
+    let text = String::from_utf8_lossy(&screen);
+
+    assert!(contains(&screen, "\u{2588}".as_bytes()) && last_cursor_up(&screen).is_some(), "bar glyphs and a cursor-up redraw:\n{text:?}");
+    let last_frame_end = rposition(&screen, b"\x1b[J").expect("the last redraw clears below the cursor") + b"\x1b[J".len();
+    let shown = rposition(&screen, SHOW_CURSOR).expect("the cursor is shown again");
+    assert!(shown >= last_frame_end, "the cursor returns after the last frame:\n{text:?}");
+    let closing = &text[text.rfind("\u{1b}[?25h").expect("shown") + SHOW_CURSOR.len()..];
+    assert!(closing.contains("SUMMARY  passed=1 failed=1"), "the closing block follows:\n{closing}");
+    assert!(text.trim_end().lines().last().is_some_and(|line| line.starts_with("RERUN    ")), "the output ends with the closing block:\n{text:?}");
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
+async fn sigint_during_a_rich_run_on_a_pty_still_shows_the_cursor_and_exits_130() {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("pty-sigint-{}", std::process::id()));
+    _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("rendezvous directory is creatable");
+    for name in ["ready", "block", "held"] {
+        make_fifo(&directory.join(name));
+    }
+    let ready = open_fifo(&directory.join("ready"), true);
+    let _held = open_fifo(&directory.join("held"), false);
+    let mut invocation = blocked_command(&directory);
+    let (master, mut child) = spawn_on_pty(&mut invocation);
+    drop(invocation);
+    let mut screen = Vec::new();
+    await_ready(&master, &ready, child.id(), &mut screen);
+
+    assert_eq!(unsafe { libc::kill(libc::pid_t::try_from(child.id()).expect("pid fits pid_t"), libc::SIGINT) }, 0, "SIGINT lands on cargo-val alone");
+    screen.extend(read_until_hangup(&master, child.id()));
+    let status = child.wait().expect("cargo-val ends after the signal");
+
+    assert_eq!(status.code(), Some(130), "{:?}", String::from_utf8_lossy(&screen));
+    assert!(contains(&screen, HIDE_CURSOR), "the frame had hidden the cursor:\n{:?}", String::from_utf8_lossy(&screen));
+    assert!(rposition(&screen, SHOW_CURSOR) > rposition(&screen, HIDE_CURSOR), "the cursor is restored after the interrupt:\n{:?}", String::from_utf8_lossy(&screen));
+}
+
+#[proxima::test(timeout = "310s")]
+async fn plain_through_a_pipe_emits_zero_escape_bytes_on_both_streams() {
+    let output = run(&[], &["--output", "plain"]).await;
+
+    assert_eq!(output.stdout.iter().chain(&output.stderr).filter(|byte| **byte == ESCAPE).count(), 0);
+    assert!(stdout_of(&output).contains("SUMMARY  passed=1 failed=1"));
 }
 
 #[proxima::test(timeout = "310s")]
@@ -343,4 +496,46 @@ async fn a_failed_build_in_rich_mode_keeps_the_same_order() {
 
     assert_diagnostics_then_summary_then_cargo_val_line(&text);
     assert_eq!(output.status.code(), Some(3), "{text}");
+}
+
+mod plain_grammar {
+    use cargo_val::render::Outcome;
+
+    use crate::plain::{names, settled};
+    use crate::plain_summary::summary;
+
+    const RUN: &str = "cargo-val 0.1.0  process=test  jobs=10\n\
+        START    cli_run  fixture::passes\n\
+        IGNORED  cli_run  fixture::ignored_by_default\n\
+        PASS     cli_run  fixture::passes  0.003s\n\
+        FAIL     doc  src/lib.rs - subtract (line 12)  1.250s  (solo rerun)\n\
+        FAILED   cli_run fixture::passes\n\
+        SUMMARY  passed=1 failed=1 ignored=1 not_run=0  wall=0.409s\n";
+
+    #[test]
+    fn settled_parses_binary_test_and_outcome_and_skips_start_and_failed_lines() {
+        assert_eq!(
+            settled(RUN),
+            [
+                ("cli_run".to_owned(), "fixture::ignored_by_default".to_owned(), Outcome::Ignored),
+                ("cli_run".to_owned(), "fixture::passes".to_owned(), Outcome::Passed),
+                ("doc".to_owned(), "src/lib.rs - subtract (line 12)".to_owned(), Outcome::Failed),
+            ]
+        );
+    }
+
+    #[test]
+    fn names_lists_one_outcome_in_print_order() {
+        assert_eq!(names(RUN, Outcome::Passed), ["fixture::passes"]);
+        assert_eq!(names(RUN, Outcome::Failed), ["src/lib.rs - subtract (line 12)"]);
+    }
+
+    #[test]
+    fn summary_reads_the_key_value_counts() {
+        let counts = summary(RUN).expect("the run printed a SUMMARY line");
+
+        assert_eq!(counts["passed"], 1);
+        assert_eq!(counts["not_run"], 0);
+        assert!(summary("START    cli_run  fixture::passes\n").is_none());
+    }
 }

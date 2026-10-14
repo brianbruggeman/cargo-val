@@ -6,7 +6,7 @@
 //! Colour roles are the terminal's own 16 ANSI colours; without colour the bars keep their state as glyph textures.
 
 use crate::line::Line;
-use crate::render::{Identity, State};
+use crate::render::{Event, Identity, Mode, State};
 use crate::view_defaults::{BAR_COLUMNS, INFLIGHT_ROWS};
 
 const GREEN: &[u8] = b"\x1b[32m";
@@ -225,6 +225,23 @@ impl<const RERUN: usize> State<'_, RERUN> {
         match frame.lost() {
             0 => Ok(()),
             lost => Err(lost),
+        }
+    }
+
+    /// The live-run projection of one event: the frame on a tick, the plain lines for events that outlive the frame, nothing otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns the bytes cut when the frame buffer was too small.
+    pub fn project_live<const FRAME: usize>(&mut self, event: &Event<'_>, frame: &mut Line<FRAME>) -> Result<(), usize> {
+        match *event {
+            Event::Tick { .. } if self.mode == Mode::Running => self.project_rich(self.color, frame),
+            Event::Begin { .. } => self.project_rich(self.color, frame),
+            Event::Captured { .. } | Event::Warned { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Finished { .. } => {
+                self.erase_rich(frame);
+                self.project(event, frame)
+            }
+            Event::Tick { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
         }
     }
 

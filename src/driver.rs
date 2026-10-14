@@ -1,6 +1,7 @@
 //! One poll-driven owner of Cargo discovery, libtest listings, and child outcomes.
 
 use core::cell::{Cell, RefCell};
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::ops::Range;
 use core::task::{Context, Poll, Waker};
 
@@ -846,15 +847,7 @@ fn settled(
     step: OutcomeStep<'_>,
 ) -> Result<bool, RunError> {
     match step {
-        OutcomeStep::Reported { outcome, .. } => {
-            if outcome == TerminalOutcome::Failed
-                && let Some(watch) = watches[index].as_ref()
-            {
-                match run.settings.output {
-                    OutputMode::Rich => watch.output.write_failure()?,
-                    OutputMode::Plain => {}
-                }
-            }
+        OutcomeStep::Reported { .. } => {
             watches[index] = None;
             Ok(true)
         }
@@ -918,12 +911,20 @@ pub(crate) fn projected(render: &Render<'_>, event: &Event<'_>) -> Line<PROJECTE
 
 /// Applies `event` to the render state and writes its projection to standard output; a frame that was too small says so on stderr.
 pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
-    let (_, state, frame) = render;
+    let (output, state, frame) = render;
     let (mut state, mut frame) = (state.borrow_mut(), frame.borrow_mut());
     let frame: &mut Line<FRAME_BYTES> = &mut frame;
     state.apply(event);
     frame.clear();
-    let projected = state.project(event, frame);
+    let projected = match output {
+        OutputMode::Plain => state.project(event, frame),
+        OutputMode::Rich => {
+            if matches!(event, Event::Begin { .. }) {
+                CURSOR_HIDDEN.store(true, Ordering::SeqCst);
+            }
+            state.project_live(event, frame)
+        }
+    };
     if !frame.bytes().is_empty() {
         write_fd(1, frame.bytes())?;
     }
@@ -935,6 +936,34 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
     notice.number(lost);
     notice.text(b" bytes\n");
     write_fd(2, notice.bytes())
+}
+
+/// Set once the live frame hides the cursor; [`restore_cursor`] shows it again exactly once on any exit path.
+static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+/// Shows the cursor if the live frame hid it; safe to call from the panic hook, the interrupt path and the normal exit.
+pub fn restore_cursor() {
+    if CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
+        let _ = crate::edge_output::write(1, SHOW_CURSOR);
+    }
+}
+
+/// Erases the live frame from the screen and shows the cursor; plain mode has no frame, so it writes nothing.
+fn erase_frame(render: &Render<'_>) -> Result<(), RunError> {
+    let (output, state, frame) = render;
+    if *output != OutputMode::Rich {
+        return Ok(());
+    }
+    let mut frame = frame.borrow_mut();
+    frame.clear();
+    state.borrow_mut().erase_rich(&mut **frame);
+    if !frame.bytes().is_empty() {
+        write_fd(1, frame.bytes())?;
+    }
+    restore_cursor();
+    Ok(())
 }
 
 /// Where a finished test's counters and color choice live.
@@ -1042,24 +1071,17 @@ fn deliver<'bytes>(
         _ => RunError::Outcome,
     })?;
     match step {
-        OutcomeStep::Reported {
-            outcome,
-            report_bytes,
-        } => {
+        OutcomeStep::Reported { outcome, .. } => {
             reporting.settle_ready(ledger);
-            match reporting.render.0 {
-                OutputMode::Plain => {
-                    let name = &report[..name_length.saturating_sub(1)];
-                    let targets = reporting.targets.borrow();
-                    let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-                    emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
-                    if outcome == TerminalOutcome::Failed {
-                        let (stdout, stderr) = watch.output.captured();
-                        emit(reporting.render, &Event::Captured { id, stdout, stderr })?;
-                    }
-                }
-                OutputMode::Rich => write_fd(1, &report[..name_length + report_bytes])?,
+            let name = &report[..name_length.saturating_sub(1)];
+            let targets = reporting.targets.borrow();
+            let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+            emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
+            if outcome == TerminalOutcome::Failed {
+                let (stdout, stderr) = watch.output.captured();
+                emit(reporting.render, &Event::Captured { id, stdout, stderr })?;
             }
+            drop(targets);
             if let Some(target) = target {
                 reporting.targets.borrow_mut().tally(
                     target,
@@ -1229,14 +1251,10 @@ fn launch_listed(
     }
     run.targets.borrow_mut().tally(target, Tally::Launched);
     start_session(ledger, watches, scan.lanes, slot, None)?;
-    match run.settings.output {
-        OutputMode::Plain => {
-            let targets = run.targets.borrow();
-            let id = (targets.id(target), intent.test_name().as_bytes());
-            emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
-        }
-        OutputMode::Rich => {}
-    }
+    let targets = run.targets.borrow();
+    let id = (targets.id(target), intent.test_name().as_bytes());
+    emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
+    drop(targets);
     shard::note_group(run, watches, slot.index(), intent.test_name());
     Ok(())
 }
@@ -1319,7 +1337,19 @@ impl ListingRun<'_> {
     }
 
     pub(crate) fn drain_signals(&self) -> Result<(), RunError> {
-        self.signals.drain().map_err(|_| RunError::Reactor)
+        self.signals.drain().map_err(|_| RunError::Reactor)?;
+        if self.signals.take_resized() {
+            self.refresh_width()?;
+        }
+        Ok(())
+    }
+
+    // the width is data the render state is told, never queried inside it
+    pub(crate) fn refresh_width(&self) -> Result<(), RunError> {
+        match (self.settings.output, crate::edge_output::columns(1)) {
+            (OutputMode::Rich, Some(cols)) => emit(self.render(), &Event::Resize { cols }),
+            _ => Ok(()),
+        }
     }
 
     // a forwarded signal only reaches children that honor it, so a per-test child that ignores it is terminated here
@@ -1402,10 +1432,10 @@ impl ListingRun<'_> {
 
     pub(crate) fn with_doc(
         &self,
-        act: impl FnOnce(&mut DocRun, bool, &DocObservation<'_>) -> Result<(), RunError>,
+        act: impl FnOnce(&mut DocRun, &DocObservation<'_>) -> Result<(), RunError>,
     ) -> Result<(), RunError> {
         match self.doc.borrow_mut().as_mut() {
-            Some(doc) => act(doc, self.settings.color, &self.docs),
+            Some(doc) => act(doc, &self.docs),
             None => Ok(()),
         }
     }
@@ -1468,14 +1498,10 @@ impl ListingScan<'_, '_> {
                 run.targets.borrow_mut().tally(self.target, Tally::Filtered);
             }
             ListingSourceStep::IgnoredTest(name) => {
-                match run.settings.output {
-                    OutputMode::Plain => {
-                        let targets = run.targets.borrow();
-                        let id = (targets.id(self.target), name.as_bytes());
-                        emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
-                    }
-                    OutputMode::Rich => report_skipped(name, run.settings.color)?,
-                }
+                let targets = run.targets.borrow();
+                let id = (targets.id(self.target), name.as_bytes());
+                emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
+                drop(targets);
                 ledger.record_ignored().map_err(|_| RunError::Outcome)?;
                 run.targets.borrow_mut().tally(self.target, Tally::Ignored);
             }
@@ -1485,16 +1511,6 @@ impl ListingScan<'_, '_> {
         }
         Ok(Flow::Next)
     }
-}
-
-fn report_skipped(name: &str, color: bool) -> Result<(), RunError> {
-    let mut report = [0; NAME_CAPACITY + 34];
-    let name_length = name.len().min(NAME_CAPACITY);
-    report[..name_length].copy_from_slice(&name.as_bytes()[..name_length]);
-    report[name_length] = b' ';
-    let label = write_report(&[TerminalOutcome::Ignored], color, &mut report[name_length + 1..])
-        .map_err(|_| RunError::Outcome)?;
-    write_fd(1, &report[..name_length + 1 + label])
 }
 
 fn feed_ignored_lines(
@@ -2395,6 +2411,13 @@ fn watch_parent() -> Result<(), RunError> {
     Err(RunError::Settings)
 }
 
+fn begin_rich(render: &Render<'_>) -> Result<(), RunError> {
+    if !crate::edge_output::enable_virtual_terminal(1) {
+        return Err(RunError::Settings);
+    }
+    emit(render, &Event::Resize { cols: crate::edge_output::columns(1).unwrap_or(80) })
+}
+
 /// Runs the whole cargo-val run: setup, the awaited prime loop, and the summary.
 ///
 /// # Errors
@@ -2411,18 +2434,18 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms)), RefCell::new(frame_line));
-    match settings.output {
-        OutputMode::Plain => emit(
-            &render,
-            &Event::Begin {
-                version: env!("CARGO_PKG_VERSION").as_bytes(),
-                shard: settings.process == ProcessMode::Shard,
-                jobs: settings.jobs,
-                github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
-            },
-        )?,
-        OutputMode::Rich => {}
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color)), RefCell::new(frame_line));
+    emit(
+        &render,
+        &Event::Begin {
+            version: env!("CARGO_PKG_VERSION").as_bytes(),
+            shard: settings.process == ProcessMode::Shard,
+            jobs: settings.jobs,
+            github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
+        },
+    )?;
+    if settings.output == OutputMode::Rich {
+        begin_rich(&render)?;
     }
     let inherited_count = environment
         .collect(inherited)
@@ -3014,7 +3037,6 @@ impl DocRun {
         &mut self,
         bytes: &[u8],
         mut offset: usize,
-        color: bool,
         observation: &DocObservation<'_>,
     ) -> Result<usize, RunError> {
         while offset < bytes.len() {
@@ -3026,7 +3048,7 @@ impl DocRun {
             let line = memchr::memchr(b'\n', rest).map_or(rest.len(), |newline| newline + 1);
             let phase = &mut self.phase;
             self.parser.feed(&rest[..line], |event| {
-                record_doc_event(event, phase, color, observation)
+                record_doc_event(event, phase, observation)
             })?;
             offset += line;
         }
@@ -3101,7 +3123,6 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn record_doc_event(
     event: DocEvent<'_>,
     phase: &mut DocPhase,
-    color: bool,
     observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     match event {
@@ -3117,7 +3138,7 @@ fn record_doc_event(
             }
             Ok(())
         }
-        DocEvent::Result { name, outcome, .. } => report_doc_result(name, outcome, color, observation),
+        DocEvent::Result { name, outcome, .. } => report_doc_result(name, outcome, observation),
         DocEvent::FailureLine(line) => {
             write_fd(2, line)?;
             write_fd(2, b"\n")
@@ -3129,7 +3150,6 @@ fn record_doc_event(
 fn report_doc_result(
     name: &[u8],
     outcome: DocOutcome,
-    color: bool,
     observation: &DocObservation<'_>,
 ) -> Result<(), RunError> {
     let (terminal, counter) = match outcome {
@@ -3138,17 +3158,8 @@ fn report_doc_result(
         DocOutcome::Ignored => (TerminalOutcome::Ignored, &observation.ignored),
     };
     counter.set(counter.get() + 1);
-    if observation.render.0 == OutputMode::Plain {
-        let id = (&b"doc-tests"[..], name);
-        return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false });
-    }
-    let mut report = [0; NAME_CAPACITY + 34];
-    let name_length = name.len().min(NAME_CAPACITY);
-    report[..name_length].copy_from_slice(&name[..name_length]);
-    report[name_length] = b' ';
-    let label_length = write_report(&[terminal], color, &mut report[name_length + 1..])
-        .map_err(|_| RunError::Outcome)?;
-    write_fd(1, &report[..name_length + 1 + label_length])
+    let id = (&b"doc-tests"[..], name);
+    emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false })
 }
 
 fn write_doc_notice(totals: &DocTotals) -> Result<(), RunError> {
@@ -3246,6 +3257,7 @@ fn conclude(
     stop: Option<StopReport>,
     doc_tests: Option<DocTotals>,
 ) -> Result<RunSummary, RunError> {
+    erase_frame(render)?;
     if let Some(report) = stop {
         write_stop_trailer(&report, settings.process == ProcessMode::Shard)?;
     }
@@ -3253,10 +3265,7 @@ fn conclude(
         write_doc_notice(doc)?;
     }
     let total = write_summary(targets, doc_tests.as_ref(), started_millis)?;
-    match settings.output {
-        OutputMode::Plain => close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path()))?,
-        OutputMode::Rich => {}
-    }
+    close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path()))?;
     let empty = total.passed + total.failed == 0;
     if empty && settings.no_tests != NoTestsPolicy::Pass {
         write_no_tests(parser, settings.ignore)?;
@@ -3319,7 +3328,7 @@ async fn run_doc_only<'run>(
         doc.lock_watch.set_directory(shared);
     }
     let observation = DocObservation::new(render);
-    observe_doc(&mut doc, &signals, settings.color, &observation).await?;
+    observe_doc(&mut doc, &signals, &observation).await?;
     interrupted(&signals)?;
     let totals = close_doc_tests(&doc, false, &observation)?;
     conclude(
