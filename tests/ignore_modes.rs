@@ -332,6 +332,7 @@ mod bin_gate_hold {
     // the bin and its unit-test target both block on the fifo, each holding a job slot, so the integration test unit needs one more or it never links and the park line never comes; an ambient build.jobs, CARGO_BUILD_JOBS or jobserver of FIFO_HELD_UNITS or fewer would stall the run until its deadline
     const FIXTURE_BUILD_JOBS: usize = FIFO_HELD_UNITS + 1;
     const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
+    const GATE_DROPPED_LINE: &str = "cargo-val: debug: gate drop reason=build-failed target=uses_bin";
 
     /// What proves the bin-less window was observed, so the bin build may be released.
     #[derive(Clone, Copy)]
@@ -411,7 +412,7 @@ mod bin_gate_hold {
         }
         let (status, stdout, stderr) = supervised(&mut command, deadline, async |_, stdout, stderr, exit| {
             let settled: fn(&str) -> bool = test_settled;
-            let parked: fn(&str) -> bool = |text| text.contains(GATE_PARKED_LINE) || text.contains("cargo test build failed");
+            let parked: fn(&str) -> bool = |text| text.contains(GATE_PARKED_LINE) || text.contains(GATE_DROPPED_LINE);
             let (stdout_proof, stderr_proof) = match release {
                 Release::AfterTestFails => (Some(settled), None),
                 Release::AfterTestArtifactLinks => (None, Some(parked)),
@@ -464,7 +465,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
     let context = format!("{}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(3), "{context}");
-    assert!(result.stderr.contains("cargo test build failed"), "{context}");
+    assert!(result.stdout.contains("BUILD    FAILED"), "{context}");
     assert!(
         result.stderr.contains("cargo-val: debug: gate park kind=test target=uses_bin"),
         "{context}"
@@ -494,7 +495,7 @@ async fn a_run_whose_bin_fails_before_any_hold_ends_on_its_own_exit_within_secon
     let context = format!("{}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(3), "{context}");
-    assert!(result.stderr.contains("cargo test build failed"), "{context}");
+    assert!(result.stdout.contains("BUILD    FAILED"), "{context}");
     assert!(started.elapsed() < core::time::Duration::from_secs(30), "the run took {:?}: {context}", started.elapsed());
 }
 

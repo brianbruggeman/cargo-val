@@ -1,1 +1,4 @@
 cargo-val 0.1.0  process=test  jobs=<n>
+BUILD    FAILED  errors=1  built=0/1
+SUMMARY  passed=0 failed=0 ignored=0 not_run=0  wall=<n> discovered=0 run=0 filtered=0
+EXIT     3  build_failed

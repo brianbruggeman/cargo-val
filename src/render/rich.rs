@@ -9,6 +9,7 @@ use crate::line::Line;
 use crate::render::{Event, Identity, Mode, State, excerpt, review};
 use crate::view_defaults::{BAR_COLUMNS, INFLIGHT_ROWS};
 
+const FAILED: &[u8] = b"FAILED";
 const GREEN: &[u8] = b"\x1b[32m";
 const RED: &[u8] = b"\x1b[31m";
 const YELLOW: &[u8] = b"\x1b[33m";
@@ -296,14 +297,15 @@ impl<const RERUN: usize> State<'_, RERUN> {
             frame.text(review::MOUSE_OFF);
         }
         match *event {
-            Event::Tick { .. } if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
-            Event::Begin { .. } | Event::Previous { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
+            Event::Tick { .. } | Event::Failing { .. } if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
+            Event::Begin { .. } | Event::Previous { .. } | Event::Waiting { .. } if self.mode.is_live() => self.project_rich(self.color, frame),
+            Event::Exited { .. } if self.mode == Mode::BuildError => self.project(event, frame),
             Event::Key(_) if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
             Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Running { .. } | Event::Finished { .. } => {
                 self.erase_rich(frame);
                 self.project(event, frame)
             }
-            Event::Captured { .. } | Event::Warned { .. } | Event::Tick { .. } | Event::Key(_) | Event::Notice { .. } | Event::Retried { .. } | Event::Reran { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
+            Event::Captured { .. } | Event::Warned { .. } | Event::Failing { .. } | Event::Begin { .. } | Event::Previous { .. } | Event::Waiting { .. } | Event::Tick { .. } | Event::Key(_) | Event::Notice { .. } | Event::Retried { .. } | Event::Reran { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
         }
     }
 
@@ -469,15 +471,27 @@ impl<const RERUN: usize> State<'_, RERUN> {
         paint(frame, color, Tone::Dim, b" build ");
         let (done, total) = (usize::from(self.built), self.units.map(usize::from));
         let settled = total.map_or(0, |total| done * bar_width * 8 / total.max(1));
-        bar(frame, color, bar_width, (settled, 0), Tone::Plain);
-        frame.text(b" ");
-        padded(frame, done, 2);
-        frame.text(b"/");
+        let failing = self.errors != 0;
+        bar(frame, color, bar_width, (settled, 0), if failing { Tone::Red } else { Tone::Plain });
+        let mut count = Line::<48>::new();
+        count.text(b" ");
+        padded(&mut count, done, 2);
+        count.text(b"/");
         match total {
-            Some(total) => frame.number(total),
-            None => frame.text(b"?"),
+            Some(total) => count.number(total),
+            None => count.text(b"?"),
         }
-        frame.text(b" compile units\n");
+        count.text(b" compile units");
+        frame.text(count.bytes());
+        if failing {
+            let used = 7 + bar_width + columns(count.bytes());
+            let room = usize::from(self.cols).saturating_sub(1 + used + FAILED.len());
+            if room != 0 {
+                spaces(frame, room);
+                paint(frame, color, Tone::Red, FAILED);
+            }
+        }
+        frame.text(b"\n");
     }
 
     fn rule_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
@@ -877,6 +891,53 @@ mod tests {
 
         assert!(String::from_utf8_lossy(waiting.bytes()).contains(" waiting for cargo's package cache lock\n"));
         assert!(!String::from_utf8_lossy(moving.bytes()).contains("waiting for cargo's"));
+    }
+
+    fn build_row_of(state: &mut State<'_, 200>, color: bool) -> String {
+        let mut frame = Line::<4096>::new();
+        state.project_rich(color, &mut frame).expect("fits");
+        String::from(String::from_utf8_lossy(frame.bytes()).lines().find(|line| line.contains("compile units")).expect("the frame has a build row"))
+    }
+
+    #[test]
+    fn a_compiler_error_turns_the_build_bar_red_and_puts_failed_at_the_right_margin() {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 10, github: false, why: None, json: false, at_ms: 0 });
+        state.apply(&Event::Resize { cols: 80 });
+        state.apply(&Event::Built { done: 12, total: Some(19) });
+        let healthy = build_row_of(&mut state, true);
+        state.apply(&Event::Failing { errors: 1 });
+
+        let failing = build_row_of(&mut state, true);
+        let uncoloured = build_row_of(&mut state, false);
+
+        assert!(!healthy.contains("\x1b[31m") && !healthy.contains("FAILED"), "{healthy:?}");
+        assert!(failing.contains("\x1b[31m\u{2588}") && failing.ends_with("\x1b[31mFAILED\x1b[0m"), "{failing:?}");
+        assert!(uncoloured.ends_with("FAILED"), "{uncoloured:?}");
+        assert_eq!(uncoloured.chars().count(), 79, "FAILED sits on the last usable column: {uncoloured:?}");
+    }
+
+    #[test]
+    fn once_the_build_failed_event_lands_a_tick_draws_no_frame() {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        let begin = Event::Begin { version: b"0.1.0", shard: false, jobs: 10, github: false, why: None, json: false, at_ms: 0 };
+        let failed = Event::BuildFailed { diagnostic: b"", exit: 3, errors: 1, built: 5, of: Some(19) };
+        let tick = Event::Tick { now_ms: 900 };
+        let mut drawn = Line::<4096>::new();
+        state.apply(&begin);
+        state.project_live(&begin, &mut drawn).expect("fits");
+        state.apply(&failed);
+        let mut closing = Line::<4096>::new();
+        state.project_live(&failed, &mut closing).expect("fits");
+        state.apply(&tick);
+
+        let mut after = Line::<4096>::new();
+        state.project_live(&tick, &mut after).expect("fits");
+
+        assert!(String::from_utf8_lossy(closing.bytes()).contains("BUILD    FAILED  errors=1  built=5/19\n"));
+        assert!(after.bytes().is_empty(), "a tick after BUILD FAILED redrew {:?}", String::from_utf8_lossy(after.bytes()));
     }
 
     #[test]

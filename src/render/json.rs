@@ -23,7 +23,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             Event::Started { id, at_ms, limit_ms, .. } => started(frame, id, at_ms, limit_ms),
             Event::Settled { id, outcome, solo, .. } => settled(frame, id, outcome, self.settled_ms, solo),
             Event::Captured { id, stdout, stderr, exit, excerpt } => failure(frame, id, [stdout, stderr], exit, excerpt),
-            Event::BuildFailed { diagnostic, exit } => build_failed(frame, diagnostic, exit),
+            Event::BuildFailed { diagnostic, exit, .. } => build_failed(frame, diagnostic, exit),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
             Event::Running { id, .. } => running(frame, id),
             Event::Exited { code } => exit(frame, code),
@@ -32,7 +32,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 self.rerun_record(frame, manifest);
                 exit(frame, code);
             }
-            Event::Begin { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Tick { .. } | Event::Warned { .. } | Event::BlockOpened { .. } | Event::BlockClosed | Event::Key(_) | Event::Notice { .. } | Event::Retried { .. } | Event::Reran { .. } => {}
+            Event::Begin { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Built { .. } | Event::Failing { .. } | Event::Resize { .. } | Event::Tick { .. } | Event::Warned { .. } | Event::BlockOpened { .. } | Event::BlockClosed | Event::Key(_) | Event::Notice { .. } | Event::Retried { .. } | Event::Reran { .. } => {}
         }
     }
 

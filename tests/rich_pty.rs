@@ -299,16 +299,23 @@ async fn a_fresh_build_prints_no_cargo_status_lines_into_or_between_frames() {
 }
 
 #[proxima::test]
-async fn a_failed_build_still_prints_rustcs_diagnostic_and_cargos_summary_after_the_frame_is_erased() {
+async fn a_failed_build_leaves_build_failed_each_diagnostic_once_summary_and_exit_with_no_live_frame_after_it() {
     let (output, status) = run_on_pty("build_error").await;
 
-    assert!(!status.success(), "a build error must fail the run");
-    let diagnostic = output.find("error[E0308]: mismatched types").unwrap_or_else(|| panic!("rustc's E0308 line is missing:\n{}", shown(&output)));
-    let summary = output.find("error: could not compile").unwrap_or_else(|| panic!("cargo's summary line is missing:\n{}", shown(&output)));
-    let failed = output.find("cargo-val: cargo test build failed").unwrap_or_else(|| panic!("the build-failed line is missing:\n{}", shown(&output)));
-    assert!(diagnostic < summary && summary < failed, "diagnostics out of order:\n{}", shown(&output));
-    for status_word in ["Compiling", "Finished"] {
-        assert!(!output.contains(status_word), "cargo's `{status_word}` line leaked:\n{}", shown(&output));
+    let screen = final_scrollback(&output);
+    let text = screen.join("\n");
+    let row = |prefix: &str| screen.iter().position(|line| line.starts_with(prefix)).unwrap_or_else(|| panic!("no row starting {prefix:?} on:\n{text}"));
+    assert_eq!(status.code(), Some(3), "a build error exits 3:\n{text}");
+    let (failed, diagnostic, note) = (row("BUILD    FAILED  errors=1  built="), row("error[E0308]: mismatched types"), row("For more information about this error"));
+    let (summary, exit) = (row("SUMMARY  passed=0 failed=0"), row("EXIT     3  build_failed"));
+    assert!(failed < diagnostic && diagnostic < note && note < summary && summary < exit, "BUILD FAILED, diagnostic, note, SUMMARY, EXIT out of order:\n{text}");
+    assert_eq!(screen.iter().filter(|line| line.starts_with("error[E0308]")).count(), 1, "the lib and lib-test diagnostics print once:\n{text}");
+    assert!(screen[..failed].iter().all(|line| line.trim().is_empty()), "the live frame left rows above BUILD FAILED:\n{text}");
+    for live_row in ["compile units", "test binaries", "running", "cargo val  "] {
+        assert!(screen[failed..].iter().all(|line| !line.contains(live_row)), "live-frame row {live_row:?} survived after BUILD FAILED:\n{text}");
+    }
+    for leaked in ["cargo-val: cargo test build failed", "error: could not compile", "build failed, waiting", "Compiling", "Finished"] {
+        assert!(!text.contains(leaked), "{leaked:?} reached the screen:\n{text}");
     }
 }
 
@@ -488,7 +495,7 @@ async fn a_rich_build_error_replaces_rustcs_snippet_with_the_excerpt_between_the
         assert!(!lines.iter().any(|line| line == rustc_row), "rustc's own snippet row {rustc_row:?} survived:\n{}", shown(&output));
     }
     assert!(!lines.iter().any(|line| line.contains("--- expected `u32` because of return type")), "{}", shown(&output));
-    let at_summary = lines.iter().position(|line| line.starts_with("error: could not compile")).expect("cargo's summary is printed");
+    let at_summary = lines.iter().position(|line| line.starts_with("SUMMARY")).expect("the closing block is printed");
     assert!(header + expected.len() < at_summary, "{}", shown(&output));
 }
 
