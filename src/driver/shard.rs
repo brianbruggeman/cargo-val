@@ -200,21 +200,12 @@ pub(super) fn withdraw_solo(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, targe
 // an interrupt ends everything, since nothing else will be read
 pub(super) fn stop_all(run: &ListingRun<'_>, ledger: &Ledger<'_>, watches: &Watches) {
     run.stop_sent.set(true);
-    let interrupted = run.interrupted();
     watches
         .iter()
         .flatten()
-        .filter(|watch| !spared_by_stop(interrupted, watch_rerun(watch)))
+        .filter(|watch| watch.scope.is_fired())
         .filter_map(|watch| ledger.sessions().get(watch.slot))
         .for_each(|session| session.child().terminate());
-}
-
-fn watch_rerun(watch: &TestWatch) -> Option<Rerun> {
-    watch.shard.as_ref().and_then(|shard_watch| shard_watch.shard.rerun)
-}
-
-fn spared_by_stop(interrupted: bool, rerun: Option<Rerun>) -> bool {
-    !interrupted && matches!(rerun, Some(Rerun::OutputOnly))
 }
 
 /// What one pass over a lane piece did: whether the stop policy tripped, and how many bytes the framer consumed before it paused.
@@ -639,7 +630,8 @@ impl CargoDriver<'_> {
             }
             let (group, group_length) = group_of(run, shard);
             let watch = ShardWatch::new(shard, &group[..group_length]);
-            start_session(ledger, watches, lanes, slot, Some(watch))?;
+            let scope = run.session_scope(shard.rerun);
+            start_session(ledger, watches, lanes, slot, (Some(watch), scope))?;
             announce_starts(run, active.target, shard)?;
             moved = true;
         }
@@ -845,34 +837,47 @@ fn queue_output_reruns(arena: &mut ShardArena<'_>, shard_watch: &ShardWatch) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::scope_for;
+    use proxima_core::signal::Signal;
 
     const DECIDING: Option<Rerun> = Some(Rerun::Decides { after_shard_failure: false });
     const OUTPUT: Option<Rerun> = Some(Rerun::OutputOnly);
+
+    fn scopes() -> (Signal, Signal) {
+        let root = Signal::new();
+        let trip = root.child();
+        (root, trip)
+    }
 
     mod cases {
         use super::*;
 
         #[proxima::test]
         async fn fail_fast_spares_output_reruns() {
-            assert!(spared_by_stop(false, OUTPUT));
+            let (root, trip) = scopes();
+            let scope = scope_for(OUTPUT, (&root, &trip));
+            trip.fire();
+            assert!(!scope.is_fired());
         }
 
         #[proxima::test]
         async fn fail_fast_kills_deciding_and_plain_sessions() {
-            assert!(!spared_by_stop(false, DECIDING));
-            assert!(!spared_by_stop(false, None));
+            let (root, trip) = scopes();
+            let scoped = [scope_for(DECIDING, (&root, &trip)), scope_for(None, (&root, &trip))];
+            trip.fire();
+            assert!(scoped.iter().all(Signal::is_fired));
         }
 
         #[proxima::test]
         async fn interrupt_kills_everything() {
-            assert!(!spared_by_stop(true, OUTPUT));
-            assert!(!spared_by_stop(true, DECIDING));
-            assert!(!spared_by_stop(true, None));
+            let (root, trip) = scopes();
+            let scoped = [scope_for(OUTPUT, (&root, &trip)), scope_for(DECIDING, (&root, &trip)), scope_for(None, (&root, &trip))];
+            root.fire();
+            assert!(scoped.iter().all(Signal::is_fired));
         }
 
         #[proxima::test]
         async fn deciding_solos_are_killed_on_fail_fast() {
-            assert!(!spared_by_stop(false, DECIDING));
             assert!(!withdrawn_solo(false, true, DECIDING, 0));
         }
 
@@ -912,6 +917,8 @@ mod pause_tests {
 
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
+
+    use proxima_core::signal::Signal;
 
     use super::{ChildOutput, GROUP_CAPACITY, Ledger, ListingRun, ShardArena, ShardWatch, TestWatch, status_queue};
     use crate::config::{IgnoreMode, NoTestsPolicy, OutputMode, ProcessMode};
@@ -988,6 +995,7 @@ mod pause_tests {
             arena.push(name).expect("name fits the arena");
         }
         arena.seal(1);
+        let root = Signal::new();
         ListingRun {
             signals,
             filter: "",
@@ -1013,6 +1021,8 @@ mod pause_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
+            trip: root.child(),
+            root,
         }
     }
 
@@ -1022,6 +1032,7 @@ mod pause_tests {
         TestWatch {
             slot: scratch.insert(0).expect("scratch table has a slot"),
             process_id: 0,
+            scope: run.trip.child(),
             output: ChildOutput::new(),
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],
