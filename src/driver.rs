@@ -66,7 +66,7 @@ use crate::shard_sched::{SchedTable, SpecialPlan};
 mod shard;
 use shard::ShardWatch;
 use crate::selection::{NameFilter, Selection};
-use crate::stop::{self, DocAtTrip, Observation, StopPolicy, StopReport};
+use crate::stop::{self, DocAtTrip, StopPolicy, StopReport};
 use crate::test_environment::{
     BuildScriptOutput, BuildScriptOutputs, LinkedDirectories, MAX_ENTRIES,
     TestEnvironmentInput, TestEnvironmentLayout,
@@ -373,7 +373,7 @@ impl RunSummary {
 pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: u32,
-    cancelled: bool,
+    scope: Signal,
     output: ChildOutput,
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
@@ -383,7 +383,7 @@ pub(crate) struct TestWatch {
 impl TestWatch {
     // a session its scope ended has no verdict of its own, so its exit status is replaced by the cancellation
     fn exit(&self, code: i32) -> Result<i32, RunError> {
-        if self.cancelled { Err(RunError::Cancelled) } else { Ok(code) }
+        if self.scope.is_fired() { Err(RunError::Cancelled) } else { Ok(code) }
     }
 
     fn in_group(&self, group: &[u8]) -> bool {
@@ -686,7 +686,7 @@ fn start_session(
     watches[slot.index()] = Some(TestWatch {
         slot,
         process_id,
-        cancelled: false,
+        scope,
         output: ChildOutput::new(),
         shard,
         group: [0; GROUP_CAPACITY],
@@ -729,7 +729,7 @@ pub(crate) fn session_output(
         };
         let step = deliver(ledger, event, run.reporting(), watch)?;
         if shard_tripped {
-            run.stop_sent.set(true);
+            run.trip.fire();
         }
         if settled(run, ledger, watches, index, step)? {
             return Ok(());
@@ -768,7 +768,7 @@ pub(crate) fn session_resume(
         shard::stall(watch, window, offset + observed.consumed);
     }
     if observed.stop {
-        run.stop_sent.set(true);
+        run.trip.fire();
     }
     Ok(watches[index].as_ref().is_none_or(|watch| !shard::stalled(watch)))
 }
@@ -805,8 +805,7 @@ pub(crate) fn session_exited(
     };
     release_child(watch.process_id);
     let (slot, exit) = (watch.slot, watch.exit(code));
-    let never_started = run.withdrawn_ready.get() == Some(slot);
-    if run.settings.process == ProcessMode::Test && (exit == Err(RunError::Cancelled) || never_started) {
+    if run.settings.process == ProcessMode::Test && exit == Err(RunError::Cancelled) {
         let target = ledger.sessions().get(slot).map(RunningChild::target);
         watches[index] = None;
         ledger.retire(slot).ok_or(RunError::Outcome)?;
@@ -824,7 +823,6 @@ pub(crate) fn session_cancelled(ledger: &Ledger<'_>, watches: &mut Watches, inde
     let Some(watch) = watches[index].as_mut() else {
         return;
     };
-    watch.cancelled = true;
     if let Some(session) = ledger.sessions().get(watch.slot) {
         session.child().terminate();
     }
@@ -1026,7 +1024,6 @@ struct Reporting<'run, 'storage> {
     color: bool,
     targets: &'run RefCell<TargetTable>,
     ready: &'run Cell<Option<SessionSlotId>>,
-    withdrawn_ready: &'run Cell<Option<SessionSlotId>>,
     run: &'run ListingRun<'storage>,
     jobs: usize,
     render: &'run Render<'storage>,
@@ -1034,7 +1031,7 @@ struct Reporting<'run, 'storage> {
 
 impl Reporting<'_, '_> {
     // a frozen child counts as a live session but not as running, so it starts the moment a job slot frees
-    // once the stop policy has tripped it is terminated instead: resuming it would launch a test after the trip
+    // once the run is stopped its scope has fired and the cancel arm ends it: resuming it would launch a test after the stop
     fn settle_ready(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
@@ -1047,8 +1044,6 @@ impl Reporting<'_, '_> {
             return;
         };
         if self.run.admit(ledger).is_err() {
-            session.child().terminate();
-            self.withdrawn_ready.set(Some(slot));
             self.ready.set(None);
             return;
         }
@@ -1338,12 +1333,10 @@ pub(crate) struct ListingRun<'run> {
     doc_pending: Cell<bool>,
     launch_storage: RefCell<HeldLaunchStorage>,
     ready: Cell<Option<SessionSlotId>>,
-    withdrawn_ready: Cell<Option<SessionSlotId>>,
     shards: RefCell<ShardArena<'run>>,
     sched: RefCell<SchedTable<'run>>,
     specials: RefCell<SpecialPlan<'run>>,
     sched_target: Cell<Option<usize>>,
-    stop_sent: Cell<bool>,
     root: Signal,
     trip: Signal,
 }
@@ -1380,7 +1373,6 @@ impl<'run> ListingRun<'run> {
             color: self.settings.color,
             targets: &self.targets,
             ready: &self.ready,
-            withdrawn_ready: &self.withdrawn_ready,
             run: self,
             jobs: self.settings.jobs,
             render: self.docs.render,
@@ -1413,18 +1405,12 @@ impl ListingRun<'_> {
         }
     }
 
-    // a forwarded signal only reaches children that honor it, so a per-test child that ignores it is terminated here
-    pub(crate) fn interrupt_sessions(&self) {
-        if self.settings.process == ProcessMode::Test && self.interrupted() && !self.stop_sent.get() {
-            self.stop_sent.set(true);
-        }
-    }
-
     pub(crate) fn session_scope(&self, rerun: Option<Rerun>) -> Signal {
         scope_for(rerun, (&self.root, &self.trip))
     }
 
-    fn interrupted(&self) -> bool {
+    // a forwarded signal only reaches children that honor it, so receiving one fires the root every session scope descends from
+    pub(crate) fn interrupted(&self) -> bool {
         let received = self.signals.received().is_some();
         if received {
             self.root.fire();
@@ -1471,13 +1457,16 @@ impl ListingRun<'_> {
         }
     }
 
+    pub(crate) fn budget_spent(&self, failures: usize) -> bool {
+        self.settings.max_fail.is_some_and(|max_fail| failures >= max_fail)
+    }
+
     fn tripped(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     ) -> bool {
         let failures = ledger.snapshot().failed + self.docs.failed.get();
-        let observation = self.policy.borrow().observe_failures(failures);
-        if observation == Observation::FirstTrip {
+        if self.budget_spent(failures) && self.policy.borrow().report().is_none() {
             let doc = self.interrupt_doc_tests();
             self.policy
                 .borrow_mut()
@@ -1487,13 +1476,13 @@ impl ListingRun<'_> {
         self.trip.is_fired()
     }
 
-    // a child terminated while still frozen never ran, so it is not in flight even while its exit is pending
+    // a parked child is still frozen, so it never ran and is not in flight
     fn started_sessions(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     ) -> usize {
         let frozen = self
-            .withdrawn_ready
+            .ready
             .get()
             .is_some_and(|slot| ledger.sessions().get(slot).is_some());
         ledger.sessions().len() - usize::from(frozen)
@@ -2636,12 +2625,10 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         doc_pending: Cell::new(doc_wanted),
         launch_storage: RefCell::new(held_launch_storage()),
         ready: Cell::new(None),
-        withdrawn_ready: Cell::new(None),
         shards: RefCell::new(ShardArena::with_declared(shard_names, DECLARED_BYTES)),
         sched: RefCell::new(SchedTable::new(sched_bytes)),
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
-            stop_sent: Cell::new(false),
             trip: root.child(),
             root,
     });
@@ -3753,12 +3740,10 @@ mod listing_allocation_tests {
             doc_pending: Cell::new(false),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: core::cell::Cell::new(None),
-            withdrawn_ready: Cell::new(None),
-            shards: RefCell::new(crate::shard_arena::ShardArena::new(&mut [])),
+                shards: RefCell::new(crate::shard_arena::ShardArena::new(&mut [])),
             sched: RefCell::new(SchedTable::new(&mut [])),
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
-            stop_sent: Cell::new(false),
             trip: root.child(),
             root,
         };
@@ -3779,5 +3764,51 @@ mod listing_allocation_tests {
         reap(&mut listing);
         std::println!("{{\"listing_spawn_allocations\":{allocations}}}");
         assert_eq!(allocations, 0);
+    }
+}
+
+#[cfg(test)]
+mod doc_trip_tests {
+    use super::{DOC_STDERR_CAPACITY, DocAtTrip, DocParser, DocPhase, DocRun, LockWatch};
+
+    const ABSENT_GROUP: u32 = 2_000_000_000;
+
+    fn doc_run(phase: DocPhase, exit_code: Option<i32>) -> DocRun {
+        DocRun {
+            child: None,
+            process_id: ABSENT_GROUP,
+            parser: DocParser::new(),
+            stdout_eof: false,
+            stderr_eof: false,
+            exit_code,
+            phase,
+            stderr_bytes: [0; DOC_STDERR_CAPACITY],
+            stderr_length: 0,
+            lock_watch: LockWatch::new(),
+            backlog: None,
+        }
+    }
+
+    #[proxima::test]
+    async fn each_doc_phase_reports_what_actually_happened_at_the_trip() {
+        let mut held = doc_run(DocPhase::Starting, None);
+        let mut executing = doc_run(DocPhase::Executing, None);
+        let mut completed = doc_run(DocPhase::Executing, Some(0));
+
+        assert_eq!(held.state_for_trip(), DocAtTrip::InterruptedBeforeExecuting);
+        assert_eq!(executing.state_for_trip(), DocAtTrip::ExecutingLeftToFinish);
+        assert_eq!(completed.state_for_trip(), DocAtTrip::AlreadyFinished);
+    }
+
+    #[proxima::test]
+    async fn only_the_held_doc_phase_is_interrupted_by_the_trip() {
+        let mut held = doc_run(DocPhase::Starting, None);
+        let mut completed = doc_run(DocPhase::Starting, Some(0));
+
+        held.state_for_trip();
+        completed.state_for_trip();
+
+        assert_eq!(held.phase, DocPhase::Interrupted);
+        assert_eq!(completed.phase, DocPhase::Starting);
     }
 }

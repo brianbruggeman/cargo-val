@@ -18,7 +18,6 @@ use crate::sched_file::{Loaded, load};
 use crate::shard_arena::{Located, PushError, Rerun, Reported, Shard, ShardArena};
 use crate::shard_sched::{Class, group_key};
 use crate::status_queue::{self, EVENT_RESERVE};
-use crate::stop::Observation;
 
 pub(super) const FAILURE_CAPACITY: usize = 16384;
 const FIXED_UNITS: usize = 3 + "--exact ".len();
@@ -171,8 +170,7 @@ fn count_reported(
 
 // a shard's failure is only counted when it would trip the stop policy; otherwise a solo run decides it
 fn would_trip(run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
-    let failures = ledger.snapshot().failed + run.docs.failed.get() + 1;
-    run.policy.borrow().observe_failures(failures) != Observation::Clear
+    run.budget_spent(ledger.snapshot().failed + run.docs.failed.get() + 1)
 }
 
 // a solo run cargo-val terminated is withdrawn: its exit says nothing about the test
@@ -181,9 +179,7 @@ pub(super) fn withdraw_solo(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, targe
     if let Some(target) = target {
         run.targets.borrow_mut().tally(target, Tally::Withdrawn);
     }
-    if !run.interrupted() {
-        run.policy.borrow_mut().listed_test_skipped();
-    }
+    run.shed(ledger, 1);
     Ok(())
 }
 
@@ -567,7 +563,7 @@ impl CargoDriver<'_> {
             }
         }
         if run.interrupted() {
-            run.stop_sent.set(true);
+            run.root.fire();
             let dropped = run.shards.borrow_mut().discard_everything() + run.specials.borrow_mut().discard();
             withdraw_unlaunched(run, ledger, active.target, dropped)?;
             return Ok(dropped > 0);
@@ -694,9 +690,7 @@ fn settle_stopped(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, target: Option<
         if let Some(target) = target {
             (0..withdrawn).for_each(|_| run.targets.borrow_mut().tally(target, Tally::Withdrawn));
         }
-        if !run.interrupted() {
-            (0..withdrawn).for_each(|_| run.policy.borrow_mut().listed_test_skipped());
-        }
+        run.shed(ledger, withdrawn);
     }
     Ok(())
 }
@@ -736,9 +730,7 @@ fn finish_rerun(
         (Some(Rerun::Decides { .. }), false) => {
             count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
             failure_output(run, target, name, output)?;
-            if run.tripped(ledger) {
-                run.stop_sent.set(true);
-            }
+            run.tripped(ledger);
             Ok(())
         }
         (_, true) => warn_rerun(run, target, name, b"passed when re-run alone"),
@@ -806,9 +798,7 @@ fn queue_solo_reruns(
         .filter(|ordinal| !shard_watch.reported.has(*ordinal) || shard_watch.failed.has(*ordinal))
         .for_each(|ordinal| _ = owed.mark(ordinal));
     arena.owe_reruns(shard, (owed, shard_watch.failed), true).map_err(|_| RunError::Outcome)?;
-    if run.tripped(ledger) {
-        run.stop_sent.set(true);
-    }
+    run.tripped(ledger);
     Ok(())
 }
 
@@ -862,6 +852,24 @@ mod tests {
             let scoped = [scope_for(OUTPUT, (&root, &trip)), scope_for(DECIDING, (&root, &trip)), scope_for(None, (&root, &trip))];
             root.fire();
             assert!(scoped.iter().all(Signal::is_fired));
+        }
+
+        #[proxima::test]
+        async fn a_frozen_session_exits_as_cancelled_once_an_interrupt_fires_its_scope() {
+            let (root, trip) = scopes();
+            let mut slots = crate::schedule::SessionSlots::<u8, 1>::new();
+            let frozen = TestWatch {
+                slot: slots.insert(0).expect("scratch table has a slot"),
+                process_id: 0,
+                scope: scope_for(None, (&root, &trip)),
+                output: ChildOutput::new(),
+                shard: None,
+                group: [0; GROUP_CAPACITY],
+                group_length: 0,
+            };
+            assert_eq!(frozen.exit(0), Ok(0));
+            root.fire();
+            assert_eq!(frozen.exit(0), Err(RunError::Cancelled));
         }
 
         #[proxima::test]
@@ -1002,12 +1010,10 @@ mod pause_tests {
             doc_pending: Cell::new(false),
             launch_storage: RefCell::new(held_launch_storage()),
             ready: Cell::new(None),
-            withdrawn_ready: Cell::new(None),
-            shards: RefCell::new(arena),
+                shards: RefCell::new(arena),
             sched: RefCell::new(SchedTable::new(&mut [])),
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
-            stop_sent: Cell::new(false),
             trip: root.child(),
             root,
         }
@@ -1019,7 +1025,7 @@ mod pause_tests {
         TestWatch {
             slot: scratch.insert(0).expect("scratch table has a slot"),
             process_id: 0,
-            cancelled: false,
+            scope: Signal::new(),
             output: ChildOutput::new(),
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],
