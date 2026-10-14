@@ -31,6 +31,9 @@ const ITEM_RECORDS: usize = (UNGATED_BYTES + EVENT_RESERVE).div_ceil(RECORD_BYTE
 
 const _: () = assert!(SLOTS >= ITEM_RECORDS, "status queue must hold one item");
 
+/// Bytes the queue absorbs from an unread descriptor before `has_room` turns false and the run pauses; the reserve of one worst-case item stays free.
+pub const UNPAUSED_QUEUE_BYTES: usize = (SLOTS - ITEM_RECORDS) * RECORD_BYTES;
+
 /// One queued write fragment: the descriptor it belongs to and up to `RECORD_BYTES` of its bytes.
 #[derive(Clone, Copy)]
 struct Record {

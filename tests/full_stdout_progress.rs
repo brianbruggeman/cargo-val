@@ -29,14 +29,24 @@ mod plain;
 #[path = "common/plain_summary.rs"]
 mod plain_summary;
 
+use cargo_val::UNPAUSED_QUEUE_BYTES;
 use cargo_val::render::Outcome;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
-const FIXTURE_TEST_COUNT: usize = 700;
 const IGNORED_FLOOD_COUNT: usize = 2500;
 const PIPE_CEILING_BYTES: usize = 65_536;
 const FLOOD_PIPE_BYTES: libc::c_int = 4096;
 const RUN_PIPE_BYTES: libc::c_int = 65_536;
+// measured from a plain run of the fixture: 408_422 stdout bytes over 3000 tests (one START and one PASS line each) is 136.1
+const PLAIN_BYTES_PER_TEST: usize = 137;
+const RUN_HOLDS_BYTES: usize = RUN_PIPE_BYTES as usize + UNPAUSED_QUEUE_BYTES;
+// the pump pauses once pipe plus queue are full, so the fixture is the most tests whose whole stdout both can hold
+const FIXTURE_TEST_COUNT: usize = RUN_HOLDS_BYTES / PLAIN_BYTES_PER_TEST;
+const CASE_COUNT_VARIABLE: &str = "FULL_STDOUT_CASE_COUNT";
+const _: () = assert!(
+    FIXTURE_TEST_COUNT * PLAIN_BYTES_PER_TEST > PIPE_CEILING_BYTES,
+    "the fixture must out-write the pipe or the queue is never exercised"
+);
 
 // the stdout stream sees EOF as EPOLLHUP alone on Linux, which the default reactor strategy does not wake on; the exit source is the wake that ends the drain
 struct Running {
@@ -134,6 +144,7 @@ fn spawn_cargo_val(directory: &Path, fixture: &str, stdout: PipeWriter) -> Child
         .env_remove("CARGO_VAL_FAIL_FAST")
         .env_remove("CARGO_VAL_NO_TESTS")
         .env("NO_COLOR", "1")
+        .env(CASE_COUNT_VARIABLE, FIXTURE_TEST_COUNT.to_string())
         .env("CARGO_VAL_DONE_LOG", directory.join("done"))
         .env(
             "CARGO_TARGET_DIR",
@@ -219,13 +230,17 @@ async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drai
     assert!(unread > 0, "no stdout was pending while the stdout pipe went unread");
 
     let (output, exited) = join(drain_stdout(&stdout), Pipe::call(&running.exit, ())).await;
+    let output_len = output.len();
     assert!(
-        output.len() > PIPE_CEILING_BYTES,
-        "stdout ({} bytes) must exceed any pipe buffer to prove the stall path",
-        output.len()
+        output_len > PIPE_CEILING_BYTES,
+        "stdout ({output_len} bytes) must exceed any pipe buffer to prove the stall path"
     );
     let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
     assert_eq!(status.code(), Some(0), "cargo-val exit status");
+    assert!(
+        output_len <= RUN_HOLDS_BYTES,
+        "stdout ({output_len} bytes) outgrew pipe plus queue ({RUN_HOLDS_BYTES}); the run pauses past that, so the per-test bytes grew"
+    );
 
     let text = String::from_utf8(output).expect("stdout is text");
     let passed = plain::names(&text, Outcome::Passed);
