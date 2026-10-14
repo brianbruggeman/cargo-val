@@ -795,6 +795,14 @@ fn run_counts(scratch: &Path) -> Vec<String> {
     std::fs::read_to_string(scratch.join("runs.log")).expect("the fixture logged its runs").lines().map(str::to_owned).collect()
 }
 
+fn run_count_evidence(scratch: &Path, output: &str, status: ExitStatus) -> String {
+    let log = std::fs::read_to_string(scratch.join("runs.log")).unwrap_or_else(|error| format!("<unreadable: {error}>"));
+    let log_lines = log.lines().enumerate().map(|(index, line)| format!("  {index}: {line}")).collect::<Vec<_>>().join("\n");
+    let review_open = output.find(REVIEW_HEADER).unwrap_or(0);
+    let receipt = output.rfind("SUMMARY").map_or("<no receipt printed>", |at| &output[at..]);
+    format!("run log ({} lines):\n{log_lines}\nexit status: {status}\nreceipt:\n{}\nframes from the review open (the key follows it) to the end:\n{}", log.lines().count(), shown(receipt), shown(&output[review_open..]))
+}
+
 fn assert_receipt_after_review(output: &str, status: ExitStatus) -> &str {
     assert_eq!(status.code(), Some(1), "a receipt with unresolved failures exits 1: {status}\n{}", shown(output));
     let receipt = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(output)));
@@ -818,7 +826,7 @@ async fn r_in_review_reruns_the_selected_failure_with_a_rerun_row_then_its_resul
     assert!(settled.contains("ASSERT") || settled.contains("PANIC"), "a failing rerun leaves the row with its class:\n{}", shown(settled));
     let receipt = assert_receipt_after_review(&output, status);
     assert!(receipt.starts_with("SUMMARY  passed=0 failed=4 "), "one rerun that failed again leaves all 4 failures:\n{}", shown(receipt));
-    assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun");
+    assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun\n{}", run_count_evidence(&scratch, &output, status));
 }
 
 #[proxima::test]
@@ -829,7 +837,7 @@ async fn capital_r_in_review_reruns_every_failure_and_the_receipt_counts_the_one
     assert!(receipt.starts_with("SUMMARY  passed=0 failed=3 flaky=1 "), "3 failures stay and 1 is flaky:\n{}", shown(receipt));
     assert_eq!(receipt.lines().filter(|line| line.starts_with("FAILED")).count(), 3, "{}", shown(receipt));
     assert!(receipt.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("fails_once_then_passes")), "{}", shown(receipt));
-    assert_eq!(run_counts(&scratch).len(), 8, "4 first runs plus exactly 4 reruns");
+    assert_eq!(run_counts(&scratch).len(), 8, "4 first runs plus exactly 4 reruns\n{}", run_count_evidence(&scratch, &output, status));
 }
 
 fn process_alive(pid: i32) -> bool {
@@ -901,7 +909,7 @@ async fn r_on_the_row_that_fails_only_on_its_first_run_shows_pass_and_the_receip
     assert!(receipt.starts_with("SUMMARY  passed=3 failed=0 flaky=1 "), "the test that passed alone is flaky, not passed and not failed:\n{}", shown(receipt));
     assert!(receipt.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("tests::fails_once_then_passes")), "{}", shown(receipt));
     assert_eq!(receipt.lines().filter(|line| line.starts_with("FAILED")).count(), 0, "{}", shown(receipt));
-    assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun");
+    assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun\n{}", run_count_evidence(&scratch, &output, status));
 }
 
 fn rerun_refused(bytes: &[u8]) -> bool {
