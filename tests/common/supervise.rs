@@ -1,48 +1,39 @@
-use std::io;
-use std::os::unix::process::CommandExt;
+use core::time::Duration;
 use std::panic::{self, AssertUnwindSafe};
-use std::process::{ChildStderr, ChildStdout, Command, ExitStatus};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
+use std::process::Command;
 
-use crate::common::{INTERRUPT_GRACE, interrupt, kill_group};
+use futures::FutureExt;
+use proxima_core::time::timeout;
+use proxima_primitives::pipe::UnpinPipe;
 
-/// Spawns `command` as the leader of its own process group, lends the caller the child's pid, its piped stdout and stderr (if the command piped them) and a receiver that yields the exit status once, then guarantees the group is gone before returning or unwinding.
+use crate::common::{ChildStream, ExitSource, interrupt_then_kill, kill_group, launch};
+
+/// Spawns `command` as the leader of its own process group and lends `interact` the child's pid, its stdout and stderr streams and its exit source, all driven on the calling prime worker; then guarantees the group is gone before returning or unwinding.
 ///
-/// Where [`crate::common::output_until`] owns the whole run, this is for tests that must watch the child while it runs. A caller panic, a missed deadline inside `interact`, or a child left running all end the same way: SIGINT to the group, `INTERRUPT_GRACE` for cargo-val to forward it, then SIGKILL, so no cargo or cargo-val child outlives the test and holds cargo's build lock.
-pub fn supervised<Outcome>(
+/// Where [`crate::common::output_until`] owns the whole run, this is for tests that must watch the child while it runs. A caller panic, a `deadline` missed by `interact`, or a child left running all end the same way: SIGINT to the group, `INTERRUPT_GRACE` for cargo-val to forward it, then SIGKILL, so no cargo or cargo-val child outlives the test and holds cargo's build lock.
+pub async fn supervised<Outcome>(
     command: &mut Command,
-    interact: impl FnOnce(u32, Option<ChildStdout>, Option<ChildStderr>, &Receiver<io::Result<ExitStatus>>) -> Outcome,
+    deadline: Duration,
+    interact: impl AsyncFnOnce(u32, &ChildStream, &ChildStream, &ExitSource) -> Outcome,
 ) -> Outcome {
-    command.process_group(0);
-    let mut child = command
-        .spawn()
-        .unwrap_or_else(|error| panic!("{command:?} did not spawn: {error}"));
-    let leader = child.id();
-    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || sender.send(child.wait()));
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| interact(leader, stdout, stderr, &receiver)));
-    let failures = settle(leader, &receiver);
+    let (leader, stdout, stderr, exit) = launch(command).unwrap_or_else(|failure| panic!("{failure}"));
+    let body = AssertUnwindSafe(interact(leader, &stdout, &stderr, &exit)).catch_unwind();
+    let outcome = timeout(deadline, body).await;
+    let failures = settle(leader, &exit).await;
     match outcome {
-        Ok(value) => {
+        Ok(Ok(value)) => {
             assert!(failures.is_empty(), "{command:?} (pid {leader}) group cleanup failed: {failures:?}");
             value
         }
-        Err(payload) => panic::resume_unwind(payload),
+        Ok(Err(payload)) => panic::resume_unwind(payload),
+        Err(elapsed) => panic!("{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}"),
     }
 }
 
-// Disconnected means the exit status was already taken; Empty means the child is still running
-fn settle(leader: u32, receiver: &Receiver<io::Result<ExitStatus>>) -> Vec<String> {
-    let mut failures = Vec::new();
-    if matches!(receiver.try_recv(), Err(TryRecvError::Empty)) {
-        failures.extend(interrupt(leader).err());
-        if receiver.recv_timeout(INTERRUPT_GRACE).is_err() {
-            failures.extend(kill_group(leader).err());
-            let _ = receiver.recv();
-        }
+// a spent source or a ready status means the exit was already taken; only a pending one means the child still runs
+async fn settle(leader: u32, exit: &ExitSource) -> Vec<String> {
+    if UnpinPipe::call(exit, ()).now_or_never().is_some() {
+        return kill_group(leader).err().into_iter().collect();
     }
-    failures.extend(kill_group(leader).err());
-    failures
+    interrupt_then_kill(leader, UnpinPipe::call(exit, ())).await.1
 }

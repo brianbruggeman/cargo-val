@@ -5,6 +5,10 @@ use cargo_val::build_defaults::SCHED_RECORD_BYTES;
 use cargo_val::sched_binary::{Absent, RECORD_BYTES, decode};
 use cargo_val::sched_file::{Loaded, load};
 
+mod common;
+
+use common::fixture_output;
+
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sched/Cargo.toml");
 
 fn target_directory() -> PathBuf {
@@ -13,12 +17,13 @@ fn target_directory() -> PathBuf {
         .join("sched-fixture")
 }
 
-fn built_test_binary() -> String {
-    let output = Command::new("cargo")
-        .args(["test", "--lib", "--no-run", "--message-format=json", "--manifest-path", FIXTURE, "--target-dir"])
-        .arg(target_directory())
-        .output()
-        .expect("cargo builds the scheduling fixture");
+async fn built_test_binary() -> String {
+    let output = fixture_output(
+        Command::new("cargo")
+            .args(["test", "--lib", "--no-run", "--message-format=json", "--manifest-path", FIXTURE, "--target-dir"])
+            .arg(target_directory()),
+    )
+    .await;
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -51,9 +56,9 @@ fn declared(binary: &str) -> Vec<(String, u8, String)> {
     entries
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn the_host_binary_format_yields_every_declared_record_with_flags_and_group() {
-    let entries = declared(&built_test_binary());
+    let entries = declared(&built_test_binary().await);
 
     let expected: Vec<(&str, u8, &str)> = vec![
         ("declared::declares_nothing", 0b000, ""),

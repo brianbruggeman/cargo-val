@@ -55,7 +55,7 @@ fn manifest(fixture: &str) -> PathBuf {
         .join("Cargo.toml")
 }
 
-fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
+async fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
     let mut command = Command::new(CARGO_VAL);
     command
         .arg("--manifest-path")
@@ -74,7 +74,7 @@ fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str
     for (key, value) in environment {
         command.env(key, value);
     }
-    let output = fixture_output(&mut command);
+    let output = fixture_output(&mut command).await;
     Run {
         status: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -84,16 +84,16 @@ fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str
 
 const MODES: [&str; 2] = ["test", "shard"];
 
-fn fixture(mode: &str, arguments: &[&str]) -> Run {
-    with_environment(mode, arguments, &[])
+async fn fixture(mode: &str, arguments: &[&str]) -> Run {
+    with_environment(mode, arguments, &[]).await
 }
 
-fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
+async fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
     let mut full = vec!["--lib", "--no-fail-fast"];
     full.extend_from_slice(arguments);
     let mut with_mode = vec![("CARGO_VAL_PROCESS", mode)];
     with_mode.extend_from_slice(environment);
-    run(&manifest("ignore_modes"), &full, &with_mode)
+    run(&manifest("ignore_modes"), &full, &with_mode).await
 }
 
 const BINARY: &str = "ignore_modes: discovered";
@@ -101,12 +101,12 @@ const BINARY: &str = "ignore_modes: discovered";
 #[proxima::test(timeout = "310s")]
 async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it() {
     for mode in MODES {
-        default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode);
+        default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode).await;
     }
 }
 
-fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode: &str) {
-    let result = fixture(mode, &[]);
+async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode: &str) {
+    let result = fixture(mode, &[]).await;
     let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(1), "{context}");
@@ -132,12 +132,12 @@ fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mode: &s
 #[proxima::test(timeout = "310s")]
 async fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest() {
     for mode in MODES {
-        ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode);
+        ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode).await;
     }
 }
 
-fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &str) {
-    let result = fixture(mode, &["--", "--ignored"]);
+async fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &str) {
+    let result = fixture(mode, &["--", "--ignored"]).await;
     let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(0), "{context}");
@@ -159,12 +159,12 @@ fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &str) {
 #[proxima::test(timeout = "310s")]
 async fn include_ignored_flag_runs_every_test() {
     for mode in MODES {
-        include_ignored_flag_runs_every_test_in(mode);
+        include_ignored_flag_runs_every_test_in(mode).await;
     }
 }
 
-fn include_ignored_flag_runs_every_test_in(mode: &str) {
-    let result = fixture(mode, &["--", "--include-ignored"]);
+async fn include_ignored_flag_runs_every_test_in(mode: &str) {
+    let result = fixture(mode, &["--", "--include-ignored"]).await;
     let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(1), "{context}");
@@ -182,13 +182,13 @@ fn include_ignored_flag_runs_every_test_in(mode: &str) {
 #[proxima::test(timeout = "310s")]
 async fn ignore_mode_setting_equals_the_libtest_flag() {
     for mode in MODES {
-        ignore_mode_setting_equals_the_libtest_flag_in(mode);
+        ignore_mode_setting_equals_the_libtest_flag_in(mode).await;
     }
 }
 
-fn ignore_mode_setting_equals_the_libtest_flag_in(mode: &str) {
-    let flag = fixture(mode, &["--", "--include-ignored"]);
-    let setting = with_environment(mode, &[], &[("CARGO_VAL_IGNORED", "include")]);
+async fn ignore_mode_setting_equals_the_libtest_flag_in(mode: &str) {
+    let flag = fixture(mode, &["--", "--include-ignored"]).await;
+    let setting = with_environment(mode, &[], &[("CARGO_VAL_IGNORED", "include")]).await;
 
     assert_eq!(setting.total_without_wall(), flag.total_without_wall());
     assert_eq!(setting.status, flag.status);
@@ -197,12 +197,12 @@ fn ignore_mode_setting_equals_the_libtest_flag_in(mode: &str) {
 #[proxima::test(timeout = "310s")]
 async fn both_ignore_flags_together_are_refused_as_in_libtest() {
     for mode in MODES {
-        both_ignore_flags_together_are_refused_as_in_libtest_in(mode);
+        both_ignore_flags_together_are_refused_as_in_libtest_in(mode).await;
     }
 }
 
-fn both_ignore_flags_together_are_refused_as_in_libtest_in(mode: &str) {
-    let result = fixture(mode, &["--", "--ignored", "--include-ignored"]);
+async fn both_ignore_flags_together_are_refused_as_in_libtest_in(mode: &str) {
+    let result = fixture(mode, &["--", "--ignored", "--include-ignored"]).await;
 
     assert_eq!(result.status, Some(2), "{}{}", result.stdout, result.stderr);
     assert!(result.stderr.contains("invalid arguments"), "{}", result.stderr);
@@ -211,12 +211,12 @@ fn both_ignore_flags_together_are_refused_as_in_libtest_in(mode: &str) {
 #[proxima::test(timeout = "310s")]
 async fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy() {
     for mode in MODES {
-        only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode);
+        only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode).await;
     }
 }
 
-fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode: &str) {
-    let result = fixture(mode, &["-E", "test(ignored_with_reason)"]);
+async fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(mode: &str) {
+    let result = fixture(mode, &["-E", "test(ignored_with_reason)"]).await;
     let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(4), "{context}");
@@ -230,11 +230,11 @@ fn only_ignored_selected_and_nothing_executed_is_red_by_the_no_tests_policy_in(m
 #[proxima::test(timeout = "310s")]
 async fn filterset_excludes_before_launch_and_counts_filtered() {
     for mode in MODES {
-        filterset_excludes_before_launch_and_counts_filtered_in(mode);
+        filterset_excludes_before_launch_and_counts_filtered_in(mode).await;
     }
 }
 
-fn filterset_excludes_before_launch_and_counts_filtered_in(mode: &str) {
+async fn filterset_excludes_before_launch_and_counts_filtered_in(mode: &str) {
     let cases: [(&str, i32, &str); 5] = [
         ("test(=fixture::passes)", 0, "total: discovered 3, passed 1, failed 0, ignored 0, filtered 2"),
         ("not test(fails)", 0, "total: discovered 3, passed 1, failed 0, ignored 1, filtered 1"),
@@ -243,7 +243,7 @@ fn filterset_excludes_before_launch_and_counts_filtered_in(mode: &str) {
         ("package(other) | none()", 4, "total: discovered 3, passed 0, failed 0, ignored 0, filtered 3"),
     ];
     for (expression, status, total) in cases {
-        let result = fixture(mode, &["-E", expression]);
+        let result = fixture(mode, &["-E", expression]).await;
         let context = format!("{mode} {expression}: {}{}", result.stdout, result.stderr);
         assert_eq!(result.status, Some(status), "{context}");
         assert_eq!(result.total_without_wall(), total, "{context}");
@@ -253,14 +253,14 @@ fn filterset_excludes_before_launch_and_counts_filtered_in(mode: &str) {
 #[proxima::test(timeout = "310s")]
 async fn filterset_setting_equals_the_flag_and_the_flag_wins() {
     for mode in MODES {
-        filterset_setting_equals_the_flag_and_the_flag_wins_in(mode);
+        filterset_setting_equals_the_flag_and_the_flag_wins_in(mode).await;
     }
 }
 
-fn filterset_setting_equals_the_flag_and_the_flag_wins_in(mode: &str) {
-    let flag = fixture(mode, &["--filterset", "test(passes)"]);
-    let setting = with_environment(mode, &[], &[("CARGO_VAL_FILTERSET", "test(passes)")]);
-    let overridden = with_environment(mode, &["-E", "test(passes)"], &[("CARGO_VAL_FILTERSET", "none()")]);
+async fn filterset_setting_equals_the_flag_and_the_flag_wins_in(mode: &str) {
+    let flag = fixture(mode, &["--filterset", "test(passes)"]).await;
+    let setting = with_environment(mode, &[], &[("CARGO_VAL_FILTERSET", "test(passes)")]).await;
+    let overridden = with_environment(mode, &["-E", "test(passes)"], &[("CARGO_VAL_FILTERSET", "none()")]).await;
 
     assert_eq!(setting.total_without_wall(), flag.total_without_wall());
     assert_eq!(overridden.total_without_wall(), flag.total_without_wall());
@@ -269,7 +269,7 @@ fn filterset_setting_equals_the_flag_and_the_flag_wins_in(mode: &str) {
 #[proxima::test(timeout = "310s")]
 async fn malformed_filterset_fails_with_a_caret_before_any_build() {
     let missing = PathBuf::from("/nonexistent/cargo-val-fixture/Cargo.toml");
-    let result = run(&missing, &["--lib", "-E", "test(a) & & test(b)"], &[]);
+    let result = run(&missing, &["--lib", "-E", "test(a) & & test(b)"], &[]).await;
 
     assert_eq!(result.status, Some(2), "{}", result.stderr);
     assert_eq!(
@@ -282,12 +282,12 @@ async fn malformed_filterset_fails_with_a_caret_before_any_build() {
 #[proxima::test(timeout = "310s")]
 async fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test() {
     for mode in MODES {
-        an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode);
+        an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode).await;
     }
 }
 
-fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode: &str) {
-    let result = run(&manifest("ghost_harness"), &["--test", "ghost"], &[("CARGO_VAL_PROCESS", mode)]);
+async fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode: &str) {
+    let result = run(&manifest("ghost_harness"), &["--test", "ghost"], &[("CARGO_VAL_PROCESS", mode)]).await;
 
     assert_eq!(result.status, Some(2), "{}{}", result.stdout, result.stderr);
     assert!(
@@ -300,26 +300,28 @@ fn an_exact_launch_that_ran_nothing_is_an_error_naming_the_test_in(mode: &str) {
 #[cfg(unix)]
 mod bin_gate_hold {
     use std::ffi::CString;
-    use std::fs::{File, OpenOptions};
+    use std::fs::OpenOptions;
     use std::os::unix::ffi::OsStrExt;
-    use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
-    use std::sync::mpsc::TryRecvError;
+    use std::path::Path;
+    use std::process::Command;
     use std::thread;
-    use std::time::Instant;
+
+    use futures::future::join3;
+    use proxima_primitives::pipe::Pipe;
 
     use super::{CARGO_VAL, Run, manifest, target_directory};
-    use crate::common::FIXTURE_DEADLINE;
+    use crate::common::{ChildStream, FIXTURE_DEADLINE, drain, drain_until};
     use crate::supervise::supervised;
 
     const TEST_FAILED_LINE: &str = "the_bin_target_exists_when_the_test_starts FAIL";
+    const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
 
     /// What proves the bin-less window was observed, so the bin build may be released.
     #[derive(Clone, Copy)]
     pub enum Release {
-        /// gate off: the test ran with no bin and said so.
+        /// gate off: the test ran with no bin and said so on stdout.
         AfterTestFails,
-        /// gate on: the test executable is linked and cargo-val is holding it for the bin.
+        /// gate on: cargo-val is holding the linked test executable for the bin and says so on stderr.
         AfterTestArtifactLinks,
     }
 
@@ -329,24 +331,8 @@ mod bin_gate_hold {
         assert_eq!(made, 0, "mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
     }
 
-    fn test_artifact_linked(deps: &Path) -> bool {
-        std::fs::read_dir(deps).is_ok_and(|entries| {
-            entries.flatten().any(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                name.starts_with("uses_bin-") && !name.contains('.')
-            })
-        })
-    }
-
-    fn observed(release: Release, deps: &Path, stdout: &Path) -> bool {
-        match release {
-            Release::AfterTestFails => std::fs::read_to_string(stdout)
-                .is_ok_and(|text| text.contains(TEST_FAILED_LINE)),
-            Release::AfterTestArtifactLinks => test_artifact_linked(deps),
-        }
-    }
-
     // rustc may open the fifo more than once (sccache runs a dep-info pass first), so one write-open would strand a later reader; the loop ends when the target directory is removed
+    // a fifo write-open blocks in the kernel until a reader arrives and has no readiness event, so it cannot run on the prime worker that drives the child
     fn release_bin_build(fifo: &Path) {
         let fifo = fifo.to_path_buf();
         thread::spawn(move || {
@@ -356,62 +342,46 @@ mod bin_gate_hold {
         });
     }
 
-    fn output_file(directory: &Path, name: &str) -> (PathBuf, File) {
-        let path = directory.join(name);
-        let file = File::create(&path).expect("output file is creatable");
-        (path, file)
+    // reads `stream` to EOF, releasing the bin build the moment `needle` appears when this stream is the one that proves the window
+    async fn watched(stream: &ChildStream, needle: Option<(&str, &Path)>) -> Vec<u8> {
+        let Some((needle, fifo)) = needle else {
+            return drain(stream).await.0;
+        };
+        let (seen, _) = drain_until(stream, |bytes| String::from_utf8_lossy(bytes).contains(needle)).await;
+        release_bin_build(fifo);
+        [seen, drain(stream).await.0].concat()
     }
 
-    pub fn cold_run(label: &str, environment: &[(&str, &str)], release: Release) -> Run {
+    pub async fn cold_run(label: &str, environment: &[(&str, &str)], release: Release) -> Run {
         let target = target_directory().join(format!("bin-gate-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&target);
-        let outputs = target.join("outputs");
-        std::fs::create_dir_all(&outputs).expect("target directory is creatable");
+        std::fs::create_dir_all(&target).expect("target directory is creatable");
         let fifo = target.join("bin-hold");
         make_fifo(&fifo);
-        let (stdout_path, stdout_file) = output_file(&outputs, "stdout");
-        let (stderr_path, stderr_file) = output_file(&outputs, "stderr");
         let mut command = Command::new(CARGO_VAL);
         command
             .arg("--manifest-path")
             .arg(manifest("bin_gate"))
             .env_remove("CARGO_VAL_BIN_GATE")
             .env("NO_COLOR", "1")
+            .env("CARGO_VAL_LOG", "debug")
             .env("CARGO_TARGET_DIR", &target)
             .env("CARGO_VAL_TARGET_DIR", "shared")
-            .env("CARGO_VAL_BIN_GATE_HOLD", &fifo)
-            .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file));
+            .env("CARGO_VAL_BIN_GATE_HOLD", &fifo);
         for (key, value) in environment {
             command.env(key, value);
         }
-        let deps = target.join("debug/deps");
-        let status = supervised(&mut command, |_, _, _, exit| {
-            let deadline = Instant::now() + FIXTURE_DEADLINE;
-            let mut released = false;
-            loop {
-                match exit.try_recv() {
-                    Ok(waited) => break waited.expect("cargo-val is waitable"),
-                    Err(TryRecvError::Disconnected) => panic!("the wait thread vanished"),
-                    Err(TryRecvError::Empty) => {}
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "cargo-val outlived {FIXTURE_DEADLINE:?} (released={released}); stdout so far:\n{}",
-                    std::fs::read_to_string(&stdout_path).unwrap_or_default()
-                );
-                if !released && observed(release, &deps, &stdout_path) {
-                    release_bin_build(&fifo);
-                    released = true;
-                }
-                thread::yield_now();
-            }
-        });
-        let run = Run {
-            status: status.code(),
-            stdout: std::fs::read_to_string(&stdout_path).expect("stdout is readable"),
-            stderr: std::fs::read_to_string(&stderr_path).expect("stderr is readable"),
-        };
+        let (status, stdout, stderr) = supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+            let (stdout_needle, stderr_needle) = match release {
+                Release::AfterTestFails => (Some((TEST_FAILED_LINE, fifo.as_path())), None),
+                Release::AfterTestArtifactLinks => (None, Some((GATE_PARKED_LINE, fifo.as_path()))),
+            };
+            let (stdout, stderr, exit) = join3(watched(stdout, stdout_needle), watched(stderr, stderr_needle), exit.call(())).await;
+            let status = exit.expect("cargo-val exit is observed once").expect("cargo-val is waitable");
+            (status, String::from_utf8_lossy(&stdout).into_owned(), String::from_utf8_lossy(&stderr).into_owned())
+        })
+        .await;
+        let run = Run { status: status.code(), stdout, stderr };
         let _ = std::fs::remove_dir_all(&target);
         run
     }
@@ -420,7 +390,7 @@ mod bin_gate_hold {
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn an_integration_test_waits_for_its_package_bin_on_a_cold_target_dir() {
-    let result = bin_gate_hold::cold_run("on", &[], bin_gate_hold::Release::AfterTestArtifactLinks);
+    let result = bin_gate_hold::cold_run("on", &[], bin_gate_hold::Release::AfterTestArtifactLinks).await;
     let context = format!("{}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(0), "{context}");
@@ -439,7 +409,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
         "broken",
         &[("RUSTFLAGS", "--cfg broken_bin"), ("CARGO_VAL_LOG", "debug")],
         bin_gate_hold::Release::AfterTestArtifactLinks,
-    );
+    ).await;
     let context = format!("{}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(3), "{context}");
@@ -463,7 +433,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn the_same_fixture_fails_with_the_bin_gate_off() {
-    let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails);
+    let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails).await;
     let failed = result
         .stdout
         .contains("the_bin_target_exists_when_the_test_starts FAIL");
@@ -477,7 +447,7 @@ async fn the_same_fixture_fails_with_the_bin_gate_off() {
 
 #[proxima::test]
 async fn help_prints_the_banner_file_and_documents_the_new_options() {
-    let output = output_within(Command::new(CARGO_VAL).arg("--help"), HELP_DEADLINE).unwrap_or_else(|failure| panic!("{failure}"));
+    let output = output_within(Command::new(CARGO_VAL).arg("--help"), HELP_DEADLINE).await.unwrap_or_else(|failure| panic!("{failure}"));
     let banner = include_str!("fixtures/help-banner.txt");
 
     assert_eq!(output.status.code(), Some(0));
@@ -518,7 +488,7 @@ async fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() 
         "lines",
         &[("CARGO_VAL_LOG", "debug")],
         bin_gate_hold::Release::AfterTestArtifactLinks,
-    );
+    ).await;
 
     assert_eq!(
         gate_lines(&result.stderr),
@@ -542,7 +512,7 @@ async fn gate_debug_lines_for_park_then_failed_build_then_drop_are_byte_exact() 
         "drop-lines",
         &[("RUSTFLAGS", "--cfg broken_bin"), ("CARGO_VAL_LOG", "debug")],
         bin_gate_hold::Release::AfterTestArtifactLinks,
-    );
+    ).await;
 
     assert_eq!(
         gate_lines(&result.stderr),
