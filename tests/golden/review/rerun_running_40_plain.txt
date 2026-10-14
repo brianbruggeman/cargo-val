@@ -1,0 +1,30 @@
+ cargo val  review                 2:18
+
+ 2 failed  381 passed  0 skipped
+ 0 warnings
+
+›RERUN        1.2s ▒░░░░░ NO-RETRY sc…p
+ PANIC     120.03s   NO-RETRY shar…ptly
+ ──────────────────────────────────────
+ sched_records::the_host_binary_format_
+ yields_every_declared_record_with_flag
+ s_and_group
+ TIMEOUT after 71.66s
+ tests/sched_records.rs:55  e opens
+NO-RETRY not retried alone: it failed
+  after 71.660s, over the 30s retry
+  budget. r retries it now
+
+ test output  verbatim
+   proxima::test: body did not complete
+    within the timeout
+
+ cargo val  process group killed after
+            71.66s
+find the commit  cargo val bisect
+  sched_records
+  the_host_binary_format_yields_every_d
+  eclared_record_with_flags_and_group
+ j/k move  r rerun  R all  e edit
+ / find  i skip  w warn  s timeline
+ q quit

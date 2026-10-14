@@ -1,0 +1,8 @@
+ [1mcargo val[0m  [1;36mreview[0m                                     [2m2:19[0m
+
+ [2m0 failed[0m  [32m381 passed[0m  [2m0 skipped[0m  [2m0 warnings[0m
+
+ [1;32mno failures left[0m
+ [2m381 passed. q then q to leave.[0m
+
+ [36m/[0m find  [36ms[0m timeline  [36mi[0m skip  [36mw[0m warn  [36mq[0m quit

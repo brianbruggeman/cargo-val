@@ -1,0 +1,10 @@
+ cargo val  review                 2:19
+
+ 0 failed  381 passed  0 skipped
+ 0 warnings
+
+ no failures left
+ 381 passed. q then q to leave.
+
+ / find  s timeline  i skip  w warn
+ q quit

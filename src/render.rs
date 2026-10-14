@@ -10,13 +10,16 @@
 //! Plain is the first projection. Rich and agent read the same `State`; they add modes and events, not a second ledger.
 
 mod agent;
+mod entry;
 mod json;
+pub mod review;
 
 use memchr::memchr;
 
 use crate::line::Line;
 use crate::failure_class::{Exit, Record, Reject, classify};
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
+use review::{Back, Key, Rerun, Verdict};
 
 mod rich;
 mod timeline;
@@ -55,6 +58,8 @@ const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
 const STDERR_STREAM: &[u8] = b"stderr";
 const SOURCE_STREAM: &[u8] = b"source";
+const QUIT_WINDOW_MS: u64 = 2_000;
+const PASS_SHOWN_MS: u64 = 1_500;
 
 /// How one test ended, as the settle event reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +73,14 @@ pub enum Outcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Running,
+    QuitArmed,
+    /// `top` is `None` while the list has focus and the first visible output line while the detail is being scrolled.
+    Review { selected: u16, armed: bool, top: Option<u16> },
+    Timeline { back: Back },
+    Find { back: Back },
+    Skipped { back: Back },
+    Warnings { back: Back },
+    Receipt,
     BuildError,
     Interrupted { signal: u8 },
     Done { wall_ms: u64 },
@@ -93,36 +106,102 @@ pub enum Event<'a> {
     Interrupted { signal: u8, groups: usize },
     Running { id: Identity<'a> },
     Exited { code: u8 },
+    Key(Key),
+    /// What retrying a failure alone concluded, or why it was not tried.
+    Retried { id: Identity<'a>, verdict: Verdict },
+    /// How a failure's rerun stands: running, passed, or idle again after it failed.
+    Reran { id: Identity<'a>, rerun: Rerun },
     Finished { passed: usize, failed: usize, ignored: usize, not_run: usize, wall_ms: u64, manifest: Option<&'a [u8]>, discovered: usize, filtered: usize, exit: u8 },
 }
 
 impl Mode {
     /// The transition table: every (mode, event) pair is named, so a new mode or event is a compile error here.
+    /// `open` is the number of failures the review list holds and `lines` the output lines of the selected one; keys read
+    /// them for `f`, for clamping the selection and for bounding the detail scroll.
     #[must_use]
-    pub const fn next(self, event: &Event<'_>) -> Self {
-        match (self, event) {
-            (Self::Running, Event::BuildFailed { .. }) => Self::BuildError,
-            (Self::Running, Event::Interrupted { signal, .. }) => Self::Interrupted { signal: *signal },
-            (Self::Running, Event::Finished { wall_ms, .. }) => Self::Done { wall_ms: *wall_ms },
-            (
-                Self::Running,
-                Event::Begin { .. }
-                | Event::Waiting { .. }
-                | Event::Previous { .. }
-                | Event::Listed { .. }
-                | Event::Built { .. }
-                | Event::Resize { .. }
-                | Event::Started { .. }
-                | Event::Settled { .. }
-                | Event::Captured { .. }
-                | Event::Warned { .. }
-                | Event::BlockOpened { .. }
-                | Event::BlockClosed
-                | Event::Running { .. }
-                | Event::Exited { .. }
-                | Event::Tick { .. },
-            ) => Self::Running,
-            (Self::BuildError | Self::Interrupted { .. } | Self::Done { .. }, _) => self,
+    pub fn next(self, event: &Event<'_>, open: usize, lines: usize) -> Self {
+        match *event {
+            Event::Key(key) => self.keyed(key, open, lines),
+            Event::Interrupted { signal, .. } if self.is_live() => Self::Interrupted { signal },
+            Event::BuildFailed { .. } if self == Self::Running => Self::BuildError,
+            Event::Finished { wall_ms, .. } if self == Self::Running => Self::Done { wall_ms },
+            Event::Begin { .. }
+            | Event::Waiting { .. }
+            | Event::Previous { .. }
+            | Event::Listed { .. }
+            | Event::Built { .. }
+            | Event::Resize { .. }
+            | Event::Started { .. }
+            | Event::Settled { .. }
+            | Event::Captured { .. }
+            | Event::Warned { .. }
+            | Event::BlockOpened { .. }
+            | Event::BlockClosed
+            | Event::BuildFailed { .. }
+            | Event::Interrupted { .. }
+            | Event::Running { .. }
+            | Event::Exited { .. }
+            | Event::Tick { .. }
+            | Event::Retried { .. }
+            | Event::Reran { .. }
+            | Event::Finished { .. } => self.clamped(open, lines),
+        }
+    }
+
+    /// A `q` is waiting for its second press.
+    #[must_use]
+    pub const fn is_armed(self) -> bool {
+        matches!(self, Self::QuitArmed | Self::Review { armed: true, .. })
+    }
+
+    const fn disarmed(self) -> Self {
+        match self {
+            Self::QuitArmed => Self::Running,
+            Self::Review { selected, top, .. } => Self::Review { selected, armed: false, top },
+            Self::Running
+            | Self::Timeline { .. }
+            | Self::Find { .. }
+            | Self::Skipped { .. }
+            | Self::Warnings { .. }
+            | Self::Receipt
+            | Self::BuildError
+            | Self::Interrupted { .. }
+            | Self::Done { .. } => self,
+        }
+    }
+
+    /// Screens that a run, a signal or a quit can still leave; the other four are final.
+    #[must_use]
+    pub const fn is_live(self) -> bool {
+        match self {
+            Self::Running
+            | Self::QuitArmed
+            | Self::Review { .. }
+            | Self::Timeline { .. }
+            | Self::Find { .. }
+            | Self::Skipped { .. }
+            | Self::Warnings { .. } => true,
+            Self::BuildError | Self::Interrupted { .. } | Self::Done { .. } | Self::Receipt => false,
+        }
+    }
+
+    fn clamped(self, open: usize, lines: usize) -> Self {
+        match self {
+            Self::Review { selected, armed, top } => Self::Review {
+                selected: review::clamp(selected, open),
+                armed,
+                top: top.filter(|_| open != 0).map(|line| review::clamp(line, lines)),
+            },
+            Self::Running
+            | Self::QuitArmed
+            | Self::Timeline { .. }
+            | Self::Find { .. }
+            | Self::Skipped { .. }
+            | Self::Warnings { .. }
+            | Self::BuildError
+            | Self::Interrupted { .. }
+            | Self::Done { .. }
+            | Self::Receipt => self,
         }
     }
 }
@@ -175,6 +254,10 @@ pub struct State<'storage, const RERUN: usize> {
     color: bool,
     lock: [u8; LOCK_BYTES],
     lock_len: usize,
+    armed_until_ms: u64,
+    passed: usize,
+    skipped: usize,
+    warnings: usize,
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
@@ -222,6 +305,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             color: false,
             lock: [0; LOCK_BYTES],
             lock_len: 0,
+            armed_until_ms: 0,
+            passed: 0,
+            skipped: 0,
+            warnings: 0,
         }
     }
 
@@ -298,7 +385,18 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     }
 
     pub fn apply(&mut self, event: &Event<'_>) {
-        self.mode = self.mode.next(event);
+        let armed_before = self.mode.is_armed();
+        if let Event::Tick { now_ms } = *event {
+            self.now_ms = now_ms;
+        }
+        let (open, lines) = self.extent();
+        self.mode = self.mode.next(event, open, lines);
+        if self.mode.is_armed() && !armed_before {
+            self.armed_until_ms = self.now_ms.saturating_add(QUIT_WINDOW_MS);
+        }
+        if matches!(event, Event::Tick { .. }) && self.mode.is_armed() && self.now_ms >= self.armed_until_ms {
+            self.mode = self.mode.disarmed();
+        }
         self.beat_at = None;
         self.settled_ms = None;
         match *event {
@@ -311,7 +409,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                 self.lock_len = 0;
             }
             Event::Resize { cols } => self.cols = cols,
-            Event::Captured { id, stdout, stderr, .. } => self.remember_reason(id, stdout.0, stderr.0),
+            Event::Captured { id, stdout, stderr, .. } => {
+                self.remember_reason(id, stdout.0, stderr.0);
+                _ = self.edit(id, |tail| entry::set_lines(tail, review::output_lines(stdout.0) + review::output_lines(stderr.0)));
+            }
             Event::Started { id, at_ms, limit_ms, .. } => {
                 self.watch(at_ms);
                 self.track(id, at_ms, limit_ms);
@@ -326,9 +427,19 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                 self.time(id, outcome, at_ms, self.settled_ms);
                 if outcome == Outcome::Failed {
                     self.record(id, self.settled_ms);
+                } else if outcome == Outcome::Passed {
+                    self.passed += 1;
+                } else {
+                    self.skipped += 1;
                 }
             }
             Event::Tick { now_ms } => self.beat(now_ms),
+            Event::Warned { .. } => self.warnings += 1,
+            Event::Retried { id, verdict } => _ = self.edit(id, |tail| entry::set_verdict(tail, verdict)),
+            Event::Reran { id, rerun } => {
+                let now_ms = self.now_ms;
+                _ = self.edit(id, |tail| entry::set_rerun(tail, rerun, now_ms));
+            }
             Event::Finished { wall_ms, .. } => {
                 self.wall_ms = Some(wall_ms);
                 self.clear_inflight();
@@ -349,6 +460,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.listed_binaries = 0;
         self.binaries_total = None;
         self.listed_tests = 0;
+        (self.passed, self.skipped, self.warnings) = (0, 0, 0);
         self.reason_len = 0;
         self.origin_ms = Some(at_ms);
         self.now_ms = at_ms;
@@ -441,7 +553,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
 
     fn record(&mut self, id: Identity<'_>, duration_ms: Option<u64>) {
         let (binary, name) = id;
-        let end = self.used + FAILURE_HEAD + binary.len() + name.len() + 2;
+        let end = self.used + FAILURE_HEAD + binary.len() + name.len() + 2 + entry::TAIL;
         let offset = u32::try_from(self.used);
         match offset {
             Ok(offset) if self.stored < self.failures.len() && end <= self.arena.len() => {
@@ -449,7 +561,9 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                 self.arena[self.used] = u8::from(duration_ms.is_some());
                 self.arena[self.used + 1..head - 4].copy_from_slice(&duration_ms.unwrap_or(0).to_le_bytes());
                 self.arena[head - 4..head].copy_from_slice(&u32::try_from(self.done).unwrap_or(u32::MAX).to_le_bytes());
-                write_names(&mut self.arena[head..end], id);
+                let names_end = end - entry::TAIL;
+                write_names(&mut self.arena[head..names_end], id);
+                self.arena[names_end..end].fill(0);
                 self.used = end;
                 self.failures[self.stored] = offset;
                 self.stored += 1;
@@ -510,6 +624,61 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.untimed
     }
 
+    fn find_failure(&self, id: Identity<'_>) -> Option<usize> {
+        self.failures().position(|stored| stored == id)
+    }
+
+    fn edit(&mut self, id: Identity<'_>, change: impl FnOnce(&mut [u8])) -> bool {
+        let Some(index) = self.find_failure(id) else {
+            return false;
+        };
+        let start = self.failure_tail_start(index);
+        change(&mut self.arena[start..start + entry::TAIL]);
+        true
+    }
+
+    fn failure_tail_start(&self, index: usize) -> usize {
+        let offset = self.failures[index] as usize;
+        let (binary, name) = self.resolve(self.failures[index]).0;
+        offset + FAILURE_HEAD + binary.len() + name.len() + 2
+    }
+
+    fn failure_tail(&self, index: usize) -> &[u8] {
+        let start = self.failure_tail_start(index);
+        &self.arena[start..start + entry::TAIL]
+    }
+
+    fn extent(&self) -> (usize, usize) {
+        let open = self.open();
+        let lines = match self.mode {
+            Mode::Review { selected, .. } => self.listed(selected).map_or(0, |index| entry::lines(self.failure_tail(index))),
+            _ => 0,
+        };
+        (open, lines)
+    }
+
+    pub(super) fn is_listed(&self, index: usize) -> bool {
+        match entry::rerun(self.failure_tail(index)) {
+            Rerun::Passed { .. } => self.now_ms < entry::cleared_at(self.failure_tail(index)).saturating_add(PASS_SHOWN_MS),
+            Rerun::Idle | Rerun::Running { .. } => true,
+        }
+    }
+
+    pub(super) fn open(&self) -> usize {
+        (0..self.stored).filter(|index| self.is_listed(*index)).count()
+    }
+
+    pub(super) fn listed(&self, position: u16) -> Option<usize> {
+        let last = self.open().checked_sub(1)?;
+        (0..self.stored).filter(|index| self.is_listed(*index)).nth(usize::from(position).min(last))
+    }
+
+    pub(super) fn ledger_entry(&self, index: usize) -> (Identity<'_>, u64, Option<Verdict>, Rerun) {
+        let tail = self.failure_tail(index);
+        let (id, millis) = self.resolve(self.failures[index]);
+        (id, millis.unwrap_or(0), entry::verdict(tail), entry::rerun(tail))
+    }
+
     fn wait_on(&mut self, lock: &[u8]) {
         let kept = lock.len().min(LOCK_BYTES);
         self.lock[..kept].copy_from_slice(&lock[..kept]);
@@ -566,7 +735,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
-            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } => {}
+            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
@@ -1039,7 +1208,7 @@ mod tests {
 
     #[test]
     fn a_failure_whose_names_do_not_fit_the_arena_is_counted_not_stored() {
-        let mut arena = [0_u8; 56];
+        let mut arena = [0_u8; 112];
         let mut ledger = [0_u32; 8];
         let mut state = State::<200>::new(&mut arena, &mut ledger);
         let long: Identity<'static> = (b"cli_run", b"fixture::a_test_name_longer_than_the_arena_has_room_for");
@@ -1098,7 +1267,7 @@ mod tests {
         ];
 
         for (from, event, to) in rows {
-            assert_eq!(from.next(&event), to, "{from:?} on {event:?}");
+            assert_eq!(from.next(&event, 0, 0), to, "{from:?} on {event:?}");
         }
     }
 

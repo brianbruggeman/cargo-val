@@ -1,0 +1,20 @@
+ [1mcargo val[0m  [1;36mreview[0m                                                         [2m2:18[0m
+
+ [1;31m2 failed[0m  [32m381 passed[0m  [2m0 skipped[0m  [2m0 warnings[0m
+
+[1;36m›[0m[1;31mTIMEOUT[0m    [2m71.66s[0m   [1;33mNO-RETRY[0m sched_records::the_host_…ord_with_flags_and_group
+ [1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shard_process::a_per_tes…cargo_val_exits_promptly
+ ──────────────────────────────────────────────────────────────────────────────
+ [1msched_records::the_host_binary_format_yields_every_declared_record_with_flags_[0m
+ [1mand_group[0m
+ [1;31mTIMEOUT[0m[2m after 71.66s[0m                        tests/sched_records.rs:55[2m  e opens[0m
+[1;33mNO-RETRY[0m not retried alone: it failed after 71.660s, over the 30s retry budget.
+  r retries it now
+
+ [2mtest output  verbatim[0m
+   proxima::test: body did not complete within the timeout
+
+ [2mcargo val[0m  process group killed after 71.66s
+[1;36mfind the commit[0m  cargo val bisect sched_records
+  the_host_binary_format_yields_every_declared_record_with_flags_and_group
+ [36mj/k[0m move  [36mr[0m rerun  [36mR[0m all  [36me[0m edit  [36m/[0m find  [36mi[0m skip  [36mw[0m warn  [36ms[0m timeline  [36mq[0m quit
