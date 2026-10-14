@@ -391,6 +391,22 @@ impl<const RERUN: usize> State<'_, RERUN> {
         frame.text(b"\n");
     }
 
+    fn idle_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
+        let mut row = Line::<96>::new();
+        match self.binaries_total {
+            Some(total) if self.listed_binaries < total => {
+                row.text(b"   building ");
+                row.number(self.listed_binaries);
+                row.text(b"/");
+                row.number(total);
+                row.text(b" test binaries\n");
+            }
+            _ if self.done == 0 => row.text(b"   waiting for the first test binary\n"),
+            _ => row.text(b"   no tests running\n"),
+        }
+        paint(frame, color, Tone::Dim, row.bytes());
+    }
+
     fn inflight_rows<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) -> u16 {
         let mut head = Line::<96>::new();
         head.text(b" running ");
@@ -402,8 +418,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         paint(frame, color, Tone::Dim, head.bytes());
         frame.text(b"\n");
         if self.inflight_count == 0 {
-            let waiting: &[u8] = if self.done == 0 { b"   waiting for the first test binary\n" } else { b"   no tests running\n" };
-            paint(frame, color, Tone::Dim, waiting);
+            self.idle_row(color, frame);
             return 2;
         }
         let shown = self.inflight_count.min(INFLIGHT_ROWS);
@@ -589,6 +604,24 @@ mod tests {
         let rows = memchr::memchr_iter(b'\n', first.bytes()).count();
         assert!(second.bytes().starts_with(format!("\x1b[{rows}A\r\x1b[J").as_bytes()));
         assert_eq!(erase.bytes(), format!("\x1b[{rows}A\r\x1b[J").as_bytes());
+    }
+
+    #[test]
+    fn an_idle_frame_counts_test_binaries_while_some_are_pending_and_waits_when_none_are_known() {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false });
+        state.apply(&Event::Resize { cols: 80 });
+        let mut unknown = Line::<4096>::new();
+        state.project_rich(false, &mut unknown).expect("fits");
+        state.apply(&Event::Listed { binaries: 3, of: Some(19), tests: 61 });
+        let mut pending = Line::<4096>::new();
+        state.project_rich(false, &mut pending).expect("fits");
+
+        let unknown = String::from_utf8_lossy(unknown.bytes());
+        let pending = String::from_utf8_lossy(pending.bytes());
+        assert!(unknown.contains("   waiting for the first test binary\n"), "{unknown}");
+        assert!(pending.contains("   building 3/19 test binaries\n"), "{pending}");
     }
 
     #[test]
