@@ -412,6 +412,53 @@ pub const OUTPUT: Layers<'static> = Layers::setting(
     ],
 );
 
+/// A test's declared deadline in whole seconds, or none; unknown stays unknown and is never zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestTimeout {
+    Unset,
+    Seconds(u32),
+}
+
+impl TestTimeout {
+    /// The deadline in milliseconds as the render core carries it; `None` is no declared deadline.
+    #[must_use]
+    pub const fn limit_ms(self) -> Option<u32> {
+        match self {
+            Self::Unset => None,
+            Self::Seconds(seconds) => Some(seconds * 1000),
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for TestTimeout {
+    type Error = ();
+
+    fn try_from(text: &[u8]) -> Result<Self, ()> {
+        if text == b"none" {
+            return Ok(Self::Unset);
+        }
+        let seconds = core::str::from_utf8(text).map_err(|_| ())?.parse::<u32>().map_err(|_| ())?;
+        match seconds {
+            1..=MAX_TIMEOUT_SECONDS => Ok(Self::Seconds(seconds)),
+            _ => Err(()),
+        }
+    }
+}
+
+const MAX_TIMEOUT_SECONDS: u32 = u32::MAX / 1000;
+
+/// `CARGO_VAL_TEST_TIMEOUT`: the deadline every test is declared to have, in seconds; defaults to `none`.
+/// The scheduling record a `#[proxima::test(timeout = ..)]` writes (`sched_binary::Entry`) carries no timeout field, so this setting is the only deadline source.
+pub const TEST_TIMEOUT: Layers<'static> = Layers::setting(
+    "CARGO_VAL_TEST_TIMEOUT",
+    [
+        b"cargo-val: the test timeout takes no command-line value\n",
+        b"cargo-val: CARGO_VAL_TEST_TIMEOUT must be none or a whole number of seconds between 1 and 4294967\n",
+        b"cargo-val: the default test timeout is invalid\n",
+    ],
+)
+.build_default(Some("none"));
+
 /// Whether the run ends when its parent process exits; off, a run outlives its parent as a backgrounded run must.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitWithParent {
@@ -1020,6 +1067,7 @@ mod layers_tests {
             ("CARGO_VAL_TARGET_DIR", "shared"),
             ("CARGO_VAL_IGNORED", "include"),
             ("CARGO_VAL_FILTERSET", "test(alpha)"),
+            ("CARGO_VAL_TEST_TIMEOUT", "120"),
         ];
         let settings = BorrowedSettings::new(&pairs);
         let empty = BorrowedSettings::new(&[]);
@@ -1035,6 +1083,17 @@ mod layers_tests {
         );
         assert_eq!(IGNORE.from_settings(&settings, None), IGNORE.configured(Some("include")));
         assert_eq!(FILTERSET.from_settings(&settings, None), FILTERSET.configured(Some("test(alpha)")));
+        assert_eq!(TEST_TIMEOUT.from_settings(&settings, None), TEST_TIMEOUT.configured(Some("120")));
+        assert_eq!(
+            TEST_TIMEOUT.from_settings(&settings, None).resolve::<TestTimeout>(),
+            Ok((TestTimeout::Seconds(120), Source::Configured))
+        );
+        assert_eq!(TEST_TIMEOUT.from_settings(&empty, None).resolve::<TestTimeout>(), Ok((TestTimeout::Unset, Source::BuildDefault)));
+        assert_eq!(TestTimeout::Seconds(120).limit_ms(), Some(120_000));
+        assert_eq!(TestTimeout::Unset.limit_ms(), None);
+        for refused_text in ["0", "-3", "soon", "4294968", ""] {
+            assert!(TEST_TIMEOUT.configured(Some(refused_text)).resolve::<TestTimeout>().is_err(), "{refused_text:?}");
+        }
         assert_eq!(
             PROCESS.build_default(Some("auto")).from_settings(&settings, None).resolve::<ProcessSetting>(),
             Ok((ProcessSetting::Shard, Source::Configured))

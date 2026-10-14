@@ -99,6 +99,12 @@ struct ViewDefaults {
     rerun_bytes: usize,
     #[setting(default = 16384)]
     frame_bytes: usize,
+    #[setting(default = 65536)]
+    inflight_bytes: usize,
+    #[setting(default = 10)]
+    heartbeat_secs: usize,
+    #[setting(default = 250)]
+    tick_ms: usize,
 }
 
 impl Validate for ViewDefaults {
@@ -109,6 +115,12 @@ impl Validate for ViewDefaults {
         }
         if self.name_bytes == 0 {
             errors.push(ValidationMessage::new("name_bytes", "must be greater than zero"));
+        }
+        if self.heartbeat_secs == 0 {
+            errors.push(ValidationMessage::new("heartbeat_secs", "must be greater than zero"));
+        }
+        if self.tick_ms == 0 || self.tick_ms > self.heartbeat_secs * 1000 {
+            errors.push(ValidationMessage::new("tick_ms", "must be nonzero and no longer than the heartbeat"));
         }
         if self.frame_bytes < self.rerun_bytes + 4096 {
             errors.push(ValidationMessage::new("frame_bytes", "must hold the rerun command plus a line, at least rerun_bytes + 4096"));
