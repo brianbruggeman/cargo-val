@@ -173,17 +173,19 @@ pub enum RunError {
     Launch(LaunchCause),
     Outcome,
     CargoFailed,
+    CargoRefused,
     Interrupted(i32),
     ListingFailed,
     DeclaredCapacity,
 }
 
 impl RunError {
-    /// 2 for every refusal, `128 + signal` when a forwarded SIGINT or SIGTERM ended the run.
+    /// 2 for every refusal including an invocation cargo rejected, `BUILD_FAILED_EXIT_CODE` when the build failed, `128 + signal` when a forwarded SIGINT or SIGTERM ended the run.
     #[must_use]
     pub const fn exit_code(self) -> i32 {
         match self {
             Self::Interrupted(signal) => conventional_status(signal),
+            Self::CargoFailed => BUILD_FAILED_EXIT_CODE,
             _ => 2,
         }
     }
@@ -213,7 +215,9 @@ impl RunError {
             Self::ListingStream => b"cargo-val: libtest listing could not be parsed\n",
             Self::Launch(_) => b"cargo-val: exact test launch failed\n",
             Self::Outcome => b"cargo-val: child completion failed\n",
-            Self::CargoFailed => b"cargo-val: cargo test build failed\n",            Self::ListingFailed => b"cargo-val: libtest listing failed\n",
+            Self::CargoFailed => b"cargo-val: cargo test build failed\n",
+            Self::CargoRefused => b"cargo-val: cargo refused the invocation before building; its error is above\n",
+            Self::ListingFailed => b"cargo-val: libtest listing failed\n",
             Self::DeclaredCapacity => {
                 b"cargo-val: declared test scheduling records exceed the build's capacity; raise CARGO_VAL_BUILD_SCHED_RECORD_BYTES\n"
             }
@@ -333,6 +337,8 @@ pub struct RunSummary {
 
 /// Exit status when the selection ran no tests and the policy is `fail`.
 pub const NO_TESTS_EXIT_CODE: i32 = 4;
+pub const BUILD_FAILED_EXIT_CODE: i32 = 3;
+
 impl RunSummary {
     /// 1 when any test failed, `NO_TESTS_EXIT_CODE` when nothing ran under the `fail` policy, else 0.
     #[must_use]
@@ -2213,7 +2219,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     if driver.discovery.lost_artifacts_on_clean_exit(driver.dropped) {
         return Err(RunError::CargoStream);
     }
-    finish_run(parser, &run, driver.discovery.exit_code())
+    finish_run(parser, &run, driver.discovery.exit_code(), driver.discovery.build_reported())
 }
 
 type CargoStorage = (
@@ -2499,11 +2505,12 @@ fn finish_run(
     parser: &CliParser<'_>,
     run: &ListingRun<'_>,
     cargo_exit_code: Option<i32>,
+    build_reported: bool,
 ) -> Result<RunSummary, RunError> {
     interrupted(run.signals)?;
     if cargo_exit_code.is_some_and(|code| code != 0) {
         run.interrupt_doc_tests();
-        return Err(RunError::CargoFailed);
+        return Err(if build_reported { RunError::CargoFailed } else { RunError::CargoRefused });
     }
     let doc_tests = run.finish_doc_tests(parser.doc_selection() == DocSelection::Included)?;
     let stop = run.policy.borrow().report();
