@@ -884,10 +884,10 @@ fn announce_lock_wait(watch: &mut LockWatch, bytes: &[u8]) -> Result<(), RunErro
     write_fd(2, line.bytes())
 }
 
-pub(crate) type RenderState<'storage> = State<'storage, FAILURES, RERUN_BYTES>;
+pub(crate) type RenderState<'storage> = State<'storage, RERUN_BYTES>;
 
 /// The run's output mode with the one render state and the frame its projection fills; plain output is `emit` into this.
-pub(crate) type Render<'storage> = (OutputMode, RefCell<RenderState<'storage>>, RefCell<Line<FRAME_BYTES>>);
+pub(crate) type Render<'storage> = (OutputMode, RefCell<RenderState<'storage>>, RefCell<&'storage mut Line<FRAME_BYTES>>);
 
 const PROJECTED_LINE: usize = NAME_CAPACITY + 2 * 128 + 64;
 
@@ -897,12 +897,6 @@ const fn rendered(outcome: TerminalOutcome) -> Outcome {
         TerminalOutcome::Failed => Outcome::Failed,
         TerminalOutcome::Ignored => Outcome::Ignored,
     }
-}
-
-// built in its own frame so the frame buffer's temporaries leave the stack before the run starts
-#[inline(never)]
-fn held_render(output: OutputMode, arena: &mut [u8]) -> std::boxed::Box<Render<'_>> {
-    held((output, RefCell::new(RenderState::new(arena)), RefCell::new(Line::new())))
 }
 
 /// Projects one block-edge event without touching the state, for lines a shard child's buffer keeps.
@@ -916,9 +910,10 @@ pub(crate) fn projected(render: &Render<'_>, event: &Event<'_>) -> Line<PROJECTE
 pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
     let (_, state, frame) = render;
     let (mut state, mut frame) = (state.borrow_mut(), frame.borrow_mut());
+    let frame: &mut Line<FRAME_BYTES> = &mut frame;
     state.apply(event);
     frame.clear();
-    let projected = state.project(event, &mut frame);
+    let projected = state.project(event, frame);
     write_fd(1, frame.bytes())?;
     let Err(lost) = projected else {
         return Ok(());
@@ -2347,8 +2342,10 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
-    let mut name_arena = zeroed(crate::view_defaults::NAME_BYTES);
-    let render = held_render(settings.output, &mut name_arena);
+    let mut storage = run_storage(settings.process);
+    let storage = &mut storage;
+    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line)) = storage;
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots)), RefCell::new(frame_line));
     match settings.output {
         OutputMode::Plain => emit(
             &render,
@@ -2361,9 +2358,6 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         )?,
         OutputMode::Rich => {}
     }
-    let mut storage = run_storage(settings.process);
-    let storage = &mut storage;
-    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked)) = storage;
     let inherited_count = environment
         .collect(inherited)
         .map_err(|_| RunError::Environment)?;
@@ -2451,9 +2445,10 @@ type RunStorage<'environment> = (
         Box<Watches>,
     ),
     (Box<[u8]>, Box<[u8]>, Box<[u32]>),
+    (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>),
 );
 
-// run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup
+// run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup: the cargo and listing buffers, the session tables, and the render frame, failure ledger and name arena
 fn run_storage<'environment>(process: ProcessMode) -> RunStorage<'environment> {
     (
         (
@@ -2476,11 +2471,17 @@ fn run_storage<'environment>(process: ProcessMode) -> RunStorage<'environment> {
             ),
             ProcessMode::Test => (zeroed(0), zeroed(crate::build_defaults::SCHED_RECORD_BYTES), std::vec::Vec::new().into_boxed_slice()),
         },
+        (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame()),
     )
 }
 
 fn zeroed(length: usize) -> Box<[u8]> {
     std::vec![0; length].into_boxed_slice()
+}
+
+// an all-zero Line is Line::new(); allocating it zeroed puts the frame buffer on the heap with no stack temporary
+fn zeroed_frame() -> Box<Line<FRAME_BYTES>> {
+    unsafe { std::boxed::Box::<Line<FRAME_BYTES>>::new_zeroed().assume_init() }
 }
 
 // the driver and the run own tens of KiB each of fixed parking and target tables, too large to sit in the root future
@@ -3442,7 +3443,9 @@ mod listing_allocation_tests {
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
         let mut arena = [0_u8; 64];
-        let render = (crate::config::OutputMode::Rich, RefCell::new(super::RenderState::new(&mut arena)), RefCell::new(crate::line::Line::new()));
+        let mut ledger = [0_u32; 4];
+        let mut frame = crate::line::Line::new();
+        let render = (crate::config::OutputMode::Rich, RefCell::new(super::RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
         let run = ListingRun {
             signals: &signals,
             filter: "",
