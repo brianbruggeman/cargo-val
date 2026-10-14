@@ -1565,6 +1565,10 @@ pub(crate) struct ListingRun<'run> {
     store: Rc<edge_store::Store>,
     editing: RefCell<Option<Vec<Vec<u8>>>>,
     editor_program: RefCell<Vec<u8>>,
+    request: RefCell<Option<(Vec<u8>, u32, u32)>>,
+    outside: RefCell<Vec<Vec<Vec<u8>>>>,
+    probe: RefCell<Option<(u32, u64, Vec<u8>, (u32, u32))>>,
+    probe_output: RefCell<(Vec<u8>, Option<bool>, bool)>,
     root: Signal,
     trip: Signal,
 }
@@ -1701,7 +1705,7 @@ impl ListingRun<'_> {
         let interrupting = matches!(action, Action::Interrupt);
         let leaving = interrupting || matches!(action, Action::Quit);
         let editing = match action {
-            Action::OpenEditor { file, line, col } => Some(self.editor_argv(file, line, col)),
+            Action::OpenEditor { file, line, col } => Some((self.located(file), line, col)),
             _ => None,
         };
         drop(state);
@@ -1712,21 +1716,20 @@ impl ListingRun<'_> {
         if leaving {
             self.root.fire();
         }
-        editing.map_or(Ok(()), |argv| self.begin_edit(argv))
+        if let Some(request) = editing.filter(|_| !editor_reserved() && self.probe.borrow().is_none()) {
+            *self.request.borrow_mut() = Some(request);
+        }
+        Ok(())
     }
 
     // the editor is resolved here, at the driver edge, from the run's settings: render only ever sees the action
-    fn editor_argv(&self, file: &[u8], line: u32, col: u32) -> Vec<Vec<u8>> {
+    fn located(&self, file: &[u8]) -> Vec<u8> {
         let directory = absolute_directory(&self.settings.source_root);
-        let located = if file.first() == Some(&b'/') { file.to_vec() } else { [directory.as_bytes(), b"/", file].concat() };
-        crate::editor_launch::editor_argv(&self.settings.editor, &located, line, col)
+        if file.first() == Some(&b'/') { file.to_vec() } else { [directory.as_bytes(), b"/", file].concat() }
     }
 
     // the terminal cannot be handed over until the queued frame, erase and show-cursor reach it, so the launch waits for the pump to drain: `edit_pending` ends the pump and `launch_editor` spawns the editor into its lane
-    fn begin_edit(&self, argv: Vec<Vec<u8>>) -> Result<(), RunError> {
-        if editor_reserved() {
-            return Ok(());
-        }
+    fn begin_handover(&self, argv: Vec<Vec<u8>>) -> Result<(), RunError> {
         erase_live(self.render())?;
         write_fd(1, SHOW_CURSOR)?;
         MOUSE_REPORTING.store(false, Ordering::SeqCst);
@@ -1739,11 +1742,102 @@ impl ListingRun<'_> {
     }
 
     pub(crate) fn edit_pending(&self) -> bool {
-        self.editing.borrow().is_some()
+        self.editing.borrow().is_some() || self.request.borrow().is_some()
     }
 
-    // the editor is a lane of the pump: the key lane is gated off so the editor reads the terminal, and its exit arrives as an item like any child's
+    // one decision per press: a probe child is asked first when the editor can only be reused if it is already running, and its answer, or none, picks the commands
     pub(crate) fn launch_editor(&self, lanes: &Lanes) -> Result<bool, RunError> {
+        if let Some((file, line, col)) = self.request.borrow_mut().take() {
+            let sockets = crate::editor_launch::nvim_sockets(self.environment);
+            return match crate::editor_launch::probe_argv(&self.settings.editor, self.environment, &sockets) {
+                Some(argv) => self.begin_probe(lanes, &argv, (file, line, col)),
+                None => self.dispatch(lanes, (file, line, col), None).map(|()| true),
+            };
+        }
+        self.launch_handover(lanes)
+    }
+
+    fn begin_probe(&self, lanes: &Lanes, argv: &[Vec<u8>], request: (Vec<u8>, u32, u32)) -> Result<bool, RunError> {
+        let directory = absolute_directory(&self.settings.source_root);
+        *self.probe_output.borrow_mut() = (Vec::new(), None, false);
+        match crate::editor_launch::spawn_detached(argv, self.environment, directory.as_bytes()) {
+            Ok((group, child)) => {
+                attach(&lanes[EDITOR_LANE], child)?;
+                *self.probe.borrow_mut() = Some((group, monotonic_millis().saturating_add(crate::editor_launch::PROBE_DEADLINE_MS), request.0, (request.1, request.2)));
+                Ok(true)
+            }
+            Err(_) => self.dispatch(lanes, request, None).map(|()| true),
+        }
+    }
+
+    // the commands for one press, given the probe's answer: detached ones run on the exit lane while review keeps drawing, an attached one takes the terminal
+    fn dispatch(&self, lanes: &Lanes, (file, line, col): (Vec<u8>, u32, u32), answer: Option<&[u8]>) -> Result<(), RunError> {
+        let sockets = crate::editor_launch::nvim_sockets(self.environment);
+        let (detached, mut commands) = crate::editor_launch::commands(&self.settings.editor, &file, (line, col), (self.environment, &sockets), answer);
+        if !detached {
+            return commands.pop().map_or(Ok(()), |argv| self.begin_handover(argv));
+        }
+        commands.reverse();
+        *self.outside.borrow_mut() = commands;
+        self.start_detached(lanes)
+    }
+
+    // the next queued detached command goes onto the exit lane; the one before it must have exited 0
+    fn start_detached(&self, lanes: &Lanes) -> Result<(), RunError> {
+        let Some(argv) = self.outside.borrow_mut().pop() else {
+            return Ok(());
+        };
+        *self.editor_program.borrow_mut() = argv.first().cloned().unwrap_or_default();
+        let directory = absolute_directory(&self.settings.source_root);
+        match crate::editor_launch::spawn_detached(&argv, self.environment, directory.as_bytes()) {
+            Ok((_, child)) => attach(&lanes[EDITOR_LANE], child).map(|_| ()),
+            Err(code) => self.detached_failed(Err(code)),
+        }
+    }
+
+    fn detached_failed(&self, outcome: Result<i32, i32>) -> Result<(), RunError> {
+        self.outside.borrow_mut().clear();
+        let mut notice = Line::<96>::new();
+        crate::editor_launch::write_notice(&mut notice, outcome, true, &self.editor_program.borrow());
+        emit(self.render(), &Event::Notice { what: notice.bytes() })
+    }
+
+    pub(crate) fn editor_output(&self, lanes: &Lanes, range: Range<u32>) -> Result<(), RunError> {
+        if self.probe.borrow().is_none() {
+            return Ok(());
+        }
+        let slot = lanes[EDITOR_LANE].0.borrow();
+        let bytes = slot.as_deref().and_then(|stream| stream.window(range)).ok_or(RunError::Reactor)?;
+        self.probe_output.borrow_mut().0.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    pub(crate) fn editor_output_ended(&self, lanes: &Lanes) -> Result<(), RunError> {
+        self.probe_output.borrow_mut().2 = true;
+        self.settle_probe(lanes)
+    }
+
+    // the probe's answer is its stdout once it exited 0 and the stream ended; a probe past its deadline is killed and answers nothing
+    fn settle_probe(&self, lanes: &Lanes) -> Result<(), RunError> {
+        let (stdout, exited, ended) = self.probe_output.borrow().clone();
+        let Some(succeeded) = exited.filter(|_| ended) else {
+            return Ok(());
+        };
+        let Some((_, _, file, (line, col))) = self.probe.borrow_mut().take() else {
+            return Ok(());
+        };
+        self.dispatch(lanes, (file, line, col), succeeded.then_some(stdout.as_slice()))
+    }
+
+    pub(crate) fn expire_probe(&self) {
+        let expired = self.probe.borrow().as_ref().is_some_and(|(_, deadline, _, _)| monotonic_millis() >= *deadline);
+        if expired && let Some((group, _, _, _)) = self.probe.borrow().as_ref() {
+            crate::editor_launch::terminate(*group);
+            self.probe_output.borrow_mut().2 = true;
+        }
+    }
+
+    fn launch_handover(&self, lanes: &Lanes) -> Result<bool, RunError> {
         let Some(argv) = self.editing.borrow_mut().take() else {
             return Ok(false);
         };
@@ -1769,12 +1863,25 @@ impl ListingRun<'_> {
     pub(crate) fn editor_exited(&self, lanes: &Lanes, status: io::Result<ExitStatus>) -> Result<(), RunError> {
         // the group is cleared before anything else: the reaped pid may be reused, and a tick that still saw it would continue a stranger's group
         if EDITOR_GROUP.swap(0, Ordering::SeqCst) == 0 {
-            return Ok(());
+            return self.detached_exited(lanes, status);
         }
         crate::editor_launch::reclaim_terminal();
         let outcome = status.map(crate::editor_launch::exit_code).map_err(|error| error.raw_os_error().unwrap_or(EXIT_FAULT_CODE));
         self.editor_ended(lanes, outcome)
     }
+
+    // a probe or a detached editor ended: the probe records its status for `settle_probe`, a detached command hands over to the next or reports a failure in the footer
+    fn detached_exited(&self, lanes: &Lanes, status: io::Result<ExitStatus>) -> Result<(), RunError> {
+        if self.probe.borrow().is_some() {
+            self.probe_output.borrow_mut().1 = Some(status.is_ok_and(|status| status.success()));
+            return self.settle_probe(lanes);
+        }
+        match status.map(crate::editor_launch::exit_code).map_err(|error| error.raw_os_error().unwrap_or(EXIT_FAULT_CODE)) {
+            Ok(0) => self.start_detached(lanes),
+            outcome => self.detached_failed(outcome),
+        }
+    }
+
 
     // an editor that fails, exits non-zero or cannot start is a footer message on the same review, never an error exit
     fn editor_ended(&self, lanes: &Lanes, outcome: Result<i32, i32>) -> Result<(), RunError> {
@@ -3212,7 +3319,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0), interrupt_not_run: Cell::new(0),
-            editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()),
+            editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
     });
@@ -4546,7 +4653,7 @@ mod listing_allocation_tests {
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
             editing: RefCell::new(None),
-            editor_program: RefCell::new(Vec::new()),
+            editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), probe: RefCell::new(None), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
         };

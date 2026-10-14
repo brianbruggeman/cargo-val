@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::num::NonZeroI32;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
+use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(target_os = "linux")]
@@ -1218,19 +1219,98 @@ fn assert_review_resumed_and_quit(output: &str, status: ExitStatus) {
     assert_eq!(status.code(), Some(1), "q q exits with the run's code: {status}\n{}", shown(output));
 }
 
+fn wait_for_invocations(log: &Path, count: usize) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        let lines = std::fs::read_to_string(log).map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
+        if lines.iter().filter(|line| line.starts_with("pgid=")).count() >= count {
+            return lines;
+        }
+        assert!(started.elapsed().as_secs() < 30, "the detached editor never ran {count} time(s): {lines:?}");
+        std::thread::yield_now();
+    }
+}
+
+async fn open_detached_editor(master: &ChildStream, mut keys: File, (log, count, hold): (&Path, usize, Option<PathBuf>)) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(b"eq").expect("the editor and quit-arm keys are writable");
+    let (armed, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("q again to confirm")).await;
+    output.extend_from_slice(b"\n--- editor opened ---\n");
+    output.extend_from_slice(&armed);
+    wait_for_invocations(log, count);
+    if let Some(hold) = hold {
+        File::create(hold).expect("the hold file releases the editor");
+    }
+    output.extend_from_slice(b"\n--- quitting ---\n");
+    keys.write_all(b"q").expect("the quit key is writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn detached_edit(editor: &Path, extra: &[(&str, &str)], count: usize, hold: bool) -> (String, ExitStatus, Vec<String>) {
+    let log = editor_log();
+    let held = log.with_extension("hold");
+    let visual = editor.display().to_string();
+    let mut environment = vec![("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8"))];
+    environment.extend_from_slice(extra);
+    if hold {
+        environment.push(("FAKE_EDITOR_HOLD_FILE", held.to_str().expect("the hold path is UTF-8")));
+    }
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| open_detached_editor(master, keys, (&log, count, hold.then_some(held.clone()))).await).await;
+    let lines = wait_for_invocations(&log, count);
+    (output, status, lines)
+}
+
 #[proxima::test]
-async fn e_in_review_runs_a_code_editor_with_dash_g_file_line_col_in_cooked_mode_as_the_foreground_group() {
-    let (output, status, log) = edit_failure(&fake_editor_named("code"), &[], (false, "")).await;
+async fn e_with_a_code_editor_runs_it_detached_while_review_keeps_taking_keys_in_raw_mode() {
+    let (output, status, lines) = detached_edit(&fake_editor_named("code"), &[], 1, true).await;
+
+    println!("recorded by the fake code editor:\n{}", lines.join("\n"));
+    let (before, running) = output.split_once("--- editor opened ---").expect("the marker separates the two halves");
+    let (after, receipt) = running.split_once("--- quitting ---").expect("the marker precedes the quit");
+    assert!(before.contains(MOUSE_ON), "review turned mouse reporting on before the editor, so its absence below means something:\n{}", shown(before));
+    assert!(!after.contains(MOUSE_OFF), "a detached editor must not turn mouse reporting off:\n{}", shown(after));
+    assert!(after.contains("q again to confirm"), "the quit key was handled while the editor ran, which needs raw mode:\n{}", shown(after));
+    assert_eq!(recorded_arguments(&lines), ["-g", format!("{}:11:9", failure_site()).as_str()]);
+    assert!(lines.contains(&"foreground=false".to_owned()), "a detached editor does not own the terminal: {lines:?}");
+    assert!(receipt.contains("SUMMARY"), "{}", shown(receipt));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
+
+#[proxima::test]
+async fn e_inside_nvim_sends_the_file_then_the_cursor_to_the_parent_server_detached() {
+    let (output, status, lines) = detached_edit(&fake_editor_named("nvim"), &[("NVIM", "/run/user/501/nvim.4242.0")], 2, false).await;
+
+    println!("recorded by the fake nvim editor:\n{}", lines.join("\n"));
+    let site = failure_site();
+    let expected = ["--server", "/run/user/501/nvim.4242.0", "--remote", site.as_str(), "--server", "/run/user/501/nvim.4242.0", "--remote-send", ":call cursor(11,9)<CR>"];
+    assert_eq!(recorded_arguments(&lines), expected);
+    assert!(output.contains("SUMMARY"), "{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
+
+#[proxima::test]
+async fn e_with_vim_and_no_server_hands_over_a_cooked_terminal() {
+    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[], (false, "")).await;
 
     let lines = recorded(&log);
-    println!("recorded by the fake code editor:\n{}", lines.join("\n"));
-    assert_eq!(recorded_arguments(&lines), ["-g", format!("{}:11:9", failure_site()).as_str()]);
+    println!("recorded by the fake vim editor:\n{}", lines.join("\n"));
+    assert_eq!(recorded_arguments(&lines), ["+11", failure_site().as_str()]);
     assert!(lines.contains(&"canonical=true".to_owned()), "the editor must see a cooked terminal: {lines:?}");
-    assert!(lines.contains(&"echo=true".to_owned()), "the editor must see echo on: {lines:?}");
     assert!(lines.contains(&"foreground=true".to_owned()), "the editor must own the terminal's foreground group: {lines:?}");
     assert_review_resumed_and_quit(&output, status);
 }
 
+#[proxima::test]
+async fn e_with_vim_and_a_server_sends_the_file_to_it_detached() {
+    let (output, status, lines) = detached_edit(&fake_editor_named("vim"), &[("FAKE_EDITOR_SERVERLIST", "GVIM\n")], 1, false).await;
+
+    println!("recorded by the fake vim editor:\n{}", lines.join("\n"));
+    assert_eq!(recorded_arguments(&lines), ["--servername", "GVIM", "--remote-silent", "+11", failure_site().as_str()]);
+    assert!(output.contains("SUMMARY"), "{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
 #[proxima::test]
 async fn e_in_review_runs_a_vim_editor_with_plus_line_then_the_file() {
     let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[], (false, "")).await;
@@ -1421,7 +1501,7 @@ const MOUSE_ON: &str = "\x1b[?1000h";
 
 #[proxima::test]
 async fn mouse_reporting_is_off_before_the_editor_starts_and_on_again_after_it_exits() {
-    let (output, status, _) = edit_failure(&fake_editor_named("code"), &[], (false, "")).await;
+    let (output, status, _) = edit_failure(&fake_editor_named("nano"), &[], (false, "")).await;
 
     let (ready, done) = (output.find(EDITOR_READY).expect("the editor ran"), output.find(EDITOR_DONE).expect("the editor finished"));
     let (on_before, off_before) = (output[..ready].rfind(MOUSE_ON), output[..ready].rfind(MOUSE_OFF));
@@ -1463,4 +1543,14 @@ async fn e_mid_run_settles_every_test_of_a_stderr_storm_while_the_editor_is_open
     let done = screen.find(EDITOR_DONE).expect("the editor saw every test finish while it was open");
     assert!(screen[done..].contains("SUMMARY  passed=5 failed=24"), "q q did not print the finished storm's receipt:\n{}", shown(&screen[done..]));
     assert_eq!(status.code(), Some(1), "{status}");
+}
+
+#[proxima::test]
+async fn a_vim_probe_that_misses_its_deadline_counts_as_no_server_and_launches_with_the_terminal() {
+    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_SERVERLIST_HANG", "1")], (false, "")).await;
+
+    let lines = recorded(&log);
+    assert_eq!(recorded_arguments(&lines), ["+11", failure_site().as_str()]);
+    assert!(lines.contains(&"canonical=true".to_owned()), "the editor must see a cooked terminal: {lines:?}");
+    assert_review_resumed_and_quit(&output, status);
 }
