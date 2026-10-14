@@ -14,7 +14,7 @@ use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
     FILTERSET, FailFastError, FailFastSources, HarnessFault, HarnessRequest, IgnoreMode, NO_TESTS, NoTestsPolicy,
-    OUTPUT, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
+    EXIT_WITH_PARENT, ExitWithParent, OUTPUT, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
     ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
@@ -524,6 +524,7 @@ struct Settings {
     process: ProcessMode,
     output: OutputMode,
     color: bool,
+    exit_with_parent: ExitWithParent,
 }
 
 fn runtime_settings(
@@ -531,7 +532,7 @@ fn runtime_settings(
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
-    let mut pairs = [("", ""); 15];
+    let mut pairs = [("", ""); 16];
     let mut count = 0;
     for key in [
         "RUST_TEST_THREADS",
@@ -541,6 +542,7 @@ fn runtime_settings(
         "CARGO_VAL_NO_TESTS",
         "CARGO_VAL_PROCESS",
         "CARGO_VAL_OUTPUT",
+        "CARGO_VAL_EXIT_WITH_PARENT",
         "CI",
         "TERM",
         "CARGO_VAL_COLOR",
@@ -615,6 +617,7 @@ fn runtime_settings(
         Some("debug") => true,
         Some(_) => return Err(RunError::Settings),
     };
+    let exit_with_parent = resolve_exit_with_parent(&source, parser)?;
     Ok(Settings {
         bin_gate,
         debug,
@@ -626,6 +629,7 @@ fn runtime_settings(
         process,
         output,
         color,
+        exit_with_parent,
     })
 }
 
@@ -2332,6 +2336,17 @@ impl CargoDriver<'_> {
 }
 
 
+// the one spawn site of the parent watch: a run that did not opt in has no extra thread
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn watch_parent() -> Result<(), RunError> {
+    crate::edge_parent_unix::watch().map_err(|_| RunError::Reactor)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn watch_parent() -> Result<(), RunError> {
+    Err(RunError::Settings)
+}
+
 /// Runs the whole cargo-val run: setup, the awaited prime loop, and the summary.
 ///
 /// # Errors
@@ -2342,6 +2357,9 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
     let settings = runtime_settings(&environment, &harness, parser)?;
+    if settings.exit_with_parent == ExitWithParent::On {
+        watch_parent()?;
+    }
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line)) = storage;
@@ -2608,6 +2626,18 @@ async fn start_children(
         gate,
         lock_watch,
     })
+}
+
+fn resolve_exit_with_parent(
+    source: &BorrowedSettings<'_>,
+    parser: &CliParser<'_>,
+) -> Result<ExitWithParent, RunError> {
+    EXIT_WITH_PARENT
+        .build_default(Some(crate::build_defaults::EXIT_WITH_PARENT))
+        .from_settings(source, parser.exit_with_parent())
+        .resolve::<ExitWithParent>()
+        .map(|(setting, _)| setting)
+        .map_err(RunError::Setting)
 }
 
 fn resolve_output(
@@ -3440,6 +3470,7 @@ mod listing_allocation_tests {
             process: crate::config::ProcessMode::Test,
             output: crate::config::OutputMode::Rich,
             color: false,
+            exit_with_parent: crate::config::ExitWithParent::Off,
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
         let mut arena = [0_u8; 64];

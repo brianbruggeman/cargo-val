@@ -111,6 +111,8 @@ pub(crate) mod edge_exit;
 pub mod edge_exit_linux;
 #[cfg(all(feature = "edge-os", target_os = "macos"))]
 pub mod edge_exit_macos;
+#[cfg(all(any(target_os = "macos", target_os = "linux"), feature = "edge-os", feature = "proxima-core"))]
+pub mod edge_parent_unix;
 #[cfg(all(unix, feature = "edge-os", feature = "proxima-core"))]
 pub mod edge_signal_unix;
 #[cfg(all(feature = "edge-os", unix))]

@@ -87,6 +87,7 @@ pub struct CliParser<'argument> {
     no_tests: Option<&'argument [u8]>,
     process: Option<&'argument [u8]>,
     output: Option<&'argument [u8]>,
+    exit_with_parent: Option<&'static [u8]>,
     filterset: Option<&'argument [u8]>,
     target_dir: Option<&'argument [u8]>,
     doc: bool,
@@ -113,6 +114,7 @@ impl<'argument> CliParser<'argument> {
             no_tests: None,
             process: None,
             output: None,
+            exit_with_parent: None,
             filterset: None,
             target_dir: None,
             doc: false,
@@ -153,6 +155,7 @@ impl<'argument> CliParser<'argument> {
             b"--version" | b"-V" => self.action = Some(CliAction::Version),
             b"--exact" => self.exact = true,
             b"--doc" => self.doc = true,
+            b"--exit-with-parent" => self.exit_with_parent = Some(b"on"),
             b"--fail-fast" => self.fail_fast = Some(FailFastArgument::FailFast),
             b"--no-fail-fast" => {
                 self.fail_fast = Some(FailFastArgument::NoFailFast);
@@ -382,6 +385,12 @@ impl<'argument> CliParser<'argument> {
         } else {
             self.output
         }
+    }
+
+    /// `on` when `--exit-with-parent` was given; the flag takes no value.
+    #[must_use]
+    pub const fn exit_with_parent(&self) -> Option<&'static [u8]> {
+        self.exit_with_parent
     }
 
     /// The last `--process` value; one with no value reports an empty value.
@@ -777,6 +786,25 @@ mod tests {
         std::println!(
             "{{\"missing_trailing_value\":1,\"missing_before_option\":1,\"missing_before_separator\":1,\"duplicate_filters_rejected\":1,\"invalid_invocations_rejected\":{rejected_invocations}}}"
         );
+    }
+}
+
+#[cfg(test)]
+mod exit_with_parent_flag_tests {
+    use super::CliParser;
+
+    fn parsed(arguments: &[&'static [u8]]) -> Option<&'static [u8]> {
+        let mut parser = CliParser::new();
+        for argument in arguments {
+            parser.push(argument);
+        }
+        parser.exit_with_parent()
+    }
+
+    #[test]
+    fn the_flag_reports_on_and_its_absence_reports_nothing() {
+        assert_eq!(parsed(&[b"val", b"--exit-with-parent", b"--lib"]), Some(&b"on"[..]));
+        assert_eq!(parsed(&[b"val", b"--lib"]), None);
     }
 }
 

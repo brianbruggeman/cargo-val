@@ -9,6 +9,7 @@ Status: **built** (in tree, uncommitted) · **designed** · **queued** · **late
 - **built** — settle-or-solo: a shard settles a test only from a clean same-line libtest result; every other name is re-run alone and that solo run decides
 - **built** — `--process auto|shard|test`: auto = shard on Windows, per-test elsewhere
 - **built** — `--output auto|rich|plain` / `CARGO_VAL_OUTPUT`: auto is rich only on an interactive terminal outside CI (`CI` non-empty or `TERM=dumb` give plain); `NO_COLOR` suppresses ANSI in every mode
+- **built** — `--exit-with-parent` / `CARGO_VAL_EXIT_WITH_PARENT=1` (off by default): when the parent process exits, kill every running test and exit 129, on macOS and Linux; a SIGKILLed test harness can no longer leave a run blocked on a dead pipe or a held fifo
 - **built** — plain output (`--output plain`, or auto off a terminal / in CI): header, `START`/`PASS`/`FAIL`/`IGNORED` line per test with `<binary id>  <test>  <secs>s`, each failure's captured stdout and stderr verbatim between `------ stdout: <id> <test> ------` and `------ end stdout ------`, then `total:` and `SUMMARY`, one `FAILED` per failure and a `RERUN` command; `GITHUB_ACTIONS=true` adds `::group::`/`::endgroup::` around each block and one `::error` per failure; no ANSI ever
 - **built** — serial / group / process records honored in both modes
 - **built** — interrupt (Ctrl-C / SIGTERM) kills children in both modes

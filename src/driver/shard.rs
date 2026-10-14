@@ -986,6 +986,7 @@ mod pause_tests {
             process: ProcessMode::Shard,
             output: crate::config::OutputMode::Rich,
             color: false,
+            exit_with_parent: crate::config::ExitWithParent::Off,
         }
     }
 
