@@ -7,6 +7,7 @@ use core::ptr::NonNull;
 use core::task::{Context, Poll};
 use std::boxed::Box;
 use std::io;
+use std::rc::Rc;
 
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
@@ -15,6 +16,7 @@ use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED_ENTRY};
 
 use crate::edge_spawn_windows::PipeEnd;
+use crate::edge_store_windows::{self as edge_store, Store, View};
 use crate::host::windows_pipe::{
     WindowsPipeReadCompletion, WindowsPipeReadSlot, WindowsPipeReadStart, WindowsPipeReadStartError,
 };
@@ -46,13 +48,27 @@ pub struct ChildStream {
     length: Cell<u32>,
     scratch_length: Cell<u32>,
     ended: Cell<bool>,
+    store: Rc<Store>,
+    view: Cell<View>,
+    window_sealed: Cell<bool>,
+    scratch_sealed: Cell<bool>,
 }
 
 impl ChildStream {
     #[must_use]
     pub fn new(end: PipeEnd) -> Self {
+        Self::with_store(end, Rc::new(edge_store::unavailable()), 0)
+    }
+
+    /// A stream that seals every page it is about to overwrite or leave behind into `store` under `key`.
+    #[must_use]
+    pub fn with_store(end: PipeEnd, store: Rc<Store>, key: u32) -> Self {
         let staging = Box::into_raw(Box::new_uninit_slice(STAGING_BYTES));
         Self {
+            store,
+            view: Cell::new((key, 0, 0, 0)),
+            window_sealed: Cell::new(false),
+            scratch_sealed: Cell::new(true),
             end,
             slot: RefCell::new(WindowsPipeReadSlot::new(&mut [])),
             // safety: Box::into_raw never returns null.
@@ -92,6 +108,22 @@ impl ChildStream {
     /// Every byte read so far that fit the capture window.
     pub fn retained(&self) -> Ref<'_, [u8]> {
         Ref::map(self.window.borrow(), |bytes| &bytes[..self.length.get() as usize])
+    }
+
+    /// Where this stream's sealed pages live in the store.
+    pub fn sealed(&self) -> View {
+        self.view.get()
+    }
+
+    /// The last page not yet sealed: the scratch tail, else the window if nothing was ever sealed, else empty.
+    pub fn resident(&self) -> Ref<'_, [u8]> {
+        if self.scratch_length.get() > 0 && !self.scratch_sealed.get() {
+            return Ref::map(self.scratch.borrow(), |bytes| &bytes[..self.scratch_length.get() as usize]);
+        }
+        if self.window_sealed.get() {
+            return Ref::map(self.scratch.borrow(), |bytes| &bytes[..0]);
+        }
+        self.retained()
     }
 
     /// Whether any bytes went past the retained window into the scratch tail.
@@ -261,15 +293,38 @@ impl ChildStream {
         Ok(range)
     }
 
+    fn seal_resident(&self) -> io::Result<()> {
+        if !self.window_sealed.get() {
+            let window = self.window.try_borrow().map_err(|_| io::Error::other("capture window is borrowed during a seal"))?;
+            self.seal(&window[..self.length.get() as usize]);
+            self.window_sealed.set(true);
+        }
+        if !self.scratch_sealed.get() {
+            let scratch = self.scratch.try_borrow().map_err(|_| io::Error::other("scratch tail is borrowed during a seal"))?;
+            self.seal(&scratch[..self.scratch_length.get() as usize]);
+            self.scratch_sealed.set(true);
+        }
+        Ok(())
+    }
+
+    fn seal(&self, bytes: &[u8]) {
+        match edge_store::append(&self.store, self.view.get(), bytes) {
+            Ok(view) => self.view.set(view),
+            Err(error) => edge_store::lose(&self.store, bytes.len(), &error),
+        }
+    }
+
     fn copy_out(&self, bytes: &[u8], count: u32) -> io::Result<Range<u32>> {
         let start = self.length.get();
         if start >= CAPTURE_BYTES {
+            self.seal_resident()?;
             let mut scratch = self
                 .scratch
                 .try_borrow_mut()
                 .map_err(|_| io::Error::other("scratch tail is borrowed during a read"))?;
             scratch[..bytes.len()].copy_from_slice(bytes);
             self.scratch_length.set(count);
+            self.scratch_sealed.set(false);
             return Ok(CAPTURE_BYTES..CAPTURE_BYTES + count);
         }
         let mut window = self

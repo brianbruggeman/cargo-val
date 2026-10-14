@@ -630,7 +630,7 @@ impl CargoDriver<'_> {
             announce_starts(run, active.target, &mut watch)?;
             let paused = !watch.announcing.is_empty();
             let scope = run.session_scope(shard.rerun);
-            start_session(ledger, watches, lanes, slot, (Some(watch), scope))?;
+            start_session(ledger, watches, (lanes, &run.store), slot, (Some(watch), scope))?;
             lanes[JOB_BASE + slot.index()].3.set(!paused);
             moved = true;
         }
@@ -1035,6 +1035,7 @@ mod pause_tests {
         let root = Signal::new();
         ListingRun {
             signals,
+            store: std::rc::Rc::new(crate::edge_store::unavailable()),
             filter: "",
             exact: false,
             targets: RefCell::new(TargetTable::new()),

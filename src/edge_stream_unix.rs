@@ -4,10 +4,13 @@ use core::ops::Range;
 use core::task::{Context, Poll};
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::rc::Rc;
 
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
 use proxima_primitives::pipe::{Exhausted, Pipe, UnpinPipe};
+
+use crate::edge_store_unix::{self as edge_store, Store, View};
 
 pub(crate) const CAPTURE_BYTES: u32 = 16 * 1024;
 const SCRATCH_BYTES: u32 = 4096;
@@ -31,12 +34,26 @@ pub struct ChildStream {
     length: Cell<u32>,
     scratch_length: Cell<u32>,
     ended: Cell<bool>,
+    store: Rc<Store>,
+    view: Cell<View>,
+    window_sealed: Cell<bool>,
+    scratch_sealed: Cell<bool>,
 }
 
 impl ChildStream {
     #[must_use]
     pub fn new(descriptor: OwnedFd) -> Self {
+        Self::with_store(descriptor, Rc::new(edge_store::unavailable()), 0)
+    }
+
+    /// A stream that seals every page it is about to overwrite or leave behind into `store` under `key`.
+    #[must_use]
+    pub fn with_store(descriptor: OwnedFd, store: Rc<Store>, key: u32) -> Self {
         Self {
+            store,
+            view: Cell::new((key, 0, 0, 0)),
+            window_sealed: Cell::new(false),
+            scratch_sealed: Cell::new(true),
             gate: RefCell::new(Readiness::new(descriptor.as_raw_fd())),
             descriptor,
             window: RefCell::new([0; CAPTURE_BYTES as usize]),
@@ -74,6 +91,22 @@ impl ChildStream {
     /// Every byte read so far that fit the capture window.
     pub fn retained(&self) -> Ref<'_, [u8]> {
         Ref::map(self.window.borrow(), |bytes| &bytes[..self.length.get() as usize])
+    }
+
+    /// Where this stream's sealed pages live in the store.
+    pub fn sealed(&self) -> View {
+        self.view.get()
+    }
+
+    /// The last page not yet sealed: the scratch tail, else the window if nothing was ever sealed, else empty.
+    pub fn resident(&self) -> Ref<'_, [u8]> {
+        if self.scratch_length.get() > 0 && !self.scratch_sealed.get() {
+            return Ref::map(self.scratch.borrow(), |bytes| &bytes[..self.scratch_length.get() as usize]);
+        }
+        if self.window_sealed.get() {
+            return Ref::map(self.scratch.borrow(), |bytes| &bytes[..0]);
+        }
+        self.retained()
     }
 
     /// Whether any bytes went past the retained window into the scratch tail.
@@ -129,6 +162,7 @@ impl ChildStream {
     }
 
     fn read_scratch(&self) -> io::Result<Range<u32>> {
+        self.seal_resident()?;
         let mut bytes = self
             .scratch
             .try_borrow_mut()
@@ -136,8 +170,30 @@ impl ChildStream {
         let count = self.read_into(&mut bytes[..])?;
         if count > 0 {
             self.scratch_length.set(count);
+            self.scratch_sealed.set(false);
         }
         Ok(CAPTURE_BYTES..CAPTURE_BYTES + count)
+    }
+
+    fn seal_resident(&self) -> io::Result<()> {
+        if !self.window_sealed.get() {
+            let window = self.window.try_borrow().map_err(|_| io::Error::other("capture window is borrowed during a seal"))?;
+            self.seal(&window[..self.length.get() as usize]);
+            self.window_sealed.set(true);
+        }
+        if !self.scratch_sealed.get() {
+            let scratch = self.scratch.try_borrow().map_err(|_| io::Error::other("scratch tail is borrowed during a seal"))?;
+            self.seal(&scratch[..self.scratch_length.get() as usize]);
+            self.scratch_sealed.set(true);
+        }
+        Ok(())
+    }
+
+    fn seal(&self, bytes: &[u8]) {
+        match edge_store::append(&self.store, self.view.get(), bytes) {
+            Ok(view) => self.view.set(view),
+            Err(error) => edge_store::lose(&self.store, bytes.len(), &error),
+        }
     }
 
     fn read_into(&self, spare: &mut [u8]) -> io::Result<u32> {
@@ -185,6 +241,7 @@ mod tests {
     use std::io;
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::process::ExitStatus;
+    use std::rc::Rc;
     use std::vec::Vec;
 
     use prime::os::core_shard::run_on_this_thread;
@@ -193,6 +250,7 @@ mod tests {
     use proxima_runtime::CoreId;
 
     use super::ChildStream;
+    use crate::edge_store_unix::{self as edge_store, Store, View};
     use crate::edge_exit::fixture::in_single_threaded_process;
     use crate::edge_spawn_unix::pipe_pair::{OwnedDescriptor, UnixPipePair};
 
@@ -299,9 +357,15 @@ mod tests {
         retained: Vec<u8>,
         last_scratch: Vec<u8>,
         ended_after_merge: bool,
+        views: [View; 2],
+        residents: [Vec<u8>; 2],
     }
 
     fn drive_children(standard_output: &'static [u8], standard_error: &'static [u8]) -> Captured {
+        drive_stored(standard_output, standard_error, Rc::new(edge_store::unavailable()))
+    }
+
+    fn drive_stored(standard_output: &'static [u8], standard_error: &'static [u8], store: Rc<Store>) -> Captured {
         let pipes = UnixPipePair::new().expect("stdout and stderr pipes are created");
         let mut release_barrier = [-1; 2];
         assert_eq!(unsafe { libc::pipe(release_barrier.as_mut_ptr()) }, 0);
@@ -311,8 +375,8 @@ mod tests {
         let barrier_write = release_barrier[1];
 
         run_on_this_thread(CoreId(0), async move {
-            let stdout = ChildStream::new(adopt(&stdout_read));
-            let stderr = ChildStream::new(adopt(&stderr_read));
+            let stdout = ChildStream::with_store(adopt(&stdout_read), Rc::clone(&store), 0);
+            let stderr = ChildStream::with_store(adopt(&stderr_read), Rc::clone(&store), 1);
             let exit = ExitSource::new(pid);
             let merged = FanIn::new(
                 [Edge::Out(&stdout), Edge::Err(&stderr), Edge::Exit(&exit)],
@@ -367,6 +431,8 @@ mod tests {
                 .window(0..super::CAPTURE_BYTES)
                 .map_or_else(Vec::new, |bytes| bytes.to_vec());
             captured.ended_after_merge = stdout_ended && stderr_ended && exit_ended;
+            captured.views = [stdout.sealed(), stderr.sealed()];
+            captured.residents = [stdout.resident().to_vec(), stderr.resident().to_vec()];
             captured
         })
         .expect("root completes")
@@ -486,6 +552,170 @@ mod tests {
             assert_eq!(outcome.2, b"cargo-val");
             assert!(outcome.3, "closed writer ends the source");
             assert!(outcome.4, "the source stays Exhausted");
+        });
+    }
+
+    use std::fs::File;
+    use std::string::ToString;
+    use std::sync::OnceLock;
+
+    use super::CAPTURE_BYTES;
+
+    const STREAM_BYTES: usize = 1024 * 1024;
+
+    fn pattern(stream: usize) -> Vec<u8> {
+        (0..STREAM_BYTES).map(|index| ((index * 31 + stream) % 251).to_le_bytes()[0]).collect()
+    }
+
+    fn standard_output() -> &'static [u8] {
+        static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+        BYTES.get_or_init(|| pattern(0))
+    }
+
+    fn standard_error() -> &'static [u8] {
+        static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+        BYTES.get_or_init(|| pattern(1))
+    }
+
+    fn reassemble(store: &Store, view: View, resident: &[u8]) -> Vec<u8> {
+        let mut offsets = Vec::new();
+        let mut cursor = view.2;
+        let mut page = [0_u8; CAPTURE_BYTES as usize];
+        let mut pages = Vec::new();
+        while cursor != 0 {
+            let (previous, length) = edge_store::read_page(store, cursor, &mut page).expect("sealed page reads back");
+            offsets.push(cursor);
+            pages.push(page[..length].to_vec());
+            cursor = previous;
+        }
+        pages.reverse();
+        let mut bytes = pages.concat();
+        bytes.extend_from_slice(resident);
+        bytes
+    }
+
+    fn store_in(directory: &std::path::Path) -> (Rc<Store>, std::path::PathBuf) {
+        let store = Rc::new(edge_store::open(Some(directory)));
+        let data = directory.join("cargo-val").join("run").join(std::process::id().to_string()).join("data");
+        (store, data)
+    }
+
+    #[proxima::test]
+    async fn each_stream_of_a_one_mebibyte_pair_reassembles_byte_for_byte_from_the_store() {
+        in_single_threaded_process(|| {
+            let directory = tempfile::tempdir().expect("temporary target");
+            let (store, data) = store_in(directory.path());
+
+            let captured = drive_stored(standard_output(), standard_error(), Rc::clone(&store));
+
+            let out = reassemble(&store, captured.views[0], &captured.residents[0]);
+            let err = reassemble(&store, captured.views[1], &captured.residents[1]);
+            assert_eq!((out.len(), err.len()), (STREAM_BYTES, STREAM_BYTES));
+            assert!(out == standard_output(), "stdout differs from the written pattern");
+            assert!(err == standard_error(), "stderr differs from the written pattern");
+            assert_eq!(store.2.get(), 0, "no byte was lost");
+            let size = std::fs::metadata(&data).expect("data file exists").len();
+            assert_eq!(size, store.1.get(), "the file ends where the store says it does");
+            assert!(size > 2 * STREAM_BYTES as u64 - 2 * 4096, "the store holds both streams plus headers: {size}");
+        });
+    }
+
+    #[proxima::test]
+    async fn a_quiet_stream_under_one_window_never_spills() {
+        in_single_threaded_process(|| {
+            let directory = tempfile::tempdir().expect("temporary target");
+            let (store, data) = store_in(directory.path());
+
+            let captured = drive_stored(&standard_output()[..4096], b"", Rc::clone(&store));
+
+            assert_eq!(captured.views[0], (0, 0, 0, 0), "nothing sealed");
+            assert_eq!(captured.residents[0], &standard_output()[..4096]);
+            assert_eq!(std::fs::metadata(&data).expect("data file exists").len(), 8, "only the magic");
+        });
+    }
+
+    #[proxima::test]
+    async fn a_failing_store_counts_lost_bytes_notices_once_and_never_blocks_the_child() {
+        in_single_threaded_process(|| {
+            let directory = tempfile::tempdir().expect("temporary target");
+            let file = File::options().read(true).write(true).create_new(true).open(directory.path().join("data")).expect("data file");
+            let store = Rc::new(edge_store::from_file(file).expect("store opens"));
+            let limit = libc::rlimit { rlim_cur: 64 * 1024, rlim_max: libc::RLIM_INFINITY };
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit), 0, "file size limit applies");
+            }
+
+            let captured = drive_stored(standard_output(), b"", Rc::clone(&store));
+
+            assert_eq!(captured.stdout, standard_output(), "the lane kept draining every byte");
+            assert_eq!(captured.code, Some(0), "the child exit is unchanged");
+            assert!(store.3.get(), "the notice was given");
+            assert!(store.2.get() > 0, "lost bytes are counted: {}", store.2.get());
+            let stored = captured.views[0].3;
+            let tail = captured.residents[0].len() as u64;
+            assert_eq!(stored + store.2.get() + tail, (STREAM_BYTES as u64), "sealed + lost + resident account for every byte");
+        });
+    }
+
+    fn sealed_lengths(store: &Store, view: View) -> Vec<usize> {
+        let mut lengths = Vec::new();
+        let mut cursor = view.2;
+        let mut page = [0_u8; CAPTURE_BYTES as usize];
+        while cursor != 0 {
+            let (previous, length) = edge_store::read_page(store, cursor, &mut page).expect("sealed page reads back");
+            lengths.push(length);
+            cursor = previous;
+        }
+        lengths.reverse();
+        lengths
+    }
+
+    #[proxima::test]
+    async fn eof_with_a_partly_filled_scratch_keeps_every_byte_in_sealed_pages_plus_resident() {
+        in_single_threaded_process(|| {
+            let directory = tempfile::tempdir().expect("temporary target");
+            let (store, _) = store_in(directory.path());
+            let written = &OVERFLOW_PAYLOAD[..CAPTURE_BYTES as usize + 1000];
+
+            let captured = drive_stored(written, b"", Rc::clone(&store));
+
+            let rebuilt = reassemble(&store, captured.views[0], &captured.residents[0]);
+            assert!(rebuilt == written, "sealed pages plus resident differ from the {} bytes written", written.len());
+            assert!(captured.residents[0].is_empty(), "the end-of-stream read sealed the scratch tail");
+            assert_eq!(sealed_lengths(&store, captured.views[0]), [CAPTURE_BYTES as usize, 1000], "window page, then the partly filled scratch page");
+            assert_eq!(store.2.get(), 0, "no byte was lost");
+        });
+    }
+
+    #[proxima::test]
+    async fn one_byte_past_an_exactly_full_window_seals_a_full_window_page_then_a_one_byte_page() {
+        in_single_threaded_process(|| {
+            let directory = tempfile::tempdir().expect("temporary target");
+            let (store, _) = store_in(directory.path());
+            let written = &OVERFLOW_PAYLOAD[..=CAPTURE_BYTES as usize];
+
+            let captured = drive_stored(written, b"", Rc::clone(&store));
+
+            assert_eq!(sealed_lengths(&store, captured.views[0]), [16384, 1], "one whole window page, then the single extra byte");
+            assert!(captured.residents[0].is_empty(), "the end-of-stream read sealed the extra byte");
+            assert_eq!(captured.views[0].3, 16385, "sealed byte count");
+            assert!(captured.truncated);
+        });
+    }
+
+    #[proxima::test]
+    async fn an_exactly_full_window_is_sealed_as_one_page_by_the_end_of_stream_read() {
+        in_single_threaded_process(|| {
+            let directory = tempfile::tempdir().expect("temporary target");
+            let (store, _) = store_in(directory.path());
+            let written = &OVERFLOW_PAYLOAD[..CAPTURE_BYTES as usize];
+
+            let captured = drive_stored(written, b"", Rc::clone(&store));
+
+            assert_eq!(sealed_lengths(&store, captured.views[0]), [16384], "the full window is the one sealed page");
+            assert!(captured.residents[0].is_empty(), "nothing is left unsealed");
+            assert!(!captured.truncated, "no byte went past the window");
         });
     }
 }

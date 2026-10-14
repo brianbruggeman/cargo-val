@@ -25,6 +25,7 @@ use crate::discover_listing::{
 use crate::discover_cargo::{BinGate, DiscoveryFsm};
 use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
+use crate::edge_store;
 use crate::last_run;
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
@@ -45,6 +46,7 @@ use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
 use std::format;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::string::String;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -726,7 +728,7 @@ pub fn spawn_reserved<Output>(spawn: impl FnOnce() -> Result<Output, RunError>) 
 fn start_session(
     ledger: &Ledger<'_>,
     watches: &mut Watches,
-    lanes: &Lanes,
+    (lanes, store): (&Lanes, &Rc<edge_store::Store>),
     slot: SessionSlotId,
     (shard, scope): (Option<ShardWatch>, Signal),
 ) -> Result<(), RunError> {
@@ -737,7 +739,7 @@ fn start_session(
         .child();
     let process_id = child.process_id();
     track_leader(process_id)?;
-    attach_session(&lanes[JOB_BASE + slot.index()], child)?;
+    attach_session(&lanes[JOB_BASE + slot.index()], child, (store, u32::try_from(slot.index() * 2).map_err(|_| RunError::Outcome)?))?;
     *lanes[JOB_BASE + slot.index()].4.borrow_mut() = Some(SignalSource::new(&scope));
     watches[slot.index()] = Some(TestWatch {
         slot,
@@ -1470,7 +1472,7 @@ fn spawn_exact(
         run.ready.set(Some(slot));
     }
     let scope = run.session_scope(rerun_started.map(|_| Rerun::OutputOnly));
-    start_session(ledger, watches, scan.lanes, slot, (None, scope))?;
+    start_session(ledger, watches, (scan.lanes, &scan.run.store), slot, (None, scope))?;
     if let Some(watch) = watches[slot.index()].as_mut() {
         watch.rerun = rerun_started;
     }
@@ -1510,6 +1512,7 @@ pub(crate) struct ListingRun<'run> {
     sched_target: Cell<Option<usize>>,
     interrupt_reported: Cell<usize>,
     interrupt_not_run: Cell<usize>,
+    store: Rc<edge_store::Store>,
     root: Signal,
     trip: Signal,
 }
@@ -3050,6 +3053,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let root = Signal::new();
     let run = held(ListingRun {
         signals: &signals,
+        store: Rc::new(edge_store::open(location.as_deref())),
         filter,
         exact: parser.exact(),
         targets: RefCell::new(TargetTable::new()),
@@ -4382,6 +4386,7 @@ mod listing_allocation_tests {
         let root = Signal::new();
         let run = ListingRun {
             signals: &signals,
+            store: std::rc::Rc::new(crate::edge_store::unavailable()),
             filter: "",
             exact: false,
             targets: RefCell::new(TargetTable::new()),
