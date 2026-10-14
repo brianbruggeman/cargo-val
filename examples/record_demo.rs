@@ -4,15 +4,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-const WINDOW_SIZE: &str = "100x30";
-const COLUMNS: &str = "100";
-const ROWS: &str = "30";
+const WINDOW_SIZE: &str = "80x34";
+const COLUMNS: &str = "80";
+const ROWS: &str = "34";
+const DRIVE_FLAG: &str = "--drive";
 const THEME: &str = "dracula";
 const FONT_SIZE: &str = "16";
 const MAX_GIF_BYTES: u64 = 2 * 1024 * 1024;
 
 fn main() -> ExitCode {
-    match record() {
+    let driving = env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == DRIVE_FLAG);
+    match if driving { terminal::drive() } else { record() } {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("record_demo: {message}");
@@ -25,19 +29,12 @@ fn record() -> Result<(), String> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cast = root.join("assets/demo.cast");
     let gif = root.join("assets/demo.gif");
-    fs::create_dir_all(root.join("assets")).map_err(|error| format!("assets directory: {error}"))?;
+    fs::create_dir_all(root.join("assets"))
+        .map_err(|error| format!("assets directory: {error}"))?;
     let target_directory = demo_target_directory(&root);
     prebuild_demo(&root, &target_directory)?;
 
-    run(Command::new("asciinema").current_dir(&root).env("PATH", path_with_built_binary()?).envs(isolated_cargo(&target_directory)).args([
-        "rec",
-        "--overwrite",
-        "--window-size",
-        WINDOW_SIZE,
-        "-c",
-        "cargo val --manifest-path examples/demo/Cargo.toml --target-dir isolated --tests",
-        "assets/demo.cast",
-    ]))?;
+    record_session(&root, &target_directory)?;
     run(Command::new("agg").current_dir(&root).args([
         "--theme",
         THEME,
@@ -53,13 +50,35 @@ fn record() -> Result<(), String> {
     report(&cast, &gif)
 }
 
+fn record_session(root: &Path, target_directory: &Path) -> Result<(), String> {
+    let executable = env::current_exe().map_err(|error| format!("current exe: {error}"))?;
+    run(Command::new("asciinema")
+        .current_dir(root)
+        .env("PATH", path_with_built_binary()?)
+        .envs(isolated_cargo(target_directory))
+        .args([
+            "rec",
+            "--overwrite",
+            "--window-size",
+            WINDOW_SIZE,
+            "-c",
+            &format!("{} {DRIVE_FLAG}", executable.display()),
+            "assets/demo.cast",
+        ]))
+}
+
 fn demo_target_directory(root: &Path) -> PathBuf {
-    env::args_os().nth(1).map_or_else(|| root.join("examples/demo/target"), PathBuf::from)
+    env::args_os()
+        .nth(1)
+        .map_or_else(|| root.join("examples/demo/target"), PathBuf::from)
 }
 
 fn isolated_cargo(target_directory: &Path) -> [(&'static str, PathBuf); 2] {
     // cargo's package cache lock is global to CARGO_HOME, so a private home keeps other cargo processes out of the cast
-    [("CARGO_TARGET_DIR", target_directory.to_path_buf()), ("CARGO_HOME", target_directory.join("cargo-home"))]
+    [
+        ("CARGO_TARGET_DIR", target_directory.to_path_buf()),
+        ("CARGO_HOME", target_directory.join("cargo-home")),
+    ]
 }
 
 fn prebuild_demo(root: &Path, target_directory: &Path) -> Result<(), String> {
@@ -68,7 +87,14 @@ fn prebuild_demo(root: &Path, target_directory: &Path) -> Result<(), String> {
         .current_dir(root)
         .env("PATH", path_with_built_binary()?)
         .envs(isolated_cargo(target_directory))
-        .args(["val", "--manifest-path", "examples/demo/Cargo.toml", "--target-dir", "isolated", "--tests"])
+        .args([
+            "val",
+            "--manifest-path",
+            "examples/demo/Cargo.toml",
+            "--target-dir",
+            "isolated",
+            "--tests",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null()))
 }
@@ -79,8 +105,14 @@ fn path_with_built_binary() -> Result<OsString, String> {
         .parent()
         .and_then(Path::parent)
         .ok_or("example executable has no profile directory")?;
-    if !profile_directory.join(format!("cargo-val{}", env::consts::EXE_SUFFIX)).is_file() {
-        return Err(format!("build the cargo-val binary first: {} has none", profile_directory.display()));
+    if !profile_directory
+        .join(format!("cargo-val{}", env::consts::EXE_SUFFIX))
+        .is_file()
+    {
+        return Err(format!(
+            "build the cargo-val binary first: {} has none",
+            profile_directory.display()
+        ));
     }
     let mut entries = vec![profile_directory.to_path_buf()];
     entries.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
@@ -89,7 +121,9 @@ fn path_with_built_binary() -> Result<OsString, String> {
 
 fn run(command: &mut Command) -> Result<(), String> {
     let program = command.get_program().display().to_string();
-    let status = command.status().map_err(|error| format!("{program} did not launch: {error}"))?;
+    let status = command
+        .status()
+        .map_err(|error| format!("{program} did not launch: {error}"))?;
     // a red demo run exits nonzero by design, so only the recorder's own failure to launch is fatal
     if status.code().is_none() {
         return Err(format!("{program} was killed by a signal"));
@@ -98,13 +132,21 @@ fn run(command: &mut Command) -> Result<(), String> {
 }
 
 fn report(cast: &Path, gif: &Path) -> Result<(), String> {
-    let cast_bytes = fs::metadata(cast).map_err(|error| format!("{}: {error}", cast.display()))?.len();
-    let gif_bytes = fs::metadata(gif).map_err(|error| format!("{}: {error}", gif.display()))?.len();
-    let frames = gif_frames(&fs::read(gif).map_err(|error| format!("{}: {error}", gif.display()))?)?;
+    let cast_bytes = fs::metadata(cast)
+        .map_err(|error| format!("{}: {error}", cast.display()))?
+        .len();
+    let gif_bytes = fs::metadata(gif)
+        .map_err(|error| format!("{}: {error}", gif.display()))?
+        .len();
+    let frames =
+        gif_frames(&fs::read(gif).map_err(|error| format!("{}: {error}", gif.display()))?)?;
     println!("{}: {cast_bytes} bytes", cast.display());
     println!("{}: {gif_bytes} bytes, {frames} frames", gif.display());
     if gif_bytes > MAX_GIF_BYTES {
-        return Err(format!("{} is {gif_bytes} bytes, over the {MAX_GIF_BYTES} byte limit", gif.display()));
+        return Err(format!(
+            "{} is {gif_bytes} bytes, over the {MAX_GIF_BYTES} byte limit",
+            gif.display()
+        ));
     }
     Ok(())
 }
@@ -129,7 +171,11 @@ fn gif_frames(bytes: &[u8]) -> Result<usize, String> {
 }
 
 fn color_table_len(flags: u8) -> usize {
-    if flags & 0x80 == 0 { 0 } else { 3 << ((flags & 0x07) + 1) }
+    if flags & 0x80 == 0 {
+        0
+    } else {
+        3 << ((flags & 0x07) + 1)
+    }
 }
 
 fn skip_sub_blocks(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
@@ -139,5 +185,123 @@ fn skip_sub_blocks(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
         if length == 0 {
             return Ok(cursor);
         }
+    }
+}
+#[cfg(unix)]
+mod terminal {
+    use std::fs::File;
+    use std::io::{self, Read, Write};
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+
+    const KEYS: [(&str, &[u8]); 2] = [("\x1b[1;36mreview", b"\r"), ("scroll", b"qq")];
+
+    // asciinema records output only, so the recorded command is this example again: it owns the pty cargo val runs on and types the keys when the screen each one answers has been drawn
+    pub fn drive() -> Result<(), String> {
+        let (mut master, slave) = open_terminal()?;
+        let mut child = spawn_on_terminal(&slave)?;
+        let mut shown = String::new();
+        let mut keys = KEYS.iter();
+        let mut next = keys.next();
+        let mut buffer = [0_u8; 4096];
+        let mut stdout = io::stdout();
+        loop {
+            let read = match master.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            stdout
+                .write_all(&buffer[..read])
+                .and_then(|()| stdout.flush())
+                .map_err(|error| format!("stdout: {error}"))?;
+            shown.push_str(&String::from_utf8_lossy(&buffer[..read]));
+            while let Some((screen, bytes)) = next.filter(|(screen, _)| shown.contains(screen)) {
+                master
+                    .write_all(bytes)
+                    .map_err(|error| format!("keys after {screen:?}: {error}"))?;
+                shown.clear();
+                next = keys.next();
+            }
+        }
+        child
+            .wait()
+            .map_err(|error| format!("cargo val wait: {error}"))?;
+        next.map_or(Ok(()), |(screen, _)| {
+            Err(format!("the run never drew {screen:?}"))
+        })
+    }
+
+    fn spawn_on_terminal(slave: &OwnedFd) -> Result<Child, String> {
+        let stream = || {
+            slave
+                .try_clone()
+                .map(Stdio::from)
+                .map_err(|error| format!("slave: {error}"))
+        };
+        let mut command = Command::new("cargo");
+        // the slave becomes the controlling terminal, as it is in a shell
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY.into(), 0);
+                Ok(())
+            });
+        }
+        command
+            .args([
+                "val",
+                "--manifest-path",
+                "examples/demo/Cargo.toml",
+                "--target-dir",
+                "isolated",
+                "--tests",
+                "--no-fail-fast",
+                "--output",
+                "rich",
+            ])
+            .env_remove("NO_COLOR")
+            .env_remove("CI")
+            .stdin(stream()?)
+            .stdout(stream()?)
+            .stderr(stream()?)
+            .spawn()
+            .map_err(|error| format!("cargo val did not launch: {error}"))
+    }
+
+    // asciinema only forwards keys from a terminal, so the recorder holds the master end of a pty and types into it
+    fn open_terminal() -> Result<(File, OwnedFd), String> {
+        let mut size = libc::winsize {
+            ws_row: 34,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let (mut master, mut slave) = (0, 0);
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut size,
+            )
+        };
+        if opened != 0 {
+            return Err(format!("openpty: {}", std::io::Error::last_os_error()));
+        }
+        Ok(unsafe {
+            (
+                File::from(OwnedFd::from_raw_fd(master)),
+                OwnedFd::from_raw_fd(slave),
+            )
+        })
+    }
+}
+
+#[cfg(not(unix))]
+mod terminal {
+    pub fn drive() -> Result<(), String> {
+        Err("the recorder drives a pty, which needs unix".to_string())
     }
 }
