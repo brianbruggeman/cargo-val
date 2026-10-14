@@ -61,6 +61,15 @@ const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
 const STDERR_STREAM: &[u8] = b"stderr";
 const SOURCE_STREAM: &[u8] = b"source";
+
+// the stream that holds the panic site is the one kept, so `detail` re-derives the location the excerpt was cut from; with no site anywhere the stderr-first rule stands
+fn sited_capture<'a>((stdout, stderr): (Stream<'a>, Stream<'a>), exit: Exit) -> &'a [u8] {
+    [stdout.0, stderr.0]
+        .into_iter()
+        .find(|capture| classify(capture, exit, 0).is_ok_and(|record| record.location.is_ok()))
+        .unwrap_or(if stderr.0.is_empty() { stdout.0 } else { stderr.0 })
+}
+
 const PAYLOAD_HEAD: usize = 7;
 const EXIT_HEAD: usize = 5;
 const QUIT_WINDOW_MS: u64 = 2_000;
@@ -483,7 +492,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Resize { cols } => self.cols = cols,
             Event::Captured { id, stdout, stderr, exit, excerpt } => {
                 self.remember_reason(id, stdout.0, stderr.0);
-                self.retain(id, exit, if stderr.0.is_empty() { stdout.0 } else { stderr.0 }, excerpt.unwrap_or_default());
+                self.retain(id, exit, sited_capture((stdout, stderr), exit), excerpt.unwrap_or_default());
                 _ = self.edit(id, |tail| entry::set_lines(tail, review::output_lines(stdout.0) + review::output_lines(stderr.0)));
             }
             Event::Started { id, at_ms, limit_ms, .. } => {
@@ -1343,6 +1352,7 @@ fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &
 
 #[cfg(test)]
 mod tests {
+    use std::format;
     use std::string::String;
     use std::vec::Vec;
 
@@ -1859,6 +1869,21 @@ mod tests {
              RUNNING  sched_records  the_host_binary_format  40.904s  killed group=48230\n\
              SUMMARY  passed=381 failed=0 ignored=0 not_run=2  wall=75.000s discovered=383 run=381 filtered=0\n"
         );
+    }
+
+    #[test]
+    fn the_panic_site_in_stdout_survives_a_stderr_storm_that_fills_the_capture_so_e_has_a_location() {
+        let (mut arena, mut ledger) = ([0_u8; 16384], [0_u32; 8]);
+        let mut state = Small::new(&mut arena, &mut ledger);
+        let storm: Vec<u8> = (0..100).flat_map(|line| format!("storm_01 diagnostic line {line:03}: connection to 10.0.0.{line} reset by peer after 3 retries\n").into_bytes()).collect();
+        let panic = b"\nthread 'tests::storm_01' panicked at src/lib.rs:31:9:\nstorm_01 failed after its diagnostics\n";
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+        state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
+
+        state.apply(&Event::Captured { id: FAILING, stdout: (panic, 0), stderr: (&storm[..4096], 5000), exit: Exit::Code(101), excerpt: UNREAD });
+
+        let located = state.detail(FAILING).1.expect("the site is kept with the stream that holds it");
+        assert_eq!((located.file, located.line, located.col), (&b"src/lib.rs"[..], 31, 9));
     }
 
     #[test]
