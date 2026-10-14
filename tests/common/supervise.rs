@@ -19,6 +19,7 @@ pub async fn supervised<Outcome>(
     let (leader, stdout, stderr, exit) = launch(command).unwrap_or_else(|failure| panic!("{failure}"));
     let body = AssertUnwindSafe(interact(leader, &stdout, &stderr, &exit)).catch_unwind();
     let outcome = timeout(deadline, body).await;
+    let group = if outcome.is_err() { group_processes(leader) } else { String::new() };
     let failures = settle(leader, &exit).await;
     release_group(leader);
     match outcome {
@@ -28,10 +29,23 @@ pub async fn supervised<Outcome>(
         }
         Ok(Err(payload)) => panic::resume_unwind(payload),
         Err(elapsed) => panic!(
-            "{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}\nstdout so far:\n{}\nstderr so far:\n{}",
+            "{command:?} (pid {leader}) outlived {deadline:?} ({elapsed:?}); group cleanup: {failures:?}\nprocess group at the deadline:\n{group}\nstdout so far:\n{}\nstderr so far:\n{}",
             String::from_utf8_lossy(&stdout.retained()),
             String::from_utf8_lossy(&stderr.retained()),
         ),
+    }
+}
+
+// the group as the deadline found it: which of cargo, rustc and the test were alive and in what state is what separates a build that is waiting from a build that is stuck
+fn group_processes(leader: u32) -> String {
+    let listing = Command::new("ps").args(["-axo", "pgid,pid,ppid,stat,etime,command"]).output();
+    match listing {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.split_whitespace().next().is_some_and(|pgid| pgid.parse() == Ok(leader)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(error) => format!("ps did not run: {error}"),
     }
 }
 
