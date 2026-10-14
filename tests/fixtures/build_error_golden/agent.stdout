@@ -1,0 +1,3 @@
+cargo-val 0.1.0  output=agent why=flag  schema=1
+BUILD    failed  exit=3  diagnostics on stderr
+EXIT     3  build_failed

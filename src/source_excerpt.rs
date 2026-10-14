@@ -13,7 +13,7 @@ use core::ops::Range;
 use std::fs;
 use std::format;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::string::{String, ToString};
 use std::vec::Vec;
 
@@ -74,6 +74,7 @@ pub struct Excerpt<'a> {
     cut: u8,
     failing: usize,
     col: u32,
+    width: u32,
 }
 
 impl<'a> Excerpt<'a> {
@@ -91,7 +92,14 @@ impl<'a> Excerpt<'a> {
         let first = wanted.min(total.saturating_sub(LAST_ROW).max(1));
         let mut spans: [Range<usize>; WINDOW] = core::array::from_fn(|_| 0..0);
         let (len, cut) = fill_spans(source, first, &mut spans);
-        Ok(Self { source, first, len, spans, cut, failing: (line - first) as usize, col: col.max(1) })
+        Ok(Self { source, first, len, spans, cut, failing: (line - first) as usize, col: col.max(1), width: 0 })
+    }
+
+    /// Carets `width` columns wide from the span's column, instead of the identifier-length guess the panic site uses.
+    #[must_use]
+    pub fn with_caret_width(mut self, width: u32) -> Self {
+        self.width = width;
+        self
     }
 
     #[must_use]
@@ -182,7 +190,8 @@ impl<'a> Excerpt<'a> {
         let skip = (self.col as usize - 1).min(line.len());
         out.extend_from_slice(GUTTER_BLANK);
         out.extend(line[..skip].iter().filter(|byte| !is_continuation(**byte)).map(|byte| if *byte == b'\t' { b'\t' } else { b' ' }));
-        out.extend(core::iter::repeat_n(CARET, token_len(&line[skip..])));
+        let carets = if self.width == 0 { token_len(&line[skip..]) } else { self.width as usize };
+        out.extend(core::iter::repeat_n(CARET, carets));
         if !label.is_empty() {
             out.push(b' ');
             out.extend_from_slice(label);
@@ -213,6 +222,103 @@ pub fn for_failure(root: &Path, colour: bool, record: &Result<Record<'_>, Reject
         proxima_telemetry::debug!(reason = reason, file = %String::from_utf8_lossy(site.file), "highlight unavailable, plain excerpt rendered");
     }
     Ok(rows)
+}
+
+/// The excerpt rows for the primary span of one rustc diagnostic, or the named reason there are none. Reads the file once;
+/// cold path. `root` is the cargo workspace root, which is what rustc's span paths are relative to. A span outside the
+/// workspace (absolute and not under `root`, or reaching up through `..`) is `external:<file>`. The carets are `width` wide
+/// and followed by `label`, the primary span's own label text.
+///
+/// # Errors
+///
+/// The reason text: `external:<file>`, or the `SourceError` message.
+pub fn for_span(root: &Path, colour: bool, (file, line, column, width, label): (&str, u32, u32, u32, Option<&str>)) -> Result<Vec<u8>, Vec<u8>> {
+    if !inside_workspace(root, file) {
+        return Err(format!("external:{file}").into_bytes());
+    }
+    let source = read_source(root, file.as_bytes()).map_err(|error| error.to_string().into_bytes())?;
+    let excerpt = Excerpt::new(&source, line, column).map_err(|error| error.to_string().into_bytes())?.with_caret_width(width);
+    let mut rows = Vec::new();
+    if let Some(reason) = excerpt.write(&mut rows, label.unwrap_or("").as_bytes(), colour) {
+        proxima_telemetry::debug!(reason = reason, file = %file, "highlight unavailable, plain excerpt rendered");
+    }
+    Ok(rows)
+}
+
+/// The byte range of rustc's own snippet block inside one rendered diagnostic: the run of gutter lines (` N |` or `   |`, and
+/// rustc's `...` elision line) that follows the first ` --> ` line, up to the first line that is not one. The bare `   |`
+/// lines that close the run are not part of the block, so the separator rustc draws before `= note:` and `help:` stays.
+/// Escape sequences are looked through. `None` when there is no ` --> ` line or no content line after it, so the caller
+/// keeps the text verbatim.
+#[must_use]
+pub fn snippet_block(rendered: &[u8]) -> Option<Range<usize>> {
+    let mut start = None;
+    let mut content_end = 0;
+    let mut at = 0;
+    while at < rendered.len() {
+        let end = memchr(b'\n', &rendered[at..]).map_or(rendered.len(), |newline| at + newline + 1);
+        let line = &rendered[at..end];
+        match start {
+            None if is_location_line(line) => start = Some(end),
+            Some(_) if !is_gutter_line(line) => break,
+            Some(_) if !is_bare_bar(line) => content_end = end,
+            _ => {}
+        }
+        at = end;
+    }
+    start.filter(|first| *first < content_end).map(|first| first..content_end)
+}
+
+/// `rendered` with rustc's snippet block replaced by `rows`; the header lines and everything after the block stay verbatim.
+/// Returns false, leaving `out` untouched, when the block is not recognised.
+pub fn splice_excerpt(out: &mut Vec<u8>, rendered: &[u8], rows: &[u8]) -> bool {
+    let Some(block) = snippet_block(rendered) else {
+        return false;
+    };
+    out.extend_from_slice(&rendered[..block.start]);
+    out.extend_from_slice(rows);
+    out.extend_from_slice(&rendered[block.end..]);
+    true
+}
+
+fn visible(line: &[u8]) -> impl Iterator<Item = u8> {
+    let mut inside_escape = false;
+    line.iter().copied().filter(move |&byte| {
+        if inside_escape {
+            inside_escape = !byte.is_ascii_alphabetic();
+            return false;
+        }
+        inside_escape = byte == 0x1b;
+        !inside_escape
+    })
+}
+
+fn is_location_line(line: &[u8]) -> bool {
+    let mut seen = visible(line).skip_while(|byte| *byte == b' ');
+    seen.next() == Some(b'-') && seen.next() == Some(b'-') && seen.next() == Some(b'>') && seen.next() == Some(b' ')
+}
+
+fn is_gutter_line(line: &[u8]) -> bool {
+    let mut seen = visible(line).peekable();
+    let mut leading = 0;
+    while seen.next_if(|byte| matches!(*byte, b' ' | b'0'..=b'9')).is_some() {
+        leading += 1;
+    }
+    let bar = seen.next() == Some(b'|') && matches!(seen.next(), None | Some(b' ' | b'\n'));
+    (leading > 0 && bar) || visible(line).filter(|byte| *byte != b'\n').eq(b"...".iter().copied())
+}
+
+fn is_bare_bar(line: &[u8]) -> bool {
+    let mut seen = visible(line).skip_while(|byte| matches!(*byte, b' ' | b'0'..=b'9'));
+    seen.next() == Some(b'|') && seen.all(|byte| byte.is_ascii_whitespace())
+}
+
+fn inside_workspace(root: &Path, file: &str) -> bool {
+    let path = Path::new(file);
+    if path.components().any(|part| part == Component::ParentDir) {
+        return false;
+    }
+    path.is_relative() || (!root.as_os_str().is_empty() && path.starts_with(root))
 }
 
 /// `NO_COLOR` present, even empty, disables colour (no-color.org); the one ambient read, so the
@@ -559,5 +665,137 @@ mod tests {
 
         let text = String::from_utf8(rows).expect("UTF-8");
         assert!(text.contains("\x1b[35mif\x1b[0m"), "{text}");
+    }
+
+    #[test]
+    fn a_workspace_relative_span_yields_the_seven_rows_with_marker_and_caret_at_the_column() {
+        let rows = for_span(&cli_run_root(), false, ("src/lib.rs", 12, 13, 5, Some("requested"))).expect("the fixture source is readable");
+
+        let text = String::from_utf8(rows).expect("UTF-8");
+        assert_eq!(text.lines().count(), WINDOW + 1, "{text}");
+        assert_eq!(text.lines().filter(|line| line.starts_with("> ")).collect::<Vec<_>>(), [">   12 |             panic!(\"requested fixture failure\");"]);
+        assert!(text.contains("      |             ^^^^^ requested\n"), "{text}");
+    }
+
+    #[test]
+    fn an_absolute_span_under_the_root_is_inside_the_workspace() {
+        let absolute = cli_run_root().join("src/lib.rs");
+
+        let rows = for_span(&cli_run_root(), false, (absolute.to_str().expect("UTF-8 path"), 12, 13, 5, None)).expect("under the root");
+
+        assert_eq!(String::from_utf8(rows).expect("UTF-8").lines().count(), WINDOW + 1);
+    }
+
+    #[proxima::test]
+    #[case::absolute_registry_dependency("/home/ci/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs")]
+    #[case::sibling_path_dependency_through_parent("../dep/src/lib.rs")]
+    async fn spans_outside_the_workspace_are_named_external_and_never_read(#[case] file: &str) {
+        let reason = for_span(&cli_run_root(), false, (file, 1, 1, 1, None)).expect_err("outside the workspace");
+
+        assert_eq!(reason, format!("external:{file}").into_bytes());
+    }
+
+    #[test]
+    fn a_span_with_no_workspace_root_rejects_every_absolute_path() {
+        let reason = for_span(Path::new(""), false, ("/rustc/abc123/library/core/src/option.rs", 1, 1, 1, None)).expect_err("no root to be inside of");
+
+        assert_eq!(reason, b"external:/rustc/abc123/library/core/src/option.rs");
+    }
+
+    #[test]
+    fn a_workspace_span_whose_file_is_missing_reports_the_read_error_not_an_excerpt() {
+        let reason = for_span(&cli_run_root(), false, ("src/absent.rs", 1, 1, 1, None)).expect_err("no such file");
+
+        assert!(String::from_utf8(reason).expect("UTF-8").starts_with("source not found: "));
+    }
+
+    #[test]
+    fn a_span_line_past_the_end_of_the_file_reports_the_file_length() {
+        let reason = for_span(&cli_run_root(), false, ("src/lib.rs", 9999, 1, 1, None)).expect_err("line past the end");
+
+        assert!(String::from_utf8(reason).expect("UTF-8").starts_with("source line 9999 is outside"));
+    }
+
+    fn rendered_of(line: &str) -> String {
+        let mut scratch = [0; 8192];
+        match crate::cargo_message::parse_cargo_message(line.trim_end().as_bytes(), &mut scratch, 65536, 8).expect("real rustc line parses") {
+            crate::cargo_message::CargoMessage::Diagnostic { rendered, .. } => rendered.to_string(),
+            other => panic!("not a diagnostic: {other:?}"),
+        }
+    }
+
+    const SINGLE_LINE: &str = include_str!("../tests/fixtures/compiler_message_error.jsonl");
+    const MULTI_LINE: &str = include_str!("../tests/fixtures/compiler_message_multiline_error.jsonl");
+
+    #[test]
+    fn the_real_single_line_error_block_runs_from_after_the_arrow_line_to_the_caret_line_with_the_elision_marker_inside() {
+        let rendered = rendered_of(SINGLE_LINE);
+
+        let block = snippet_block(rendered.as_bytes()).expect("a recognised block");
+
+        assert_eq!(&rendered[..block.start], "error[E0308]: mismatched types\n --> src/lib.rs:4:5\n");
+        assert_eq!(
+            &rendered[block.clone()],
+            "  |\n1 | pub fn answer() -> u32 {\n  |                    --- expected `u32` because of return type\n...\n4 |     \"forty-two\"\n  |     ^^^^^^^^^^^ expected `u32`, found `&str`\n"
+        );
+        assert_eq!(&rendered[block.end..], "\n");
+    }
+
+    #[test]
+    fn the_real_multi_line_span_block_ends_at_its_closing_rule_and_the_separator_and_help_stay_in_the_tail() {
+        let rendered = rendered_of(MULTI_LINE);
+
+        let block = snippet_block(rendered.as_bytes()).expect("a recognised block");
+
+        assert!(rendered[block.clone()].ends_with("9 | |     )\n  | |_____^ expected `u32`, found `u64`\n"), "{:?}", &rendered[block.clone()]);
+        assert!(rendered[block.start..].starts_with("  |\n5 |   pub fn answer()"), "{:?}", &rendered[block.clone()]);
+        assert!(rendered[block.end..].starts_with("  |\nhelp: you can convert a `u64` to a `u32`"), "{:?}", &rendered[block.end..]);
+    }
+
+    #[test]
+    fn splicing_replaces_only_the_block_and_keeps_header_separator_and_help_verbatim() {
+        let rendered = rendered_of(MULTI_LINE);
+        let mut out = Vec::new();
+
+        let spliced = splice_excerpt(&mut out, rendered.as_bytes(), b"EXCERPT\n");
+
+        assert!(spliced);
+        let text = String::from_utf8(out).expect("UTF-8");
+        assert!(text.starts_with("error[E0308]: mismatched types\n --> src/lib.rs:6:5\nEXCERPT\n  |\nhelp: you can convert"), "{text}");
+        assert!(text.ends_with("  |      ++++++++++++++++++++\n\n"), "{text}");
+        assert!(!text.contains("pub fn answer()"), "{text}");
+    }
+
+    #[test]
+    fn escape_sequences_around_the_arrow_and_gutter_do_not_hide_the_block() {
+        let coloured = "\x1b[1m\x1b[91merror[E0308]\x1b[0m\x1b[1m: mismatched types\x1b[0m\n \x1b[1m\x1b[94m--> \x1b[0mc.rs:2:5\n  \x1b[1m\x1b[94m|\x1b[0m\n\x1b[1m\x1b[94m1\x1b[0m \x1b[1m\x1b[94m|\x1b[0m pub fn answer() -> u32 {\n  \x1b[1m\x1b[94m|\x1b[0m                      \x1b[1m\x1b[94m---\x1b[0m \x1b[1m\x1b[94mexpected `u32` because of return type\x1b[0m\n\x1b[1m\x1b[94m2\x1b[0m \x1b[1m\x1b[94m|\x1b[0m     \"forty-two\"\n  \x1b[1m\x1b[94m|\x1b[0m     \x1b[1m\x1b[91m^^^^^^^^^^^\x1b[0m \x1b[1m\x1b[91mexpected `u32`, found `&str`\x1b[0m\n\n";
+
+        let block = snippet_block(coloured.as_bytes()).expect("a recognised block");
+
+        assert!(coloured[..block.start].ends_with("c.rs:2:5\n"));
+        assert!(coloured[block.clone()].starts_with("  \x1b[1m\x1b[94m|\x1b[0m\n"));
+        assert!(coloured[block.clone()].ends_with("found `&str`\x1b[0m\n"));
+    }
+
+    #[proxima::test]
+    #[case::no_arrow_line("error: aborting due to 1 previous error\n\n")]
+    #[case::arrow_with_no_gutter_after("error: x\n --> src/lib.rs:1:1\n= note: nothing drawn\n")]
+    #[case::arrow_with_only_a_bare_bar("error: x\n --> src/lib.rs:1:1\n  |\n\n")]
+    #[case::empty("")]
+    async fn text_without_a_recognisable_block_is_left_to_the_caller(#[case] rendered: &str) {
+        let mut out = Vec::new();
+
+        assert_eq!(snippet_block(rendered.as_bytes()), None);
+        assert!(!splice_excerpt(&mut out, rendered.as_bytes(), b"EXCERPT\n"));
+        assert_eq!(out, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn a_span_gets_carets_of_the_given_width_then_the_label() {
+        let rows = for_span(&cli_run_root(), false, ("src/lib.rs", 12, 13, 5, Some("requested"))).expect("readable");
+
+        let text = String::from_utf8(rows).expect("UTF-8");
+        assert!(text.contains("      |             ^^^^^ requested\n"), "{text}");
+        assert!(!text.contains("^^^^^^"), "{text}");
     }
 }

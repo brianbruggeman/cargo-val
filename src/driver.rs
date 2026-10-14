@@ -29,7 +29,7 @@ use crate::last_run;
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
 use crate::failure_class::Exit;
-use crate::source_excerpt::{colour_allowed, for_failure};
+use crate::source_excerpt::{colour_allowed, for_failure, for_span, splice_excerpt};
 use crate::render::{Event, Outcome, State, Stream, located};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
@@ -42,6 +42,7 @@ use proxima_core::signal::Signal;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
 use std::path::{Path, PathBuf};
+use std::string::String;
 use std::sync::OnceLock;
 use std::time::Instant;
 use std::vec::Vec;
@@ -1873,6 +1874,7 @@ pub(crate) struct CargoDriver<'buffer> {
     dropped: usize,
     lock_watch: LockWatch,
     diagnostics: Vec<u8>,
+    workspace_root: PathBuf,
     stderr_held: Vec<u8>,
     diagnostics_reported: bool,
     output: OutputMode,
@@ -1923,6 +1925,25 @@ fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
     };
     if kept {
         held.extend_from_slice(rendered.as_bytes());
+    }
+}
+
+fn keep_rich_error(held: &mut Vec<u8>, settings: &Settings, root: &Path, rendered: &str, span: Option<(&str, u32, u32, u32, Option<&str>)>) {
+    let colour = settings.color && colour_allowed();
+    let Some(located) = span else {
+        return keep_diagnostic(held, "error", rendered);
+    };
+    match for_span(root, colour, located) {
+        Ok(rows) if splice_excerpt(held, rendered.as_bytes(), &rows) => {}
+        Ok(rows) => {
+            proxima_telemetry::debug!(file = %located.0, "rustc snippet block not recognised, diagnostic kept verbatim with the excerpt appended");
+            keep_diagnostic(held, "error", rendered);
+            held.extend_from_slice(&rows);
+        }
+        Err(reason) => {
+            proxima_telemetry::debug!(file = %located.0, reason = %String::from_utf8_lossy(&reason), "no excerpt for the diagnostic span");
+            keep_diagnostic(held, "error", rendered);
+        }
     }
 }
 
@@ -2223,7 +2244,13 @@ impl CargoDriver<'_> {
                     self.reason = b"bin-built";
                     self.release_parked(run, ledger, lanes)?;
                 }
-                CargoSourceStep::Diagnostic { level, rendered } => keep_diagnostic(&mut self.diagnostics, level, rendered),
+                CargoSourceStep::Diagnostic { level, rendered, span } => {
+                    if level == "error" && run.settings.output == OutputMode::Rich {
+                        keep_rich_error(&mut self.diagnostics, run.settings, &self.workspace_root, rendered, span);
+                    } else {
+                        keep_diagnostic(&mut self.diagnostics, level, rendered);
+                    }
+                }
                 CargoSourceStep::BuildFinished { success } => self.build_finished(success, (run, ledger, lanes))?,
                 CargoSourceStep::BuildScript(script) => {
                     for reported in script.linked_paths.iter() {
@@ -2780,11 +2807,13 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         test_targets,
         lock_watch,
         metadata_directory,
+        workspace_root,
     } = start_children(parser, &settings, target_mode, inherited).await?;
     open_last_run(&render, &settings, location, [explicit_root(target_mode), utf8_variable(&environment, b"CARGO_TARGET_DIR")?.map(str::as_bytes), metadata_directory.as_deref()])?;
     let cargo_process_id = cargo_child.process_id();
     let shared_directory = lock_watch.directory().to_vec();
     let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, test_targets, lock_watch, settings.output)?;
+    driver.workspace_root = workspace_root;
     emit_live(&render, &Event::Listed { binaries: 0, of: test_targets, tests: 0 })?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
@@ -2944,6 +2973,7 @@ fn new_driver(
         dropped: 0,
         lock_watch,
         diagnostics: Vec::new(),
+        workspace_root: PathBuf::new(),
         stderr_held: Vec::new(),
         diagnostics_reported: false,
         output,
@@ -2987,6 +3017,7 @@ struct StartedChildren {
     test_targets: Option<usize>,
     lock_watch: LockWatch,
     metadata_directory: Option<Box<[u8]>>,
+    workspace_root: PathBuf,
 }
 
 // isolated mode reads the metadata first because the build directories come from it; the other modes overlap the read with the builds
@@ -3019,6 +3050,7 @@ async fn start_children(
         }
         (None, None) => {}
     }
+    let workspace_root = facts.as_deref().and_then(MetadataFacts::workspace_root).and_then(|bytes| core::str::from_utf8(bytes).ok()).map_or_else(|| settings.source_root.clone(), PathBuf::from);
     let test_targets = facts.as_deref().map(|found| found.test_targets);
     let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory).map(Box::from);
     let (bins, gate) = resolve_bin_gate(settings, spawned, facts);
@@ -3030,6 +3062,7 @@ async fn start_children(
         test_targets,
         lock_watch,
         metadata_directory,
+        workspace_root,
     })
 }
 
