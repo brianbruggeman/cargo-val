@@ -416,7 +416,7 @@ fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build() {
     );
     let context = format!("{}{}", result.stdout, result.stderr);
 
-    assert_eq!(result.status, Some(2), "{context}");
+    assert_eq!(result.status, Some(3), "{context}");
     assert!(result.stderr.contains("cargo test build failed"), "{context}");
     assert!(
         result.stderr.contains("cargo-val: debug: gate park kind=test target=uses_bin"),

@@ -5,6 +5,7 @@ const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const ESCAPE: u8 = 0x1b;
 
 struct Run {
+    status: Option<i32>,
     stderr: Vec<u8>,
     text: String,
 }
@@ -22,10 +23,14 @@ fn manifest() -> PathBuf {
 }
 
 fn run_build_error() -> Run {
+    run_with(&["--lib"])
+}
+
+fn run_with(arguments: &[&str]) -> Run {
     let output = Command::new(CARGO_VAL)
         .arg("--manifest-path")
         .arg(manifest())
-        .arg("--lib")
+        .args(arguments)
         .env("NO_COLOR", "1")
         .env("CARGO_TERM_COLOR", "always")
         .env_remove("CARGO_VAL_COLOR")
@@ -33,6 +38,7 @@ fn run_build_error() -> Run {
         .output()
         .expect("cargo-val binary is spawnable");
     Run {
+        status: output.status.code(),
         text: String::from_utf8_lossy(&output.stderr).into_owned(),
         stderr: output.stderr,
     }
@@ -79,4 +85,21 @@ fn colour_off_diagnostics_carry_no_escape_bytes() {
 
     assert!(result.text.contains("error[E0308]"), "{}", result.text);
     assert!(!escaped, "{}", result.text);
+}
+
+#[test]
+fn a_build_failure_exits_3() {
+    let result = run_build_error();
+
+    assert_eq!(result.status, Some(3), "{}", result.text);
+}
+
+#[test]
+fn an_unknown_flag_is_an_invocation_error_naming_the_flag_and_exiting_2() {
+    let result = run_with(&["--bogus"]);
+
+    assert_eq!(result.status, Some(2), "{}", result.text);
+    assert!(result.text.contains("--bogus"), "{}", result.text);
+    assert!(!result.text.contains("build failed"), "{}", result.text);
+    assert!(result.text.contains("refused the invocation"), "{}", result.text);
 }

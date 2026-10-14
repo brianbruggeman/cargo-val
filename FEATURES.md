@@ -15,6 +15,7 @@ Status: **built** (in tree, uncommitted) · **designed** · **queued** · **late
 - **built** — `-- --test-threads N` / `RUST_TEST_THREADS`; `-j` stays cargo build jobs
 - **built** — fail fast by default; `--no-fail-fast`, `--max-fail N`
 - **built** — `--no-tests=fail|warn|pass`, zero tests run is never green (default fail, exit 4)
+- **built** — exit status: 0 passed, 1 a test failed, 2 invalid arguments or settings or an invocation cargo refused before building (cargo-val prints its refusal line after cargo's own error), 3 the cargo build failed, 4 no tests ran under the fail policy, 128+signal interrupted
 - **built** — a failed build prints each compiler-message `rendered` text (errors, plus the warnings of that build) verbatim to stderr before the build-failed line; a successful build prints none; `--message-format=json-diagnostic-rendered-ansi` only when colour is on, so colour off carries no ESC bytes
 - **built** — `#[ignore]`d tests are their own outcome: listed per binary with `--list --ignored`, never launched, reported IGNORED; `-- --ignored` / `-- --include-ignored` (libtest meaning) or `CARGO_VAL_IGNORED=skip|only|include`; a child is classified by its libtest `test result:` line, so 0 passed is never PASS and an `--exact` launch that ran nothing is an error naming the test
 - **built** — summary lines: `<binary>: discovered N, passed P, failed F, ignored I, filtered X` per test binary plus a `total:` line with wall time; counts that do not balance are an error naming the binary; zero executed tests follows `--no-tests`

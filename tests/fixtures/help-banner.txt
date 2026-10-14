@@ -99,7 +99,8 @@ whose counts do not add up is an error naming it. A run that executed no test (p
 failed = 0) follows --no-tests.
 
 Exit status: 0 all selected tests passed, 1 a test failed, 2 invalid arguments or
-settings or a driver failure, 4 no tests to run under the fail policy.
+settings or a driver failure or an invocation cargo refused, 3 the cargo build failed, 4 no
+tests to run under the fail policy.
 
 Doc tests: the default selection also runs `cargo test --doc` as one child at nice 10,
 concurrently with the other tests; its doctests are reported and counted like any test.

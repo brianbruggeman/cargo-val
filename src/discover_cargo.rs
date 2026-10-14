@@ -46,6 +46,7 @@ pub struct DiscoveryFsm {
     stdout_eof: bool,
     stderr_eof: bool,
     exit_code: Option<i32>,
+    build_reported: bool,
 }
 
 impl DiscoveryFsm {
@@ -58,6 +59,7 @@ impl DiscoveryFsm {
             stdout_eof: false,
             stderr_eof: false,
             exit_code: None,
+            build_reported: false,
         }
     }
 
@@ -107,7 +109,14 @@ impl DiscoveryFsm {
         self.bins.note_built(package_id);
     }
 
+    /// Whether cargo reported `build-finished`; without it a failing exit means cargo refused before building.
+    #[must_use]
+    pub const fn build_reported(&self) -> bool {
+        self.build_reported
+    }
+
     pub const fn build_finished(&mut self, success: bool) {
+        self.build_reported = true;
         self.build = if success { BuildState::Succeeded } else { BuildState::Failed };
     }
 
