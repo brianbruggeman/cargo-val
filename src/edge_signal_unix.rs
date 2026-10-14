@@ -11,6 +11,7 @@ use proxima_core::signal::Signal;
 use crate::build_defaults::SIGNAL_SLOTS;
 
 const FORWARDED: [c_int; 2] = [libc::SIGINT, libc::SIGTERM];
+const RESIZE: c_int = libc::SIGWINCH;
 const TARGET_CAPACITY: usize = SIGNAL_SLOTS;
 const CONVENTIONAL_BASE: i32 = 128;
 const RESERVED: c_int = c_int::MIN;
@@ -31,6 +32,7 @@ pub struct SignalPipe {
     write_end: c_int,
     installed: bool,
     received: Cell<Option<c_int>>,
+    resized: Cell<bool>,
     interrupt: Signal,
 }
 
@@ -116,13 +118,14 @@ impl SignalPipe {
             write_end,
             installed: false,
             received: Cell::new(None),
+            resized: Cell::new(false),
             interrupt: Signal::new(),
         };
         WRITE_END
             .compare_exchange(-1, write_end, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| libc::EBUSY)?;
         pipe.installed = true;
-        for signal in FORWARDED {
+        for signal in FORWARDED.into_iter().chain([RESIZE]) {
             install_handler(signal)?;
         }
         Ok(pipe)
@@ -171,8 +174,21 @@ impl SignalPipe {
             }
             bytes[..count]
                 .iter()
-                .for_each(|byte| self.forward(c_int::from(*byte)));
+                .for_each(|byte| self.dispatch(c_int::from(*byte)));
         }
+    }
+
+    fn dispatch(&self, signal: c_int) {
+        if signal == RESIZE {
+            self.resized.set(true);
+        } else {
+            self.forward(signal);
+        }
+    }
+
+    /// Whether the terminal was resized since the last call; the render state wants a new width.
+    pub fn take_resized(&self) -> bool {
+        self.resized.replace(false)
     }
 
     fn forward(&self, signal: c_int) {
@@ -200,7 +216,7 @@ pub fn signal_children(signal: c_int) {
 impl Drop for SignalPipe {
     fn drop(&mut self) {
         if self.installed {
-            for signal in FORWARDED {
+            for signal in FORWARDED.into_iter().chain([RESIZE]) {
                 unsafe { libc::signal(signal, libc::SIG_DFL) };
             }
             WRITE_END.store(-1, Ordering::SeqCst);

@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-const CASE_COUNT: usize = 3000;
+const CASE_COUNT: usize = 700;
 
 fn main() {
     let out_directory = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));

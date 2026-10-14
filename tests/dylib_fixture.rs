@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
+#[path = "common/plain.rs"]
+mod plain;
 
+use cargo_val::render::Outcome;
 use common::fixture_output;
 
 const LOADER_VARIABLES: [&str; 3] = [
@@ -51,11 +54,7 @@ fn cargo_test_names(output: &Output) -> BTreeSet<String> {
 }
 
 fn cargo_val_names(output: &Output) -> BTreeSet<String> {
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.strip_suffix(" PASS"))
-        .map(str::to_owned)
-        .collect()
+    plain::names(&String::from_utf8_lossy(&output.stdout), Outcome::Passed).into_iter().collect()
 }
 
 #[proxima::test(timeout = "310s")]
@@ -64,7 +63,7 @@ async fn proc_macro_test_binary_runs_under_cargo_val_with_the_environment_cargo_
     cargo_test.args(["test", "--lib", "--manifest-path"]);
     cargo_test.arg(fixture_manifest());
     let mut cargo_val = scrubbed(Command::new(env!("CARGO_BIN_EXE_cargo-val")));
-    cargo_val.env("CARGO_VAL_OUTPUT", "rich");
+    cargo_val.env("CARGO_VAL_OUTPUT", "plain");
     cargo_val.arg("--lib").arg("--manifest-path");
     cargo_val.arg(fixture_manifest());
 
