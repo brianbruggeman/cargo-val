@@ -415,10 +415,14 @@ async fn rich_on_a_pty_draws_the_frame_ends_with_the_closing_block_and_shows_the
     assert!(contains(&screen, "\u{2588}".as_bytes()) && last_cursor_up(&screen).is_some(), "bar glyphs and a cursor-up redraw:\n{text:?}");
     let last_frame_end = rposition(&screen, b"\x1b[J").expect("the last redraw clears below the cursor") + b"\x1b[J".len();
     let shown = rposition(&screen, SHOW_CURSOR).expect("the cursor is shown again");
-    assert!(shown >= last_frame_end, "the cursor returns after the last frame:\n{text:?}");
-    let closing = &text[text.rfind("\u{1b}[?25h").expect("shown") + SHOW_CURSOR.len()..];
-    assert!(closing.contains("SUMMARY  passed=1 failed=1"), "the closing block follows:\n{closing}");
-    assert!(text.trim_end().lines().last().is_some_and(|line| line.starts_with("RERUN    ")), "the output ends with the closing block:\n{text:?}");
+    assert!(shown >= last_frame_end, "the cursor returns after the last frame is erased:\n{text:?}");
+    assert!(!contains(&screen[last_frame_end..], HIDE_CURSOR), "nothing draws a frame once the final erase has run:\n{text:?}");
+    assert_eq!(screen.windows(SHOW_CURSOR.len()).filter(|window| *window == SHOW_CURSOR).count(), 1, "the cursor is shown exactly once:\n{text:?}");
+    let closing = &text[last_frame_end..shown];
+    assert!(closing.contains("SUMMARY  passed=1 failed=1"), "the closing block sits between the erase and the cursor:\n{closing}");
+    assert!(screen.ends_with(SHOW_CURSOR), "the cursor returns last, after the closing block:\n{text:?}");
+    let before_cursor = &text[..text.len() - SHOW_CURSOR.len()];
+    assert!(before_cursor.trim_end().lines().last().is_some_and(|line| line.starts_with("RERUN    ")), "the closing block ends with the rerun line:\n{text:?}");
 }
 
 #[cfg(unix)]
@@ -428,10 +432,11 @@ async fn shard_mode_rich_on_a_pty_prints_no_per_test_lines_between_frames() {
     let text = String::from_utf8_lossy(&screen);
 
     assert!(contains(&screen, HIDE_CURSOR) && last_cursor_up(&screen).is_some(), "the shard run draws the frame:\n{text:?}");
-    let before_closing = &text[..text.rfind("\u{1b}[?25h").expect("the cursor is shown after the last frame")];
+    let last_frame_end = rposition(&screen, b"\x1b[J").expect("the last redraw clears below the cursor") + b"\x1b[J".len();
+    let before_closing = &text[..last_frame_end];
     assert!(!before_closing.contains("fixture::passes"), "a passing test prints no line while frames are live:\n{before_closing:?}");
     assert!(!before_closing.contains("fixture::ignored_by_default"), "an ignored test prints no line while frames are live:\n{before_closing:?}");
-    assert!(text[text.rfind("\u{1b}[?25h").expect("shown")..].contains("SUMMARY  passed=1 failed=1"), "the closing block follows:\n{text:?}");
+    assert!(text[last_frame_end..].contains("SUMMARY  passed=1 failed=1") && screen.ends_with(SHOW_CURSOR), "the closing block follows the erase and the cursor returns after it:\n{text:?}");
 }
 
 #[cfg(unix)]

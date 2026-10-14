@@ -1042,14 +1042,15 @@ static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 
 const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 
-/// Shows the cursor if the live frame hid it; safe to call from the panic hook, the interrupt path and the normal exit.
+/// Shows the cursor if the live frame hid it, writing directly: the fallback for the panic hook and for exits that never reached the queued close.
+/// The normal close queues its show-cursor through `close_cursor` so it lands behind the erase and the closing block, never ahead of them.
 pub fn restore_cursor() {
     if CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
         let _ = crate::edge_output::write(1, SHOW_CURSOR);
     }
 }
 
-/// Erases the live frame from the screen and shows the cursor; plain mode has no frame, so it writes nothing.
+/// Erases the live frame from the screen; plain mode has no frame, so it writes nothing.
 fn erase_frame(render: &Render<'_>) -> Result<(), RunError> {
     let (output, state, frame) = render;
     if *output != OutputMode::Rich {
@@ -1061,7 +1062,15 @@ fn erase_frame(render: &Render<'_>) -> Result<(), RunError> {
     if !frame.bytes().is_empty() {
         write_fd(1, frame.bytes())?;
     }
-    restore_cursor();
+    Ok(())
+}
+
+/// Queues the show-cursor behind everything already queued, so the cursor returns only after the erase and the closing block.
+fn close_cursor() -> Result<(), RunError> {
+    if CURSOR_HIDDEN.load(Ordering::SeqCst) {
+        write_fd(1, SHOW_CURSOR)?;
+        CURSOR_HIDDEN.store(false, Ordering::SeqCst);
+    }
     Ok(())
 }
 
@@ -3564,6 +3573,7 @@ fn conclude(
     if empty && settings.no_tests != NoTestsPolicy::Pass && !settings.output.is_agent_like() {
         write_no_tests(parser, settings.ignore)?;
     }
+    close_cursor()?;
     Ok(RunSummary {
         passed: total.passed,
         failed: total.failed,
@@ -3993,5 +4003,111 @@ mod doc_trip_tests {
 
         assert_eq!(held.phase, DocPhase::Interrupted);
         assert_eq!(completed.phase, DocPhase::Starting);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod close_sequence_tests {
+    use core::cell::RefCell;
+    use core::future::poll_fn;
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::vec::Vec;
+
+    use prime::os::core_shard::run_on_this_thread;
+    use proxima_runtime::CoreId;
+
+    use super::{FRAME_BYTES, Render, RenderState, close_cursor, emit, erase_frame};
+    use crate::config::OutputMode;
+    use crate::edge_exit::fixture::in_single_threaded_process;
+    use crate::line::Line;
+    use crate::render::Event;
+    use crate::status_queue::{Capture, Sinks};
+
+    const STDOUT: i32 = 1;
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+    const ERASE_TAIL: &[u8] = b"A\r\x1b[J";
+
+    fn begin() -> Event<'static> {
+        Event::Begin { version: b"0.1.0", shard: false, jobs: 10, github: false, why: None, json: false, at_ms: 0 }
+    }
+
+    fn finished_with_a_failure() -> Event<'static> {
+        Event::Finished { passed: 1, failed: 1, ignored: 1, not_run: 0, wall_ms: 935, manifest: None, discovered: 3, filtered: 0, exit: 1 }
+    }
+
+    fn pipe_pair() -> (OwnedFd, OwnedFd) {
+        let mut ends = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "pipe is created");
+        unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) }
+    }
+
+    fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|window| window == needle)
+    }
+
+    fn rposition(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).rposition(|window| window == needle)
+    }
+
+    // a tick drew the frame, then the close runs, then one more tick arrives: the rich close as the driver sequences it
+    fn close_after_a_drawn_frame(late_tick: bool) -> Vec<u8> {
+        let (reader, writer) = pipe_pair();
+        let saved_stdout = unsafe { libc::fcntl(STDOUT, libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(saved_stdout >= 0, "stdout is duplicated for restore");
+        assert!(unsafe { libc::dup2(writer.as_raw_fd(), STDOUT) } >= 0, "stdout points at the pipe");
+        let outcome = run_on_this_thread(CoreId(0), async move {
+            let _capture = Capture::enter();
+            let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 4]);
+            let mut frame = Line::<FRAME_BYTES>::new();
+            let live: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+            emit(&live, &begin()).expect("begin draws the first frame");
+            emit(&live, &Event::Tick { now_ms: 250 }).expect("a tick redraws the frame");
+            erase_frame(&live).expect("the close erases the frame");
+            emit(&live, &finished_with_a_failure()).expect("the closing block queues");
+            close_cursor().expect("the cursor return queues");
+            if late_tick {
+                emit(&live, &Event::Tick { now_ms: 500 }).expect("a late tick is accepted");
+            }
+            let mut sinks = Sinks::new();
+            poll_fn(|context| sinks.poll_drain(context)).await.expect("the queue drains");
+        });
+        unsafe {
+            libc::dup2(saved_stdout, STDOUT);
+            libc::close(saved_stdout);
+        }
+        outcome.expect("root completes");
+        drop(writer);
+        let mut delivered = Vec::new();
+        std::fs::File::from(reader).read_to_end(&mut delivered).expect("the pipe reads to its end");
+        delivered
+    }
+
+    #[proxima::test]
+    async fn a_close_after_a_drawn_frame_erases_before_it_shows_the_cursor_and_nothing_draws_after_the_erase() {
+        in_single_threaded_process(|| {
+            let delivered = close_after_a_drawn_frame(false);
+            let text = std::string::String::from_utf8_lossy(&delivered);
+
+            let erase = rposition(&delivered, ERASE_TAIL).expect("the drawn frame is erased");
+            let show = position(&delivered, SHOW_CURSOR).expect("the cursor is shown");
+            assert!(erase < show, "the erase precedes the show-cursor:\n{text:?}");
+            assert_eq!(delivered.windows(SHOW_CURSOR.len()).filter(|window| *window == SHOW_CURSOR).count(), 1, "the cursor is shown once:\n{text:?}");
+            assert!(delivered.ends_with(SHOW_CURSOR), "the cursor returns after the closing block:\n{text:?}");
+            let after_erase = &delivered[erase..];
+            assert!(position(after_erase, HIDE_CURSOR).is_none(), "no frame is drawn once the erase has begun:\n{text:?}");
+            assert!(position(after_erase, b"SUMMARY  passed=1 failed=1 ignored=1").is_some_and(|summary| summary < after_erase.len() - SHOW_CURSOR.len()), "the closing block sits between the erase and the cursor:\n{text:?}");
+        });
+    }
+
+    #[proxima::test]
+    async fn a_tick_that_arrives_after_the_close_draws_nothing() {
+        in_single_threaded_process(|| {
+            let closed = close_after_a_drawn_frame(false);
+            let with_late_tick = close_after_a_drawn_frame(true);
+
+            assert_eq!(with_late_tick, closed, "a late tick adds no bytes after the cursor returned:\n{:?}", std::string::String::from_utf8_lossy(&with_late_tick));
+        });
     }
 }
