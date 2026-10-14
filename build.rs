@@ -83,6 +83,34 @@ impl Validate for BuildDefaults {
     }
 }
 
+#[derive(Settings, ConfigCodegen)]
+#[settings(prefix = "CARGO_VAL_VIEW")]
+struct ViewDefaults {
+    #[setting(default = 64)]
+    failures: usize,
+    #[setting(default = 8192)]
+    rerun_bytes: usize,
+    #[setting(default = 32768)]
+    frame_bytes: usize,
+}
+
+impl Validate for ViewDefaults {
+    fn validate(&self) -> conflaguration::Result<()> {
+        let mut errors = Vec::new();
+        if self.failures == 0 {
+            errors.push(ValidationMessage::new("failures", "must be greater than zero"));
+        }
+        if self.frame_bytes < self.rerun_bytes + 4096 {
+            errors.push(ValidationMessage::new("frame_bytes", "must hold the rerun command plus a line, at least rerun_bytes + 4096"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Validation { errors })
+        }
+    }
+}
+
 fn main() -> conflaguration::Result<()> {
     let mut settings = conflaguration::init::<BuildDefaults>()?;
     if env::var_os("CARGO_VAL_BUILD_JOBS").is_none() && env::var_os("HOST") == env::var_os("TARGET")
@@ -91,5 +119,8 @@ fn main() -> conflaguration::Result<()> {
     }
     codegen::write_consts(&settings, "cargo_val_build.rs")?;
     codegen::rerun_for::<BuildDefaults>();
+    let view = conflaguration::init::<ViewDefaults>()?;
+    codegen::write_consts(&view, "cargo_val_view.rs")?;
+    codegen::rerun_for::<ViewDefaults>();
     Ok(())
 }

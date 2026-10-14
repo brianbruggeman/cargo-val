@@ -18,6 +18,10 @@ pub mod build_defaults {
     include!(concat!(env!("OUT_DIR"), "/cargo_val_build.rs"));
 }
 
+pub mod view_defaults {
+    include!(concat!(env!("OUT_DIR"), "/cargo_val_view.rs"));
+}
+
 pub mod cargo_message;
 pub mod child_completion;
 pub mod cli;
@@ -31,6 +35,7 @@ pub mod isolated_target;
 pub mod line;
 pub mod metadata_scan;
 pub mod parked_artifacts;
+pub mod render;
 pub mod schedule;
 pub mod sched_binary;
 #[cfg(feature = "edge-os")]
