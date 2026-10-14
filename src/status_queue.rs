@@ -1,4 +1,5 @@
 use core::cell::{Cell, RefCell};
+use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::{Context, Poll, ready};
 use std::io;
@@ -101,10 +102,11 @@ fn next_record(queue: &Queue) -> Option<Record> {
     queue.records.dequeue().or_else(|| queue.tail.borrow_mut().take())
 }
 
-/// Scope inside which [`write`] queues instead of writing; the async pump holds one and drains through [`Sinks`] after every item.
+/// Scope inside which [`write`] queues instead of writing; the whole run holds one, the pump drains through [`Sinks`] after every
+/// item, and [`flush`] drains what the setup and summary reports queued between pumps.
 ///
-/// Callers outside a scope (the setup and summary reports that run between pumps) keep the plain
-/// synchronous [`edge_output::write`]. The banner and help paths in `main` never reach this module.
+/// Only a caller with no scope (no prime reactor yet) uses the synchronous [`edge_output::write`]; the banner and help paths in
+/// `main` never reach this module, and a refused append (unreachable under the per-event gates) is its one fallback.
 pub(crate) struct Capture {
     previous: bool,
 }
@@ -116,9 +118,15 @@ impl Capture {
     }
 }
 
+// a run that ends in an error never reaches `flush`; its queued lines go out synchronously here, after the reactor has stopped mattering
 impl Drop for Capture {
     fn drop(&mut self) {
         QUEUE.with(|queue| queue.capturing.set(self.previous));
+        if !self.previous {
+            while let Some(record) = QUEUE.with(next_record) {
+                let _ = edge_output::write(i32::from(record.descriptor), &record.bytes[..record.length]);
+            }
+        }
     }
 }
 
@@ -144,6 +152,12 @@ pub(crate) fn resume_due() -> bool {
         queue.deferred.set(queue.deferred.get() && !due);
         due
     })
+}
+
+/// Delivers every queued record through the readiness-gated sinks, parking on the writable gate instead of blocking the thread.
+pub(crate) async fn flush() -> Result<(), RunError> {
+    let mut sinks = Sinks::new();
+    poll_fn(|context| sinks.poll_drain(context)).await
 }
 
 pub(crate) fn write(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {

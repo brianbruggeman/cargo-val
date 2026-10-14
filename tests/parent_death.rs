@@ -186,6 +186,22 @@ fn await_fifo_eof(held: &File, what: &str) {
     assert_eq!(count, 0, "{what}: the held fifo carried data instead of EOF");
 }
 
+const PRIME_ROOT_THREADS: usize = 1;
+
+#[cfg(target_os = "macos")]
+fn thread_count(pid: libc::pid_t) -> usize {
+    let mut info: libc::proc_taskinfo = unsafe { core::mem::zeroed() };
+    let size = i32::try_from(size_of::<libc::proc_taskinfo>()).expect("taskinfo size fits");
+    let written = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size) };
+    assert_eq!(written, size, "proc_pidinfo returns a full proc_taskinfo for pid {pid}");
+    usize::try_from(info.pti_threadnum).expect("thread count is non-negative")
+}
+
+#[cfg(target_os = "linux")]
+fn thread_count(pid: libc::pid_t) -> usize {
+    fs::read_dir(format!("/proc/{pid}/task")).expect("the task directory of a live pid lists its threads").count()
+}
+
 fn kill_intermediary(leader: u32) {
     let leader = libc::pid_t::try_from(leader).expect("a pid fits pid_t");
     assert_eq!(unsafe { libc::kill(leader, libc::SIGKILL) }, 0, "the intermediary is killable");
@@ -229,6 +245,7 @@ async fn a_run_blocked_writing_to_an_unread_terminal_exits_when_its_parent_is_si
     supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
         reaping_on_panic(&cargo_val, async {
             armed_pid(announcements, &cargo_val, exit, lifeline).await;
+            assert_eq!(thread_count(cargo_val.get()), PRIME_ROOT_THREADS, "cargo-val runs only on the prime root thread: no watcher thread exists");
 
             kill_intermediary(leader);
 

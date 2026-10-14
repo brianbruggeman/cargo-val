@@ -1,14 +1,17 @@
 //! Turns SIGINT and SIGTERM into readable bytes so the event loop can forward them to every child it spawned.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicI32, Ordering};
+use core::task::{Context, Poll};
 use std::io;
+use std::os::fd::OwnedFd;
 
-use prime::os::readiness::Readiness;
+use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::signal::Signal;
 
 use crate::build_defaults::SIGNAL_SLOTS;
+use crate::edge_parent_unix;
 
 const FORWARDED: [c_int; 2] = [libc::SIGINT, libc::SIGTERM];
 const TARGET_CAPACITY: usize = SIGNAL_SLOTS;
@@ -25,13 +28,14 @@ static WRITE_END: AtomicI32 = AtomicI32::new(-1);
 static TARGETS: [AtomicI32; TARGET_CAPACITY] = [const { AtomicI32::new(0) }; TARGET_CAPACITY];
 
 /// A self-pipe whose read end a prime gate watches and whose write end the handler feeds.
-#[derive(Debug)]
 pub struct SignalPipe {
     read_end: c_int,
     write_end: c_int,
     installed: bool,
     received: Cell<Option<c_int>>,
     interrupt: Signal,
+    parent: RefCell<Option<(Readiness, Option<OwnedFd>)>>,
+    parent_armed: Cell<bool>,
 }
 
 /// Claims a table slot before a child is spawned, so a full table refuses the spawn instead of leaving a live untracked child.
@@ -117,6 +121,8 @@ impl SignalPipe {
             installed: false,
             received: Cell::new(None),
             interrupt: Signal::new(),
+            parent: RefCell::new(None),
+            parent_armed: Cell::new(false),
         };
         WRITE_END
             .compare_exchange(-1, write_end, Ordering::SeqCst, Ordering::SeqCst)
@@ -135,6 +141,44 @@ impl SignalPipe {
     /// Never fails on this OS; the result matches the edges whose gate duplicates a handle.
     pub fn gate(&self) -> io::Result<Readiness> {
         Ok(Readiness::new(self.read_end))
+    }
+
+    /// Watches the parent process on the prime reactor; once it exits, [`poll_parent`](Self::poll_parent) kills every tracked child and exits.
+    ///
+    /// A process already adopted by init has no parent to lose and watches nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error from opening the exit gate.
+    pub fn watch_parent(&self) -> io::Result<()> {
+        match edge_parent_unix::open() {
+            Ok(gate) => {
+                *self.parent.borrow_mut() = gate;
+                Ok(())
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => edge_parent_unix::end_run(),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One arm of the run's merge: pending while the parent lives, divergent once it exits, ready only with a gate fault.
+    ///
+    /// The first `Retry` of a fresh gate is the registration epoch, not an exit, so it is skipped once.
+    pub fn poll_parent(&self, context: &Context<'_>) -> Poll<io::Error> {
+        let mut slot = self.parent.borrow_mut();
+        let Some((gate, _pidfd)) = slot.as_mut() else {
+            return Poll::Pending;
+        };
+        loop {
+            match gate.poll(context) {
+                Ok(ReadyState::Parked) => return Poll::Pending,
+                Ok(ReadyState::Retry) if self.parent_armed.replace(true) => edge_parent_unix::end_run(),
+                Ok(ReadyState::Retry) => {}
+                Ok(ReadyState::OffWorker) => return Poll::Ready(io::Error::other("parent gate polled off a prime worker")),
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => edge_parent_unix::end_run(),
+                Err(error) => return Poll::Ready(error),
+            }
+        }
     }
 
     /// Fires once, when [`drain`](Self::drain) first forwards a signal.
