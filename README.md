@@ -2,6 +2,8 @@
 
 A Proxima-based Cargo test runner, invoked as `cargo val`.
 
+![cargo val on a failing workspace: live frame, pinned failure, review screen, receipt](https://raw.githubusercontent.com/brianbruggeman/cargo-val/main/assets/demo.gif)
+
 Install the runner from this checkout:
 
 ```sh
