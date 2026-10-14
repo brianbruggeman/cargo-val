@@ -20,6 +20,7 @@ use memchr::{memchr, memchr_iter};
 
 pub const WINDOW: usize = 7;
 const ABOVE: u32 = 3;
+const LAST_ROW: u32 = 6;
 const GUTTER_BLANK: &[u8] = b"      | ";
 const CARET: u8 = b'^';
 
@@ -43,6 +44,9 @@ impl fmt::Display for SourceError {
     }
 }
 
+/// # Errors
+/// `NotFound`, `Unreadable` or `NotUtf8Path`, each carrying the path.
+///
 /// Reads `file` (as located by the failure record) relative to `root`, once. Absolute paths win.
 pub fn read_source(root: &Path, file: &[u8]) -> Result<Vec<u8>, SourceError> {
     let relative = core::str::from_utf8(file).map_err(|_| SourceError::NotUtf8Path { lossy: String::from_utf8_lossy(file).into_owned() })?;
@@ -66,6 +70,9 @@ pub struct Excerpt<'a> {
 }
 
 impl<'a> Excerpt<'a> {
+    /// # Errors
+    /// `LineOutOfRange` when `line` is 0 or past the last line.
+    ///
     /// `line` and `col` are 1-based, as in `failure_class::Location`; a `col` of 0 (no column
     /// known) carets column 1.
     pub fn new(source: &'a [u8], line: u32, col: u32) -> Result<Self, SourceError> {
@@ -74,36 +81,43 @@ impl<'a> Excerpt<'a> {
             return Err(SourceError::LineOutOfRange { line, total });
         }
         let wanted = line.saturating_sub(ABOVE).max(1);
-        let first = wanted.min(total.saturating_sub(WINDOW as u32 - 1).max(1));
+        let first = wanted.min(total.saturating_sub(LAST_ROW).max(1));
         let mut spans: [Range<usize>; WINDOW] = core::array::from_fn(|_| 0..0);
         let len = fill_spans(source, first, &mut spans);
         Ok(Self { source, first, len, spans, failing: (line - first) as usize, col: col.max(1) })
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    #[must_use]
     pub fn first_line(&self) -> u32 {
         self.first
     }
 
+    #[must_use]
     pub fn failing_index(&self) -> usize {
         self.failing
     }
 
+    #[must_use]
     pub fn row(&self, index: usize) -> &'a [u8] {
         &self.source[self.spans[index].clone()]
     }
 
+    #[cfg(feature = "highlight")]
     pub(crate) fn source(&self) -> &'a [u8] {
         self.source
     }
 
+    #[cfg(feature = "highlight")]
     pub(crate) fn span(&self, index: usize) -> Range<usize> {
         self.spans[index].clone()
     }
@@ -124,6 +138,16 @@ impl<'a> Excerpt<'a> {
     /// state. Without the `highlight` feature, or with `colour` false, this is `write_plain`; the
     /// returned reason is `Some` only when highlighting was wanted and could not be done.
     pub fn write(&self, out: &mut Vec<u8>, label: &[u8], colour: bool) -> Option<&'static str> {
+        #[cfg(feature = "highlight")]
+        if colour {
+            return match crate::source_highlight::write_highlighted(self, out, label) {
+                Ok(()) => None,
+                Err(reason) => {
+                    self.write_plain(out, label);
+                    Some(reason)
+                }
+            };
+        }
         let _ = colour;
         self.write_plain(out, label);
         None
@@ -132,7 +156,7 @@ impl<'a> Excerpt<'a> {
     pub(crate) fn write_gutter(&self, out: &mut Vec<u8>, index: usize) {
         out.push(if index == self.failing { b'>' } else { b' ' });
         out.push(b' ');
-        write_number(out, self.first + index as u32);
+        write_number(out, self.first.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)));
         out.extend_from_slice(b" |");
         if !self.row(index).is_empty() {
             out.push(b' ');
@@ -155,6 +179,7 @@ impl<'a> Excerpt<'a> {
 
 /// `NO_COLOR` present, even empty, disables colour (no-color.org); the one ambient read, so the
 /// renderer takes its answer as data.
+#[must_use]
 pub fn colour_allowed() -> bool {
     std::env::var_os("NO_COLOR").is_none()
 }
@@ -162,7 +187,7 @@ pub fn colour_allowed() -> bool {
 fn line_count(source: &[u8]) -> u32 {
     let newlines = memchr_iter(b'\n', source).count();
     let unterminated = !source.is_empty() && source.last() != Some(&b'\n');
-    (newlines + usize::from(unterminated)) as u32
+    u32::try_from(newlines + usize::from(unterminated)).unwrap_or(u32::MAX)
 }
 
 fn fill_spans(source: &[u8], first: u32, spans: &mut [Range<usize>; WINDOW]) -> usize {
@@ -216,7 +241,7 @@ mod tests {
 
     fn find_line(source: &[u8], needle: &[u8]) -> u32 {
         let at = memchr::memmem::find(source, needle).expect("the needle is in the real source file");
-        1 + memchr_iter(b'\n', &source[..at]).count() as u32
+        1 + u32::try_from(memchr_iter(b'\n', &source[..at]).count()).expect("fewer than 2^32 lines")
     }
 
     #[test]
@@ -308,7 +333,7 @@ mod tests {
         excerpt.write_plain(&mut plain, b"here");
         let reason = excerpt.write(&mut no_colour, b"here", false);
 
-        assert_eq!(plain.iter().filter(|byte| **byte == 0x1b).count(), 0);
+        assert_eq!(memchr_iter(0x1b, &plain).count(), 0);
         assert_eq!(no_colour, plain);
         assert_eq!(reason, None);
     }
