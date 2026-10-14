@@ -4,7 +4,7 @@ mod fixture {
     fn passes() {}
 
     #[test]
-    fn fails_when_requested() {
+    fn fails_when_requested() { crate::pattern::write_from_env();
         if std::env::var_os("CARGO_VAL_C52D_LONG_OUTPUT").is_some() {
             print!("{}", "X".repeat(5000));
         }
@@ -22,3 +22,6 @@ mod fixture {
         panic!("ignored fixture body should not run");
     }
 }
+
+#[cfg(test)]
+mod pattern;

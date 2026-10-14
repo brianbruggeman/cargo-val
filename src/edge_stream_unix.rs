@@ -38,6 +38,7 @@ pub struct ChildStream {
     view: Cell<View>,
     window_sealed: Cell<bool>,
     scratch_sealed: Cell<bool>,
+    seen: Cell<u64>,
 }
 
 impl ChildStream {
@@ -54,6 +55,7 @@ impl ChildStream {
             view: Cell::new((key, 0, 0, 0)),
             window_sealed: Cell::new(false),
             scratch_sealed: Cell::new(true),
+            seen: Cell::new(0),
             gate: RefCell::new(Readiness::new(descriptor.as_raw_fd())),
             descriptor,
             window: RefCell::new([0; CAPTURE_BYTES as usize]),
@@ -109,6 +111,33 @@ impl ChildStream {
         self.retained()
     }
 
+    /// Every byte read from the child so far, sealed or not.
+    pub fn seen(&self) -> u64 {
+        self.seen.get()
+    }
+
+    /// Seals the pages still resident so the store alone holds every byte, and returns the chain.
+    ///
+    /// A page the store refuses stays resident and is counted by neither the view nor the loss counter,
+    /// so `seen - view total - resident` is exactly what a memory-only run could not keep.
+    pub fn settle(&self) -> View {
+        self.seal_tails();
+        self.view.get()
+    }
+
+    fn seal_tails(&self) {
+        if !self.window_sealed.get() && let Ok(window) = self.window.try_borrow() && self.append(&window[..self.length.get() as usize]) {
+            self.window_sealed.set(true);
+        }
+        if !self.scratch_sealed.get() && let Ok(scratch) = self.scratch.try_borrow() && self.append(&scratch[..self.scratch_length.get() as usize]) {
+            self.scratch_sealed.set(true);
+        }
+    }
+
+    fn append(&self, bytes: &[u8]) -> bool {
+        bytes.is_empty() || edge_store::append(&self.store, self.view.get(), bytes).map(|view| self.view.set(view)).is_ok()
+    }
+
     /// Whether any bytes went past the retained window into the scratch tail.
     pub fn truncated(&self) -> bool {
         self.length.get() >= CAPTURE_BYTES && self.scratch_length.get() > 0
@@ -158,35 +187,53 @@ impl ChildStream {
             .map_err(|_| io::Error::other("capture window is borrowed during a read"))?;
         let count = self.read_into(&mut bytes[start as usize..])?;
         self.length.set(start + count);
+        self.seen.set(self.seen.get() + u64::from(count));
         Ok(start..start + count)
     }
 
     fn read_scratch(&self) -> io::Result<Range<u32>> {
-        self.seal_resident()?;
+        self.seal_window()?;
+        let refused = self.seal_scratch()?;
         let mut bytes = self
             .scratch
             .try_borrow_mut()
             .map_err(|_| io::Error::other("scratch tail is borrowed during a read"))?;
         let count = self.read_into(&mut bytes[..])?;
         if count > 0 {
+            if let Some((length, error)) = refused {
+                edge_store::lose(&self.store, length, &error);
+            }
             self.scratch_length.set(count);
             self.scratch_sealed.set(false);
+            self.seen.set(self.seen.get() + u64::from(count));
         }
         Ok(CAPTURE_BYTES..CAPTURE_BYTES + count)
     }
 
-    fn seal_resident(&self) -> io::Result<()> {
+    fn seal_window(&self) -> io::Result<()> {
         if !self.window_sealed.get() {
             let window = self.window.try_borrow().map_err(|_| io::Error::other("capture window is borrowed during a seal"))?;
             self.seal(&window[..self.length.get() as usize]);
             self.window_sealed.set(true);
         }
-        if !self.scratch_sealed.get() {
-            let scratch = self.scratch.try_borrow().map_err(|_| io::Error::other("scratch tail is borrowed during a seal"))?;
-            self.seal(&scratch[..self.scratch_length.get() as usize]);
-            self.scratch_sealed.set(true);
-        }
         Ok(())
+    }
+
+    // a page the store refuses stays resident until a read overwrites it, so a read that finds no bytes loses nothing
+    fn seal_scratch(&self) -> io::Result<Option<(usize, io::Error)>> {
+        if self.scratch_sealed.get() {
+            return Ok(None);
+        }
+        let scratch = self.scratch.try_borrow().map_err(|_| io::Error::other("scratch tail is borrowed during a seal"))?;
+        let bytes = &scratch[..self.scratch_length.get() as usize];
+        match edge_store::append(&self.store, self.view.get(), bytes) {
+            Ok(view) => {
+                self.view.set(view);
+                self.scratch_sealed.set(true);
+                Ok(None)
+            }
+            Err(error) => Ok(Some((bytes.len(), error))),
+        }
     }
 
     fn seal(&self, bytes: &[u8]) {

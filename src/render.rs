@@ -18,7 +18,7 @@ pub mod review;
 use memchr::memchr;
 
 use crate::line::Line;
-use crate::failure_class::{Absent, Class, Exit, Location, Record, Reject, classify};
+use crate::failure_class::{Absent, Class, Enforcer, Exit, Location, Record, Reject, classify};
 use crate::hyperlink::write_linked;
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
 use review::{Key, Rerun, Verdict};
@@ -58,20 +58,31 @@ const NOTICE_BYTES: usize = 120;
 const TIMED_HEAD: usize = 9;
 const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
-const STDOUT_STREAM: &[u8] = b"stdout";
-const STDERR_STREAM: &[u8] = b"stderr";
+pub(crate) const STDOUT_STREAM: &[u8] = b"stdout";
+pub(crate) const STDERR_STREAM: &[u8] = b"stderr";
 const SOURCE_STREAM: &[u8] = b"source";
 
-// the stream that holds the panic site is the one kept, so `detail` re-derives the location the excerpt was cut from; with no site anywhere the stderr-first rule stands
-fn sited_capture<'a>((stdout, stderr): (Stream<'a>, Stream<'a>), exit: Exit) -> &'a [u8] {
-    [stdout.0, stderr.0]
+// the stream that holds the panic site is the one the kept record is read from, so `detail` and `e` find the location the excerpt was cut from;
+// with no site in either stream the stdout-first rule of `located` stands
+fn sited<'a>((stdout, stderr): (Stream<'a>, Stream<'a>), exit: Exit) -> Result<Record<'a>, Reject> {
+    [stdout, stderr]
         .into_iter()
-        .find(|capture| classify(capture, exit, 0).is_ok_and(|record| record.location.is_ok()))
-        .unwrap_or(if stderr.0.is_empty() { stdout.0 } else { stderr.0 })
+        .find_map(|(capture, dropped)| classify(capture, exit, dropped).ok().filter(|record| record.location.is_ok()))
+        .map_or_else(|| located(stdout, stderr, exit), Ok)
 }
 
-const PAYLOAD_HEAD: usize = 7;
 const EXIT_HEAD: usize = 5;
+const VIEWS_AT: usize = 8;
+const VIEW_BYTES: usize = 28;
+const RECORD_AT: usize = VIEWS_AT + 2 * VIEW_BYTES;
+const PAYLOAD_HEAD: usize = RECORD_AT + 23;
+const CLASS_NONE: u8 = 255;
+const WHICH_STDERR: u8 = 1;
+const REASON_FLAG: u8 = 2;
+const BLOCK_PENDING: u8 = 4;
+const FILE_KEEP: usize = 512;
+const MESSAGE_KEEP: usize = 2048;
+const SIDE_KEEP: usize = 1024;
 const QUIT_WINDOW_MS: u64 = 2_000;
 const PASS_SHOWN_MS: u64 = 1_500;
 
@@ -284,6 +295,9 @@ pub struct State<'storage, const RERUN: usize> {
     origin: u16,
     link_template: &'storage [u8],
     link_directory: &'storage [u8],
+    window: &'storage mut [u8],
+    window_len: usize,
+    window_of: usize,
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
@@ -343,7 +357,17 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             origin: 0,
             link_template: &[],
             link_directory: &[],
+            window: &mut [],
+            window_len: 0,
+            window_of: usize::MAX,
         }
+    }
+
+    /// Gives the state the one buffer a review loads the selected failure's output window into; without one the review shows no verbatim output.
+    #[must_use]
+    pub const fn with_window(mut self, window: &'storage mut [u8]) -> Self {
+        self.window = window;
+        self
     }
 
     /// Chooses whether the live frame is drawn in the terminal's own colours.
@@ -492,7 +516,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Resize { cols } => self.cols = cols,
             Event::Captured { id, stdout, stderr, exit, excerpt } => {
                 self.remember_reason(id, stdout.0, stderr.0);
-                self.retain(id, exit, sited_capture((stdout, stderr), exit), excerpt.unwrap_or_default());
+                self.retain(id, exit, (stdout, stderr), excerpt);
                 _ = self.edit(id, |tail| entry::set_lines(tail, review::output_lines(stdout.0) + review::output_lines(stderr.0)));
             }
             Event::Started { id, at_ms, limit_ms, .. } => {
@@ -562,6 +586,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.lock_len = 0;
         self.drawn_rows = 0;
         self.used = 0;
+        self.window_of = usize::MAX;
         self.stored = 0;
         self.unstored = 0;
         self.untracked = 0;
@@ -731,19 +756,23 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         let Some(index) = self.find_failure(id) else {
             return false;
         };
-        let start = self.failure_tail_start(index);
-        change(&mut self.arena[start..start + entry::TAIL]);
+        self.edit_at(index, change);
         true
     }
 
-    /// Keeps a failure's exit, source-excerpt rows and captured bytes after its record, as much as the arena has room for.
+    fn edit_at(&mut self, index: usize, change: impl FnOnce(&mut [u8])) {
+        let start = self.failure_tail_start(index);
+        change(&mut self.arena[start..start + entry::TAIL]);
+    }
+
+    /// Keeps a failure's exit, source-excerpt rows, store views and the classifier's record after its record in the arena, as much as the arena has room for.
     ///
     /// The first capture can only grow the last record, so one that arrives after a later failure settled is not kept and
     /// the review shows that row without output. A rerun's capture replaces the one already kept, whichever record holds
-    /// it: the records after it slide to make room, and the same bound applies. The bytes are what [`State::detail`]
-    /// classifies and shows verbatim; the rows are what review and the pinned frame draw, bounded by `EXCERPT_ROWS` rows
-    /// of `EXCERPT_ROW_BYTES` bytes.
-    fn retain(&mut self, id: Identity<'_>, exit: Exit, capture: &[u8], rows: &[u8]) {
+    /// it: the records after it slide to make room, and the same bound applies. The output bytes are not kept here: they stay
+    /// in the run store, and the record the classifier read from them (class, location, message, left and right) is what
+    /// [`State::detail`] shows, so a panic header outside the window a review loads still classifies.
+    fn retain(&mut self, id: Identity<'_>, exit: Exit, streams: (Stream<'_>, Stream<'_>), excerpt: ExcerptRows<'_>) {
         let Some(index) = self.find_failure(id) else {
             return;
         };
@@ -756,9 +785,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
         let end = self.arena.len();
         self.arena.copy_within(start + old..self.used, end - trailing);
-        let kept_rows = excerpt::keep(rows, &mut self.arena[start + PAYLOAD_HEAD..start + room]);
-        let body = start + PAYLOAD_HEAD + kept_rows;
-        let kept = capture.len().min(start + room - body);
+        let kept_rows = match excerpt {
+            Ok(rows) => excerpt::keep(rows, &mut self.arena[start + PAYLOAD_HEAD..start + room]),
+            Err(reason) => {
+                let kept = reason.len().min(room - PAYLOAD_HEAD);
+                self.arena[start + PAYLOAD_HEAD..start + PAYLOAD_HEAD + kept].copy_from_slice(&reason[..kept]);
+                kept
+            }
+        };
         let (tag, value) = match exit {
             Exit::Code(code) => (0, code),
             Exit::Signal(signal) => (1, signal),
@@ -766,14 +800,164 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         };
         self.arena[start] = tag;
         self.arena[start + 1..start + EXIT_HEAD].copy_from_slice(&value.to_le_bytes());
-        self.arena[start + EXIT_HEAD..start + PAYLOAD_HEAD].copy_from_slice(&u16::try_from(kept_rows).unwrap_or(0).to_le_bytes());
-        self.arena[body..body + kept].copy_from_slice(&capture[..kept]);
-        self.arena.copy_within(end - trailing..end, body + kept);
-        self.used = body + kept + trailing;
-        let length = PAYLOAD_HEAD + kept_rows + kept;
+        self.arena[start + EXIT_HEAD..start + EXIT_HEAD + 2].copy_from_slice(&u16::try_from(kept_rows).unwrap_or(0).to_le_bytes());
+        self.arena[start + VIEWS_AT..start + RECORD_AT].fill(0);
+        self.arena[start + VIEWS_AT - 1] = u8::from(shows_stderr(streams, exit)) | if excerpt.is_err() { REASON_FLAG } else { 0 };
+        let kept_record = self.keep_record(start, (start + PAYLOAD_HEAD + kept_rows, start + room), sited(streams, exit));
+        self.arena.copy_within(end - trailing..end, start + PAYLOAD_HEAD + kept_rows + kept_record);
+        self.used = start + PAYLOAD_HEAD + kept_rows + kept_record + trailing;
+        let length = PAYLOAD_HEAD + kept_rows + kept_record;
         let (before, after) = (u32::try_from(old).unwrap_or(0), u32::try_from(length).unwrap_or(0));
         self.failures[index + 1..self.stored].iter_mut().for_each(|offset| *offset = *offset + after - before);
         _ = self.edit(id, |tail| entry::set_payload(tail, length));
+        self.window_of = usize::MAX;
+    }
+
+    fn keep_record(&mut self, start: usize, (mut at, limit): (usize, usize), record: Result<Record<'_>, Reject>) -> usize {
+        let began = at;
+        let Ok(found) = record else {
+            self.arena[start + RECORD_AT] = CLASS_NONE;
+            return 0;
+        };
+        let (tag, arg) = match found.class {
+            Class::Assert => (0, 0),
+            Class::Panic => (1, 0),
+            Class::Timeout { enforced_by: Enforcer::Val } => (2, 0),
+            Class::Timeout { enforced_by: Enforcer::Harness } => (3, 0),
+            Class::Hang => (4, 0),
+            Class::Crash { signal } => (5, signal),
+        };
+        let (kind, site) = match found.location {
+            Ok(site) => (1, site),
+            Err(Absent::External(site)) => (2, site),
+            Err(Absent::NoPanicSite) => (0, Location { file: b"", line: 0, col: 0 }),
+        };
+        let (left, right) = found.sides.unwrap_or((b"", b""));
+        let pieces: [(&[u8], usize); 4] = [(site.file, FILE_KEEP), (found.message, MESSAGE_KEEP), (left, SIDE_KEEP), (right, SIDE_KEEP)];
+        let mut lengths = [0_u16; 4];
+        for (slot, (bytes, cap)) in lengths.iter_mut().zip(pieces) {
+            let kept = bytes.len().min(cap).min(limit - at);
+            self.arena[at..at + kept].copy_from_slice(&bytes[..kept]);
+            *slot = u16::try_from(kept).unwrap_or(0);
+            at += kept;
+        }
+        let head = &mut self.arena[start + RECORD_AT..start + PAYLOAD_HEAD];
+        head[0] = tag;
+        head[1..5].copy_from_slice(&arg.to_le_bytes());
+        head[5] = kind;
+        head[6..10].copy_from_slice(&site.line.to_le_bytes());
+        head[10..14].copy_from_slice(&site.col.to_le_bytes());
+        head[14] = u8::from(found.sides.is_some());
+        lengths.iter().enumerate().for_each(|(position, length)| head[15 + position * 2..17 + position * 2].copy_from_slice(&length.to_le_bytes()));
+        at - began
+    }
+
+    /// Records where the failure's output lives in the run store: its stdout and stderr chains, as the driver sealed them.
+    pub fn keep_views(&mut self, id: Identity<'_>, views: [(u32, u64, u64, u64); 2]) {
+        let Some(index) = self.find_failure(id) else {
+            return;
+        };
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        if entry::payload(self.failure_tail(index)) < PAYLOAD_HEAD {
+            return;
+        }
+        for (position, (key, first, last, total)) in views.into_iter().enumerate() {
+            let at = start + VIEWS_AT + position * VIEW_BYTES;
+            self.arena[at..at + 4].copy_from_slice(&key.to_le_bytes());
+            self.arena[at + 4..at + 12].copy_from_slice(&first.to_le_bytes());
+            self.arena[at + 12..at + 20].copy_from_slice(&last.to_le_bytes());
+            self.arena[at + 20..at + 28].copy_from_slice(&total.to_le_bytes());
+        }
+        self.window_of = usize::MAX;
+    }
+
+    /// Queues the stored failure `id` as a block the driver prints page by page, because its output lives in the run store and the output queue cannot hold it at once.
+    ///
+    /// Returns whether the failure was kept in full; when it was not (the arena had no room) nothing is queued and the caller prints the block from the event.
+    pub fn queue_block(&mut self, id: Identity<'_>) -> bool {
+        let Some(index) = self.find_failure(id) else {
+            return false;
+        };
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        if entry::payload(self.failure_tail(index)) < PAYLOAD_HEAD {
+            return false;
+        }
+        self.arena[start + VIEWS_AT - 1] |= BLOCK_PENDING;
+        true
+    }
+
+    /// The oldest failure whose block still waits to be printed.
+    #[must_use]
+    pub fn pending_block(&self) -> Option<usize> {
+        (0..self.stored).find(|index| {
+            let start = self.failure_tail_start(*index) + entry::TAIL;
+            entry::payload(self.failure_tail(*index)) >= PAYLOAD_HEAD && self.arena[start + VIEWS_AT - 1] & BLOCK_PENDING != 0
+        })
+    }
+
+    /// Marks the block of the failure at `index` printed.
+    pub fn finish_block(&mut self, index: usize) {
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        self.arena[start + VIEWS_AT - 1] &= !BLOCK_PENDING;
+    }
+
+    /// The name and the two store chains of the queued failure at `index`.
+    pub(crate) fn block_at(&self, index: usize) -> (Identity<'_>, [(u32, u64, u64, u64); 2]) {
+        (self.resolve(self.failures[index]).0, self.views_at(index).1)
+    }
+
+    /// The editor template, its directory and the panic site the queued failure's pages are linked with.
+    pub(crate) fn block_links(&self, index: usize) -> (&[u8], &[u8], Option<Location<'_>>) {
+        let site = if self.link_template.is_empty() { None } else { self.detail(self.resolve(self.failures[index]).0).1 };
+        (self.link_template, self.link_directory, site)
+    }
+
+    /// The source excerpt the queued failure at `index` was captured with.
+    pub(crate) fn block_excerpt(&self, index: usize) -> ExcerptRows<'_> {
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        if self.arena[start + VIEWS_AT - 1] & REASON_FLAG == 0 {
+            return Ok(self.excerpt_at(index));
+        }
+        let length = usize::from(u16::from_le_bytes([self.arena[start + EXIT_HEAD], self.arena[start + EXIT_HEAD + 1]]));
+        Err(&self.arena[start + PAYLOAD_HEAD..start + PAYLOAD_HEAD + length])
+    }
+
+    fn views_at(&self, index: usize) -> (u8, [(u32, u64, u64, u64); 2]) {
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        if entry::payload(self.failure_tail(index)) < PAYLOAD_HEAD {
+            return (0, [(0, 0, 0, 0); 2]);
+        }
+        let number = |at: usize, width: usize| {
+            let mut bytes = [0; 8];
+            bytes[..width].copy_from_slice(&self.arena[start + at..start + at + width]);
+            u64::from_le_bytes(bytes)
+        };
+        let view = |position: usize| {
+            let at = VIEWS_AT + position * VIEW_BYTES;
+            (u32::try_from(number(at, 4)).unwrap_or(0), number(at + 4, 8), number(at + 12, 8), number(at + 20, 8))
+        };
+        (self.arena[start + VIEWS_AT - 1] & WHICH_STDERR, [view(0), view(1)])
+    }
+
+    /// Loads, through `load`, the stream window the review detail of the selected failure shows, once per selection.
+    ///
+    /// `load` receives the failure's chain for the stream the review shows and the state's one window buffer, and returns
+    /// the bytes it put there. Nothing is loaded outside review, so a plain or agent run never touches the buffer.
+    pub fn fill_window(&mut self, load: impl FnOnce((u32, u64, u64, u64), &mut [u8]) -> usize) {
+        let Mode::Review { selected, .. } = self.mode else {
+            return;
+        };
+        let Some(index) = self.listed(selected) else {
+            return;
+        };
+        if self.window_of == index {
+            return;
+        }
+        let (which, views) = self.views_at(index);
+        self.window_len = load(views[usize::from(which)], &mut *self.window);
+        self.window_of = index;
+        let lines = review::output_lines(&self.window[..self.window_len]);
+        self.edit_at(index, |tail| entry::set_lines(tail, lines));
     }
 
     /// The source-excerpt rows [`State::retain`] kept for the failure at ledger `index`; empty when there are none.
@@ -784,7 +968,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
         let start = self.failure_tail_start(index) + entry::TAIL;
         let mut size = [0; 2];
-        size.copy_from_slice(&self.arena[start + EXIT_HEAD..start + PAYLOAD_HEAD]);
+        size.copy_from_slice(&self.arena[start + EXIT_HEAD..start + EXIT_HEAD + 2]);
+        if self.arena[start + VIEWS_AT - 1] & REASON_FLAG != 0 {
+            return b"";
+        }
         &self.arena[start + PAYLOAD_HEAD..start + PAYLOAD_HEAD + usize::from(u16::from_le_bytes(size))]
     }
 
@@ -798,32 +985,42 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         })
     }
 
-    /// A failure's class, source location and verbatim output, classified from the bytes [`State::retain`] kept.
+    /// A failure's class, source location, the classifier's reason and the output window a review loaded for it.
+    ///
+    /// The class, location and reason are the record [`State::retain`] kept, so they hold when the panic header is not in the
+    /// loaded window; the window is empty until [`State::fill_window`] has loaded it for this failure.
     #[must_use]
     pub fn detail(&self, id: Identity<'_>) -> review::Detail<'_> {
-        let kept = self.find_failure(id).map(|index| (self.failure_tail_start(index) + entry::TAIL, entry::payload(self.failure_tail(index))));
-        let Some((start, length)) = kept.filter(|(_, length)| *length >= PAYLOAD_HEAD) else {
+        let kept = self.find_failure(id).map(|index| (index, self.failure_tail_start(index) + entry::TAIL, entry::payload(self.failure_tail(index))));
+        let Some((index, start, _)) = kept.filter(|(_, _, length)| *length >= PAYLOAD_HEAD) else {
             return (Class::Panic, None, (b"", None), b"", b"");
         };
-        let mut value = [0; 4];
-        value.copy_from_slice(&self.arena[start + 1..start + EXIT_HEAD]);
-        let exit = match (self.arena[start], i32::from_le_bytes(value)) {
-            (0, code) => Exit::Code(code),
-            (1, signal) => Exit::Signal(signal),
-            _ => Exit::DeadlineKilled,
-        };
-        let rows = self.find_failure(id).map_or(&b""[..], |index| self.excerpt_at(index));
-        let capture = &self.arena[start + PAYLOAD_HEAD + rows.len()..start + length];
-        match classify(capture, exit, 0) {
-            Ok(record) => {
-                let located = match record.location {
-                    Ok(site) | Err(Absent::External(site)) => Some(site),
-                    Err(Absent::NoPanicSite) => None,
-                };
-                (record.class, located, (record.message, record.sides), rows, capture)
-            }
-            Err(_) => (Class::Panic, None, (b"", None), rows, capture),
+        let rows = self.excerpt_at(index);
+        let skipped = usize::from(u16::from_le_bytes([self.arena[start + EXIT_HEAD], self.arena[start + EXIT_HEAD + 1]]));
+        let capture = if self.window_of == index { &self.window[..self.window_len] } else { &[][..] };
+        let head = &self.arena[start + RECORD_AT..start + PAYLOAD_HEAD];
+        if head[0] == CLASS_NONE {
+            return (Class::Panic, None, (b"", None), rows, capture);
         }
+        let number = |at: usize| u32::from_le_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+        let length_of = |position: usize| usize::from(u16::from_le_bytes([head[15 + position * 2], head[16 + position * 2]]));
+        let class = match head[0] {
+            0 => Class::Assert,
+            2 => Class::Timeout { enforced_by: Enforcer::Val },
+            3 => Class::Timeout { enforced_by: Enforcer::Harness },
+            4 => Class::Hang,
+            5 => Class::Crash { signal: number(1).cast_signed() },
+            _ => Class::Panic,
+        };
+        let mut at = start + PAYLOAD_HEAD + skipped;
+        let mut next = |position: usize| {
+            let piece = &self.arena[at..at + length_of(position)];
+            at += piece.len();
+            piece
+        };
+        let (file, message, left, right) = (next(0), next(1), next(2), next(3));
+        let site = (head[5] != 0).then_some(Location { file, line: number(6), col: number(10) });
+        (class, site, (message, (head[14] != 0).then_some((left, right))), rows, capture)
     }
 
     fn failure_tail_start(&self, index: usize) -> usize {
@@ -1052,6 +1249,15 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         (stdout, stderr, exit): (Stream<'_>, Stream<'_>, Exit),
         excerpt: ExcerptRows<'_>,
     ) {
+        self.captured_open(frame, id);
+        let links = self.stream_links((stdout, stderr), exit);
+        stream(frame, id, STDOUT_STREAM, stdout, links);
+        stream(frame, id, STDERR_STREAM, stderr, links);
+        self.captured_close(frame, id, excerpt);
+    }
+
+    /// Opens a failure block: the GitHub group line when the run asked for annotations.
+    pub(crate) fn captured_open<const FRAME: usize>(&self, frame: &mut Line<FRAME>, id: Identity<'_>) {
         if self.github {
             frame.text(b"::group::");
             frame.text(id.0);
@@ -1059,13 +1265,19 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             frame.text(id.1);
             frame.text(b"\n");
         }
-        let links = (self.link_template, self.link_directory, self.panic_site((stdout, stderr), exit));
-        stream(frame, id, STDOUT_STREAM, stdout, links);
-        stream(frame, id, STDERR_STREAM, stderr, links);
+    }
+
+    /// Ends a failure block with its source excerpt and the GitHub group end.
+    pub(crate) fn captured_close<const FRAME: usize>(&self, frame: &mut Line<FRAME>, id: Identity<'_>, excerpt: ExcerptRows<'_>) {
         source_block(frame, id, excerpt);
         if self.github {
             frame.text(b"::endgroup::\n");
         }
+    }
+
+    /// The editor template, its directory and the panic site the stream pages are linked with.
+    pub(crate) fn stream_links<'a>(&'a self, streams: (Stream<'a>, Stream<'a>), exit: Exit) -> (&'a [u8], &'a [u8], Option<Location<'a>>) {
+        (self.link_template, self.link_directory, self.panic_site(streams, exit))
     }
 
     fn passed_alone(&self, index: usize) -> bool {
@@ -1298,6 +1510,16 @@ fn interrupted<const FRAME: usize>(frame: &mut Line<FRAME>, signal: u8, groups: 
     frame.text(b"\n");
 }
 
+// the review shows the stream whose classifier record has a site, falling back to stderr when it has any bytes
+fn shows_stderr((stdout, stderr): (Stream<'_>, Stream<'_>), exit: Exit) -> bool {
+    let sited = |(bytes, dropped): Stream<'_>| classify(bytes, exit, dropped).is_ok_and(|record| record.location.is_ok() || matches!(record.location, Err(Absent::External(_))));
+    if sited(stdout) {
+        false
+    } else {
+        sited(stderr) || !stderr.0.is_empty()
+    }
+}
+
 fn block_open<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8]) {
     frame.text(b"------ ");
     frame.text(name);
@@ -1330,16 +1552,31 @@ fn source_block<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, e
     block_close(frame, SOURCE_STREAM);
 }
 
-fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, dropped): Stream<'_>, (template, directory, site): (&[u8], &[u8], Option<Location<'_>>)) {
+fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, dropped): Stream<'_>, links: (&[u8], &[u8], Option<Location<'_>>)) {
     if bytes.is_empty() {
         return;
     }
+    stream_open(frame, id, name);
+    stream_page(frame, bytes, links);
+    stream_close(frame, name, (bytes.last() == Some(&b'\n'), dropped));
+}
+
+/// Opens the fenced block of one stream; the pages follow through [`stream_page`] and [`stream_close`] ends it.
+pub(crate) fn stream_open<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8]) {
     block_open(frame, id, name);
+}
+
+/// Writes one page of a stream's bytes, linking the panic site when the run has an editor template.
+pub(crate) fn stream_page<const FRAME: usize>(frame: &mut Line<FRAME>, bytes: &[u8], (template, directory, site): (&[u8], &[u8], Option<Location<'_>>)) {
     match site {
         Some(site) => write_linked(frame, (template, directory), bytes, (site.file, site.line, site.col)),
         None => frame.text(bytes),
     }
-    if bytes.last() != Some(&b'\n') {
+}
+
+/// Ends the fenced block: a newline when the last byte was not one, and the count of bytes the run could not keep.
+pub(crate) fn stream_close<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], (newline_ended, dropped): (bool, u64)) {
+    if !newline_ended {
         frame.text(b"\n");
     }
     if dropped != 0 {
@@ -1610,6 +1847,112 @@ mod tests {
         assert_eq!(heartbeats, 20_000, "every tick found the test in flight, so the heartbeat path was measured too");
         assert_eq!(allocations, 0);
         assert!(state.unstored() > 0, "the ledger overflowed during the loop, so the overflow path was measured too");
+    }
+
+    const REPORT: &[u8] = b"thread 'fixture::fails_when_requested' panicked at src/lib.rs:12:13:\nrequested fixture failure\n";
+    const VIEWS: [(u32, u64, u64, u64); 2] = [(0, 8, 8_192, 1_048_576), (1, 0, 0, 0)];
+
+    fn reviewing<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], window: &'storage mut [u8]) -> State<'storage, 8192> {
+        let mut state = State::<8192>::new(arena, ledger).with_window(window);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+        state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
+        state.apply(&Event::Captured { id: FAILING, stdout: (REPORT, 1_048_576 - REPORT.len() as u64), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
+        state.keep_views(FAILING, VIEWS);
+        state.apply(&Event::Key(crate::render::review::Key::Char(b'f')));
+        state.apply(&Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 9, manifest: None, discovered: 2, filtered: 0, exit: 1 });
+        state
+    }
+
+    #[test]
+    fn the_review_loads_the_window_around_the_panic_and_the_record_outlives_the_window() {
+        let (mut arena, mut ledger, mut window) = ([0_u8; 4096], [0_u32; 8], [0_u8; 512]);
+        let mut state = reviewing(&mut arena, &mut ledger, &mut window);
+        let before = state.detail(FAILING).4.to_vec();
+
+        let mut asked = None;
+        state.fill_window(|view, buffer| {
+            asked = Some(view);
+            let loaded: &[u8] = b"line before the panic\nthread 'fixture::fails_when_requested' panicked at src/lib.rs:12:13:\nrequested fixture failure\nline after the panic\n";
+            buffer[..loaded.len()].copy_from_slice(loaded);
+            loaded.len()
+        });
+        let after = state.detail(FAILING);
+
+        assert_eq!(before, b"", "nothing is loaded until the review asks for the window");
+        assert_eq!(asked, Some(VIEWS[0]), "the review asks for the chain of the stream whose output it shows");
+        assert!(after.4.starts_with(b"line before the panic\n") && after.4.ends_with(b"line after the panic\n"), "{:?}", String::from_utf8_lossy(after.4));
+        assert_eq!((after.0, after.1.map(|site| (site.file, site.line, site.col)), after.2.0), (crate::failure_class::Class::Panic, Some((&b"src/lib.rs"[..], 12, 13)), &b"requested fixture failure"[..]), "the kept record, not the window, classifies the failure");
+    }
+
+    #[test]
+    fn a_site_in_stdout_is_kept_when_stderr_is_a_storm_and_the_review_shows_stdout() {
+        let (mut arena, mut ledger, mut window) = ([0_u8; 4096], [0_u32; 8], [0_u8; 512]);
+        let storm = [b'e'; 2048];
+        let mut state = State::<8192>::new(&mut arena, &mut ledger).with_window(&mut window);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+        state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
+        state.apply(&Event::Captured { id: FAILING, stdout: (REPORT, 0), stderr: (&storm, 1_048_576 - 2048), exit: Exit::Code(101), excerpt: UNREAD });
+        state.keep_views(FAILING, VIEWS);
+        state.apply(&Event::Key(crate::render::review::Key::Char(b'f')));
+
+        let mut asked = None;
+        state.fill_window(|view, _| {
+            asked = Some(view);
+            0
+        });
+        let detail = state.detail(FAILING);
+
+        assert_eq!(asked, Some(VIEWS[0]), "the review loads the stream the site came from, not the storm");
+        assert_eq!(detail.1.map(|site| (site.file, site.line)), Some((&b"src/lib.rs"[..], 12)));
+        assert_eq!(detail.2.0, b"requested fixture failure");
+    }
+
+    #[test]
+    fn a_selection_loads_its_window_once_and_a_new_capture_asks_again() {
+        let (mut arena, mut ledger, mut window) = ([0_u8; 4096], [0_u32; 8], [0_u8; 64]);
+        let mut state = reviewing(&mut arena, &mut ledger, &mut window);
+        let mut loads = 0;
+
+        for _ in 0..3 {
+            state.fill_window(|_, _| {
+                loads += 1;
+                0
+            });
+        }
+        state.keep_views(FAILING, VIEWS);
+        state.fill_window(|_, _| {
+            loads += 1;
+            0
+        });
+
+        assert_eq!(loads, 2, "three fills of one selection load once; fresh views load again");
+    }
+
+    #[test]
+    fn ten_thousand_review_windows_and_plain_pages_load_and_project_with_zero_allocations() {
+        let (mut arena, mut ledger, mut window) = ([0_u8; 4096], [0_u32; 8], [0_u8; 4096]);
+        let mut state = reviewing(&mut arena, &mut ledger, &mut window);
+        let mut frame = Line::<32_768>::new();
+        let page = [b'x'; 16_384];
+        let links: (&[u8], &[u8], Option<crate::failure_class::Location<'_>>) = (b"", b"", None);
+        let mut pages = 0_usize;
+
+        let ((), allocations) = measure_allocations(|| {
+            for _ in 0..10_000 {
+                state.keep_views(FAILING, VIEWS);
+                state.fill_window(|_, buffer| {
+                    buffer[..REPORT.len()].copy_from_slice(REPORT);
+                    REPORT.len()
+                });
+                frame.clear();
+                super::stream_page(&mut frame, &page, links);
+                pages += 1;
+            }
+        });
+
+        assert_eq!(pages, 10_000, "every page was projected, so a zero is not an empty loop");
+        assert_eq!(allocations, 0);
+        assert_eq!(state.detail(FAILING).4, REPORT, "the last load is the window the review shows");
     }
 
     #[test]
@@ -1892,25 +2235,28 @@ mod tests {
         let mut state = Small::new(&mut arena, &mut ledger);
         let second: Identity<'static> = (b"cli_run", b"fixture::second");
         let third: Identity<'static> = (b"cli_run", b"fixture::third");
-        let captures = [(FAILING, &b"first message\n"[..]), (second, &b"second message\n"[..]), (third, &b"third message\n"[..])];
+        let report = |message: &str| std::format!("thread 't' panicked at src/lib.rs:1:1:\n{message}\n");
+        let captures = [(FAILING, report("first message")), (second, report("second message")), (third, report("third message"))];
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
         for (id, bytes) in captures {
             state.apply(&Event::Settled { id, outcome: Outcome::Failed, at_ms: None, solo: false });
-            state.apply(&Event::Captured { id, stdout: (bytes, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
+            state.apply(&Event::Captured { id, stdout: (bytes.as_bytes(), 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
         }
-        let later = Event::Captured { id: second, stdout: (b"a much longer second message from the rerun\n", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
+        let longer = report("a much longer second message from the rerun");
+        let later = Event::Captured { id: second, stdout: (longer.as_bytes(), 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
 
         state.apply(&later);
 
-        assert_eq!(state.detail(second).4, b"a much longer second message from the rerun\n");
-        assert_eq!(state.detail(FAILING).4, b"first message\n");
-        assert_eq!(state.detail(third).4, b"third message\n");
-        let shorter = Event::Captured { id: second, stdout: (b"short\n", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
+        assert_eq!(state.detail(second).2.0, b"a much longer second message from the rerun");
+        assert_eq!(state.detail(FAILING).2.0, b"first message");
+        assert_eq!(state.detail(third).2.0, b"third message");
+        let brief = report("short");
+        let shorter = Event::Captured { id: second, stdout: (brief.as_bytes(), 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
 
         state.apply(&shorter);
 
-        assert_eq!(state.detail(second).4, b"short\n");
-        assert_eq!(state.detail(third).4, b"third message\n");
-        assert_eq!(state.detail(FAILING).4, b"first message\n");
+        assert_eq!(state.detail(second).2.0, b"short");
+        assert_eq!(state.detail(third).2.0, b"third message");
+        assert_eq!(state.detail(FAILING).2.0, b"first message");
     }
 }

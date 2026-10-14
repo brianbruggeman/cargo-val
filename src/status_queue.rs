@@ -9,7 +9,8 @@ use proxima_core::time::timeout;
 use proxima_primitives::pipe::{BoundedQueue, EnqueueOutcome, FailMode, UnpinPipe};
 
 use crate::build_defaults::STATUS_QUEUE_BYTES;
-use crate::driver::{CAPTURE_CAPACITY, NAME_CAPACITY, RunError};
+use crate::driver::window::SYNC_WINDOW_BYTES;
+use crate::driver::{NAME_CAPACITY, RunError};
 use crate::edge_output::{self, OutputSink};
 use crate::edge_stream::CAPTURE_BYTES;
 use crate::line::Line;
@@ -25,7 +26,7 @@ const PLAIN_BLOCK_FRAMING_BYTES: usize = NAME_CAPACITY + ID_CAPACITY + 128;
 const REPORT_FRAMING_BYTES: usize = 64 + ID_CAPACITY + 16;
 pub(crate) const EVENT_RESERVE: usize = NAME_CAPACITY + REPORT_FRAMING_BYTES;
 const LANE_CHUNK: usize = CAPTURE_BYTES as usize;
-const CAPTURE_PAIR: usize = 2 * CAPTURE_CAPACITY + HANDLER_FRAMING_BYTES;
+const CAPTURE_PAIR: usize = 2 * SYNC_WINDOW_BYTES + HANDLER_FRAMING_BYTES;
 const UNGATED_BYTES: usize = if LANE_CHUNK > CAPTURE_PAIR { LANE_CHUNK } else { CAPTURE_PAIR };
 // small writes each take a whole record, so an item also reserves a count of writes beyond its byte volume.
 const WRITES_PER_ITEM: usize = 16;
@@ -161,7 +162,7 @@ pub(crate) fn room_for(bytes: usize) -> bool {
 
 /// Whether the queue can take the worst-case output of the next handled item.
 pub(crate) fn has_room() -> bool {
-    QUEUE.with(|queue| free_slots(queue) >= ITEM_RECORDS)
+    QUEUE.with(|queue| free_slots(queue) >= ITEM_RECORDS && !queue.deferred.get())
 }
 
 /// Marks that a writer paused for lack of room; its backlog waits for [`resume_due`].

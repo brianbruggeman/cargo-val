@@ -1,7 +1,7 @@
 //! Shard children: many tests in one libtest process, each counted as its result line streams in.
 
 use super::{
-    CargoDriver, ChildOutput, ExactTestIntent, ExecutablePath, LaunchCause, LaunchInput, LaunchOwner, Ledger,
+    CargoDriver, ExactTestIntent, ExecutablePath, LaunchCause, LaunchInput, LaunchOwner, Ledger,
     Line, ListingRun, NAME_CAPACITY, ProcessMode, RunError, RunningChild, Tally, TerminalOutcome, TestWatch,
     Watches, executable_text, override_entries, report_launch_failure, report_nothing_ran, slot_range, spawn_reserved, start_session, write_fd,
     monotonic_millis, projected, rendered, emit, emit_kept, Render,
@@ -696,7 +696,7 @@ pub(super) fn finish(
     };
     shard_watch.flush_failures(run.render())?;
     if shard_watch.shard.rerun.is_some() {
-        finish_rerun(run, ledger, target, (&shard_watch, &watch.output), (watch.exit(status), status))?;
+        finish_rerun(run, ledger, target, (&shard_watch, &watch), (watch.exit(status), status))?;
         ledger.retire(watch.slot);
         run.shards.borrow_mut().finished(shard_watch.shard);
         return Ok(());
@@ -739,7 +739,7 @@ fn finish_rerun(
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
     target: Option<usize>,
-    (shard_watch, output): (&ShardWatch, &ChildOutput),
+    (shard_watch, watch): (&ShardWatch, &TestWatch),
     (exit, status): (Result<i32, RunError>, i32),
 ) -> Result<(), RunError> {
     let shard = shard_watch.shard;
@@ -754,7 +754,7 @@ fn finish_rerun(
             if after_shard_failure {
                 warn_rerun(run, target, name, b"failed in a shared process, passed alone")?;
             }
-            let counted = match output.verdict() {
+            let counted = match watch.output.verdict() {
                 LibtestVerdict::NothingRan => return Err(report_nothing_ran(&run.targets, target, name)),
                 LibtestVerdict::Skipped => (TerminalOutcome::Ignored, Tally::Skipped),
                 _ => (TerminalOutcome::Passed, Tally::Passed),
@@ -763,24 +763,23 @@ fn finish_rerun(
         }
         (Some(Rerun::Decides { .. }), false) => {
             count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
-            failure_output(run, target, name, (output, status))?;
+            failure_output(run, target, name, (watch, status))?;
             run.tripped(ledger);
             Ok(())
         }
         (_, true) => warn_rerun(run, target, name, b"passed when re-run alone"),
-        (_, false) => block_output(run, target, name, (output, status)),
+        (_, false) => block_output(run, target, name, (watch, status)),
     }
 }
 
 // the streamed path prints libtest's failure block in cargo-val's frame and says nothing about reproduction, so the rerun does the same
-fn block_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (output, status): (&ChildOutput, i32)) -> Result<(), RunError> {
-    let (stdout, _) = output.captured();
-    let Some(body) = failure_body(stdout.0) else {
-        return failure_output(run, target, name, (output, status));
-    };
+fn block_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (watch, status): (&TestWatch, i32)) -> Result<(), RunError> {
     let targets = run.targets.borrow();
     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-    run.emit_captured(id, ((body, stdout.1), (b"", 0)), Exit::from_status(status))
+    run.emit_shaped(id, watch.streams.as_ref(), Exit::from_status(status), |stdout, stderr| match failure_body(stdout.0) {
+        Some(body) => ((body, stdout.1), (b"", 0)),
+        None => (stdout, stderr),
+    })
 }
 
 // the lines between libtest's `---- <name> stdout ----` header and the `failures:` that closes the section, found by the parser that streams them
@@ -812,11 +811,10 @@ fn warn_rerun(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], what: &[
     emit(run.render(), &Event::Warned { id, what })
 }
 
-fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (output, status): (&ChildOutput, i32)) -> Result<(), RunError> {
+fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (watch, status): (&TestWatch, i32)) -> Result<(), RunError> {
     let targets = run.targets.borrow();
     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-    let (stdout, stderr) = output.captured();
-    run.emit_captured(id, (stdout, stderr), Exit::from_status(status))
+    run.emit_failure(id, watch.streams.as_ref(), Exit::from_status(status))
 }
 
 // every name that did not settle on its clean shard line owes a solo run, and that solo run's exit decides it
@@ -863,6 +861,7 @@ mod tests {
 
     mod cases {
         use super::*;
+        use crate::driver::ChildOutput;
 
         #[proxima::test]
         async fn fail_fast_spares_output_reruns() {
@@ -897,6 +896,7 @@ mod tests {
                 process_id: 0,
                 scope: scope_for(None, (&root, &trip)),
                 output: ChildOutput::new(),
+                streams: None,
                 shard: None,
                 group: [0; GROUP_CAPACITY],
                 group_length: 0,
@@ -953,7 +953,8 @@ mod pause_tests {
 
     use proxima_core::signal::Signal;
 
-    use super::{ChildOutput, GROUP_CAPACITY, Ledger, ListingRun, ShardArena, ShardWatch, TestWatch, status_queue};
+    use crate::driver::ChildOutput;
+    use super::{GROUP_CAPACITY, Ledger, ListingRun, ShardArena, ShardWatch, TestWatch, status_queue};
     use crate::config::{IgnoreMode, NoTestsPolicy, OutputMode, ProcessMode};
     use crate::driver::{DocObservation, Render, RenderState, Settings, TargetTable};
     use crate::line::Line;
@@ -1039,6 +1040,8 @@ mod pause_tests {
         ListingRun {
             signals,
             store: std::rc::Rc::new(crate::edge_store::unavailable()),
+            reads: RefCell::new(&mut []),
+            cursor: Cell::new([0; 5]),
             filter: "",
             exact: false,
             targets: RefCell::new(TargetTable::new()),
@@ -1077,6 +1080,7 @@ mod pause_tests {
             process_id: 0,
             scope: Signal::new(),
             output: ChildOutput::new(),
+            streams: None,
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],
             group_length: 0,
@@ -1105,7 +1109,7 @@ mod pause_tests {
                 let mut arena = [0_u8; 64];
                 let mut ledger = [0_u32; 4];
                 let mut frame = Line::new();
-                let sink: Render<'_> = (OutputMode::Plain, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+                let sink: Render<'_> = (OutputMode::Plain, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame), RefCell::new(None));
                 let run = run_over(&signals, &settings, (&sink, &mut names));
                 let mut sessions = SessionSlots::new();
                 let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
@@ -1145,7 +1149,7 @@ mod pause_tests {
                 let mut arena = [0_u8; 64];
                 let mut ledger = [0_u32; 4];
                 let mut frame = Line::new();
-                let sink: Render<'_> = (OutputMode::Plain, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
+                let sink: Render<'_> = (OutputMode::Plain, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame), RefCell::new(None));
                 let run = run_over(&signals, &settings, (&sink, &mut names));
                 let mut sessions = SessionSlots::new();
                 let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
