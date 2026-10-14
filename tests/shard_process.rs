@@ -478,8 +478,11 @@ async fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
     let run = run_fixture(SHARD, "fail-fast-block", &["--process", "shard"], &[("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_SHARD_FAIL", "1")]).await;
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
-    assert!(run.stdout.contains("---- suite::d_panics_on_request stdout ----"), "{}", run.stderr);
-    assert!(run.stdout.contains("requested shard failure in d"), "{}", run.stderr);
+    let full = format!("stdout: {}\nstderr: {}", run.stdout, run.stderr);
+    // a block that reaches the stream before the stop terminates the child prints in cargo-val's frame; one that does not is rerun and prints libtest's own frame inside it
+    let opened = run.stdout.find("------ stdout: cargo_val_shard_fixture suite::d_panics_on_request ------");
+    let message = run.stdout.find("requested shard failure in d");
+    assert!(opened.zip(message).is_some_and(|(open, message)| open < message), "{full}");
 }
 
 #[proxima::test(timeout = "310s")]
