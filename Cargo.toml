@@ -57,3 +57,7 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[[bench]]
+name = "failure_class"
+harness = false
