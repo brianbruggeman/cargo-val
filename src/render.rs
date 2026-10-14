@@ -84,23 +84,23 @@ impl Mode {
 /// The render state: the screen, the projection inputs, and the failure ledger as offsets into a caller-owned name arena.
 ///
 /// A failure's binary and name are copied once, on its settle event, into `arena` as `binary NUL name NUL`; the ledger
-/// holds the record's start offset. The arena is the caller's storage for the whole run, so nothing in the state borrows
+/// (a caller-owned `[u32]`, its length the capacity) holds the record's start offset. The arena is the caller's storage for the whole run, so nothing in the state borrows
 /// from an event, and a full arena counts the failure instead of storing it.
 #[derive(Debug)]
-pub struct State<'storage, const FAILURES: usize, const RERUN: usize> {
+pub struct State<'storage, const RERUN: usize> {
     mode: Mode,
     github: bool,
     arena: &'storage mut [u8],
     used: usize,
-    failures: [u32; FAILURES],
+    failures: &'storage mut [u32],
     stored: usize,
     unstored: usize,
 }
 
-impl<'storage, const FAILURES: usize, const RERUN: usize> State<'storage, FAILURES, RERUN> {
+impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
-    pub const fn new(arena: &'storage mut [u8]) -> Self {
-        Self { mode: Mode::Running, github: false, arena, used: 0, failures: [0; FAILURES], stored: 0, unstored: 0 }
+    pub const fn new(arena: &'storage mut [u8], failures: &'storage mut [u32]) -> Self {
+        Self { mode: Mode::Running, github: false, arena, used: 0, failures, stored: 0, unstored: 0 }
     }
 
     #[must_use]
@@ -140,7 +140,7 @@ impl<'storage, const FAILURES: usize, const RERUN: usize> State<'storage, FAILUR
         let end = self.used + binary.len() + name.len() + 2;
         let offset = u32::try_from(self.used);
         match offset {
-            Ok(offset) if self.stored < FAILURES && end <= self.arena.len() => {
+            Ok(offset) if self.stored < self.failures.len() && end <= self.arena.len() => {
                 let (binary_end, name_end) = (self.used + binary.len(), end - 1);
                 self.arena[self.used..binary_end].copy_from_slice(binary);
                 self.arena[binary_end] = 0;
@@ -433,10 +433,10 @@ mod tests {
     const FAILING: Identity<'static> = (b"cli_run", b"fixture::fails_when_requested");
     const PASSING: Identity<'static> = (b"cli_run", b"fixture::passes");
 
-    type Small<'storage> = State<'storage, 2, 200>;
+    type Small<'storage> = State<'storage, 200>;
 
-    fn projected<const FAILURES: usize, const RERUN: usize>(
-        state: &State<'_, FAILURES, RERUN>,
+    fn projected<const RERUN: usize>(
+        state: &State<'_, RERUN>,
         event: &Event<'_>,
     ) -> String {
         let mut frame = Line::<4096>::new();
@@ -453,7 +453,8 @@ mod tests {
     #[test]
     fn a_settled_failure_projects_its_fail_line_and_joins_the_ledger() {
         let mut arena = [0_u8; 512];
-        let mut state = Small::new(&mut arena);
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
 
         let line = settle(&mut state, FAILING, Outcome::Failed);
 
@@ -464,7 +465,8 @@ mod tests {
     #[test]
     fn github_adds_the_error_annotation_after_the_fail_line_and_wraps_captured_output_in_a_group() {
         let mut arena = [0_u8; 512];
-        let mut state = Small::new(&mut arena);
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true });
 
         let fail = settle(&mut state, FAILING, Outcome::Failed);
@@ -481,7 +483,8 @@ mod tests {
     #[test]
     fn the_closing_block_lists_every_failure_and_one_command_that_reruns_them() {
         let mut arena = [0_u8; 512];
-        let mut state = Small::new(&mut arena);
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
         settle(&mut state, PASSING, Outcome::Passed);
         settle(&mut state, FAILING, Outcome::Failed);
         let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 8400, manifest: Some(b"/w/Cargo.toml") };
@@ -501,7 +504,8 @@ mod tests {
     #[test]
     fn failures_past_the_ledger_are_counted_and_named_in_the_closing_block() {
         let mut arena = [0_u8; 512];
-        let mut state = Small::new(&mut arena);
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
         let names: [Identity<'static>; 4] = [(b"a", b"one"), (b"a", b"two"), (b"a", b"three"), (b"a", b"four")];
         for id in names {
             settle(&mut state, id, Outcome::Failed);
@@ -518,7 +522,8 @@ mod tests {
     #[test]
     fn a_failure_whose_names_do_not_fit_the_arena_is_counted_not_stored() {
         let mut arena = [0_u8; 40];
-        let mut state = State::<8, 200>::new(&mut arena);
+        let mut ledger = [0_u32; 8];
+        let mut state = State::<200>::new(&mut arena, &mut ledger);
         let long: Identity<'static> = (b"cli_run", b"fixture::a_test_name_longer_than_the_arena_has_room_for");
 
         settle_any(&mut state, FAILING);
@@ -528,14 +533,15 @@ mod tests {
         assert_eq!(state.unstored(), 1);
     }
 
-    fn settle_any<const FAILURES: usize>(state: &mut State<'_, FAILURES, 200>, id: Identity<'_>) {
+    fn settle_any(state: &mut State<'_, 200>, id: Identity<'_>) {
         state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: None, solo: false });
     }
 
     #[test]
     fn a_rerun_command_that_outgrows_its_budget_says_how_many_failures_it_left_out() {
         let mut arena = [0_u8; 256];
-        let mut state = State::<4, 40>::new(&mut arena);
+        let mut ledger = [0_u32; 4];
+        let mut state = State::<40>::new(&mut arena, &mut ledger);
         for id in [(&b"a"[..], &b"one"[..]), (b"a", b"two"), (b"a", b"three")] {
             state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: None, solo: false });
         }
@@ -550,7 +556,8 @@ mod tests {
     #[test]
     fn a_frame_too_small_for_the_event_reports_the_bytes_it_cut() {
         let mut arena = [0_u8; 64];
-        let state = Small::new(&mut arena);
+        let mut ledger = [0_u32; 2];
+        let state = Small::new(&mut arena, &mut ledger);
         let mut frame = Line::<16>::new();
 
         let result = state.project(&Event::Started { id: FAILING, solo: false }, &mut frame);
@@ -580,7 +587,8 @@ mod tests {
     #[test]
     fn no_projection_contains_an_escape_byte() {
         let mut arena = [0_u8; 512];
-        let mut state = Small::new(&mut arena);
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
         let events = [
             Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true },
             Event::Listed { binaries: 19, tests: 383 },
@@ -600,7 +608,8 @@ mod tests {
     #[test]
     fn a_hundred_thousand_events_update_and_project_with_zero_allocations() {
         let mut arena = [0_u8; 4096];
-        let mut state = State::<64, 8192>::new(&mut arena);
+        let mut ledger = [0_u32; 64];
+        let mut state = State::<8192>::new(&mut arena, &mut ledger);
         let mut frame = Line::<32_768>::new();
         let mut events_applied = 0_usize;
 
@@ -629,7 +638,8 @@ mod tests {
     #[test]
     fn ten_thousand_closing_frames_project_with_zero_allocations() {
         let mut arena = [0_u8; 4096];
-        let mut state = State::<64, 8192>::new(&mut arena);
+        let mut ledger = [0_u32; 64];
+        let mut state = State::<8192>::new(&mut arena, &mut ledger);
         let mut frame = Line::<32_768>::new();
         let mut frames = 0_usize;
         for ordinal in 0..64_u64 {
