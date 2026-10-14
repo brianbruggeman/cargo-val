@@ -315,8 +315,9 @@ mod bin_gate_hold {
     use crate::supervise::supervised;
 
     const TEST_NAME: &str = "the_bin_target_exists_when_the_test_starts";
-    // the bin and its unit-test target both block on the fifo, each holding a job slot, so the integration test unit needs a third slot or it never links and the park line never comes; an ambient build.jobs, CARGO_BUILD_JOBS or jobserver of 2 or fewer would stall the run until its deadline
-    const FIXTURE_BUILD_JOBS: &str = "8";
+    const FIFO_HELD_UNITS: usize = 2;
+    // the bin and its unit-test target both block on the fifo, each holding a job slot, so the integration test unit needs one more or it never links and the park line never comes; an ambient build.jobs, CARGO_BUILD_JOBS or jobserver of FIFO_HELD_UNITS or fewer would stall the run until its deadline
+    const FIXTURE_BUILD_JOBS: usize = FIFO_HELD_UNITS + 1;
     const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
 
     /// What proves the bin-less window was observed, so the bin build may be released.
@@ -385,7 +386,7 @@ mod bin_gate_hold {
             .env("CARGO_TARGET_DIR", &target)
             .env("CARGO_VAL_TARGET_DIR", "shared")
             .env("CARGO_VAL_BIN_GATE_HOLD", &fifo)
-            .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS)
+            .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS.to_string())
             .env_remove("MAKEFLAGS")
             .env_remove("CARGO_MAKEFLAGS")
             .env_remove("MFLAGS");
