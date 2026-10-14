@@ -64,6 +64,7 @@ async fn proc_macro_test_binary_runs_under_cargo_val_with_the_environment_cargo_
     cargo_test.args(["test", "--lib", "--manifest-path"]);
     cargo_test.arg(fixture_manifest());
     let mut cargo_val = scrubbed(Command::new(env!("CARGO_BIN_EXE_cargo-val")));
+    cargo_val.env("CARGO_VAL_OUTPUT", "rich");
     cargo_val.arg("--lib").arg("--manifest-path");
     cargo_val.arg(fixture_manifest());
 

@@ -58,6 +58,7 @@ fn manifest(fixture: &str) -> PathBuf {
 async fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
     let mut command = Command::new(CARGO_VAL);
     command
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest_path)
         .args(arguments)
@@ -360,6 +361,7 @@ mod bin_gate_hold {
         make_fifo(&fifo);
         let mut command = Command::new(CARGO_VAL);
         command
+            .env("CARGO_VAL_OUTPUT", "rich")
             .arg("--manifest-path")
             .arg(manifest("bin_gate"))
             .env_remove("CARGO_VAL_BIN_GATE")
