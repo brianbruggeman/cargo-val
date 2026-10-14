@@ -6,7 +6,7 @@
 //! Colour roles are the terminal's own 16 ANSI colours; without colour the bars keep their state as glyph textures.
 
 use crate::line::Line;
-use crate::render::{Event, Identity, Mode, State};
+use crate::render::{Event, Identity, Mode, State, excerpt};
 use crate::view_defaults::{BAR_COLUMNS, INFLIGHT_ROWS};
 
 const GREEN: &[u8] = b"\x1b[32m";
@@ -287,12 +287,12 @@ impl<const RERUN: usize> State<'_, RERUN> {
     fn rich_rows<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) -> u16 {
         let layout = self.layout();
         self.header_row(color, frame);
-        self.pinned_row(color, frame);
+        let pinned = self.pinned_row(color, frame);
         frame.text(b"\n");
         self.build_row(color, frame, layout.0);
         self.rule_row(color, frame);
         self.test_row(color, frame, layout);
-        let mut rows = 6;
+        let mut rows = 6 + pinned;
         if self.failed_count() != 0 {
             self.tick_row(color, frame, layout.0);
             rows += 1;
@@ -318,10 +318,10 @@ impl<const RERUN: usize> State<'_, RERUN> {
         frame.text(b"\n");
     }
 
-    fn pinned_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
+    fn pinned_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) -> u16 {
         let Some(first) = self.failures().next() else {
             self.lock_note(color, frame);
-            return;
+            return 0;
         };
         let mut head = Line::<32>::new();
         head.text(b" FAIL ");
@@ -342,6 +342,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             paint(frame, color, Tone::Red, tail.bytes());
         }
         frame.text(b"\n");
+        excerpt::draw(frame, self.excerpt_at(0), (1, usize::from(self.cols).saturating_sub(1), color))
     }
 
     fn lock_note<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
@@ -516,10 +517,11 @@ impl<const RERUN: usize> State<'_, RERUN> {
 mod tests {
     use std::format;
     use std::string::String;
+    use std::vec::Vec;
 
     use crate::failure_class::Exit;
     use crate::line::Line;
-    use crate::render::{Event, Outcome, State, UNREAD};
+    use crate::render::{Event, ExcerptRows, Outcome, State, UNREAD, excerpt};
     use crate::test_alloc::measure_allocations;
 
     const FAILING: (&[u8], &[u8]) = (b"sched_records", b"the_host_binary_format_yields_every_declared_record_with_flags_and_group");
@@ -527,6 +529,10 @@ mod tests {
     const PANIC: &[u8] = b"thread 'x' panicked at tests/sched_records.rs:55:9:\nassertion failed: left == right\n";
 
     fn midrun<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], inflight: &'storage mut [u8], cols: u16) -> State<'storage, 200> {
+        midrun_with(arena, ledger, inflight, cols, UNREAD)
+    }
+
+    fn midrun_with<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], inflight: &'storage mut [u8], cols: u16, rows: ExcerptRows<'_>) -> State<'storage, 200> {
         let mut state = State::<200>::new(arena, ledger).with_inflight(inflight);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
         state.apply(&Event::Resize { cols });
@@ -537,7 +543,7 @@ mod tests {
             state.apply(&Event::Settled { id: (b"filler", b"passes"), outcome: Outcome::Passed, at_ms: None, solo: false });
         }
         state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
-        state.apply(&Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (PANIC, 0), exit: Exit::Code(101), excerpt: UNREAD });
+        state.apply(&Event::Captured { id: FAILING, stdout: (b"", 0), stderr: (PANIC, 0), exit: Exit::Code(101), excerpt: rows });
         state.apply(&Event::Started { id: FAILING, solo: false, at_ms: 5800, limit_ms: None });
         state.apply(&Event::Started { id: SHARD, solo: false, at_ms: 8100, limit_ms: Some(120_000) });
         state.apply(&Event::Tick { now_ms: 47_100 });
@@ -717,6 +723,94 @@ mod tests {
             assert_eq!(frames, 10_000, "the loop ran every frame at {cols} columns, so a zero is not an empty loop");
             assert_eq!(allocations, 0, "{cols} columns");
             assert!(frame.bytes().len() > 400, "the last frame at {cols} columns is a real frame");
+        }
+    }
+
+    const SOURCE_ROWS: &[u8] = b"    52 |     let records = host_binary_records(&binary);\n    53 |     assert_eq!(records.len(), expected.len());\n    54 |     assert_eq!(records.flags(), expected.flags());\n>   55 |     assert_eq!(records.group(), expected.group());\n      |     ^^^^^^^^^ panicked here\n";
+    const STYLED_ROWS: &[u8] = b">   55 | \x1b[35massert_eq!\x1b[0m(records.group(), expected.group());\n";
+
+    fn pinned_frame(cols: u16, color: bool, rows: ExcerptRows<'_>) -> (String, u16) {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 2048], [0_u32; 8], [0_u8; 1024]);
+        let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, cols, rows);
+        let mut frame = Line::<4096>::new();
+        state.project_rich(color, &mut frame).expect("the frame holds one redraw");
+        (String::from_utf8(frame.bytes().to_vec()).expect("the frame is utf-8"), state.drawn_rows)
+    }
+
+    #[test]
+    fn the_pinned_failure_shows_the_stored_excerpt_rows_at_eighty_and_forty_columns() {
+        let (wide, _) = pinned_frame(80, false, Ok(SOURCE_ROWS));
+        let (narrow, _) = pinned_frame(40, false, Ok(SOURCE_ROWS));
+
+        let wide_expected = " FAIL 1  sched_records::the_\u{2026}d_with_flags_and_group  assertion failed: left ==\u{2026}\n     52 |     let records = host_binary_records(&binary);\n     53 |     assert_eq!(records.len(), expected.len());\n     54 |     assert_eq!(records.flags(), expected.flags());\n >   55 |     assert_eq!(records.group(), expected.group());\n       |     ^^^^^^^^^ panicked here\n\n";
+        let narrow_expected = " FAIL 1  sched_re\u{2026}and_group  assertion\u{2026}\n     52 |     let records = host_binar\u{2026}\n     53 |     assert_eq!(records.len()\u{2026}\n     54 |     assert_eq!(records.flags\u{2026}\n >   55 |     assert_eq!(records.group\u{2026}\n       |     ^^^^^^^^^ panicked here\n\n";
+        assert!(wide.contains(wide_expected), "{wide}");
+        assert!(narrow.contains(narrow_expected), "{narrow}");
+    }
+
+    #[test]
+    fn the_erase_moves_up_exactly_the_rows_a_frame_with_excerpt_rows_drew() {
+        let mut checked = 0;
+        for cols in [80_u16, 40] {
+            for color in [false, true] {
+                let (frame, drawn) = pinned_frame(cols, color, Ok(SOURCE_ROWS));
+                let (bare, bare_drawn) = pinned_frame(cols, color, UNREAD);
+
+                assert_eq!(usize::from(drawn), frame.matches('\n').count(), "{cols} columns, colour {color}");
+                assert_eq!(drawn, bare_drawn + 5, "five excerpt rows join the bare frame at {cols} columns");
+                assert_eq!(usize::from(bare_drawn), bare.matches('\n').count());
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 4);
+    }
+
+    #[test]
+    fn the_erase_matches_the_drawn_rows_when_an_excerpt_has_tabs_and_wide_glyphs_at_forty_columns() {
+        let rows = "    52 | \tlet name = \"日本語のテスト名前\";\n>   55 | \t\tassert!(\"漢字\".len() == 6);\n      | \t\t^^^^^^^^^ panicked here\n".as_bytes();
+        let (frame, drawn) = pinned_frame(40, false, Ok(rows));
+        let (_, bare_drawn) = pinned_frame(40, false, UNREAD);
+
+        assert_eq!(usize::from(drawn), frame.matches('\n').count(), "{frame}");
+        assert_eq!(drawn, bare_drawn + 3, "three excerpt rows join the bare frame");
+        let widest = frame.lines().map(|line| excerpt::visible(line.as_bytes())).max().expect("the frame has rows");
+        assert!(widest <= 40, "the widest drawn row is {widest} columns\n{frame}");
+        let excerpt_rows: Vec<&str> = frame.lines().filter(|line| line.contains(" | ")).collect();
+        assert_eq!(excerpt_rows.len(), 3, "{frame}");
+        assert!(excerpt_rows.iter().all(|line| excerpt::visible(line.as_bytes()) <= 39), "{excerpt_rows:?}");
+    }
+
+    #[test]
+    fn a_plain_screen_drops_the_stored_sgr_and_a_colour_screen_keeps_and_closes_it() {
+        let (plain, _) = pinned_frame(80, false, Ok(STYLED_ROWS));
+        let (colored, _) = pinned_frame(80, true, Ok(STYLED_ROWS));
+
+        let after_hide = plain.strip_prefix("\x1b[?25l").expect("the frame opens by hiding the cursor");
+        assert_eq!(after_hide.bytes().filter(|byte| *byte == 0x1b).count(), 0, "{plain}");
+        assert!(plain.contains(" >   55 | assert_eq!(records.group(), expected.group());\n"), "{plain}");
+        assert!(colored.contains(" >   55 | \x1b[35massert_eq!\x1b[0m(records.group(), expected.group());\x1b[0m\n"), "{colored}");
+    }
+
+    #[test]
+    fn ten_thousand_frames_with_excerpt_rows_at_each_width_allocate_nothing() {
+        for cols in [80_u16, 40, 200] {
+            let (mut arena, mut ledger, mut inflight) = ([0_u8; 2048], [0_u32; 8], [0_u8; 1024]);
+            let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, cols, Ok(SOURCE_ROWS));
+            let mut frame = Line::<16_384>::new();
+            let mut frames = 0_usize;
+
+            let ((), allocations) = measure_allocations(|| {
+                for round in 0..10_000_u64 {
+                    frame.clear();
+                    state.apply(&Event::Tick { now_ms: 47_100 + round });
+                    state.project_rich(round % 2 == 0, &mut frame).expect("the frame holds one redraw");
+                    frames += 1;
+                }
+            });
+
+            assert_eq!(frames, 10_000, "the loop ran every frame at {cols} columns, so a zero is not an empty loop");
+            assert_eq!(allocations, 0, "{cols} columns");
+            assert!(String::from_utf8_lossy(frame.bytes()).contains("panicked here"), "the last frame at {cols} columns drew the excerpt");
         }
     }
 }

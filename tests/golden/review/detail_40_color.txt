@@ -6,9 +6,9 @@
  [1;31mTIMEOUT[0m    [2m71.66s[0m   [1;33mNO-RETRY[0m sche…roup
 [1;36m›[0m[1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shar…ptly
  ──────────────────────────────────────
- [1mshard_process::a_per_test_interrupt_en[0m
- [1mds_a_blocked_child_and_cargo_val_exits[0m
- [1m_promptly[0m
+ [1mshard_process[0m
+   [1ma_per_test_interrupt_ends_a_blocked_[0m
+   [1mchild_and_cargo_val_exits_promptly[0m
  [1;31mPANIC[0m[2m after 120.03s[0m
  tests/shard_process.rs:575[2m  e opens[0m
 [1;33mNO-RETRY[0m not retried alone: it failed

@@ -5,8 +5,8 @@
 [1;36m›[0m[1;32mPASS[0m        [2m8.40s[0m   [1;33mNO-RETRY[0m sched_records::the_host_…ord_with_flags_and_group
  [1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shard_process::a_per_tes…cargo_val_exits_promptly
  ──────────────────────────────────────────────────────────────────────────────
- [1msched_records::the_host_binary_format_yields_every_declared_record_with_flags_[0m
- [1mand_group[0m
+ [1msched_records[0m
+   [1mthe_host_binary_format_yields_every_declared_record_with_flags_and_group[0m
  [1;31mTIMEOUT[0m[2m after 71.66s[0m                        tests/sched_records.rs:55[2m  e opens[0m
 [1;33mNO-RETRY[0m not retried alone: it failed after 71.660s, over the 30s retry budget.
   r retries it now

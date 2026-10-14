@@ -11,6 +11,7 @@
 
 mod agent;
 mod entry;
+mod excerpt;
 mod json;
 pub mod review;
 
@@ -58,7 +59,8 @@ const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
 const STDERR_STREAM: &[u8] = b"stderr";
 const SOURCE_STREAM: &[u8] = b"source";
-const PAYLOAD_HEAD: usize = 5;
+const PAYLOAD_HEAD: usize = 7;
+const EXIT_HEAD: usize = 5;
 const QUIT_WINDOW_MS: u64 = 2_000;
 const PASS_SHOWN_MS: u64 = 1_500;
 
@@ -423,9 +425,9 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                 self.lock_len = 0;
             }
             Event::Resize { cols } => self.cols = cols,
-            Event::Captured { id, stdout, stderr, exit, .. } => {
+            Event::Captured { id, stdout, stderr, exit, excerpt } => {
                 self.remember_reason(id, stdout.0, stderr.0);
-                self.retain(id, exit, if stderr.0.is_empty() { stdout.0 } else { stderr.0 });
+                self.retain(id, exit, if stderr.0.is_empty() { stdout.0 } else { stderr.0 }, excerpt.unwrap_or_default());
                 _ = self.edit(id, |tail| entry::set_lines(tail, review::output_lines(stdout.0) + review::output_lines(stderr.0)));
             }
             Event::Started { id, at_ms, limit_ms, .. } => {
@@ -652,29 +654,46 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         true
     }
 
-    /// Keeps the newest failure's exit and captured bytes after its record, as much as the arena has room for.
+    /// Keeps the newest failure's exit, source-excerpt rows and captured bytes after its record, as much as the arena has room for.
     ///
     /// Only the last record can grow, so a capture that arrives after a later failure settled is not kept and the
-    /// review shows that row without output. The bytes are what [`State::detail`] classifies and shows verbatim.
-    fn retain(&mut self, id: Identity<'_>, exit: Exit, capture: &[u8]) {
+    /// review shows that row without output. The bytes are what [`State::detail`] classifies and shows verbatim; the
+    /// rows are what review and the pinned frame draw, bounded by `EXCERPT_ROWS` rows of `EXCERPT_ROW_BYTES` bytes.
+    fn retain(&mut self, id: Identity<'_>, exit: Exit, capture: &[u8], rows: &[u8]) {
         let Some(index) = self.find_failure(id) else {
             return;
         };
         let start = self.failure_tail_start(index) + entry::TAIL;
-        if start != self.used {
+        let room = self.arena.len().saturating_sub(start);
+        if start != self.used || room < PAYLOAD_HEAD {
             return;
         }
-        let kept = capture.len().min(self.arena.len().saturating_sub(start + PAYLOAD_HEAD));
+        let kept_rows = excerpt::keep(rows, &mut self.arena[start + PAYLOAD_HEAD..]);
+        let body = start + PAYLOAD_HEAD + kept_rows;
+        let kept = capture.len().min(self.arena.len() - body);
         let (tag, value) = match exit {
             Exit::Code(code) => (0, code),
             Exit::Signal(signal) => (1, signal),
             Exit::DeadlineKilled => (2, 0),
         };
         self.arena[start] = tag;
-        self.arena[start + 1..start + PAYLOAD_HEAD].copy_from_slice(&value.to_le_bytes());
-        self.arena[start + PAYLOAD_HEAD..start + PAYLOAD_HEAD + kept].copy_from_slice(&capture[..kept]);
-        self.used = start + PAYLOAD_HEAD + kept;
-        _ = self.edit(id, |tail| entry::set_payload(tail, PAYLOAD_HEAD + kept));
+        self.arena[start + 1..start + EXIT_HEAD].copy_from_slice(&value.to_le_bytes());
+        self.arena[start + EXIT_HEAD..start + PAYLOAD_HEAD].copy_from_slice(&u16::try_from(kept_rows).unwrap_or(0).to_le_bytes());
+        self.arena[body..body + kept].copy_from_slice(&capture[..kept]);
+        self.used = body + kept;
+        _ = self.edit(id, |tail| entry::set_payload(tail, PAYLOAD_HEAD + kept_rows + kept));
+    }
+
+    /// The source-excerpt rows [`State::retain`] kept for the failure at ledger `index`; empty when there are none.
+    pub(super) fn excerpt_at(&self, index: usize) -> &[u8] {
+        let length = entry::payload(self.failure_tail(index));
+        if length < PAYLOAD_HEAD {
+            return b"";
+        }
+        let start = self.failure_tail_start(index) + entry::TAIL;
+        let mut size = [0; 2];
+        size.copy_from_slice(&self.arena[start + EXIT_HEAD..start + PAYLOAD_HEAD]);
+        &self.arena[start + PAYLOAD_HEAD..start + PAYLOAD_HEAD + usize::from(u16::from_le_bytes(size))]
     }
 
     /// A failure's class, source location and verbatim output, classified from the bytes [`State::retain`] kept.
@@ -682,25 +701,26 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     pub fn detail(&self, id: Identity<'_>) -> review::Detail<'_> {
         let kept = self.find_failure(id).map(|index| (self.failure_tail_start(index) + entry::TAIL, entry::payload(self.failure_tail(index))));
         let Some((start, length)) = kept.filter(|(_, length)| *length >= PAYLOAD_HEAD) else {
-            return (Class::Panic, None, (b"", None), b"");
+            return (Class::Panic, None, (b"", None), b"", b"");
         };
         let mut value = [0; 4];
-        value.copy_from_slice(&self.arena[start + 1..start + PAYLOAD_HEAD]);
+        value.copy_from_slice(&self.arena[start + 1..start + EXIT_HEAD]);
         let exit = match (self.arena[start], i32::from_le_bytes(value)) {
             (0, code) => Exit::Code(code),
             (1, signal) => Exit::Signal(signal),
             _ => Exit::DeadlineKilled,
         };
-        let capture = &self.arena[start + PAYLOAD_HEAD..start + length];
+        let rows = self.find_failure(id).map_or(&b""[..], |index| self.excerpt_at(index));
+        let capture = &self.arena[start + PAYLOAD_HEAD + rows.len()..start + length];
         match classify(capture, exit, 0) {
             Ok(record) => {
                 let located = match record.location {
                     Ok(site) | Err(Absent::External(site)) => Some(site),
                     Err(Absent::NoPanicSite) => None,
                 };
-                (record.class, located, (record.message, record.sides), capture)
+                (record.class, located, (record.message, record.sides), rows, capture)
             }
-            Err(_) => (Class::Panic, None, (b"", None), capture),
+            Err(_) => (Class::Panic, None, (b"", None), rows, capture),
         }
     }
 

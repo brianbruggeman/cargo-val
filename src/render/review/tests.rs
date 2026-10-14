@@ -7,13 +7,14 @@ use std::vec::Vec;
 use super::{Action, Detail, Key, Rerun, Verdict};
 use crate::failure_class::{Class, Enforcer, Exit, Location};
 use crate::line::Line;
-use crate::render::{Event, Identity, Mode, Outcome, State, UNREAD};
+use crate::render::{Event, ExcerptRows, Identity, Mode, Outcome, State, UNREAD, excerpt};
 use crate::test_alloc::measure_allocations;
 
 const SCHED: (&[u8], &[u8]) = (b"sched_records", b"the_host_binary_format_yields_every_declared_record_with_flags_and_group");
 const SHARD: (&[u8], &[u8]) = (b"shard_process", b"a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly");
 const SCHED_OUTPUT: &[u8] = b"proxima::test: body did not complete within the timeout\n";
 const SHARD_OUTPUT: &[u8] = b"thread 'a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly' panicked at tests/shard_process.rs:575:31:\nthe shard child reported its pid before the deadline\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n";
+const SHARD_ROWS: &[u8] = b"  572 |         .arg(\"--manifest-path\")\n  573 |         .arg(manifest)\n  574 |         .args([\"--process\", process, \"--no-fail-fast\"])\n> 575 |         .env_remove(\"RUST_TEST_THREADS\")\n      |                               ^^^^^^^^ panicked here\n  576 |         .env_remove(\"CARGO_VAL_MAX_FAIL\")\n  577 |         .env_remove(\"CARGO_VAL_FAIL_FAST\")\n  578 |         .env_remove(\"CARGO_VAL_PROCESS\")\n";
 const WIDTHS: [usize; 3] = [80, 60, 40];
 const CLOCK_MS: u64 = 138_205;
 const NOT_RETRIED: Verdict = Verdict::NotRetried { budget_secs: 30 };
@@ -28,10 +29,10 @@ fn tracked<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32]) -> 
 fn detail(id: Identity<'_>) -> Detail<'static> {
     if id == SCHED {
         let location = Location { file: b"tests/sched_records.rs", line: 55, col: 1 };
-        (Class::Timeout { enforced_by: Enforcer::Val }, Some(location), (b"", None), SCHED_OUTPUT)
+        (Class::Timeout { enforced_by: Enforcer::Val }, Some(location), (b"", None), b"", SCHED_OUTPUT)
     } else {
         let location = Location { file: b"tests/shard_process.rs", line: 575, col: 31 };
-        (Class::Panic, Some(location), (b"the shard child reported its pid before the deadline", None), SHARD_OUTPUT)
+        (Class::Panic, Some(location), (b"the shard child reported its pid before the deadline", None), b"", SHARD_OUTPUT)
     }
 }
 
@@ -41,13 +42,17 @@ fn settle(state: &mut Review<'_>, id: Identity<'_>, outcome: Outcome, millis: u6
 }
 
 fn run<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], passed: usize) -> Review<'storage> {
+    run_with_excerpt(arena, ledger, passed, UNREAD)
+}
+
+fn run_with_excerpt<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], passed: usize, shard_rows: ExcerptRows<'_>) -> Review<'storage> {
     let mut state = tracked(arena, ledger);
     for _ in 0..passed {
         settle(&mut state, (b"c68_run_policy", b"a_passing_test"), Outcome::Passed, 3_123);
     }
     for (id, millis, output) in [(SCHED, 71_660, SCHED_OUTPUT), (SHARD, 120_030, SHARD_OUTPUT)] {
         settle(&mut state, id, Outcome::Failed, millis);
-        state.apply(&Event::Captured { id, stdout: (output, 0), stderr: (b"", 0), exit: if id == SCHED { Exit::DeadlineKilled } else { Exit::Code(101) }, excerpt: UNREAD });
+        state.apply(&Event::Captured { id, stdout: (output, 0), stderr: (b"", 0), exit: if id == SCHED { Exit::DeadlineKilled } else { Exit::Code(101) }, excerpt: if id == SHARD { shard_rows } else { UNREAD } });
         state.apply(&Event::Retried { id, verdict: NOT_RETRIED });
     }
     state.apply(&Event::Tick { now_ms: CLOCK_MS });
@@ -530,7 +535,7 @@ fn ten_thousand_decodes_lane_chunks_projections_and_details_allocate_nothing() {
             state.project_live(&Event::Key(key), &mut frame).expect("the frame holds a review projection");
             projections += 1;
 
-            let (_, _, _, output) = state.detail(if round % 2 == 0 { SCHED } else { SHARD });
+            let (_, _, _, _, output) = state.detail(if round % 2 == 0 { SCHED } else { SHARD });
             detail_bytes += output.len();
             details += 1;
         }
@@ -651,7 +656,7 @@ fn the_state_keeps_each_failures_output_and_classifies_it_for_the_detail_view() 
     let state = run(&mut arena, &mut ledger, 1);
 
     assert_eq!(state.detail(SHARD), detail(SHARD), "a panic keeps its class, its line and its bytes");
-    let (class, _, _, output) = state.detail(SCHED);
+    let (class, _, _, _, output) = state.detail(SCHED);
     assert_eq!((class, output), (Class::Timeout { enforced_by: Enforcer::Val }, SCHED_OUTPUT), "a val deadline keeps its class and its bytes");
 }
 
@@ -665,7 +670,7 @@ fn a_long_capture_shows_the_assertion_first_then_the_lines_around_the_panic_with
     let long = |_: Identity<'_>| -> Detail<'static> {
         let location = Location { file: b"src/lib.rs", line: 11, col: 9 };
         let message: &[u8] = b"assertion `left == right` failed: expected three listeners, found [8080, 8443]";
-        (Class::Assert, Some(location), (message, Some((&b"2"[..], &b"3"[..]))), LONG_OUTPUT)
+        (Class::Assert, Some(location), (message, Some((&b"2"[..], &b"3"[..]))), b"", LONG_OUTPUT)
     };
     let mut frame = Line::<8192>::new();
     state.screen(long, 100, false, &mut frame).expect("the frame holds one review screen");
@@ -677,4 +682,148 @@ fn a_long_capture_shows_the_assertion_first_then_the_lines_around_the_panic_with
     assert!(text.contains("   right  3"), "{text}");
     assert!(text.contains("panicked at src/lib.rs:11:9:") && !text.contains("running 1 test"), "{text}");
     assert!(text.contains("above") && text.contains("below"), "{text}");
+}
+
+fn detail_frame(state: &Review<'_>, width: usize, color: bool) -> String {
+    let mut frame = Line::<8192>::new();
+    state.screen(|id| state.detail(id), width, color, &mut frame).expect("the frame holds one review screen");
+    String::from_utf8(frame.bytes().to_vec()).expect("a review frame is utf-8")
+}
+
+fn selected_shard<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], rows: ExcerptRows<'_>) -> Review<'storage> {
+    let mut state = run_with_excerpt(arena, ledger, 381, rows);
+    keys(&mut state, &[Key::Char(b'f'), Key::Char(b'j')]);
+    state
+}
+
+#[test]
+fn golden_detail_with_the_stored_excerpt_between_the_reason_and_the_output_window() {
+    let mut frames = 0;
+    for width in [80, 40] {
+        for (color, tag) in [(true, "color"), (false, "plain")] {
+            let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+            let state = selected_shard(&mut arena, &mut ledger, Ok(SHARD_ROWS));
+            let text = detail_frame(&state, width, color);
+
+            let reason = text.find("the shard child reported its pid").expect("the reason is shown");
+            let marker = text.find("> 575 |").expect("the failing excerpt row is shown");
+            let output = text.find("test output  verbatim").expect("the output window is shown");
+            assert!(reason < marker && marker < output, "{width} {tag}: excerpt must sit between reason and output\n{text}");
+            golden(&std::format!("detail_excerpt_{width}_{tag}.txt"), &text);
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, 4, "2 widths x 2 colour settings were compared");
+}
+
+#[test]
+fn a_failure_with_an_absent_excerpt_renders_exactly_as_one_the_driver_never_read() {
+    let mut frames = 0;
+    for width in WIDTHS {
+        let (mut unread_arena, mut unread_ledger) = ([0_u8; 4096], [0_u32; 8]);
+        let (mut absent_arena, mut absent_ledger) = ([0_u8; 4096], [0_u32; 8]);
+        let unread = selected_shard(&mut unread_arena, &mut unread_ledger, UNREAD);
+        let absent = selected_shard(&mut absent_arena, &mut absent_ledger, Err(b"external:/rustc/lib.rs:9"));
+
+        let (plain_unread, plain_absent) = (detail_frame(&unread, width, false), detail_frame(&absent, width, false));
+
+        assert_eq!(plain_unread, plain_absent, "width {width}");
+        assert!(!plain_unread.contains(" | "), "width {width}: no excerpt gutter appears\n{plain_unread}");
+        frames += 1;
+    }
+    assert_eq!(frames, 3, "every width was compared");
+}
+
+#[test]
+fn the_kept_excerpt_is_at_most_eight_rows_and_at_most_seven_times_512_bytes_cut_on_a_row_boundary() {
+    let numbered = [b"  100 | ".as_slice(), &[b'x'; 400], b"\n"].concat();
+    let long = [b"  100 | ".as_slice(), &[b'x'; 490], b"\n"].concat();
+    let mut cases = 0;
+    for (row, expected_rows) in [(&numbered, 8), (&long, 7)] {
+        let rows = row.repeat(20);
+        let (mut arena, mut ledger) = ([0_u8; 16_384], [0_u32; 8]);
+        let state = selected_shard(&mut arena, &mut ledger, Ok(&rows));
+
+        let (_, _, _, kept, _) = state.detail(SHARD);
+
+        assert_eq!(String::from_utf8_lossy(kept).matches('\n').count(), expected_rows, "rows of {} bytes", row.len());
+        assert_eq!(kept.len(), expected_rows * row.len(), "whole rows of {} bytes", row.len());
+        assert!(kept.len() <= 7 * 512 && kept.ends_with(b"\n"), "{} bytes", kept.len());
+        cases += 1;
+    }
+    assert_eq!(cases, 2, "the row cap and the byte cap were each the binding limit once");
+}
+
+#[test]
+fn retaining_an_excerpt_never_panics_at_any_arena_size_and_keeps_whole_rows_or_none() {
+    let mut sizes = 0;
+    let mut round_tripped = 0;
+    for size in (0..=64).chain([96, 128, 256, 1024, 4096, 65_536]) {
+        let (mut arena, mut ledger) = (vec![0_u8; size], [0_u32; 8]);
+        let state = run_with_excerpt(&mut arena, &mut ledger, 0, Ok(SHARD_ROWS));
+
+        let (_, _, _, kept, _) = state.detail(SHARD);
+
+        assert!(SHARD_ROWS.starts_with(kept), "arena {size}: the kept rows are a prefix of the stored rows");
+        assert!(kept.is_empty() || kept.ends_with(b"\n"), "arena {size}: a partial row was kept");
+        round_tripped += usize::from(kept == SHARD_ROWS);
+        sizes += 1;
+    }
+    assert_eq!(sizes, 71, "every arena size ran");
+    assert!(round_tripped >= 3, "the large arenas round-trip the whole excerpt, got {round_tripped}");
+}
+
+#[test]
+fn a_tab_and_cjk_excerpt_row_is_expanded_to_four_column_stops_and_clipped_within_the_width() {
+    let rows = "  101 | \tlet name = \"日本語のテスト名前\";\n> 102 | \t\tassert!(\"漢字\".len() == 6);\n".as_bytes();
+    let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+    let state = selected_shard(&mut arena, &mut ledger, Ok(rows));
+
+    let (_, _, _, kept, _) = state.detail(SHARD);
+    let frame = detail_frame(&state, 40, false);
+
+    assert!(!kept.contains(&b'\t'), "tabs are expanded when the rows are kept");
+    assert!(String::from_utf8_lossy(kept).starts_with("  101 |     let name"), "a tab at column 8 expands to the stop at 12");
+    let drawn: Vec<&str> = frame.lines().filter(|line| line.contains("101 |") || line.contains("102 |")).collect();
+    assert_eq!(drawn.len(), 2, "both excerpt rows are drawn\n{frame}");
+    assert!(drawn.iter().all(|line| excerpt::visible(line.as_bytes()) <= 39), "{drawn:?}");
+}
+
+#[test]
+fn excerpt_rows_wider_than_the_screen_are_clipped_with_an_ellipsis_and_plain_screens_drop_sgr() {
+    let styled = b"> 575 | \x1b[35mlet\x1b[0m value = a_very_long_expression_that_runs_past_the_edge_of_a_forty_column_screen();\n";
+    let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+    let state = selected_shard(&mut arena, &mut ledger, Ok(styled));
+
+    let plain = detail_frame(&state, 40, false);
+    let colored = detail_frame(&state, 40, true);
+
+    let plain_row = plain.lines().find(|line| line.contains("> 575 |")).expect("the plain row is shown");
+    let colored_row = colored.lines().find(|line| line.contains("> 575 |")).expect("the colour row is shown");
+    assert!(!plain.contains('\x1b') && plain_row.ends_with('\u{2026}') && columns(plain_row) <= 39, "{plain_row:?}");
+    assert!(colored_row.contains("\x1b[35mlet\x1b[0m") && columns(colored_row) <= 39, "{colored_row:?}");
+}
+
+#[test]
+fn ten_thousand_details_and_frames_with_excerpts_allocate_nothing() {
+    let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+    let state = selected_shard(&mut arena, &mut ledger, Ok(SHARD_ROWS));
+    let mut frame = Line::<8192>::new();
+    let (mut frames, mut details, mut excerpt_bytes) = (0_usize, 0_usize, 0_usize);
+
+    let ((), allocations) = measure_allocations(|| {
+        for round in 0..10_000_usize {
+            frame.clear();
+            state.screen(|id| state.detail(id), [80, 60, 40][round % 3], round % 2 == 0, &mut frame).expect("the frame holds one review screen");
+            frames += 1;
+            let (_, _, _, rows, _) = state.detail(SHARD);
+            excerpt_bytes += rows.len();
+            details += 1;
+        }
+    });
+
+    assert_eq!((frames, details), (10_000, 10_000), "every loop ran, so a zero is not an empty loop");
+    assert_eq!(excerpt_bytes, 10_000 * SHARD_ROWS.len(), "each detail returned the stored rows");
+    assert_eq!(allocations, 0);
+    assert!(String::from_utf8_lossy(frame.bytes()).contains("> 575 |"), "the last frame drew the excerpt");
 }
