@@ -365,10 +365,11 @@ mod spawn {
 
     pub type HeldLaunchStorage = std::boxed::Box<LaunchStorage>;
 
-    #[inline(never)]
     #[must_use]
     pub fn held_launch_storage() -> HeldLaunchStorage {
-        std::boxed::Box::new(LaunchStorage::default())
+        // zeroed in place on the heap: building the value first puts 298 KiB on the caller's stack twice
+        // all-zero is a valid LaunchStorage: zero bytes and null pointers
+        unsafe { std::boxed::Box::<LaunchStorage>::new_zeroed().assume_init() }
     }
 
     const DOC_NICE: c_int = 10;
