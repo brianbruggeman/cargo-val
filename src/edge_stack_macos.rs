@@ -5,9 +5,13 @@ use std::string::ToString;
 
 use memchr::memmem;
 
+use crate::edge_signal_unix::{abandon_slot, release_child, reserve_slot, track_child};
 use crate::edge_spawn_unix::{Child, spawn};
-use crate::stack_capture::{Capture, Unavailable, append};
+use crate::stack_capture::{Unavailable, append};
 use crate::stack_frames::Format;
+
+/// The format [`capture`] writes into the buffer.
+pub const FORMAT: Format = Format::Sample;
 
 const SAMPLE: &str = "/usr/bin/sample";
 const GRAPH_START: &[u8] = b"Call graph:";
@@ -18,16 +22,19 @@ const DRAIN_BYTES: usize = 512;
 ///
 /// Cold path: it spawns the tool through [`spawn`] (the `edge_spawn` path), blocks until the tool exits, reads its
 /// output file, and keeps only the `Call graph:` section. It allocates (path, file bytes) and blocks for the sampling
-/// second, so a driver runs it on a blocking worker, never on the event loop. Parse the buffer with
-/// [`Rows`](crate::stack_frames::Rows) using [`Format::Sample`].
-pub fn capture(pid: u32, buffer: &mut [u8]) -> Capture {
+/// second, so a driver runs it on a blocking worker, never on the event loop. Returns `(written, dropped)`: bytes now in
+/// `buffer` and useful bytes that did not fit. The tool is a signal-table child: a slot is reserved before the spawn,
+/// filled by the child, and released at reap, so an interrupt reaches `sample` like any other child. Parse the buffer with
+/// [`frames`](crate::stack_frames::frames) using [`FORMAT`].
+///
+/// # Errors
+///
+/// Returns [`Unavailable`] when `sample` cannot start, fails, or prints no call graph.
+pub fn capture(pid: u32, buffer: &mut [u8]) -> Result<(usize, usize), Unavailable> {
     let path = output_path(pid);
     let outcome = run_sample(pid, &path).and_then(|()| fs::read(&path).map_err(|error| io_failure("read sample output", &error)));
     let _ = fs::remove_file(&path);
-    match outcome {
-        Ok(bytes) => keep_call_graph(&bytes, buffer),
-        Err(reason) => Capture::Unavailable(reason),
-    }
+    outcome.and_then(|bytes| keep_call_graph(&bytes, buffer))
 }
 
 fn output_path(pid: u32) -> PathBuf {
@@ -42,10 +49,17 @@ fn run_sample(pid: u32, path: &Path) -> Result<(), Unavailable> {
     let target = pid.to_string();
     let file = path.as_os_str().as_encoded_bytes();
     let arguments: [&[u8]; 5] = [target.as_bytes(), b"1", b"-mayDie", b"-file", file];
-    let child = spawn(SAMPLE.as_bytes(), &arguments, &[], &[], None)
-        .map_err(|error| Unavailable::NoTool { tool: SAMPLE, os_code: error.os_code })?;
+    reserve_slot().map_err(|os_code| Unavailable::Io { operation: "reserve signal slot", os_code })?;
+    let child = spawn(SAMPLE.as_bytes(), &arguments, &[], &[], None).map_err(|error| {
+        abandon_slot();
+        Unavailable::NoTool { tool: SAMPLE, os_code: error.os_code }
+    })?;
+    let tracked = track_child(child.process_id());
     drain(&child);
-    match wait_status(&child) {
+    let status = wait_status(&child);
+    release_child(child.process_id());
+    tracked.map_err(|os_code| Unavailable::Io { operation: "track sample child", os_code })?;
+    match status {
         0 => Ok(()),
         status => Err(Unavailable::ToolFailed { tool: SAMPLE, status }),
     }
@@ -83,13 +97,13 @@ fn wait_status(child: &Child) -> i32 {
     if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { 128 + libc::WTERMSIG(status) }
 }
 
-fn keep_call_graph(bytes: &[u8], buffer: &mut [u8]) -> Capture {
+fn keep_call_graph(bytes: &[u8], buffer: &mut [u8]) -> Result<(usize, usize), Unavailable> {
     let Some(start) = memmem::find(bytes, GRAPH_START) else {
-        return Capture::Unavailable(Unavailable::Empty { source: SAMPLE });
+        return Err(Unavailable::Empty { source: SAMPLE });
     };
     let end = memmem::find(&bytes[start..], GRAPH_END).map_or(bytes.len(), |offset| start + offset);
     let mut written = 0;
     let dropped = append(buffer, &mut written, &bytes[start..end]);
-    Capture::Captured { format: Format::Sample, written, dropped, source: bytes.len() }
+    Ok((written, dropped))
 }
 

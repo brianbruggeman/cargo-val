@@ -1,15 +1,18 @@
-use core::str::{self, Lines, Utf8Error};
+use core::str::{self, Utf8Error};
 
 /// Which text a stack capture holds: macOS `sample` call-graph output, or Linux `/proc/<pid>/task/<tid>/stack` blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     /// `sample` output: a `Call graph:` section of indented `count symbol (in image) + offset [address] file:line` lines.
     Sample,
-    /// `Thread_<tid>` header lines each followed by `[<0>] symbol+0xoffset/0xsize` kernel frames.
+    /// `Thread_<tid>` header lines each followed by `[<0>] symbol+0xoffset/0xsize` kernel frames; the offset is absent for a `wchan` frame.
     KernelStack,
 }
 
 /// Where a frame lives, from the reader's point of view.
+///
+/// This is frame ownership, not a failure kind: `failure_class::Class` names why a test failed, and no variant of it
+/// describes a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     /// A crate the caller named as the workspace.
@@ -40,166 +43,62 @@ pub struct Frame<'a> {
     pub class: Class,
 }
 
-/// One output row of [`Rows`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Row<'a> {
-    /// A thread header; the frames after it belong to it.
-    Thread(&'a str),
-    Frame(Frame<'a>),
-    /// This many consecutive runtime frames were folded away.
-    Folded(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Section {
-    Preamble,
-    Graph,
-    Done,
-}
-
 const RUNTIME_CRATES: [&str; 8] = ["std", "core", "alloc", "test", "panic_unwind", "panic_abort", "proc_macro", "backtrace"];
 
-/// Sans-IO iterator over a captured stack: thread headers, classified frames, and optionally runs of runtime frames folded.
+/// Sans-IO parse of a captured stack into classified frames, in input order.
 ///
-/// Zero allocation: every row borrows from the input, and the iterator holds only a cursor.
-/// Frame classes come from the crate named in the symbol (`workspace` lists the user crates, in
-/// underscore form), falling back to the image for symbols that name no Rust crate.
-#[derive(Debug, Clone)]
-pub struct Rows<'a> {
-    lines: Lines<'a>,
-    format: Format,
-    workspace: &'a [&'a str],
-    fold: bool,
-    section: Section,
-    thread: &'a str,
-    folded: usize,
-    pending: Option<Row<'a>>,
+/// A source pipe over `str::lines`: `skip_while`/`take_while` cut the `Call graph:` section out of `sample` output, and
+/// `scan` carries the current thread header, so the iterator holds only a cursor and allocates nothing. Every frame
+/// borrows from `bytes`. Frame classes come from the crate named in the symbol (`workspace` lists the user crates, in
+/// underscore form), falling back to the image for symbols that name no Rust crate. To drop runtime frames, filter on
+/// [`Class::Runtime`]; the count dropped is the total minus the count kept.
+///
+/// # Errors
+///
+/// Returns the UTF-8 error when the captured bytes are not text.
+pub fn frames<'a>(bytes: &'a [u8], format: Format, workspace: &'a [&'a str]) -> Result<impl Iterator<Item = Frame<'a>>, Utf8Error> {
+    let graph = format == Format::Sample;
+    Ok(str::from_utf8(bytes)?
+        .lines()
+        .skip_while(move |line| graph && line.trim() != "Call graph:")
+        .skip(usize::from(graph))
+        .take_while(move |line| !graph || !line.trim().is_empty())
+        .scan("", move |thread, line| Some(parse_line(format, line, thread, workspace)))
+        .flatten())
 }
 
-impl<'a> Rows<'a> {
-    /// Every frame, none folded.
-    ///
-    /// # Errors
-    ///
-    /// Returns the UTF-8 error when the captured bytes are not text.
-    pub fn raw(bytes: &'a [u8], format: Format, workspace: &'a [&'a str]) -> Result<Self, Utf8Error> {
-        Self::new(bytes, format, workspace, false)
-    }
-
-    /// Runs of runtime frames collapse into one [`Row::Folded`]; user and other frames stay.
-    ///
-    /// # Errors
-    ///
-    /// Returns the UTF-8 error when the captured bytes are not text.
-    pub fn folded(bytes: &'a [u8], format: Format, workspace: &'a [&'a str]) -> Result<Self, Utf8Error> {
-        Self::new(bytes, format, workspace, true)
-    }
-
-    fn new(bytes: &'a [u8], format: Format, workspace: &'a [&'a str], fold: bool) -> Result<Self, Utf8Error> {
-        let section = match format {
-            Format::Sample => Section::Preamble,
-            Format::KernelStack => Section::Graph,
-        };
-        Ok(Self {
-            lines: str::from_utf8(bytes)?.lines(),
-            format,
-            workspace,
-            fold,
-            section,
-            thread: "",
-            folded: 0,
-            pending: None,
-        })
-    }
-
-    fn read_line(&mut self, line: &'a str) -> Option<Row<'a>> {
-        match (self.format, self.section) {
-            (_, Section::Done) => None,
-            (Format::Sample, Section::Preamble) => {
-                if line.trim() == "Call graph:" {
-                    self.section = Section::Graph;
-                }
-                None
-            }
-            (Format::Sample, Section::Graph) => self.sample_line(line),
-            (Format::KernelStack, _) => self.kernel_line(line),
-        }
-    }
-
-    fn sample_line(&mut self, line: &'a str) -> Option<Row<'a>> {
-        if line.trim().is_empty() {
-            self.section = Section::Done;
-            return None;
-        }
-        let trimmed = line.trim_start_matches([' ', '+', '!', ':', '|']);
-        let depth = line.len() - trimmed.len();
-        let (count, body) = trimmed.split_once(' ')?;
-        let samples = count.parse::<u32>().ok()?;
-        let body = body.trim_start();
-        if body.starts_with("Thread_") {
-            self.thread = body.trim_end();
-            return Some(Row::Thread(self.thread));
-        }
-        let (symbol, rest) = body.split_once("  (in ")?;
-        let (image, tail) = rest.split_once(')')?;
-        let (file, number) = source_location(tail);
-        Some(Row::Frame(self.frame(depth, samples, symbol, image, file, number)))
-    }
-
-    fn kernel_line(&mut self, line: &'a str) -> Option<Row<'a>> {
-        let trimmed = line.trim();
-        if trimmed.starts_with("Thread_") {
-            self.thread = trimmed;
-            return Some(Row::Thread(trimmed));
-        }
-        let (_, after) = trimmed.split_once("] ")?;
-        let symbol = after.split_once('+').map_or(after, |(name, _)| name);
-        Some(Row::Frame(self.frame(0, 1, symbol, "kernel", None, None)))
-    }
-
-    fn frame(&self, depth: usize, samples: u32, symbol: &'a str, image: &'a str, file: Option<&'a str>, line: Option<u32>) -> Frame<'a> {
-        Frame {
-            thread: self.thread,
-            depth,
-            samples,
-            symbol,
-            image,
-            file,
-            line,
-            class: classify(symbol, image, self.workspace),
-        }
+fn parse_line<'a>(format: Format, line: &'a str, thread: &mut &'a str, workspace: &[&str]) -> Option<Frame<'a>> {
+    match format {
+        Format::Sample => sample_line(line, thread, workspace),
+        Format::KernelStack => kernel_line(line, thread, workspace),
     }
 }
 
-impl<'a> Iterator for Rows<'a> {
-    type Item = Row<'a>;
-
-    fn next(&mut self) -> Option<Row<'a>> {
-        if let Some(row) = self.pending.take() {
-            return Some(row);
-        }
-        loop {
-            let Some(line) = self.lines.next().filter(|_| self.section != Section::Done) else {
-                return self.flush_folded();
-            };
-            match self.read_line(line) {
-                Some(Row::Frame(frame)) if self.fold && frame.class == Class::Runtime => self.folded += 1,
-                Some(row) if self.folded == 0 => return Some(row),
-                Some(row) => {
-                    self.pending = Some(row);
-                    return self.flush_folded();
-                }
-                None => {}
-            }
-        }
+fn sample_line<'a>(line: &'a str, thread: &mut &'a str, workspace: &[&str]) -> Option<Frame<'a>> {
+    let trimmed = line.trim_start_matches([' ', '+', '!', ':', '|']);
+    let depth = line.len() - trimmed.len();
+    let (count, body) = trimmed.split_once(' ')?;
+    let samples = count.parse::<u32>().ok()?;
+    let body = body.trim_start();
+    if body.starts_with("Thread_") {
+        *thread = body.trim_end();
+        return None;
     }
+    let (symbol, rest) = body.split_once("  (in ")?;
+    let (image, tail) = rest.split_once(')')?;
+    let (file, number) = source_location(tail);
+    Some(Frame { thread, depth, samples, symbol, image, file, line: number, class: classify(symbol, image, workspace) })
 }
 
-impl Rows<'_> {
-    fn flush_folded(&mut self) -> Option<Row<'static>> {
-        let count = core::mem::take(&mut self.folded);
-        (count > 0).then_some(Row::Folded(count))
+fn kernel_line<'a>(line: &'a str, thread: &mut &'a str, workspace: &[&str]) -> Option<Frame<'a>> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("Thread_") {
+        *thread = trimmed;
+        return None;
     }
+    let (_, after) = trimmed.split_once("] ")?;
+    let symbol = after.split_once('+').map_or(after, |(name, _)| name);
+    Some(Frame { thread, depth: 0, samples: 1, symbol, image: "kernel", file: None, line: None, class: classify(symbol, "kernel", workspace) })
 }
 
 fn source_location(tail: &str) -> (Option<&str>, Option<u32>) {
@@ -274,50 +173,56 @@ fn length_prefixed(text: &str, from: usize) -> Option<&str> {
     tail.get(start..start.checked_add(length)?)
 }
 
+
 #[cfg(test)]
 mod tests {
     use std::vec::Vec;
 
-    use super::{Class, Format, Frame, Row, Rows};
+    use super::{Class, Format, Frame, frames};
     use crate::test_alloc::measure_allocations;
 
     /// Real `sample` output: `/usr/bin/sample <pid> 1 -mayDie -file <path>` against the `tests/fixtures/blocked_test`
     /// lib test binary while its `unit_blocks_when_requested` test was blocked in `File::open` on a fifo with no
     /// writer. macOS 15.8 (24H20), ARM64, 2026-10-13. Committed unedited.
     const SAMPLE: &[u8] = include_bytes!("../tests/fixtures/stack/sample_blocked_fixture.txt");
+    /// Real kernel stacks of the same fixture blocked the same way on versailles (Linux 7.2.9-zen1-1-zen `x86_64`,
+    /// 2026-10-13): `sudo cat /proc/<pid>/task/<tid>/stack` for each of the two threads of
+    /// `cargo_val_blocked_fixture-2e42461185e9115d --exact tests::unit_blocks_when_requested`, each file prefixed
+    /// with the `Thread_<tid>` header line that `edge_stack_linux::capture` writes. Frame lines unedited.
+    const KERNEL_STACK: &[u8] = include_bytes!("../tests/fixtures/stack/kernel_stack_blocked_fixture.txt");
+    /// Real `/proc/<pid>/task/<tid>/wchan` of the same two threads, read unprivileged, with the same headers. The
+    /// kernel prints the symbol alone: no offset, no size, no callers.
+    const KERNEL_WCHAN: &[u8] = include_bytes!("../tests/fixtures/stack/kernel_wchan_blocked_fixture.txt");
     const WORKSPACE: [&str; 1] = ["cargo_val_blocked_fixture"];
 
-    fn frames(rows: Rows<'_>) -> Vec<Frame<'_>> {
-        rows.filter_map(|row| if let Row::Frame(frame) = row { Some(frame) } else { None }).collect()
+    fn parse(bytes: &'static [u8], format: Format) -> Vec<Frame<'static>> {
+        frames(bytes, format, &WORKSPACE).expect("captured stacks are text").collect()
     }
 
     #[test]
     fn real_sample_names_the_user_frame_where_the_test_blocks() {
-        let rows = Rows::raw(SAMPLE, Format::Sample, &WORKSPACE).expect("sample output is text");
+        let all = parse(SAMPLE, Format::Sample);
 
-        let frames = frames(rows);
-
-        let blocked = frames
+        let blocked = all
             .iter()
             .rfind(|frame| frame.class == Class::User && frame.thread.contains("unit_blocks_when_requested"))
             .expect("the blocked test thread has a user frame");
         assert!(blocked.symbol.contains("unit_blocks_when_requested"), "{}", blocked.symbol);
         assert_eq!((blocked.file, blocked.line), (Some("lib.rs"), Some(26)));
-        assert_eq!(frames.len(), 32, "every frame line of the call graph");
+        assert_eq!(all.len(), 32, "every frame line of the call graph");
     }
 
     #[test]
-    fn real_sample_folds_runtime_frames_into_counted_rows() {
-        let rows = Rows::folded(SAMPLE, Format::Sample, &WORKSPACE).expect("sample output is text");
+    fn real_sample_keeps_user_frames_when_runtime_frames_are_filtered_out() {
+        let all = parse(SAMPLE, Format::Sample);
 
-        let all: Vec<Row<'_>> = rows.collect();
+        let kept: Vec<&Frame<'_>> = all.iter().filter(|frame| frame.class != Class::Runtime).collect();
 
-        let folded: usize = all.iter().filter_map(|row| if let Row::Folded(count) = row { Some(*count) } else { None }).sum();
-        let kept = all.iter().filter(|row| matches!(row, Row::Frame(_))).count();
-        assert_eq!(kept + folded, 32, "folding loses no frame");
-        assert!(folded > 0 && kept < 32, "folded={folded} kept={kept}");
-        assert_eq!(all.iter().filter(|row| matches!(row, Row::Thread(_))).count(), 2);
-        assert!(all.iter().filter_map(|row| if let Row::Frame(frame) = row { Some(frame) } else { None }).all(|frame| frame.class != Class::Runtime));
+        assert!(!kept.is_empty() && kept.len() < all.len(), "kept={} of {}", kept.len(), all.len());
+        assert!(kept.iter().any(|frame| frame.class == Class::User));
+        let mut threads: Vec<&str> = all.iter().map(|frame| frame.thread).collect();
+        threads.dedup();
+        assert_eq!(threads.len(), 2, "{threads:?}");
     }
 
     #[test]
@@ -325,37 +230,45 @@ mod tests {
         let (parsed, allocations) = measure_allocations(|| {
             let mut total = 0_usize;
             for _ in 0..100_000 {
-                total += Rows::folded(SAMPLE, Format::Sample, &WORKSPACE).expect("sample output is text").count();
+                total += frames(SAMPLE, Format::Sample, &WORKSPACE).expect("sample output is text").count();
             }
             total
         });
 
-        assert!(parsed > 100_000, "parsed rows: {parsed}");
+        assert!(parsed > 100_000, "parsed frames: {parsed}");
         assert_eq!(allocations, 0);
     }
 
     #[test]
-    fn kernel_stack_blocks_parse_as_runtime_frames_per_thread() {
-        // layout documented in proc(5) for /proc/<pid>/task/<tid>/stack; no Linux host was available to capture one
-        let text = b"Thread_4242\n[<0>] futex_wait_queue+0x4d/0x90\n[<0>] __x64_sys_futex+0x14e/0x200\n[<0>] do_syscall_64+0x5b/0x1a0\nThread_4243\n[<0>] do_epoll_wait+0x5ae/0x7c0\n";
+    fn real_kernel_stack_of_a_fifo_open_names_wait_for_partner_under_its_thread() {
+        let all = parse(KERNEL_STACK, Format::KernelStack);
 
-        let rows: Vec<Row<'_>> = Rows::raw(text, Format::KernelStack, &WORKSPACE).expect("text").collect();
-
-        assert_eq!(rows.len(), 6);
-        let Row::Frame(first) = rows[1] else { panic!("second row is a frame: {:?}", rows[1]) };
-        assert_eq!((first.symbol, first.thread, first.class), ("futex_wait_queue", "Thread_4242", Class::Runtime));
+        assert_eq!(all.len(), 14);
+        let leaf = all.iter().find(|frame| frame.symbol == "wait_for_partner").expect("the fifo open wait is a frame");
+        assert_eq!((leaf.thread, leaf.class, leaf.image), ("Thread_2219216", Class::Runtime, "kernel"));
+        assert_eq!(all[0].symbol, "__futex_wait");
+        assert_eq!(all[0].thread, "Thread_2219215");
+        assert_eq!(all[13].symbol, "entry_SYSCALL_64_after_hwframe");
     }
 
     #[test]
-    fn rows_are_empty_for_text_without_a_call_graph() {
-        let rows = Rows::raw(b"sample: process 99999 does not exist\n", Format::Sample, &WORKSPACE).expect("text");
+    fn real_wchan_frames_parse_without_an_offset() {
+        let all = parse(KERNEL_WCHAN, Format::KernelStack);
 
-        assert_eq!(rows.count(), 0);
+        let symbols: Vec<(&str, &str)> = all.iter().map(|frame| (frame.thread, frame.symbol)).collect();
+        assert_eq!(symbols, [("Thread_2219215", "__futex_wait"), ("Thread_2219216", "wait_for_partner")]);
     }
 
     #[test]
-    fn rows_refuse_bytes_that_are_not_text() {
-        assert!(Rows::raw(&[0xff, 0xfe, b'\n'], Format::Sample, &WORKSPACE).is_err());
+    fn frames_are_empty_for_text_without_a_call_graph() {
+        let all = frames(b"sample: process 99999 does not exist\n", Format::Sample, &WORKSPACE).expect("text");
+
+        assert_eq!(all.count(), 0);
+    }
+
+    #[test]
+    fn frames_refuse_bytes_that_are_not_text() {
+        assert!(frames(&[0xff, 0xfe, b'\n'], Format::Sample, &WORKSPACE).is_err());
     }
 
     #[test]
