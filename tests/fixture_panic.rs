@@ -2,12 +2,16 @@
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
+
+use cargo_val::edge_stream_unix::ChildStream;
 
 mod common;
 #[path = "common/fifo.rs"]
@@ -60,9 +64,14 @@ fn open_reader(path: &Path) -> File {
         .expect("a fifo opens for nonblocking read without a writer")
 }
 
-fn read_pid(ready: &File) -> libc::pid_t {
-    let text = fifo::read_line(ready.as_raw_fd(), "the blocked test never reported it was blocked");
-    text.trim().parse().unwrap_or_else(|error| panic!("the ready fifo carries one pid, got {text:?}: {error}"))
+// read+write so the ready fifo parks until the child writes its pid instead of reading EOF before any writer exists
+fn open_ready(path: &Path) -> File {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .expect("a fifo opens for nonblocking read-write")
 }
 
 fn gone(pid: libc::pid_t) -> bool {
@@ -80,23 +89,31 @@ async fn a_panicking_supervised_test_still_kills_its_group() {
     let warm = fixture_output(&mut blocked_test_command(None));
     assert_eq!(warm.status.code(), Some(0), "the fixture builds and its unblocked test passes");
     let directory = probe_directory();
-    let ready = open_reader(&directory.join("ready"));
-    let held = open_reader(&directory.join("held"));
+    let ready = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
+    let held = ChildStream::new(OwnedFd::from(open_reader(&directory.join("held"))));
     let mut command = blocked_test_command(Some(&directory));
-    let (mut blocked, mut leader): (libc::pid_t, libc::pid_t) = (0, 0);
+    let (reported, report) = mpsc::channel::<()>();
 
-    let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
-        supervised(&mut command, |leader_pid, _, _, _| {
-            blocked = read_pid(&ready);
-            leader = libc::pid_t::try_from(leader_pid).expect("a pid fits pid_t");
-            panic!("{CALLER_PANIC}");
-        })
-    }));
+    let run = thread::spawn(move || {
+        let mut leader: libc::pid_t = 0;
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            supervised(&mut command, |leader_pid, _, _, _| {
+                leader = libc::pid_t::try_from(leader_pid).expect("a pid fits pid_t");
+                report.recv().expect("the test body reports the blocked pid");
+                panic!("{CALLER_PANIC}");
+            })
+        }));
+        (unwound, leader)
+    });
+    let text = fifo::first_line(&ready, "the blocked test never reported it was blocked").await;
+    let blocked: libc::pid_t = text.trim().parse().unwrap_or_else(|error| panic!("the ready fifo carries one pid, got {text:?}: {error}"));
+    reported.send(()).expect("the run is waiting for the blocked pid");
+    let (unwound, leader) = run.join().expect("the run thread finishes");
 
     let payload = unwound.expect_err("the caller's panic must propagate out of supervised");
     let message = payload.downcast_ref::<String>().map(String::as_str).or_else(|| payload.downcast_ref::<&str>().copied());
     assert_eq!(message, Some(CALLER_PANIC), "supervised resumed a different panic than the caller's");
-    fifo::await_readable(held.as_raw_fd(), "the held fifo never reached EOF: the blocked test still holds its write end");
+    fifo::until_eof(&held, "the held fifo never reached EOF: the blocked test still holds its write end").await;
     assert!(gone(blocked), "the blocked test (pid {blocked}) survived the unwind");
     assert!(group_gone(blocked), "the blocked test's process group survived the unwind");
     assert!(gone(leader), "the group leader (pid {leader}) survived the unwind");

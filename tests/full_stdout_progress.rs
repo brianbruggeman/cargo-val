@@ -3,18 +3,23 @@
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fs;
-use std::io::{PipeReader, PipeWriter, Read};
-use std::os::fd::AsRawFd;
+use core::future::poll_fn;
+use core::task::Poll;
+use std::io::PipeWriter;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
+use cargo_val::edge_stream_unix::ChildStream;
+use prime::os::readiness::{Readiness, ReadyState};
+use proxima_primitives::pipe::{Exhausted, Pipe};
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const FIXTURE_TEST_COUNT: usize = 3000;
 const IGNORED_FLOOD_COUNT: usize = 2500;
 const PIPE_CEILING_BYTES: usize = 65_536;
-const WAIT_MILLISECONDS: i32 = 300_000;
-const CHUNK_BYTES: usize = 8_192;
 const FLOOD_PIPE_BYTES: libc::c_int = 4096;
 const RUN_PIPE_BYTES: libc::c_int = 65_536;
 
@@ -59,14 +64,22 @@ fn size_pipe(writer: &PipeWriter, bytes: libc::c_int) {
 #[cfg(not(target_os = "linux"))]
 fn size_pipe(_writer: &PipeWriter, _bytes: libc::c_int) {}
 
-fn await_readable(descriptor: libc::c_int, label: &str) {
-    let mut watched = libc::pollfd {
-        fd: descriptor,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ready = unsafe { libc::poll(&raw mut watched, 1, WAIT_MILLISECONDS) };
-    assert_eq!(ready, 1, "{label}: no progress within the bound");
+fn set_nonblocking(descriptor: libc::c_int) {
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    let set = unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    assert_eq!(set, 0, "set O_NONBLOCK: {}", std::io::Error::last_os_error());
+}
+
+// waits for pending bytes without consuming them, so the pipe stays full for the stall assertion
+async fn await_pending_bytes(descriptor: libc::c_int, label: &str) {
+    let mut gate = Readiness::new(descriptor);
+    poll_fn(|context| match gate.poll(context) {
+        Ok(ReadyState::Retry) => Poll::Ready(()),
+        Ok(ReadyState::Parked) => Poll::Pending,
+        Ok(ReadyState::OffWorker) => panic!("{label}: gate polled off a prime worker"),
+        Err(error) => panic!("{label}: gate failed: {error}"),
+    })
+    .await;
 }
 
 fn unread_bytes(descriptor: libc::c_int) -> libc::c_int {
@@ -109,16 +122,16 @@ fn expected_names() -> BTreeSet<String> {
         .collect()
 }
 
-fn collect_done_names(done: &mut fs::File) -> BTreeSet<String> {
+async fn collect_done_names(done: &ChildStream) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut pending = Vec::new();
     let mut reported = 0;
     while reported < FIXTURE_TEST_COUNT {
-        await_readable(done.as_raw_fd(), "done log");
-        let mut chunk = [0_u8; CHUNK_BYTES];
-        let count = done.read(&mut chunk).expect("done log reads");
-        assert!(count > 0, "done log closed before every fixture test reported");
-        pending.extend_from_slice(&chunk[..count]);
+        let range = match done.call(()).await {
+            Ok(read) => read.expect("done log reads"),
+            Err(Exhausted) => panic!("done log closed before every fixture test reported"),
+        };
+        pending.extend_from_slice(&done.window(range).expect("the range was just read"));
         while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = pending.drain(..=newline).collect();
             let name = String::from_utf8(line[..newline].to_vec()).expect("done line is text");
@@ -129,20 +142,16 @@ fn collect_done_names(done: &mut fs::File) -> BTreeSet<String> {
     names
 }
 
-fn drain_stdout(stdout: &mut PipeReader) -> Vec<u8> {
+async fn drain_stdout(stdout: &ChildStream) -> Vec<u8> {
     let mut output = Vec::new();
-    loop {
-        await_readable(stdout.as_raw_fd(), "stdout");
-        let mut chunk = [0_u8; CHUNK_BYTES];
-        let count = stdout.read(&mut chunk).expect("stdout reads");
-        if count == 0 {
-            return output;
-        }
-        output.extend_from_slice(&chunk[..count]);
+    while let Ok(read) = stdout.call(()).await {
+        let range = read.expect("stdout reads");
+        output.extend_from_slice(&stdout.window(range).expect("the range was just read"));
     }
+    output
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drain() {
     let directory = target_directory()
         .join("full-stdout")
@@ -150,25 +159,30 @@ async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drai
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).expect("run directory is creatable");
     make_fifo(&directory.join("done"));
-    let mut done = fs::OpenOptions::new()
+    let done = fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(libc::O_NONBLOCK)
         .open(directory.join("done"))
         .expect("done fifo opens read-write so the reader never sees EOF");
+    let done = ChildStream::new(OwnedFd::from(done));
 
-    let (mut stdout, stdout_writer) = std::io::pipe().expect("stdout pipe is creatable");
+    let (stdout, stdout_writer) = std::io::pipe().expect("stdout pipe is creatable");
+    set_nonblocking(stdout.as_raw_fd());
+    let stdout_descriptor = stdout.as_raw_fd();
+    let stdout = ChildStream::new(OwnedFd::from(stdout));
     // the pump pauses once its status queue is full, so pipe plus queue must hold the fixture's whole stdout for every test to run unread
     size_pipe(&stdout_writer, RUN_PIPE_BYTES);
     let mut running = Running(spawn_cargo_val(&directory, "full_stdout", stdout_writer));
 
-    let names = collect_done_names(&mut done);
+    let names = collect_done_names(&done).await;
     assert_eq!(names, expected_names(), "every fixture test ran exactly once");
     let alive = running.0.try_wait().expect("cargo-val status reads");
     assert!(alive.is_none(), "cargo-val waits on a full stdout instead of exiting: {alive:?}");
-    let unread = unread_bytes(stdout.as_raw_fd());
+    let unread = unread_bytes(stdout_descriptor);
     assert!(unread > 0, "no stdout was pending while the stdout pipe went unread");
 
-    let output = drain_stdout(&mut stdout);
+    let output = drain_stdout(&stdout).await;
     assert!(
         output.len() > PIPE_CEILING_BYTES,
         "stdout ({} bytes) must exceed any pipe buffer to prove the stall path",
@@ -199,22 +213,25 @@ async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drai
     );
 }
 
-#[proxima::test]
+#[proxima::test(timeout = "310s")]
 async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_order_after_drain() {
     let directory = target_directory()
         .join("full-stdout")
         .join(format!("flood-{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).expect("run directory is creatable");
-    let (mut stdout, stdout_writer) = std::io::pipe().expect("stdout pipe is creatable");
+    let (stdout, stdout_writer) = std::io::pipe().expect("stdout pipe is creatable");
+    set_nonblocking(stdout.as_raw_fd());
+    let stdout_descriptor = stdout.as_raw_fd();
+    let stdout = ChildStream::new(OwnedFd::from(stdout));
     size_pipe(&stdout_writer, FLOOD_PIPE_BYTES);
     let mut running = Running(spawn_cargo_val(&directory, "ignored_flood", stdout_writer));
 
-    await_readable(stdout.as_raw_fd(), "stdout");
+    await_pending_bytes(stdout_descriptor, "stdout").await;
     let alive = running.0.try_wait().expect("cargo-val status reads");
     assert!(alive.is_none(), "cargo-val waits on a full stdout instead of exiting: {alive:?}");
 
-    let output = drain_stdout(&mut stdout);
+    let output = drain_stdout(&stdout).await;
     let status = running.0.wait().expect("cargo-val exits after the drain");
     let stderr = fs::read_to_string(directory.join("stderr.log")).expect("stderr log reads");
     assert_eq!(status.code(), Some(0), "cargo-val exit status; stderr: {stderr}");
