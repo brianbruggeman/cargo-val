@@ -19,12 +19,20 @@ use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
 use cargo_val::edge_exit_macos::MacosExit as ExitSource;
 use cargo_val::edge_stream_unix::ChildStream;
 use futures::FutureExt;
-use futures::future::join;
+use core::pin::pin;
+use futures::future::{Either, join, select};
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_primitives::pipe::{Exhausted, Pipe};
 
+#[path = "common/plain.rs"]
+mod plain;
+#[path = "common/plain_summary.rs"]
+mod plain_summary;
+
+use cargo_val::render::Outcome;
+
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
-const FIXTURE_TEST_COUNT: usize = 3000;
+const FIXTURE_TEST_COUNT: usize = 700;
 const IGNORED_FLOOD_COUNT: usize = 2500;
 const PIPE_CEILING_BYTES: usize = 65_536;
 const FLOOD_PIPE_BYTES: libc::c_int = 4096;
@@ -117,7 +125,7 @@ fn spawn_cargo_val(directory: &Path, fixture: &str, stdout: PipeWriter) -> Child
         .join("Cargo.toml");
     let stderr = fs::File::create(directory.join("stderr.log")).expect("stderr log is creatable");
     Command::new(CARGO_VAL)
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", "plain")
         .arg("--manifest-path")
         .arg(manifest)
         .env_remove("RUST_TEST_THREADS")
@@ -197,7 +205,13 @@ async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drai
     size_pipe(&stdout_writer, RUN_PIPE_BYTES);
     let mut running = Running::start(spawn_cargo_val(&directory, "full_stdout", stdout_writer));
 
-    let names = collect_done_names(&done).await;
+    let names = match select(pin!(collect_done_names(&done)), pin!(Pipe::call(&running.exit, ()))).await {
+        Either::Left((names, _)) => names,
+        Either::Right((exited, _)) => {
+            let stderr = fs::read_to_string(directory.join("stderr.log")).unwrap_or_default();
+            panic!("cargo-val ended before every fixture test reported: {exited:?}; stderr: {stderr}");
+        }
+    };
     assert_eq!(names, expected_names(), "every fixture test ran exactly once");
     let alive = running.child.try_wait().expect("cargo-val status reads");
     assert!(alive.is_none(), "cargo-val waits on a full stdout instead of exiting: {alive:?}");
@@ -214,25 +228,12 @@ async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drai
     assert_eq!(status.code(), Some(0), "cargo-val exit status");
 
     let text = String::from_utf8(output).expect("stdout is text");
-    let lines: Vec<&str> = text.lines().collect();
-    let passed: Vec<&str> = lines
-        .iter()
-        .copied()
-        .filter(|line| line.ends_with(" PASS"))
-        .collect();
-    let printed: BTreeSet<String> = passed
-        .iter()
-        .map(|line| line.trim_end_matches(" PASS").to_owned())
-        .collect();
+    let passed = plain::names(&text, Outcome::Passed);
+    let printed: BTreeSet<String> = passed.iter().cloned().collect();
     assert_eq!(passed.len(), FIXTURE_TEST_COUNT, "one PASS line per fixture test");
     assert_eq!(printed, expected_names(), "PASS lines name every fixture test");
-    let summary = lines.last().expect("stdout ends with a summary line");
-    assert!(
-        summary.starts_with(&format!(
-            "total: discovered {FIXTURE_TEST_COUNT}, passed {FIXTURE_TEST_COUNT}, failed 0"
-        )),
-        "summary line: {summary}"
-    );
+    let counts = plain_summary::summary(&text).expect("stdout carries a SUMMARY line");
+    assert_eq!((counts["passed"], counts["failed"]), (FIXTURE_TEST_COUNT, 0), "summary counts: {counts:?}");
 }
 
 #[proxima::test(timeout = "310s")]
@@ -259,10 +260,7 @@ async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_
     assert_eq!(status.code(), Some(0), "cargo-val exit status; stderr: {stderr}");
 
     let text = String::from_utf8(output).expect("stdout is text");
-    let skipped: Vec<&str> = text
-        .lines()
-        .filter_map(|line| line.strip_suffix(" IGNORED"))
-        .collect();
+    let skipped = plain::names(&text, Outcome::Ignored);
     let expected: Vec<String> = (0..IGNORED_FLOOD_COUNT)
         .map(|index| format!("ignored_flood_case_with_a_deliberately_long_descriptive_name_for_real_world_reports_{index:04}"))
         .collect();

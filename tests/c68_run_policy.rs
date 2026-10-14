@@ -10,7 +10,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 mod common;
+#[path = "common/plain.rs"]
+mod plain;
 
+use cargo_val::render::Outcome;
 use common::fixture_output;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
@@ -32,11 +35,8 @@ impl From<Output> for Run {
 }
 
 impl Run {
-    fn count(&self, label: &str) -> usize {
-        self.stdout
-            .lines()
-            .filter(|line| line.ends_with(&format!(" {label}")))
-            .count()
+    fn count(&self, outcome: Outcome) -> usize {
+        plain::names(&self.stdout, outcome).len()
     }
 
     fn trailer_number(&self, field: &str) -> Option<usize> {
@@ -84,7 +84,7 @@ fn fixture_command(
 ) -> Command {
     let mut command = Command::new(CARGO_VAL);
     command
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", "plain")
         .arg("--manifest-path")
         .arg(fixture_manifest(fixture))
         .args(arguments)
@@ -359,8 +359,8 @@ async fn c68_default_fails_fast_launching_nothing_after_the_first_failure() {
     let run = run_stopping(&["--", "--test-threads=1"], &[ONE_FAILING]).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
-    assert_eq!(run.count("FAIL"), 1);
-    assert_eq!(run.count("PASS"), 0);
+    assert_eq!(run.count(Outcome::Failed), 1);
+    assert_eq!(run.count(Outcome::Passed), 0);
     assert_eq!(run.trailer_number("launched after trip "), Some(0));
     assert_eq!(run.trailer_number("in flight at trip "), Some(0));
     assert_eq!(
@@ -381,8 +381,8 @@ async fn c68_no_fail_fast_runs_every_selected_test() {
     ).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
-    assert_eq!(run.count("PASS") + run.count("FAIL"), TEST_COUNT);
-    assert_eq!(run.count("FAIL"), 1);
+    assert_eq!(run.count(Outcome::Passed) + run.count(Outcome::Failed), TEST_COUNT);
+    assert_eq!(run.count(Outcome::Failed), 1);
     assert_eq!(run.trailer_number("launched after trip "), None);
 }
 
@@ -394,8 +394,8 @@ async fn c68_max_fail_two_stops_after_the_second_of_three_failures() {
     ).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
-    assert_eq!(run.count("FAIL"), 2);
-    assert_eq!(run.count("PASS"), 0);
+    assert_eq!(run.count(Outcome::Failed), 2);
+    assert_eq!(run.count(Outcome::Passed), 0);
     assert_eq!(run.trailer_number("launched after trip "), Some(0));
     assert_eq!(
         run.trailer_number("listed tests not run "),
@@ -408,13 +408,13 @@ async fn c68_in_flight_children_finish_and_every_listed_test_is_accounted_for() 
     let run = run_stopping(&["--", "--test-threads=4"], &[THREE_FAILING]).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
-    let finished = run.count("PASS") + run.count("FAIL");
+    let finished = run.count(Outcome::Passed) + run.count(Outcome::Failed);
     let not_run = run
         .trailer_number("listed tests not run ")
         .expect("a tripped run prints its trailer");
     assert_eq!(finished + not_run, TEST_COUNT, "{}", run.stdout);
     assert_eq!(run.trailer_number("launched after trip "), Some(0));
-    assert!(run.count("FAIL") >= 1);
+    assert!(run.count(Outcome::Failed) >= 1);
 }
 
 #[proxima::test(timeout = "310s")]
@@ -436,11 +436,11 @@ async fn c68_stop_policy_sources_follow_precedence() {
         &[THREE_FAILING, ("CARGO_VAL_FAIL_FAST", "false")],
     ).await;
 
-    assert_eq!(environment_max_fail.count("FAIL"), 2);
-    assert_eq!(cli_beats_environment.count("FAIL"), 3);
-    assert_eq!(cli_beats_environment.count("PASS"), TEST_COUNT - 3);
-    assert_eq!(environment_disables.count("FAIL"), 3);
-    assert_eq!(explicit_flag.count("FAIL"), 1);
+    assert_eq!(environment_max_fail.count(Outcome::Failed), 2);
+    assert_eq!(cli_beats_environment.count(Outcome::Failed), 3);
+    assert_eq!(cli_beats_environment.count(Outcome::Passed), TEST_COUNT - 3);
+    assert_eq!(environment_disables.count(Outcome::Failed), 3);
+    assert_eq!(explicit_flag.count(Outcome::Failed), 1);
 }
 
 #[proxima::test(timeout = "310s")]
@@ -462,7 +462,7 @@ async fn c68_invalid_max_fail_values_name_the_supplying_source() {
 }
 
 fn passing_count(run: &Run) -> usize {
-    run.count("PASS")
+    run.count(Outcome::Passed)
 }
 
 #[proxima::test(timeout = "310s")]
@@ -501,7 +501,7 @@ async fn c68_short_manifest_path_is_forwarded_and_not_taken_as_the_filter() {
     let manifest = manifest.to_str().expect("fixture path is utf-8");
     let mut command = Command::new(CARGO_VAL);
     command
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", "plain")
         .args(["-m", manifest, "--no-fail-fast"])
         .env("NO_COLOR", "1")
         .env("CARGO_TARGET_DIR", target_directory().join("c68-fixture"));
@@ -510,10 +510,7 @@ async fn c68_short_manifest_path_is_forwarded_and_not_taken_as_the_filter() {
 
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert_eq!(
-        stdout
-            .lines()
-            .filter(|line| line.ends_with(" PASS"))
-            .count(),
+        plain::names(&stdout, Outcome::Passed).len(),
         TEST_COUNT
     );
 }
@@ -538,7 +535,7 @@ async fn c68_zero_test_runs_exit_four_by_default_and_zero_with_no_tests_pass() {
 
         let context = format!("{arguments:?}: {}{}", default.stdout, default.stderr);
         assert_eq!(
-            default.count("PASS") + default.count("FAIL"),
+            default.count(Outcome::Passed) + default.count(Outcome::Failed),
             0,
             "{context}"
         );
@@ -594,7 +591,7 @@ async fn c68_a_selection_that_matches_tests_is_not_reported_as_empty() {
         None,
     ).await;
 
-    assert_eq!(run.count("PASS"), 1, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.count(Outcome::Passed), 1, "{}{}", run.stdout, run.stderr);
     assert_eq!(run.status, Some(0));
     assert!(!run.stderr.contains("no tests to run"));
 }
@@ -635,11 +632,8 @@ async fn cargo_test_doc_reference() -> DocReference {
     }
 }
 
-fn doc_lines(run: &Run, label: &str) -> usize {
-    run.stdout
-        .lines()
-        .filter(|line| line.replace('\\', "/").starts_with("src/lib.rs - ") && line.ends_with(&format!(" {label}")))
-        .count()
+fn doc_lines(run: &Run, outcome: Outcome) -> usize {
+    plain::names(&run.stdout, outcome).iter().filter(|name| name.replace('\\', "/").starts_with("src/lib.rs - ")).count()
 }
 
 #[proxima::test(timeout = "310s")]
@@ -648,16 +642,16 @@ async fn c68_doc_test_counts_equal_cargo_test_doc_for_the_same_fixture() {
     let only_docs = run_fixture(DOC_FIXTURE, &["--doc"], &[], None).await;
 
     assert_eq!(
-        doc_lines(&only_docs, "PASS"),
+        doc_lines(&only_docs, Outcome::Passed),
         reference.passed,
         "{}{}",
         only_docs.stdout,
         only_docs.stderr
     );
-    assert_eq!(doc_lines(&only_docs, "FAIL"), reference.failed);
-    assert_eq!(doc_lines(&only_docs, "IGNORED"), reference.ignored);
+    assert_eq!(doc_lines(&only_docs, Outcome::Failed), reference.failed);
+    assert_eq!(doc_lines(&only_docs, Outcome::Ignored), reference.ignored);
     assert_eq!(
-        only_docs.count("PASS") + only_docs.count("FAIL") + only_docs.count("IGNORED"),
+        only_docs.count(Outcome::Passed) + only_docs.count(Outcome::Failed) + only_docs.count(Outcome::Ignored),
         3
     );
     assert_eq!(only_docs.status, Some(1));
@@ -666,9 +660,9 @@ async fn c68_doc_test_counts_equal_cargo_test_doc_for_the_same_fixture() {
         reference.passed,
         reference.failed,
         reference.ignored,
-        doc_lines(&only_docs, "PASS"),
-        doc_lines(&only_docs, "FAIL"),
-        doc_lines(&only_docs, "IGNORED")
+        doc_lines(&only_docs, Outcome::Passed),
+        doc_lines(&only_docs, Outcome::Failed),
+        doc_lines(&only_docs, Outcome::Ignored)
     );
 }
 
@@ -690,10 +684,10 @@ async fn c68_failing_doc_test_output_is_shown_like_other_failures() {
 async fn c68_default_selection_runs_unit_tests_and_doc_tests_together_and_counts_both() {
     let run = run_fixture(DOC_FIXTURE, &["--no-fail-fast"], &[], None).await;
 
-    assert_eq!(run.count("PASS"), 3, "{}{}", run.stdout, run.stderr);
-    assert_eq!(run.count("FAIL"), 1);
-    assert_eq!(run.count("IGNORED"), 1);
-    assert_eq!(doc_lines(&run, "PASS"), 1);
+    assert_eq!(run.count(Outcome::Passed), 3, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.count(Outcome::Failed), 1);
+    assert_eq!(run.count(Outcome::Ignored), 1);
+    assert_eq!(doc_lines(&run, Outcome::Passed), 1);
     assert_eq!(run.status, Some(1));
 }
 
@@ -702,7 +696,7 @@ async fn c68_default_fail_fast_still_reports_the_doc_failure_and_exits_one() {
     let run = run_fixture(DOC_FIXTURE, &[], &[], None).await;
 
     assert_eq!(run.status, Some(1), "{}{}", run.stdout, run.stderr);
-    assert_eq!(doc_lines(&run, "FAIL"), 1);
+    assert_eq!(doc_lines(&run, Outcome::Failed), 1);
 }
 
 #[proxima::test(timeout = "310s")]
@@ -710,14 +704,14 @@ async fn c68_target_selection_flags_exclude_doc_tests_as_cargo_does() {
     let library_only = run_fixture(DOC_FIXTURE, &["--lib"], &[], None).await;
 
     assert_eq!(
-        library_only.count("PASS"),
+        library_only.count(Outcome::Passed),
         2,
         "{}{}",
         library_only.stdout,
         library_only.stderr
     );
     assert_eq!(
-        doc_lines(&library_only, "PASS") + doc_lines(&library_only, "FAIL"),
+        doc_lines(&library_only, Outcome::Passed) + doc_lines(&library_only, Outcome::Failed),
         0
     );
     assert!(!library_only.stdout.contains("doc tests"));
@@ -747,7 +741,7 @@ async fn c68_package_without_a_library_skips_doc_tests_and_says_so() {
     let run = run_fixture(STOP_POLICY, &[], &[], None).await;
 
     assert_eq!(
-        run.count("PASS"),
+        run.count(Outcome::Passed),
         TEST_COUNT,
         "{}{}",
         run.stdout,
@@ -791,10 +785,10 @@ async fn c68_a_trip_before_doc_tests_execute_interrupts_the_doc_child_and_says_s
             .contains("cargo-val: doc tests: stopped before executing")
     );
     assert_eq!(
-        doc_lines(&run, "PASS") + doc_lines(&run, "FAIL") + doc_lines(&run, "IGNORED"),
+        doc_lines(&run, Outcome::Passed) + doc_lines(&run, Outcome::Failed) + doc_lines(&run, Outcome::Ignored),
         0
     );
-    assert_eq!(run.count("FAIL"), 1);
+    assert_eq!(run.count(Outcome::Failed), 1);
 }
 
 #[proxima::test(timeout = "310s")]
@@ -802,7 +796,7 @@ async fn c97_one_live_child_drains_every_listed_test_and_ends_the_listing() {
     let run = run_stopping(&["--no-fail-fast", "--", "--test-threads=1"], &[]).await;
 
     assert_eq!(run.status, Some(0), "{}{}", run.stdout, run.stderr);
-    assert_eq!(run.count("PASS"), TEST_COUNT, "{}", run.stdout);
+    assert_eq!(run.count(Outcome::Passed), TEST_COUNT, "{}", run.stdout);
     assert!(
         run.stdout.contains(&format!(
             "total: discovered {TEST_COUNT}, passed {TEST_COUNT}, failed 0, ignored 0"
@@ -821,9 +815,9 @@ async fn c97_one_live_child_still_drains_the_listing_and_the_doc_group_together(
         None,
     ).await;
 
-    assert_eq!(run.count("PASS"), 3, "{}{}", run.stdout, run.stderr);
-    assert_eq!(run.count("FAIL"), 1);
-    assert_eq!(run.count("IGNORED"), 1);
-    assert_eq!(doc_lines(&run, "PASS"), 1);
+    assert_eq!(run.count(Outcome::Passed), 3, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.count(Outcome::Failed), 1);
+    assert_eq!(run.count(Outcome::Ignored), 1);
+    assert_eq!(doc_lines(&run, Outcome::Passed), 1);
     assert_eq!(run.status, Some(1));
 }

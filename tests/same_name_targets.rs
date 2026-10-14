@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 mod common;
+#[path = "common/plain.rs"]
+mod plain;
 
+use cargo_val::render::Outcome;
 use common::fixture_output;
 
 const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
@@ -44,7 +47,7 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
 
     let mut command = Command::new(CARGO_VAL);
     command
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", "plain")
         .arg("--manifest-path")
         .arg(manifest)
         .env_remove("RUST_TEST_THREADS")
@@ -61,10 +64,7 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
     let output = fixture_output(&mut command).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let passed = stdout
-        .lines()
-        .filter(|line| *line == "shared_name PASS")
-        .count();
+    let passed = plain::names(&stdout, Outcome::Passed).iter().filter(|name| *name == "shared_name").count();
     println!(
         "{{\"event\":\"same_name_two_targets\",\"status\":{:?},\"shared_name_passed\":{passed}}}",
         output.status.code()

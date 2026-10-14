@@ -131,6 +131,7 @@ pub struct State<'storage, const RERUN: usize> {
     drawn_rows: u16,
     reason: [u8; REASON_BYTES],
     reason_len: usize,
+    color: bool,
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
@@ -165,7 +166,15 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             drawn_rows: 0,
             reason: [0; REASON_BYTES],
             reason_len: 0,
+            color: false,
         }
+    }
+
+    /// Chooses whether the live frame is drawn in the terminal's own colours.
+    #[must_use]
+    pub const fn with_color(mut self, color: bool) -> Self {
+        self.color = color;
+        self
     }
 
     /// Gives the state the byte arena its in-flight tests live in; without one every start is counted as untracked.
