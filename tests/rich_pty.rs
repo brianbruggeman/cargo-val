@@ -1827,3 +1827,93 @@ async fn a_vim_probe_that_misses_its_deadline_counts_as_no_server_and_launches_w
     assert!(lines.contains(&"canonical=true".to_owned()), "the editor must see a cooked terminal: {lines:?}");
     assert_review_resumed_and_quit(&output, status);
 }
+
+const KEY_ROW: &str = "f review failures  s timeline  q cancel";
+const PINNED_HINT: &str = "  f review";
+
+async fn review_mid_run_then_back_then_quit(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| {
+        let screen = without_sgr(&String::from_utf8_lossy(bytes));
+        live_frames(&screen).iter().any(|frame| frame.contains(" FAIL 1") && frame.contains(KEY_ROW))
+    })
+    .await;
+    keys.write_all(b"f").expect("the review key is writable");
+    let (review, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(REVIEW_HEADER)).await;
+    output.extend_from_slice(&review);
+    assert!(!without_sgr(&String::from_utf8_lossy(&output)).contains("SUMMARY"), "review opened mid-run, so no receipt exists yet:\n{}", shown(&String::from_utf8_lossy(&output)));
+    keys.write_all(b"\x1b").expect("the escape key is writable");
+    let (live, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(KEY_ROW)).await;
+    output.extend_from_slice(&live);
+    File::create(release).expect("the release file is creatable");
+    let (final_review, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(REVIEW_HEADER)).await;
+    output.extend_from_slice(&final_review);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn release_then_read_plain(master: &ChildStream, release: PathBuf) -> String {
+    File::create(release).expect("the release file is creatable");
+    read_plain(master).await
+}
+
+#[proxima::test]
+async fn f_opens_review_while_a_test_is_held_escape_returns_to_the_live_frame_and_the_receipt_equals_plain() {
+    let environment = [FAILING_RUN, ("NO_COLOR", "1")];
+    let (output, status) = run_driven("rich_pty", "rich", &environment, async |master, keys, release, _leader| review_mid_run_then_back_then_quit(master, keys, release).await).await;
+    let (plain, plain_status) = run_driven("rich_pty", "plain", &environment, async |master, _keys, release, _leader| release_then_read_plain(master, release).await).await;
+
+    let screen = without_sgr(&output);
+    let review_at = screen.find(REVIEW_HEADER).unwrap_or_else(|| panic!("review never opened mid-run:\n{}", shown(&screen)));
+    let live_after = screen[review_at..].find(KEY_ROW).unwrap_or_else(|| panic!("no live frame with the key row followed the review:\n{}", shown(&screen[review_at..])));
+    let pinned = screen.lines().find(|line| line.starts_with(" FAIL 1")).unwrap_or_else(|| panic!("no pinned failure row:\n{}", shown(&screen)));
+    println!("PINNED ROW\n{pinned}\nKEY ROW\n{KEY_ROW}\nlive frame {live_after} bytes after the review header");
+    assert!(pinned.ends_with(PINNED_HINT.trim_end()) && pinned.contains("f review"), "the pinned row ends with the review hint: {pinned}");
+    let plain = plain.replace('\r', "");
+    let closing = "cargo_val_rich_pty_fixture: discovered";
+    let plain_receipt: String = plain[plain.find(closing).expect("the plain run prints the closing block")..].lines().filter(|line| !line.starts_with("LISTED")).collect::<Vec<_>>().join("\n");
+    let receipt = receipt_of(&final_scrollback(&output));
+    assert_eq!((status.code(), plain_status.code()), (Some(1), Some(1)), "both runs exit 1");
+    assert_eq!(settle_order_free(&receipt), settle_order_free(plain_receipt.trim()), "rich receipt after mid-run review differs from the plain closing block");
+}
+
+async fn timeline_and_a_cancelled_quit_mid_run(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(KEY_ROW)).await;
+    for (key, wanted) in [(&b"s"[..], TIMELINE_HEADER), (b"\x1b", KEY_ROW), (b"q", "q again to confirm, any key cancels")] {
+        keys.write_all(key).expect("the key is writable");
+        let (seen, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(wanted)).await;
+        output.extend_from_slice(&seen);
+    }
+    keys.write_all(b"x").expect("the cancelling key is writable");
+    File::create(release).expect("the release file is creatable");
+    let (review, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(REVIEW_HEADER)).await;
+    output.extend_from_slice(&review);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[proxima::test]
+async fn s_opens_the_timeline_mid_run_and_a_q_then_any_other_key_leaves_the_run_going_to_its_own_review() {
+    let (output, status) = run_driven("rich_pty", "rich", &[FAILING_RUN, ("NO_COLOR", "1")], async |master, keys, release, _leader| timeline_and_a_cancelled_quit_mid_run(master, keys, release).await).await;
+
+    let screen = without_sgr(&output);
+    let timeline = screen.find(TIMELINE_HEADER).unwrap_or_else(|| panic!("the timeline never opened mid-run:\n{}", shown(&screen)));
+    assert!(screen[timeline..].contains("q again to confirm, any key cancels"), "q armed after the timeline closed:\n{}", shown(&screen[timeline..]));
+    assert!(screen.contains(REVIEW_HEADER), "the run was not cancelled, so it reached its own end-of-run review:\n{}", shown(&screen));
+    assert_eq!(status.code(), Some(1), "the run finished its failing test and exited 1: {status}");
+}
+
+#[proxima::test]
+async fn with_stdin_piped_the_live_frame_shows_no_key_row_and_no_review_hint() {
+    let (output, status) = run_with("rich_pty", "rich", &[FAILING_RUN, ("NO_COLOR", "1")], false, async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
+
+    let screen = without_sgr(&output);
+    let frames = live_frames(&screen);
+    assert!(frames.iter().any(|frame| frame.contains(" FAIL 1")), "a live frame pinned the failure, so the hint had its chance to show:\n{}", shown(&screen));
+    assert!(frames.len() >= 2, "{} live frames drawn", frames.len());
+    assert!(!screen.contains("q cancel") && !screen.contains("f review") && !screen.contains("s timeline"), "keys are not live, so no key hint is shown:\n{}", shown(&screen));
+    assert_eq!(status.code(), Some(1), "the failing run exits 1: {status}");
+}

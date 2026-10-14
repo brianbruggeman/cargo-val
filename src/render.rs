@@ -294,6 +294,8 @@ pub struct State<'storage, const RERUN: usize> {
     key_carry: [u8; review::CARRY],
     mouse: Option<bool>,
     hover: bool,
+    /// `None` while no key lane reads the terminal, `Some(false)` while one does and the run goes on, `Some(true)` once review is the last screen of a finished run.
+    keys: Option<bool>,
     origin: u16,
     link_template: &'storage [u8],
     link_directory: &'storage [u8],
@@ -357,6 +359,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             key_carry: [0; review::CARRY],
             mouse: None,
             hover: false,
+            keys: None,
             origin: 0,
             link_template: &[],
             link_directory: &[],
@@ -441,6 +444,16 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.mouse = if mouse { Some(false) } else { None };
     }
 
+    /// Whether a key lane reads the terminal during the run; the live frame draws its key hints only then, since keys that cannot act are not offered.
+    pub const fn set_keys_live(&mut self, live: bool) {
+        self.keys = if live { Some(false) } else { None };
+    }
+
+    /// Marks review as the last screen of a finished run: `Esc` there has no run to go back to.
+    pub const fn hold_review(&mut self) {
+        self.keys = Some(true);
+    }
+
     /// Whether the last frame turned mouse reporting on and nothing has turned it off since.
     #[must_use]
     pub const fn mouse_on(&self) -> bool {
@@ -505,7 +518,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             event
         };
         let (open, lines) = self.extent();
-        self.mode = self.mode.next(event, open, lines);
+        let leaves_review = self.keys != Some(true) && matches!((self.mode, event), (Mode::Review { armed: false, .. }, Event::Key(Key::Esc)));
+        self.mode = if leaves_review { Mode::Running } else { self.mode.next(event, open, lines) };
         if self.mode.is_armed() && !armed_before {
             self.armed_until_ms = self.now_ms.saturating_add(QUIT_WINDOW_MS);
         }
@@ -596,6 +610,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.now_ms = at_ms;
         self.lock_len = 0;
         self.drawn_rows = 0;
+        self.keys = self.keys.map(|_| false);
         self.used = 0;
         self.window_of = usize::MAX;
         self.stored = 0;
@@ -1884,6 +1899,54 @@ mod tests {
         assert_eq!(heartbeats, 20_000, "every tick found the test in flight, so the heartbeat path was measured too");
         assert_eq!(allocations, 0);
         assert!(state.unstored() > 0, "the ledger overflowed during the loop, so the overflow path was measured too");
+    }
+
+    fn failing_run<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32]) -> State<'storage, 8192> {
+        let mut state = State::<8192>::new(arena, ledger);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+        state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
+        state.apply(&Event::Captured { id: FAILING, stdout: (REPORT, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
+        state
+    }
+
+    #[test]
+    fn f_opens_review_and_escape_returns_to_the_running_screen_mid_run() {
+        let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+        let mut state = failing_run(&mut arena, &mut ledger);
+
+        state.apply(&Event::Key(crate::render::review::Key::Char(b'f')));
+        let opened = state.mode();
+        state.apply(&Event::Key(crate::render::review::Key::Esc));
+
+        assert_eq!(opened, Mode::Review { selected: 0, armed: false, top: None });
+        assert_eq!(state.mode(), Mode::Running);
+    }
+
+    #[test]
+    fn escape_in_the_review_of_a_finished_run_stays_in_review() {
+        let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+        let mut state = failing_run(&mut arena, &mut ledger);
+        state.apply(&Event::Key(crate::render::review::Key::Char(b'f')));
+        state.hold_review();
+
+        state.apply(&Event::Key(crate::render::review::Key::Esc));
+
+        assert_eq!(state.mode(), Mode::Review { selected: 0, armed: false, top: None });
+    }
+
+    #[test]
+    fn f_without_a_failure_stays_on_the_running_screen_and_s_opens_the_timeline_mid_run() {
+        let (mut arena, mut ledger) = ([0_u8; 4096], [0_u32; 8]);
+        let mut state = State::<8192>::new(&mut arena, &mut ledger);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+
+        state.apply(&Event::Key(crate::render::review::Key::Char(b'f')));
+        let after_f = state.mode();
+        state.apply(&Event::Key(crate::render::review::Key::Char(b's')));
+        let after_s = state.mode();
+        state.apply(&Event::Key(crate::render::review::Key::Char(b's')));
+
+        assert_eq!((after_f, after_s, state.mode()), (Mode::Running, Mode::Timeline { back: None }, Mode::Running));
     }
 
     const REPORT: &[u8] = b"thread 'fixture::fails_when_requested' panicked at src/lib.rs:12:13:\nrequested fixture failure\n";
