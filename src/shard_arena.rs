@@ -408,14 +408,22 @@ impl<'storage> ShardArena<'storage> {
         dropped
     }
 
-    /// Drops every name not yet launched and every queued deciding or relaunch retry for a stopped run, and returns how many uncounted names those were.
+    /// Pops the next queued shard of a stopped run and returns how many uncounted names it held: a deciding retry first, else up to one bound of unlaunched names.
     /// Output-only reruns stay queued: their names were already counted Failed at their shard line.
-    pub fn discard_unlaunched(&mut self) -> usize {
-        let mut dropped = self.unlaunched;
-        dropped += self.discard_retries(|pending| pending.decides);
-        self.cursor = self.length;
-        self.unlaunched = 0;
-        dropped
+    pub fn pop_queued(&mut self) -> Option<usize> {
+        let deciding = self.retry.iter_mut().find(|slot| slot.as_ref().is_some_and(|pending| pending.decides));
+        if let Some(slot) = deciding {
+            return slot.take().map(|pending| pending.owed.total());
+        }
+        if self.unlaunched == 0 {
+            return None;
+        }
+        let popped = self.unlaunched.min(self.bound.max(1));
+        self.unlaunched -= popped;
+        if self.unlaunched == 0 {
+            self.cursor = self.length;
+        }
+        Some(popped)
     }
 
     // returns the names of the dropped retries that are uncounted, so an already-counted output rerun never adds to the total
@@ -654,7 +662,7 @@ mod tests {
         arena.owe_reruns(shard, (owed, failed), false).expect("a slot is free");
         arena.owe_reruns(shard, owed_all(2), true).expect("a slot is free");
 
-        assert_eq!(arena.discard_unlaunched(), 2, "only the deciding record's two names were uncounted");
+        assert_eq!(std::iter::from_fn(|| arena.pop_queued()).sum::<usize>(), 2, "only the deciding record's two names were uncounted");
         let rerun = arena.carve_rerun().expect("the output rerun survived");
 
         assert_eq!(arena.names(rerun), b"m::b\0");
