@@ -36,6 +36,8 @@ struct BuildDefaults {
     spawn_environment_pointers: usize,
     #[setting(default = 65536)]
     status_queue_bytes: usize,
+    #[setting(default = 72)]
+    signal_slots: usize,
 }
 
 impl Validate for BuildDefaults {
@@ -54,6 +56,12 @@ impl Validate for BuildDefaults {
             errors.push(ValidationMessage::new(
                 "shard_retry_slots",
                 "must be at least 64, the most jobs the run accepts (jobs above 64 is rejected)",
+            ));
+        }
+        if self.signal_slots < MAX_JOBS + 1 {
+            errors.push(ValidationMessage::new(
+                "signal_slots",
+                "must be at least 65, one slot for each of the 64 jobs the run accepts plus the doc test group",
             ));
         }
         if self.shard_names == 0 || self.shard_names + 64 > self.spawn_argument_pointers {

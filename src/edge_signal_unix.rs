@@ -8,9 +8,14 @@ use std::io;
 use prime::os::readiness::Readiness;
 use proxima_core::signal::Signal;
 
+use crate::build_defaults::SIGNAL_SLOTS;
+
 const FORWARDED: [c_int; 2] = [libc::SIGINT, libc::SIGTERM];
-const TARGET_CAPACITY: usize = 72;
+const TARGET_CAPACITY: usize = SIGNAL_SLOTS;
 const CONVENTIONAL_BASE: i32 = 128;
+
+/// The refusal code of a full table.
+pub const TABLE_FULL: c_int = libc::ENOSPC;
 
 // the handler can only reach process-global state; -1 means no pipe is installed
 static WRITE_END: AtomicI32 = AtomicI32::new(-1);
@@ -70,7 +75,7 @@ fn track(target: libc::pid_t) -> Result<(), c_int> {
                 .is_ok()
         })
         .then_some(())
-        .ok_or(libc::ENOSPC)
+        .ok_or(TABLE_FULL)
 }
 
 fn release(target: libc::pid_t) {
@@ -244,4 +249,24 @@ fn errno_slot() -> *mut c_int {
 
 fn last_error() -> c_int {
     unsafe { *errno_slot() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TABLE_FULL, TARGET_CAPACITY, release_child, track_child};
+
+    #[test]
+    fn a_full_target_table_refuses_the_next_child_and_a_released_slot_admits_it() {
+        let capacity = u32::try_from(TARGET_CAPACITY).expect("capacity fits a pid");
+        for pid in 1..=capacity {
+            track_child(pid).expect("a free slot admits the child");
+        }
+
+        let refused = track_child(capacity + 1);
+        release_child(1);
+        let admitted = track_child(capacity + 1);
+
+        assert_eq!(refused, Err(TABLE_FULL));
+        assert_eq!(admitted, Ok(()));
+    }
 }
