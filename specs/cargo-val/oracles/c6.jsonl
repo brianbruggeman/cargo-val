@@ -1,3 +1,0 @@
-{"kind":"intents","names":["suite::alpha","suite::beta","suite::gamma"],"reads_before_deferred":2,"reads_while_deferred":2,"reads_after_retry":3,"available_while_deferred":0}
-{"kind":"zero_capacity","source_reads":0,"available_permits":0}
-{"kind":"positive_control","allocations":1}

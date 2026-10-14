@@ -1,8 +1,0 @@
-   Compiling conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
-     Running tests/std_compat.rs (/tmp/conflaguration_f8a_target/debug/deps/std_compat-121f6f80753eb5c9)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-

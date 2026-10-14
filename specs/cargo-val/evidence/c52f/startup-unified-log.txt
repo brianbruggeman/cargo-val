@@ -1,9 +1,0 @@
-Timestamp               Ty Process[PID:TID]
-2026-10-10 21:32:33.110 Df kernel[0:55a0b5f] (AppleMobileFileIntegrity) AMFI: '/private/tmp/cargo_target/debug/deps/integration_fixture-c192ef95dfef63d1' has no CMS blob?
-2026-10-10 21:32:33.110 Df kernel[0:55a0b5f] (AppleMobileFileIntegrity) AMFI: '/private/tmp/cargo_target/debug/deps/integration_fixture-c192ef95dfef63d1': Unrecoverable CT signature issue, bailing out.
-2026-10-10 21:32:57.082 Df syspolicyd[542:55a12a9] [com.apple.syspolicy.exec:default] Found provenance data on process: TA(607200c612c68f2a, 2), 82775
-2026-10-10 21:32:57.083 Df syspolicyd[542:55a12a9] [com.apple.syspolicy.exec:default] Found provenance data on process: TA(607200c612c68f2a, 2), 82775
-2026-10-10 21:32:57.083 Df syspolicyd[542:55a12a9] [com.apple.syspolicy.exec:default] Process was already in provenance sandbox, skipping: 82775, TA(607200c612c68f2a, 2)
-2026-10-10 21:33:07.378 Df syspolicyd[542:559de72] [com.apple.syspolicy.exec:default] Found provenance data on process: TA(607200c612c68f2a, 2), 82770
-2026-10-10 21:33:07.378 Df syspolicyd[542:55a12a9] [com.apple.syspolicy.exec:default] Found provenance data on process: TA(607200c612c68f2a, 2), 82770
-2026-10-10 21:33:07.378 Df syspolicyd[542:55a12a9] [com.apple.syspolicy.exec:default] Process was already in provenance sandbox, skipping: 82770, TA(607200c612c68f2a, 2)

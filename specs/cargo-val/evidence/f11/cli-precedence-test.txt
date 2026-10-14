@@ -1,9 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
-     Running tests/borrowed_settings.rs (/tmp/conflaguration_f10_target/debug/deps/borrowed_settings-abaa0b7110c4545a)
-
-running 1 test
-test cli_precedence ... {"generated_jobs":2,"environment_jobs":3,"cli_jobs":4,"resolved_jobs":4,"validation_calls":1,"cli_jobs_zero_rejected":1}
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
-

@@ -1,3 +1,0 @@
-GET https://api.github.com/repos/brianbruggeman/cargo-val/actions/jobs/114309682106/logs
-HTTP 403: {"message":"Must have admin rights to Repository.","documentation_url":"https://docs.github.com/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run","status":"403"}
-The public Jobs API returned completed/success for Windows, Ubuntu, and macOS. The logs endpoint did not expose individual test output; no test count or printed payload is inferred from this file.

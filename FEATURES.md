@@ -1,6 +1,6 @@
 # cargo val features
 
-Status: **built** (in tree, uncommitted) · **designed** · **queued** · **later** · **declined**. Detail lives in `specs/cargo-val/discipline.md`.
+Status: **built** (in tree, uncommitted) · **designed** · **queued** · **later** · **declined**.
 
 ## Running
 - **built** — stream tests as cargo reports each test binary; first result before discovery ends

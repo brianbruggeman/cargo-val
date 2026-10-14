@@ -1,7 +1,0 @@
-C40 build investigation and corrections
-
-The first host test build used the shared CARGO_TARGET_DIR=/tmp/cargo_target. Cargo waited for rustc. A process sample of rustc 6996 recorded all 795 samples in FileSearch::new -> readdir -> __getdirentries64; direct `ls -U /tmp/cargo_target/debug/deps` also remained active beyond the 10-second command window. The underlying directory-entry count was not captured. The next attempt used the isolated /tmp/cargo_val_c40_target: the host test executable build returned exit 0, and the ARM64 Linux test executable build returned exit 0. Future C40 builds use the isolated target directory.
-
-The first ARM64 test compile reported E0433 because Waker was not imported in the test module, and E0599 twice because the barrier release byte was a u8 rather than a byte slice. The test now imports core::task::Waker and uses a one-byte array; the subsequent ARM64 test executable build returned exit 0.
-
-The first event-loop test asserted that one epoll batch contained two pipe events and the child pidfd. The captured failing run reported `event_count` left 2 and expected 3 (test exit 101). The child writes stdout, then stderr, then exits, so the pipes became readable while pidfd exit readiness had not yet arrived. The test now accumulates tokens over successive waits, drains each stream directly into caller storage, observes EOF using a nonempty scratch probe after collecting the expected bytes, and checks the task Waker notification count. The latest QEMU run emitted three batches and passed both C39 and C40 focused tests.

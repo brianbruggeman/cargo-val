@@ -1,5 +1,0 @@
-{"observed_library_artifacts": 1, "product_errors": 0}
-{"rejected_missing_target_kind_controls": 1}
-{"rejected_unrelated_package_controls": 1}
-{"counted_nested_compiler_error_controls": 1}
-{"rejected_unexpected_event_controls": 1}

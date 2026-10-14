@@ -1,6 +1,0 @@
-  PID  PPID ELAPSED STAT ARGS
-77566  3968   02:12 Ss   /opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python -
-77574 77566   02:12 S    /Users/brianbruggeman/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --manifest-path tests/fixtures/workspace/Cargo.toml
-77660 77574   02:11 S    /tmp/cargo_val_c54_multi_fixture_target/debug/deps/cargo_val_fixture-3b47bb63cfb7774f
-78835  3968   00:42 Ss   /bin/zsh -lc cat > /tmp/cargo_val_dyld_probe.rs <<'RS'\012fn main() { println!("started"); }\012RS\012rustc /tmp/cargo_val_dyld_probe.rs -o /tmp/cargo_val_c54_multi_fixture_target/dyld_probe\012/tmp/cargo_val_c54_multi_fixture_target/dyld_probe\012rustc --test /tmp/cargo_val_dyld_probe.rs -o /tmp/cargo_val_c54_multi_fixture_target/dyld_test_probe\012/tmp/cargo_val_c54_multi_fixture_target/dyld_test_probe --list
-78855 78835   00:42 S    /tmp/cargo_val_c54_multi_fixture_target/dyld_probe

@@ -1,5 +1,0 @@
-{"kind":"chunk","source_state":"open","bytes":"alpha: test\n","expected":"dispatch:alpha"}
-{"kind":"chunk","source_state":"open","bytes":"beta: test\n","expected":"dispatch:beta"}
-{"kind":"chunk","source_state":"open","bytes":"gamma: test\n","expected":"dispatch:gamma"}
-{"kind":"chunk","source_state":"open","bytes":"delta: test\n","expected":"dispatch:delta"}
-{"kind":"eof","source_state":"eof","expected":"finish"}

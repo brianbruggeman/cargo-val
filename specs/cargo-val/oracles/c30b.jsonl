@@ -1,2 +1,0 @@
-{"case":"c30b_fixture","input":{"target":"x86_64-unknown-none","normal_dependency":{"name":"serde","features":["std"]},"expected":{"control_exit":101,"exact_error_marker":"error[E0463]: can't find crate for `std`","exact_error_marker_count":2,"compiler_error_records":5829,"control_diagnostics_in_product_count":0}},"status":"observed"}
-{"case":"c30b_negative_control","control":{"mutation":"replace E0463 marker with unrelated compiler error while retaining exit 101","expected_rejected":true},"status":"observed"}

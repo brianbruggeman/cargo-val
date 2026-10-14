@@ -1,2 +1,0 @@
-{"case":"c45c_fixture","input":{"stderr":"err","expected":{"stderr_payloads":1,"total_eof_records":2,"payload_copies":0}},"status":"prospective"}
-{"case":"c45c_negative_control","control":{"mutation":"withhold final stderr eof","expected_rejected":true},"status":"prospective"}

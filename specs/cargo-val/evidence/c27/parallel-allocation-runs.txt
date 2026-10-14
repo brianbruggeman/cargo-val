@@ -1,9 +1,0 @@
-command: cargo test -p cargo-val --lib --no-default-features --features proxima-codec,proxima-primitives --release dispatch_stream::tests -- --test-threads=3 --nocapture
-run=1 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
-run=2 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
-run=3 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
-run=4 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
-run=5 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
-run=6 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
-run=7 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}
-run=8 exit=0 {"dispatch_allocations":0,"event":"allocation_probe","positive_control_allocations":1}

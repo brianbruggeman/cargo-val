@@ -1,6 +1,0 @@
-command: cargo val --manifest-path tests/fixtures/workspace/Cargo.toml --package cargo_val_fixture fixture::passes -- --nocapture --test-threads=1
-probe: a temporary cargo-val executable printed JSON for its received argv; Cargo's external-subcommand dispatch was exercised directly
-exit_status: 0
-stdout_bytes: 160
-stderr_bytes: 0
-payload: cargo-argv.json

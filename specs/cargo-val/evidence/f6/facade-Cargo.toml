@@ -1,7 +1,0 @@
-[package]
-name = "conflaguration"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-conflaguration-core = { version = "0.1.0", path = "../../../../Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-core" }

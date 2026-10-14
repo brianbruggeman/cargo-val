@@ -734,7 +734,7 @@ mod tests {
     #[proxima::test]
     async fn c48d_retains_external_cargo_and_harness_arguments_by_reference() {
         let cargo_arguments = serde_json::from_str::<Vec<String>>(include_str!(
-            "../specs/cargo-val/evidence/c48d-cli/cargo-argv.json"
+            "../tests/fixtures/cli-argv/cargo-argv.json"
         ))
         .expect("recorded cargo val argv is valid JSON");
         let arguments = cargo_arguments

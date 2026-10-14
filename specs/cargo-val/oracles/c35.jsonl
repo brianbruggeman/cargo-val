@@ -1,2 +1,0 @@
-{"case":"c35_fixture","input":{"slot":{"index":0,"generation":1},"events":[{"kind":"stdout","bytes":"out"},{"kind":"stderr","bytes":"err"},{"kind":"exit","status":0}],"expected":{"stdout":1,"stderr":1,"exit":1,"payload_copies":0}},"status":"observed"}
-{"case":"c35_negative_control","control":{"mutation":"deliver exit with retired generation 0","expected_rejected":true},"status":"observed"}

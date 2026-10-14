@@ -1,4 +1,0 @@
-command=cargo fmt --all -- --check
-exit_status=0
-stdout:
-stderr:

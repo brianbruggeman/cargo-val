@@ -1,2 +1,0 @@
-{"case":"c47a_fixture","input":{"host":"linux","children":["timed_out","sibling"],"expected":{"terminated_and_reaped":1,"live_siblings":1,"orphans":0}},"status":"prospective"}
-{"case":"c47a_negative_control","control":{"mutation":"cancel with stale slot generation","expected":{"terminated_processes":0}},"status":"prospective"}

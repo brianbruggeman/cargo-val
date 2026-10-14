@@ -1,4 +1,0 @@
-{"case":"generated_defaults","environment":{},"expected":{"color":true,"jobs":2}}
-{"case":"generated_overrides","environment":{"CARGO_VAL_BUILD_COLOR":"false","CARGO_VAL_BUILD_JOBS":"2"},"expected":{"color":false,"jobs":2}}
-{"case":"invalid_capacity","environment":{"CARGO_VAL_BUILD_JOBS":"0"},"expected_error":{"field":"jobs","reason":"must be greater than zero"}}
-{"case":"std_dependency_negative_control","dependency":{"name":"serde","version":"1","features":["std"]},"target":"x86_64-unknown-none","expected":"compile_rejected_without_target_std"}

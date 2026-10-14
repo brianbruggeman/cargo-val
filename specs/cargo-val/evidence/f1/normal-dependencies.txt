@@ -1,1 +1,0 @@
-conflaguration-core v0.1.0 (/Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-core)

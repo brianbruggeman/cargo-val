@@ -1,8 +1,0 @@
-control: mutate first literal name alpha -> omega; validator must reject
-exit_status: 1
-stdout: (empty)
-stderr: Traceback (most recent call last):
-  File "/Users/brianbruggeman/repos/slot-0/cargo-val/specs/cargo-val/validate_c5_oracle.py", line 13, in <module>
-    assert [record["bytes"] for record in chunks] == source_lines
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError

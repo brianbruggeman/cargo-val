@@ -1,2 +1,0 @@
-1:#![no_std]
-7:pub trait SettingsSource {

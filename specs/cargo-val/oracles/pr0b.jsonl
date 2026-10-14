@@ -1,6 +1,0 @@
-{"case":"empty_window_control","cycles":0,"expected_allocations":0,"record_count":1}
-{"case":"boxed_allocation_positive_control","cycles":1,"expected_allocations":1,"record_count":1}
-{"case":"uncontended_acquire_once","cycles":1,"expected_allocations":0,"record_count":1,"macos_baseline_allocations":1,"baseline_source":"evidence/pr0a/semaphore-alloc-macos.txt:9"}
-{"case":"uncontended_acquire_repeated","cycles":16,"expected_allocations":0,"record_count":1,"macos_baseline_allocations":16,"baseline_source":"evidence/pr0a/semaphore-alloc-macos.txt:10"}
-{"case":"uncontended_try_acquire_once","cycles":1,"expected_allocations":0,"record_count":1,"macos_baseline_allocations":0,"baseline_source":"evidence/pr0a/semaphore-alloc-macos.txt:11"}
-{"case":"uncontended_try_acquire_repeated","cycles":16,"expected_allocations":0,"record_count":1,"macos_baseline_allocations":0,"baseline_source":"evidence/pr0a/semaphore-alloc-macos.txt:12"}

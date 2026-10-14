@@ -1,3 +1,0 @@
-cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
-[build-dependencies]
-└── conflaguration v2.0.0 (https://github.com/brianbruggeman/conflaguration.git?rev=3eb325d84fc291df35528e6781b5b814884e2d28#3eb325d8)

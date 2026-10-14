@@ -1,7 +1,0 @@
-   Compiling proc-macro2 v1.0.106
-   Compiling quote v1.0.44
-   Compiling syn v2.0.117
-   Compiling conflaguration-derive v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration/crates/conflaguration-derive)
-    Checking conflaguration v2.0.0 (/Users/brianbruggeman/repos/mine/conflaguration)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.36s
-cargo_check_exit=0

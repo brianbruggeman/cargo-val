@@ -1,4 +1,0 @@
-   Compiling cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
-error: no global memory allocator found but one is required; link to std or add `#[global_allocator]` to a static item that implements the GlobalAlloc trait
-
-error: could not compile `cargo-val` (bin "cargo-val") due to 1 previous error

@@ -1,4 +1,0 @@
-{"event":"parse_invocation","manifest_path":"tests/fixtures/workspace/Cargo.toml","filter":"fixture::passes","exact":true,"test_args_after_separator":"--help","expected_action":"Run"}
-{"event":"missing_manifest_path","input":["--manifest-path"],"expected":"invalid"}
-{"event":"empty_manifest_path","input":["--manifest-path="],"expected":"invalid"}
-{"event":"allocation_probe","parser_allocations":0,"positive_control_allocations":1}

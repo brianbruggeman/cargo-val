@@ -1,1 +1,0 @@
-cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)

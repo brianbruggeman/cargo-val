@@ -1,3 +1,0 @@
-command: CARGO_TARGET_DIR=/tmp/cargo_val_c3_target cargo check -p cargo-val --lib --no-default-features --features proxima-codec,proxima-primitives
-    Checking cargo-val v0.1.0 (/Users/brianbruggeman/repos/slot-0/cargo-val)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.17s
