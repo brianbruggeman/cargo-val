@@ -32,6 +32,8 @@ enum Expectation {
     CargoOptionValue,
     MaxFailValue,
     NoTestsValue,
+    TestTimeoutValue,
+    HeartbeatValue,
     ProcessValue,
     OutputValue,
     FiltersetValue,
@@ -85,6 +87,8 @@ pub struct CliParser<'argument> {
     exact: bool,
     fail_fast: Option<FailFastArgument<'argument>>,
     no_tests: Option<&'argument [u8]>,
+    test_timeout: Option<&'argument [u8]>,
+    heartbeat: Option<&'argument [u8]>,
     process: Option<&'argument [u8]>,
     output: Option<&'argument [u8]>,
     exit_with_parent: Option<&'static [u8]>,
@@ -112,6 +116,8 @@ impl<'argument> CliParser<'argument> {
             exact: false,
             fail_fast: None,
             no_tests: None,
+            test_timeout: None,
+            heartbeat: None,
             process: None,
             output: None,
             exit_with_parent: None,
@@ -163,6 +169,8 @@ impl<'argument> CliParser<'argument> {
             }
             b"--max-fail" => self.expectation = Expectation::MaxFailValue,
             b"--no-tests" => self.expectation = Expectation::NoTestsValue,
+            b"--test-timeout" => self.expectation = Expectation::TestTimeoutValue,
+            b"--heartbeat" => self.expectation = Expectation::HeartbeatValue,
             b"--process" => self.expectation = Expectation::ProcessValue,
             b"--output" => self.expectation = Expectation::OutputValue,
             b"--filterset" | b"-E" => self.begin_filterset(),
@@ -188,18 +196,7 @@ impl<'argument> CliParser<'argument> {
             value if value.starts_with(b"--target-dir=") => {
                 self.set_target_dir(&value[b"--target-dir=".len()..]);
             }
-            value if value.starts_with(b"--process=") => {
-                self.process = Some(&value[b"--process=".len()..]);
-            }
-            value if value.starts_with(b"--output=") => {
-                self.output = Some(&value[b"--output=".len()..]);
-            }
-            value if value.starts_with(b"--no-tests=") => {
-                self.no_tests = Some(&value[b"--no-tests=".len()..]);
-            }
-            value if value.starts_with(b"--max-fail=") => {
-                self.fail_fast = Some(FailFastArgument::MaxFail(&value[b"--max-fail=".len()..]));
-            }
+            value if self.take_inline_value(value) => {}
             value if value.starts_with(b"-m") && !value.starts_with(b"--") => {
                 let path = value[2..].strip_prefix(b"=").unwrap_or(&value[2..]);
                 if path.is_empty() {
@@ -229,6 +226,23 @@ impl<'argument> CliParser<'argument> {
         }
     }
 
+    fn take_inline_value(&mut self, argument: &'argument [u8]) -> bool {
+        let Some(split) = argument.iter().position(|byte| *byte == b'=') else {
+            return false;
+        };
+        let value = &argument[split + 1..];
+        match &argument[..split] {
+            b"--process" => self.process = Some(value),
+            b"--output" => self.output = Some(value),
+            b"--test-timeout" => self.test_timeout = Some(value),
+            b"--heartbeat" => self.heartbeat = Some(value),
+            b"--no-tests" => self.no_tests = Some(value),
+            b"--max-fail" => self.fail_fast = Some(FailFastArgument::MaxFail(value)),
+            _ => return false,
+        }
+        true
+    }
+
     fn consume_expected(&mut self, argument: &'argument [u8]) -> bool {
         match core::mem::replace(&mut self.expectation, Expectation::Nothing) {
             Expectation::Nothing => false,
@@ -248,6 +262,14 @@ impl<'argument> CliParser<'argument> {
             }
             Expectation::NoTestsValue => {
                 self.no_tests = Some(argument);
+                true
+            }
+            Expectation::TestTimeoutValue => {
+                self.test_timeout = Some(argument);
+                true
+            }
+            Expectation::HeartbeatValue => {
+                self.heartbeat = Some(argument);
                 true
             }
             Expectation::ProcessValue => {
@@ -374,6 +396,26 @@ impl<'argument> CliParser<'argument> {
             Some(&[])
         } else {
             self.no_tests
+        }
+    }
+
+    /// The last `--test-timeout` value; one with no value reports an empty value.
+    #[must_use]
+    pub const fn test_timeout(&self) -> Option<&'argument [u8]> {
+        if matches!(self.expectation, Expectation::TestTimeoutValue) {
+            Some(&[])
+        } else {
+            self.test_timeout
+        }
+    }
+
+    /// The last `--heartbeat` value; one with no value reports an empty value.
+    #[must_use]
+    pub const fn heartbeat(&self) -> Option<&'argument [u8]> {
+        if matches!(self.expectation, Expectation::HeartbeatValue) {
+            Some(&[])
+        } else {
+            self.heartbeat
         }
     }
 
@@ -639,6 +681,23 @@ mod tests {
         let mut dangling = CliParser::new();
         dangling.push(b"-m");
         assert!(dangling.has_invalid_manifest_path());
+    }
+
+    #[proxima::test]
+    async fn test_timeout_and_heartbeat_take_a_value_in_either_form_and_are_not_forwarded() {
+        let mut parser = CliParser::new();
+        for argument in [b"--test-timeout".as_slice(), b"120", b"--heartbeat=2", b"filter"] {
+            parser.push(argument);
+        }
+
+        assert_eq!(parser.test_timeout(), Some(&b"120"[..]));
+        assert_eq!(parser.heartbeat(), Some(&b"2"[..]));
+        assert_eq!(parser.cargo_arguments(), &[] as &[&[u8]]);
+        assert_eq!(parser.filter(), Some(&b"filter"[..]));
+
+        let mut dangling = CliParser::new();
+        dangling.push(b"--heartbeat");
+        assert_eq!(dangling.heartbeat(), Some(&b""[..]));
     }
 
     #[proxima::test]
