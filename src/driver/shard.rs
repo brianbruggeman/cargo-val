@@ -439,6 +439,11 @@ pub(super) fn note_group(run: &ListingRun<'_>, watches: &mut Watches, slot: usiz
     }
 }
 
+// a shard of several names has one clock and no observable per-test start, so its line names the shard; a lone name is its own test
+pub(super) fn unreported(watch: &ShardWatch) -> Option<usize> {
+    (watch.shard.count > 1).then(|| watch.shard.count - watch.reported.total())
+}
+
 // the first name of the shard that has not reported is the test this deadline names; an output-only rerun never announced a start, so it names none
 pub(super) fn first_running<'arena>(arena: &'arena ShardArena, watch: &ShardWatch) -> Option<&'arena [u8]> {
     if watch.shard.rerun == Some(Rerun::OutputOnly) {

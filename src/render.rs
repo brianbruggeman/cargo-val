@@ -60,7 +60,7 @@ pub enum Event<'a> {
     Started { id: Identity<'a>, solo: bool, at_ms: u64, limit_ms: Option<u32> },
     Settled { id: Identity<'a>, outcome: Outcome, at_ms: Option<u64>, solo: bool },
     Tick { now_ms: u64 },
-    Milestone { id: Identity<'a>, age_ms: u64, limit_ms: Option<u32> },
+    Milestone { id: Identity<'a>, age_ms: u64, limit_ms: Option<u32>, unreported: Option<usize> },
     Captured { id: Identity<'a>, stdout: Stream<'a>, stderr: Stream<'a> },
     Warned { id: Identity<'a>, what: &'a [u8] },
     BlockOpened { id: Identity<'a> },
@@ -407,7 +407,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Tick { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
-            Event::Milestone { id, age_ms, limit_ms } => Self::milestone(frame, id, age_ms, limit_ms),
+            Event::Milestone { id, age_ms, limit_ms, unreported } => Self::milestone(frame, id, (age_ms, limit_ms), unreported),
             Event::Captured { id, stdout, stderr } => self.captured(frame, id, stdout, stderr),
             Event::Warned { id, what } => warned(frame, id, what),
             Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
@@ -424,11 +424,20 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
     }
 
-    fn milestone<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, age_ms: u64, limit_ms: Option<u32>) {
+    fn milestone<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, (age_ms, limit_ms): (u64, Option<u32>), unreported: Option<usize>) {
         label(frame, b"RUNNING");
         frame.text(id.0);
         frame.text(b" ");
-        frame.text(id.1);
+        match unreported {
+            Some(count) => {
+                frame.text(b"shard (");
+                frame.number(count);
+                frame.text(b" unreported, first ");
+                frame.text(id.1);
+                frame.text(b")");
+            }
+            None => frame.text(id.1),
+        }
         frame.text(b" age=");
         seconds(frame, age_ms);
         if let Some(limit) = limit_ms {
@@ -888,7 +897,7 @@ mod tests {
                 let outcome = if round % 7 == 0 { Outcome::Failed } else { Outcome::Passed };
                 for event in [
                     Event::Started { id: FAILING, solo: false, at_ms: round, limit_ms: Some(120_000) },
-                    Event::Milestone { id: FAILING, age_ms: round + 3, limit_ms: Some(120_000) },
+                    Event::Milestone { id: FAILING, age_ms: round + 3, limit_ms: Some(120_000), unreported: None },
                     Event::Settled { id: FAILING, outcome, at_ms: Some(round + 5), solo: false },
                     Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", false), stderr: (b"", false) },
                     Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml") },
@@ -945,8 +954,8 @@ mod tests {
         let mut arena = [0_u8; 64];
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
-        let reached = Event::Milestone { id: SLOW, age_ms: 10_795, limit_ms: Some(120_000) };
-        let open = Event::Milestone { id: HOURS, age_ms: 20_000, limit_ms: None };
+        let reached = Event::Milestone { id: SLOW, age_ms: 10_795, limit_ms: Some(120_000), unreported: None };
+        let open = Event::Milestone { id: HOURS, age_ms: 20_000, limit_ms: None, unreported: None };
 
         state.apply(&reached);
         let with_limit = projected(&state, &reached);
@@ -956,6 +965,21 @@ mod tests {
         assert_eq!(with_limit, "RUNNING  shard_process a_per_test_interrupt_ends_a_blocked_child age=10.795s limit=120.000s\n");
         assert_eq!(without_limit, "RUNNING  sched_records the_host_binary_format_yields_every_declared_record age=20.000s\n");
         assert_eq!(state.inflight_len(), 0);
+    }
+
+    #[test]
+    fn a_shard_milestone_names_the_shard_and_its_first_unreported_test_without_crediting_it_the_age() {
+        let mut arena = [0_u8; 64];
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
+        let shard = Event::Milestone { id: SLOW, age_ms: 10_795, limit_ms: None, unreported: Some(3) };
+
+        state.apply(&shard);
+
+        assert_eq!(
+            projected(&state, &shard),
+            "RUNNING  shard_process shard (3 unreported, first a_per_test_interrupt_ends_a_blocked_child) age=10.795s\n"
+        );
     }
 
     #[test]

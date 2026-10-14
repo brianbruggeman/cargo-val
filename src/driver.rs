@@ -851,15 +851,15 @@ pub(crate) fn session_milestone(
     let age_ms = monotonic_millis().saturating_sub(watch.started_ms);
     let session = ledger.sessions().get(watch.slot).ok_or(RunError::Outcome)?;
     let arena = run.shards.borrow();
-    let name = match watch.shard.as_ref() {
-        Some(shard_watch) => shard::first_running(&arena, shard_watch),
-        None => Some(session.name_bytes()),
+    let (name, unreported) = match watch.shard.as_ref() {
+        Some(shard_watch) => (shard::first_running(&arena, shard_watch), shard::unreported(shard_watch)),
+        None => (Some(session.name_bytes()), None),
     };
     let Some(name) = name else {
         return Ok(());
     };
     let targets = run.targets.borrow();
-    emit(run.render(), &Event::Milestone { id: (targets.id(session.target()), name), age_ms, limit_ms: run.settings.test_limit_ms })
+    emit(run.render(), &Event::Milestone { id: (targets.id(session.target()), name), age_ms, limit_ms: run.settings.test_limit_ms.filter(|_| unreported.is_none()), unreported })
 }
 
 pub(crate) fn session_cancelled(ledger: &Ledger<'_>, watches: &mut Watches, index: usize) {
