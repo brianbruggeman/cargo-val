@@ -38,6 +38,11 @@ pub enum CargoSourceStep<'path> {
         /// the uplifted path such as `/repo/target/debug/parser`, as cargo reported it.
         executable: &'path str,
     },
+    /// A compile unit that is not a test executable or a `bin` finished.
+    Compiled {
+        /// true when cargo reused the unit instead of compiling it.
+        fresh: bool,
+    },
     /// Cargo finished building; no artifact follows.
     BuildFinished {
         /// false when a unit failed to build, so executables still waiting for a bin will never get it.
@@ -239,6 +244,10 @@ impl<'buffer> CargoSource<'buffer> {
                 consumed_bytes,
             ),
             RecordStep::Parsed {
+                parsed: Some(CargoMessage::Compiled { fresh }),
+                consumed_bytes,
+            } => (CargoSourceStep::Compiled { fresh }, consumed_bytes),
+            RecordStep::Parsed {
                 parsed: Some(CargoMessage::Diagnostic { level, rendered }),
                 consumed_bytes,
             } => (CargoSourceStep::Diagnostic { level, rendered }, consumed_bytes),
@@ -371,6 +380,7 @@ mod tests {
                     Poll::Ready(Ok(
                         CargoSourceStep::Ignored
                         | CargoSourceStep::BinBuilt { .. }
+                        | CargoSourceStep::Compiled { .. }
                         | CargoSourceStep::Diagnostic { .. }
                     | CargoSourceStep::BuildFinished { .. },
                     )) => {

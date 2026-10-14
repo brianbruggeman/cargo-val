@@ -34,7 +34,17 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, Some([discovered, filtered]));
                 exit_line(frame, exit);
             }
-            _ => {}
+            Event::Begin { .. }
+            | Event::Waiting { .. }
+            | Event::Listed { .. }
+            | Event::Built { .. }
+            | Event::Resize { .. }
+            | Event::Started { .. }
+            | Event::Settled { .. }
+            | Event::Tick { .. }
+            | Event::Warned { .. }
+            | Event::BlockOpened { .. }
+            | Event::BlockClosed => {}
         }
     }
 }
