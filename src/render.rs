@@ -11,6 +11,10 @@
 
 use crate::line::Line;
 
+pub mod review;
+
+use review::{Back, Key};
+
 /// A test id as two borrowed fields: the binary, then the test name.
 pub type Identity<'a> = (&'a [u8], &'a [u8]);
 
@@ -31,10 +35,17 @@ pub enum Outcome {
     Ignored,
 }
 
-/// The screen the run is in. Plain uses exactly these four; review, timeline and the rest join with the rich projection.
+/// The screen the run is in. Plain uses `Running`, `BuildError`, `Interrupted` and `Done`; the rest are the rich screens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Running,
+    QuitArmed,
+    Review { selected: u16, armed: bool },
+    Timeline { back: Back },
+    Find { back: Back },
+    Skipped { back: Back },
+    Warnings { back: Back },
+    Receipt,
     BuildError,
     Interrupted { signal: u8 },
     Done { wall_ms: u64 },
@@ -53,30 +64,62 @@ pub enum Event<'a> {
     BlockClosed,
     BuildFailed { diagnostic: &'a [u8] },
     Interrupted { signal: u8 },
+    Key(Key),
     Finished { passed: usize, failed: usize, ignored: usize, not_run: usize, wall_ms: u64, manifest: Option<&'a [u8]> },
 }
 
 impl Mode {
     /// The transition table: every (mode, event) pair is named, so a new mode or event is a compile error here.
+    /// `open` is the number of failures the review list holds; keys read it for `f` and for clamping the selection.
     #[must_use]
-    pub const fn next(self, event: &Event<'_>) -> Self {
-        match (self, event) {
-            (Self::Running, Event::BuildFailed { .. }) => Self::BuildError,
-            (Self::Running, Event::Interrupted { signal }) => Self::Interrupted { signal: *signal },
-            (Self::Running, Event::Finished { failed: 0, wall_ms, .. }) => Self::Done { wall_ms: *wall_ms },
-            (
-                Self::Running,
-                Event::Begin { .. }
-                | Event::Listed { .. }
-                | Event::Started { .. }
-                | Event::Settled { .. }
-                | Event::Captured { .. }
-                | Event::Warned { .. }
-                | Event::BlockOpened { .. }
-                | Event::BlockClosed
-                | Event::Finished { .. },
-            ) => Self::Running,
-            (Self::BuildError | Self::Interrupted { .. } | Self::Done { .. }, _) => self,
+    pub fn next(self, event: &Event<'_>, open: usize) -> Self {
+        match *event {
+            Event::Key(key) => self.keyed(key, open),
+            Event::Interrupted { signal } if self.is_live() => Self::Interrupted { signal },
+            Event::BuildFailed { .. } if self == Self::Running => Self::BuildError,
+            Event::Finished { failed: 0, wall_ms, .. } if self == Self::Running => Self::Done { wall_ms },
+            Event::Begin { .. }
+            | Event::Listed { .. }
+            | Event::Started { .. }
+            | Event::Settled { .. }
+            | Event::Captured { .. }
+            | Event::Warned { .. }
+            | Event::BlockOpened { .. }
+            | Event::BlockClosed
+            | Event::BuildFailed { .. }
+            | Event::Interrupted { .. }
+            | Event::Finished { .. } => self.clamped(open),
+        }
+    }
+
+    /// Screens that a run, a signal or a quit can still leave; the other four are final.
+    #[must_use]
+    pub const fn is_live(self) -> bool {
+        match self {
+            Self::Running
+            | Self::QuitArmed
+            | Self::Review { .. }
+            | Self::Timeline { .. }
+            | Self::Find { .. }
+            | Self::Skipped { .. }
+            | Self::Warnings { .. } => true,
+            Self::BuildError | Self::Interrupted { .. } | Self::Done { .. } | Self::Receipt => false,
+        }
+    }
+
+    fn clamped(self, open: usize) -> Self {
+        match self {
+            Self::Review { selected, armed } => Self::Review { selected: review::clamp(selected, open), armed },
+            Self::Running
+            | Self::QuitArmed
+            | Self::Timeline { .. }
+            | Self::Find { .. }
+            | Self::Skipped { .. }
+            | Self::Warnings { .. }
+            | Self::BuildError
+            | Self::Interrupted { .. }
+            | Self::Done { .. }
+            | Self::Receipt => self,
         }
     }
 }
@@ -120,7 +163,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     }
 
     pub fn apply(&mut self, event: &Event<'_>) {
-        self.mode = self.mode.next(event);
+        self.mode = self.mode.next(event, self.stored);
         match *event {
             Event::Begin { github, .. } => self.begin(github),
             Event::Settled { id, outcome: Outcome::Failed, .. } => self.record(id),
@@ -177,6 +220,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
             Event::BuildFailed { diagnostic } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
             Event::Interrupted { signal } => interrupted(frame, signal),
+            Event::Key(_) => {}
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest } => {
                 self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest);
             }
@@ -580,7 +624,7 @@ mod tests {
         ];
 
         for (from, event, to) in rows {
-            assert_eq!(from.next(&event), to, "{from:?} on {event:?}");
+            assert_eq!(from.next(&event, 0), to, "{from:?} on {event:?}");
         }
     }
 

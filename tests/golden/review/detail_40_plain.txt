@@ -1,0 +1,33 @@
+ cargo val  review                 2:18
+
+ 2 failed  381 passed  0 skipped
+ 0 warnings
+
+ TIMEOUT    71.66s   sched_rec…nd_group
+›PANIC     120.03s   shard_pro…promptly
+ ──────────────────────────────────────
+ shard_process::a_per_test_interrupt_en
+ ds_a_blocked_child_and_cargo_val_exits
+ _promptly
+ PANIC after 120.03s
+ tests/shard_process.rs:575  e opens
+NO-RETRY not retried alone: it failed
+  after 120.030s, over the 30s retry
+  budget. r retries it now
+
+ test output  verbatim
+   thread 'a_per_test_interrupt_ends_a_
+   blocked_child_and_cargo_val_exits_pr
+   omptly' panicked at tests/shard_proc
+   ess.rs:575:31:
+   the shard child reported its pid bef
+   ore the deadline
+   +1 lines
+
+find the commit  cargo val bisect
+  shard_process
+  a_per_test_interrupt_ends_a_blocked_c
+  hild_and_cargo_val_exits_promptly
+ j/k move  r rerun  R all  e edit
+ / find  i skip  w warn  s timeline
+ q quit
