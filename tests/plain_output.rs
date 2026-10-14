@@ -438,6 +438,39 @@ async fn rich_on_a_pty_draws_the_frame_ends_with_the_closing_block_and_shows_the
 }
 
 #[cfg(unix)]
+const RESULT_PREFIXES: [&str; 3] = ["PASS     ", "FAIL     ", "IGNORED  "];
+
+#[cfg(unix)]
+fn settled_result_lines(drawn: &str) -> Vec<&str> {
+    drawn
+        .split('\n')
+        .map(|line| line.rsplit("\x1b[J").next().unwrap_or(line))
+        .filter(|line| RESULT_PREFIXES.iter().any(|prefix| line.starts_with(prefix)))
+        .collect()
+}
+
+#[cfg(unix)]
+fn without_escapes(text: &str) -> String {
+    let mut plain = String::new();
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\x1b' => _ = characters.by_ref().find(char::is_ascii_alphabetic),
+            other => plain.push(other),
+        }
+    }
+    plain
+}
+
+#[cfg(unix)]
+fn is_inflight_row_for(line: &str, name: &str) -> bool {
+    let plain = without_escapes(line);
+    let Some((age, rest)) = plain.trim_start().split_once("s ") else { return false };
+    let is_tenths_age = age.split_once('.').is_some_and(|(whole, tenth)| !whole.is_empty() && whole.bytes().all(|byte| byte.is_ascii_digit()) && tenth.len() == 1 && tenth.bytes().all(|byte| byte.is_ascii_digit()));
+    is_tenths_age && rest.trim_end().ends_with(name)
+}
+
+#[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn shard_mode_rich_on_a_pty_prints_no_per_test_lines_between_frames() {
     let screen = on_a_pty(&[], &["--output", "rich", "--process", "shard"]).await;
@@ -446,8 +479,12 @@ async fn shard_mode_rich_on_a_pty_prints_no_per_test_lines_between_frames() {
     assert!(contains(&screen, HIDE_CURSOR) && last_cursor_up(&screen).is_some(), "the shard run draws the frame:\n{text:?}");
     let last_frame_end = rposition(&screen, b"\x1b[J").expect("the last redraw clears below the cursor") + b"\x1b[J".len();
     let before_closing = &text[..last_frame_end];
-    assert!(!before_closing.contains("fixture::passes"), "a passing test prints no line while frames are live:\n{}", around(before_closing, "fixture::passes"));
-    assert!(!before_closing.contains("fixture::ignored_by_default"), "an ignored test prints no line while frames are live:\n{}", around(before_closing, "fixture::ignored_by_default"));
+    assert_eq!(settled_result_lines(before_closing), Vec::<&str>::new(), "no PASS/FAIL/IGNORED result line while frames are live:\n{}", around(before_closing, "fixture::"));
+    for name in ["fixture::passes", "fixture::ignored_by_default"] {
+        for row in before_closing.lines().filter(|line| line.contains(name)) {
+            assert!(is_inflight_row_for(row, name), "{name} may appear only as an in-flight row (age, then name): {row:?}");
+        }
+    }
     assert!(text[last_frame_end..].contains("SUMMARY  passed=1 failed=1") && screen.ends_with(SHOW_CURSOR), "the closing block follows the erase and the cursor returns after it:\n{text:?}");
 }
 

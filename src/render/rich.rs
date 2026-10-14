@@ -778,6 +778,36 @@ mod tests {
     }
 
     #[test]
+    fn a_shard_frame_lists_two_tests_in_flight_as_age_then_name_rows_and_a_settle_emits_no_result_line() {
+        const PASSES: (&[u8], &[u8]) = (b"cli_run", b"fixture::passes");
+        const IGNORED: (&[u8], &[u8]) = (b"cli_run", b"fixture::ignored_by_default");
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: true, jobs: 10, github: false, why: None, json: false, at_ms: 0 });
+        state.apply(&Event::Resize { cols: 80 });
+        state.apply(&Event::Started { id: PASSES, solo: false, at_ms: 0, limit_ms: None });
+        state.apply(&Event::Started { id: IGNORED, solo: false, at_ms: 0, limit_ms: None });
+        let tick = Event::Tick { now_ms: 12_000 };
+        state.apply(&tick);
+        let mut frame = Line::<4096>::new();
+
+        state.project_live(&tick, &mut frame).expect("the frame holds one redraw");
+
+        let drawn = String::from_utf8_lossy(frame.bytes()).into_owned();
+        let rows: Vec<&str> = drawn.lines().filter(|line| line.contains("fixture::")).collect();
+        assert!(drawn.contains(" running 2 tests  \u{b7}  up to 10 at once\n"), "{drawn}");
+        assert_eq!(rows.len(), 2, "{drawn}");
+        for name in ["cli_run::fixture::passes", "cli_run::fixture::ignored_by_default"] {
+            assert!(rows.iter().any(|row| row.contains("12.0s") && row.ends_with(name)), "{name} is an in-flight row, age then name:\n{drawn}");
+        }
+        let settled = Event::Settled { id: PASSES, outcome: Outcome::Passed, at_ms: Some(12_500), solo: false };
+        state.apply(&settled);
+        let mut after_settle = Line::<512>::new();
+        state.project_live(&settled, &mut after_settle).expect("a settle projects");
+        assert_eq!(after_settle.bytes(), b"", "shard mode prints no PASS line for a settled test; the frame is the only surface");
+    }
+
+    #[test]
     fn ten_thousand_rich_frames_at_each_width_allocate_nothing() {
         let scenarios = [(80_u16, Some(380), PARTIAL), (120, Some(380), PARTIAL), (200, Some(380), PARTIAL), (80, None, PARTIAL), (80, Some(380), COMPLETE), (60, None, COMPLETE)];
         let mut total_frames = 0_usize;
