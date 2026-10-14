@@ -5,7 +5,6 @@ use core::cell::Cell;
 use core::ptr;
 use std::alloc::System;
 use std::env;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cargo_val::artifact_stream::{ArtifactFramer, ArtifactStreamError, RecordFault, RecordStep};
 use cargo_val::discover_listing::{ListingError, ListingLine, parse_listing_line};
@@ -13,6 +12,7 @@ use proxima_codec::FrameError;
 
 thread_local! {
     static TRACKING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 fn tracking_enabled() -> bool {
@@ -23,8 +23,6 @@ fn set_tracking(enabled: bool) {
     TRACKING.with(|tracking| tracking.set(enabled));
 }
 
-static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 struct AllocationCounter;
 
 #[global_allocator]
@@ -33,7 +31,7 @@ static GLOBAL_ALLOCATOR: AllocationCounter = AllocationCounter;
 unsafe impl GlobalAlloc for AllocationCounter {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if tracking_enabled() {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
         }
         unsafe { System.alloc(layout) }
     }
@@ -44,7 +42,7 @@ unsafe impl GlobalAlloc for AllocationCounter {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         if tracking_enabled() {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
         }
         unsafe { System.realloc(pointer, layout, size) }
     }
@@ -52,7 +50,7 @@ unsafe impl GlobalAlloc for AllocationCounter {
 
 #[proxima::test]
 async fn parse_one_listing_line() {
-    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    ALLOCATION_COUNT.with(|count| count.set(0));
     set_tracking(true);
     let name_input = b"suite::alpha: test";
     let name = parse_listing_line(name_input);
@@ -87,12 +85,12 @@ async fn parse_one_listing_line() {
     let crlf_name = parse_listing_line(b"suite::alpha: test\r");
     set_tracking(false);
     assert_eq!(crlf_name, Ok(ListingLine::Test("suite::alpha")));
-    assert_eq!(ALLOCATION_COUNT.load(Ordering::Relaxed), 0);
+    assert_eq!(ALLOCATION_COUNT.with(Cell::get), 0);
 
     set_tracking(true);
     let allocation_control = Vec::<u8>::with_capacity(1);
     set_tracking(false);
-    assert_eq!(ALLOCATION_COUNT.load(Ordering::Relaxed), 1);
+    assert_eq!(ALLOCATION_COUNT.with(Cell::get), 1);
     drop(allocation_control);
 
     println!(
