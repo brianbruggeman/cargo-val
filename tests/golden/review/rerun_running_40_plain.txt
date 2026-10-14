@@ -26,5 +26,4 @@ find the commit  cargo val bisect
   the_host_binary_format_yields_every_d
   eclared_record_with_flags_and_group
  j/k move  r rerun  R all  e edit
- / find  i skip  w warn  s timeline
- q quit
+ s timeline  q quit

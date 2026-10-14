@@ -37,20 +37,10 @@ const YELLOW: &[u8] = b"33";
 const GREEN: &[u8] = b"32";
 const CYAN: &[u8] = b"36";
 const CYAN_BOLD: &[u8] = b"1;36";
-const KEYS: [(&[u8], &[u8]); 9] = [
-    (b"j/k", b"move"),
-    (b"r", b"rerun"),
-    (b"R", b"all"),
-    (b"e", b"edit"),
-    (b"/", b"find"),
-    (b"i", b"skip"),
-    (b"w", b"warn"),
-    (b"s", b"timeline"),
-    (b"q", b"quit"),
-];
-const EMPTY_KEYS: [(&[u8], &[u8]); 5] = [(b"/", b"find"), (b"s", b"timeline"), (b"i", b"skip"), (b"w", b"warn"), (b"q", b"quit")];
+const KEYS: [(&[u8], &[u8]); 6] = [(b"j/k", b"move"), (b"r", b"rerun"), (b"R", b"all"), (b"e", b"edit"), (b"s", b"timeline"), (b"q", b"quit")];
+const EMPTY_KEYS: [(&[u8], &[u8]); 2] = [(b"s", b"timeline"), (b"q", b"quit")];
 const SCROLL_KEYS: [(&[u8], &[u8]); 5] = [(b"j/k", b"scroll"), (b"enter", b"list"), (b"r", b"rerun"), (b"e", b"edit"), (b"q", b"quit")];
-const STUB_KEYS: [(&[u8], &[u8]); 2] = [(b"esc", b"back"), (b"q", b"quit")];
+const TIMELINE_KEYS: [(&[u8], &[u8]); 2] = [(b"esc", b"back"), (b"q", b"quit")];
 const ARMED_NOTICE: &[u8] = b"q again to confirm, any key cancels";
 
 /// Width in columns, and whether the frame may carry colour.
@@ -155,9 +145,6 @@ const fn interrupted() -> Mode {
 const fn opening(byte: u8, back: Option<u16>) -> Option<Mode> {
     match byte {
         b's' => Some(Mode::Timeline { back }),
-        b'i' => Some(Mode::Skipped { back }),
-        b'w' => Some(Mode::Warnings { back }),
-        b'/' => Some(Mode::Find { back }),
         _ => None,
     }
 }
@@ -307,28 +294,11 @@ impl Mode {
             Self::Running => running_key(key, open),
             Self::QuitArmed => armed_key(key),
             Self::Review { selected, armed, top } => review_key(selected, armed, top, key, (open, lines)),
-            Self::Timeline { back } | Self::Find { back } | Self::Skipped { back } | Self::Warnings { back } => {
-                screen_key(self, back, key)
-            }
+            Self::Timeline { back } => screen_key(back, key),
             Self::BuildError | Self::Interrupted { .. } | Self::Done { .. } | Self::Receipt => self,
         }
     }
 
-    const fn own_key(self) -> u8 {
-        match self {
-            Self::Timeline { .. } => b's',
-            Self::Find { .. } => b'/',
-            Self::Skipped { .. } => b'i',
-            Self::Warnings { .. } => b'w',
-            Self::Running
-            | Self::QuitArmed
-            | Self::Review { .. }
-            | Self::BuildError
-            | Self::Interrupted { .. }
-            | Self::Done { .. }
-            | Self::Receipt => 0,
-        }
-    }
 }
 
 fn running_key(key: Key, open: usize) -> Mode {
@@ -368,13 +338,11 @@ fn review_key(selected: u16, armed: bool, top: Option<u16>, key: Key, (open, lin
     }
 }
 
-fn screen_key(own: Mode, back: Option<u16>, key: Key) -> Mode {
+fn screen_key(back: Option<u16>, key: Key) -> Mode {
     match key {
-        Key::Esc => restore(back),
+        Key::Esc | Key::Char(b's') => restore(back),
         Key::Char(b'c') | Key::CtrlC => interrupted(),
-        Key::Char(byte) if byte == own.own_key() => restore(back),
-        Key::Char(byte) => opening(byte, back).unwrap_or(own),
-        Key::Enter | Key::Up | Key::Down | Key::Pointer { .. } | Key::Cursor { .. } => own,
+        Key::Char(_) | Key::Enter | Key::Up | Key::Down | Key::Pointer { .. } | Key::Cursor { .. } => Mode::Timeline { back },
     }
 }
 
@@ -390,7 +358,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
                 Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down | Key::Pointer { .. } | Key::Cursor { .. } => Action::None,
             },
-            Mode::Running | Mode::Timeline { .. } | Mode::Find { .. } | Mode::Skipped { .. } | Mode::Warnings { .. } => match key {
+            Mode::Running | Mode::Timeline { .. } => match key {
                 Key::Char(b'c') | Key::CtrlC => Action::Interrupt,
                 Key::Char(_) | Key::Enter | Key::Esc | Key::Up | Key::Down | Key::Pointer { .. } | Key::Cursor { .. } => Action::None,
             },
@@ -429,10 +397,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         let look = (width.max(MIN_WIDTH), color);
         match self.mode() {
             Mode::Review { selected, armed, top } => self.page(frame, look, (selected, armed, top), &detail),
-            Mode::Timeline { .. } => self.stub(frame, look, b"timeline"),
-            Mode::Find { .. } => self.stub(frame, look, b"find"),
-            Mode::Skipped { .. } => self.stub(frame, look, b"skipped"),
-            Mode::Warnings { .. } => self.stub(frame, look, b"warnings"),
+            Mode::Timeline { .. } => self.timeline_screen(frame, look)?,
             Mode::Running
             | Mode::QuitArmed
             | Mode::BuildError
@@ -446,12 +411,11 @@ impl<const RERUN: usize> State<'_, RERUN> {
         }
     }
 
-    fn stub<const FRAME: usize>(&self, frame: &mut Line<FRAME>, look: Look, title: &[u8]) {
-        self.header(frame, look, title);
-        frame.text(b"\n\n ");
-        paint(frame, look.1, FAINT, title);
-        paint(frame, look.1, FAINT, b" view is drawn by a later slice\n\n");
-        keys_line(frame, look, &STUB_KEYS);
+    fn timeline_screen<const FRAME: usize>(&self, frame: &mut Line<FRAME>, look: Look) -> Result<(), usize> {
+        self.project_timeline(look.0, frame)?;
+        frame.text(b"\n");
+        keys_line(frame, look, &TIMELINE_KEYS);
+        Ok(())
     }
 
     fn shown<'s, 'a: 's>(&'s self, index: usize, detail: &impl Fn(Identity<'_>) -> Detail<'a>) -> Shown<'s> {
@@ -1178,7 +1142,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             Mode::Review { .. } if self.open() == 0 => &EMPTY_KEYS,
             Mode::Review { top: Some(_), .. } => &SCROLL_KEYS,
             Mode::Review { .. } => &KEYS,
-            Mode::Timeline { .. } | Mode::Find { .. } | Mode::Skipped { .. } | Mode::Warnings { .. } => &STUB_KEYS,
+            Mode::Timeline { .. } => &TIMELINE_KEYS,
             Mode::Running | Mode::QuitArmed | Mode::BuildError | Mode::Interrupted { .. } | Mode::Done { .. } | Mode::Receipt => &[],
         }
     }
@@ -1259,7 +1223,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         match (self.mode, button & !MODIFIERS, press) {
             (Mode::Review { armed: true, .. }, LEFT, true) if on_footer => Key::Char(b'q'),
             (Mode::Review { armed: true, .. }, LEFT, true) => Key::Esc,
-            (Mode::Review { .. } | Mode::Timeline { .. } | Mode::Find { .. } | Mode::Skipped { .. } | Mode::Warnings { .. }, LEFT, true) if on_footer => {
+            (Mode::Review { .. } | Mode::Timeline { .. }, LEFT, true) if on_footer => {
                 (line - footer_top).checked_sub(self.notice_rows()).and_then(|row| self.footer_key(row, column, width)).unwrap_or(key)
             }
             (Mode::Review { selected, .. }, LEFT, true) => match self.row_at(line, width) {
