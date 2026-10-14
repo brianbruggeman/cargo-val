@@ -11,6 +11,7 @@ use std::process::ExitStatus;
 use std::os::unix::process::ExitStatusExt;
 use std::vec::Vec;
 
+use prime::os::core_shard::{TimerAtFuture, current_tick_checked, timer_at};
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_core::markers::DropSafe;
 use proxima_primitives::pipe::{Exhausted, FanIn, Select, SignalSource, UnpinPipe};
@@ -21,9 +22,10 @@ use crate::edge_signal::SignalPipe;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, run_body, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, emit, monotonic_millis, run_body, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
+use crate::render::Event;
 use crate::status_queue::{self, Capture, Sinks};
 
 pub(crate) const CARGO_LANE: usize = 0;
@@ -31,7 +33,8 @@ pub(crate) const LISTING_LANE: usize = 1;
 pub(crate) const DOC_LANE: usize = 2;
 pub(crate) const JOB_BASE: usize = 3;
 const LANES: usize = JOB_BASE + LIVE_CAPACITY;
-const ARMS: usize = LANES * 3 + 3;
+const TICK_MS: u64 = crate::view_defaults::TICK_MS as u64;
+const ARMS: usize = LANES * 3 + 4;
 
 /// One child's stdout and stderr streams, its exit source, and whether its stdout may be read now.
 pub(crate) type Lane = (
@@ -42,6 +45,9 @@ pub(crate) type Lane = (
 );
 
 pub(crate) type Lanes = [Lane; LANES];
+
+/// The pending timer of the next tick; empty until the first poll arms it and again after each tick fires.
+pub(crate) type Beat = RefCell<Option<TimerAtFuture>>;
 
 pub(crate) fn empty_lanes() -> Lanes {
     core::array::from_fn(|_| {
@@ -92,6 +98,7 @@ pub(crate) enum Edge<'edge> {
     Signal(Option<&'edge RefCell<Readiness>>),
     Interrupt(Option<&'edge SignalSource>),
     Parent(Option<&'edge SignalPipe>),
+    Tick(Option<&'edge Beat>),
 }
 
 pub(crate) enum Item {
@@ -102,6 +109,7 @@ pub(crate) enum Item {
     Exit(usize, io::Result<ExitStatus>),
     Signal(io::Result<()>),
     Interrupt,
+    Tick,
 }
 
 impl DropSafe for Edge<'_> {}
@@ -121,6 +129,7 @@ impl UnpinPipe for Edge<'_> {
             Edge::Signal(gate) => {
                 gate.map_or(Poll::Ready(Err(Exhausted)), |gate| signal_step(gate, context))
             }
+            Edge::Tick(beat) => beat.map_or(Poll::Pending, |beat| tick_step(beat, context)),
             Edge::Interrupt(source) => source
                 .map_or(Poll::Ready(Err(Exhausted)), |source| interrupt_step(source, context)),
             Edge::Parent(signals) => signals.map_or(Poll::Ready(Err(Exhausted)), |signals| parent_step(signals, context)),
@@ -201,6 +210,22 @@ fn parent_step(signals: &SignalPipe, context: &Context<'_>) -> Poll<Result<Item,
     signals.poll_parent(context).map(|error| Ok(Item::Signal(Err(error))))
 }
 
+// one timer on this core's wheel, re-armed a tick ahead of now after each fire, so a busy loop never owes a burst of catch-up ticks
+fn tick_step(beat: &Beat, context: &mut Context<'_>) -> Poll<Result<Item, Exhausted>> {
+    let Some(now) = current_tick_checked() else {
+        return Poll::Pending;
+    };
+    let mut armed = beat.borrow_mut();
+    let timer = armed.get_or_insert_with(|| timer_at(now.saturating_add(TICK_MS)));
+    match Pin::new(timer).poll(context) {
+        Poll::Ready(()) => {
+            *armed = None;
+            Poll::Ready(Ok(Item::Tick))
+        }
+        Poll::Pending => Poll::Pending,
+    }
+}
+
 fn signal_step(gate: &RefCell<Readiness>, context: &Context<'_>) -> Poll<Result<Item, Exhausted>> {
     match gate.borrow_mut().poll(context) {
         Ok(ReadyState::Parked) => Poll::Pending,
@@ -215,8 +240,12 @@ fn signal_step(gate: &RefCell<Readiness>, context: &Context<'_>) -> Poll<Result<
 fn edge<'edge>(
     lanes: &'edge Lanes,
     port: Option<(&'edge RefCell<Readiness>, &'edge SignalSource, &'edge SignalPipe)>,
+    beat: Option<&'edge Beat>,
     index: usize,
 ) -> Edge<'edge> {
+    if index == ARMS - 4 {
+        return Edge::Tick(beat);
+    }
     if index == ARMS - 1 {
         return Edge::Signal(port.map(|(gate, _, _)| gate));
     }
@@ -243,10 +272,11 @@ fn edge<'edge>(
 pub(crate) async fn pump(
     lanes: &Lanes,
     port: Option<(&RefCell<Readiness>, &SignalSource, &SignalPipe)>,
+    beat: Option<&Beat>,
     mut on_item: impl FnMut(Item) -> Result<ControlFlow<()>, RunError>,
 ) -> Result<usize, RunError> {
     let merged = FanIn::new(
-        core::array::from_fn::<_, ARMS, _>(|index| edge(lanes, port, index)),
+        core::array::from_fn::<_, ARMS, _>(|index| edge(lanes, port, beat, index)),
         Select::RoundRobin,
     );
     let _capture = Capture::enter();
@@ -387,6 +417,7 @@ fn handle(
             Ok(())
         }
         Item::Interrupt => Ok(()),
+        Item::Tick => emit(run.render(), &Event::Tick { now_ms: monotonic_millis() }),
     }
 }
 
@@ -450,7 +481,7 @@ fn handle_doc(
             doc.exited(exit_code(status)?);
             Ok(())
         }
-        Item::Signal(_) | Item::Interrupt => Ok(()),
+        Item::Signal(_) | Item::Interrupt | Item::Tick => Ok(()),
     }
 }
 
@@ -471,7 +502,7 @@ pub(crate) async fn observe_doc(
     }
     let gate = RefCell::new(signals.gate().map_err(|_| RunError::Reactor)?);
     let interrupt = SignalSource::new(signals.interrupt());
-    pump(&lanes, Some((&gate, &interrupt, signals)), |item| {
+    pump(&lanes, Some((&gate, &interrupt, signals)), None, |item| {
         match item {
             Item::Interrupt => {}
             Item::Signal(ready) => {
@@ -503,7 +534,7 @@ pub(crate) async fn collect_child(
     let lanes = Box::new(empty_lanes());
     attach(&lanes[CARGO_LANE], child)?;
     let (mut code, mut out_ended, mut err_ended) = (None, false, false);
-    pump(&lanes, None, |item| {
+    pump(&lanes, None, None, |item| {
         match item {
             Item::Out(_, range) => {
                 let range = range.map_err(|_| RunError::Reactor)?;
@@ -514,7 +545,7 @@ pub(crate) async fn collect_child(
             Item::OutEnd(_) => out_ended = true,
             Item::ErrEnd(_) => err_ended = true,
             Item::Exit(_, status) => code = Some(exit_code(status)?),
-            Item::Err(..) | Item::Signal(_) | Item::Interrupt => {}
+            Item::Err(..) | Item::Signal(_) | Item::Interrupt | Item::Tick => {}
         }
         Ok(if code.is_some() && out_ended && err_ended {
             ControlFlow::Break(())
@@ -606,7 +637,8 @@ pub(crate) async fn observe_cargo(
     attach(&lanes[CARGO_LANE], child)?;
     let signal = RefCell::new(run.signal_gate()?);
     let interrupt = run.interrupt_source();
-    pump(&lanes, Some((&signal, &interrupt, run.signals())), |item| {
+    let beat = Beat::new(None);
+    pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&beat), |item| {
         if matches!(item, Item::Out(CARGO_LANE, _) | Item::OutEnd(CARGO_LANE) | Item::Exit(CARGO_LANE, _)) {
             run.start_doc(&lanes, launch_doc)?;
         }
@@ -765,7 +797,7 @@ mod tests {
             let mut found = Vec::new();
             let mut raw = Vec::new();
             let (mut exited, mut out_ended, mut err_ended) = (false, false, false);
-            let parks = pump(&lanes, None, |item| {
+            let parks = pump(&lanes, None, None, |item| {
                 match item {
                     Item::Out(_, range) => {
                         let slot = lanes[CARGO_LANE].0.borrow();
@@ -785,7 +817,7 @@ mod tests {
                     }
                     Item::OutEnd(_) => out_ended = true,
                     Item::ErrEnd(_) => err_ended = true,
-                    Item::Signal(_) | Item::Interrupt => {}
+                    Item::Signal(_) | Item::Interrupt | Item::Tick => {}
                 }
                 Ok(if exited && out_ended && err_ended {
                     ControlFlow::Break(())

@@ -14,7 +14,7 @@ use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
     FILTERSET, FailFastError, FailFastSources, HarnessFault, HarnessRequest, IgnoreMode, NO_TESTS, NoTestsPolicy,
-    EXIT_WITH_PARENT, ExitWithParent, OUTPUT, exit_with_parent_unsupported, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
+    EXIT_WITH_PARENT, ExitWithParent, OUTPUT, TEST_TIMEOUT, TestTimeout, exit_with_parent_unsupported, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
     ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
@@ -373,7 +373,6 @@ pub(crate) struct TestWatch {
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
     group_length: usize,
-    started_millis: u64,
     status: Option<i32>,
 }
 
@@ -528,9 +527,11 @@ struct Settings {
     output_why: &'static str,
     color: bool,
     exit_with_parent: ExitWithParent,
+    test_limit_ms: Option<u32>,
+    heartbeat_ms: u64,
 }
 
-const SETTING_KEYS: [&str; 20] = [
+const SETTING_KEYS: [&str; 22] = [
     "RUST_TEST_THREADS",
     "CARGO_VAL_JOBS",
     "CARGO_VAL_MAX_FAIL",
@@ -539,6 +540,8 @@ const SETTING_KEYS: [&str; 20] = [
     "CARGO_VAL_PROCESS",
     "CARGO_VAL_OUTPUT",
     "CARGO_VAL_EXIT_WITH_PARENT",
+    "CARGO_VAL_TEST_TIMEOUT",
+    "CARGO_VAL_HEARTBEAT_SECS",
     "CI",
     "TERM",
     "CARGO_VAL_COLOR",
@@ -558,7 +561,7 @@ fn runtime_settings(
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
-    let mut pairs = [("", ""); 24];
+    let mut pairs = [("", ""); SETTING_KEYS.len()];
     let mut count = 0;
     for key in SETTING_KEYS {
         if let Some(value) = environment.get(key.as_bytes()) {
@@ -640,6 +643,8 @@ fn runtime_settings(
         output_why,
         color,
         exit_with_parent,
+        test_limit_ms: TEST_TIMEOUT.from_settings(&source, parser.test_timeout()).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
+        heartbeat_ms: crate::config::heartbeat_millis(&source, parser.heartbeat()).map_err(RunError::Setting)?,
     })
 }
 
@@ -699,7 +704,6 @@ fn start_session(
         shard,
         group: [0; GROUP_CAPACITY],
         group_length: 0,
-        started_millis: monotonic_millis(),
         status: None,
     });
     Ok(())
@@ -930,7 +934,9 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
     state.apply(event);
     frame.clear();
     let projected = state.project(event, frame);
-    write_fd(1, frame.bytes())?;
+    if !frame.bytes().is_empty() {
+        write_fd(1, frame.bytes())?;
+    }
     let Err(lost) = projected else {
         return Ok(());
     };
@@ -1055,12 +1061,11 @@ fn deliver<'bytes>(
             match reporting.render.0 {
                 OutputMode::Plain | OutputMode::Agent | OutputMode::Json => {
                     let name = &report[..name_length.saturating_sub(1)];
-                    let millis = monotonic_millis().saturating_sub(watch.started_millis);
                     let targets = reporting.targets.borrow();
                     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
                     let withdrawn = reporting.interrupted && reporting.render.0.is_agent_like();
                     if !withdrawn {
-                        emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), millis: Some(millis), solo: false })?;
+                        emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
                     }
                     if outcome == TerminalOutcome::Failed && !withdrawn {
                         let (stdout, stderr) = watch.output.captured();
@@ -1243,7 +1248,7 @@ fn launch_listed(
         OutputMode::Plain | OutputMode::Agent | OutputMode::Json => {
             let targets = run.targets.borrow();
             let id = (targets.id(target), intent.test_name().as_bytes());
-            emit(run.render(), &Event::Started { id, solo: false })?;
+            emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
         }
         OutputMode::Rich => {}
     }
@@ -1302,7 +1307,7 @@ impl<'run> DocObservation<'run> {
 }
 
 impl<'run> ListingRun<'run> {
-    fn render(&self) -> &'run Render<'run> {
+    pub(crate) fn render(&self) -> &'run Render<'run> {
         self.docs.render
     }
 
@@ -1506,7 +1511,7 @@ impl ListingScan<'_, '_> {
                     OutputMode::Plain | OutputMode::Agent | OutputMode::Json => {
                         let targets = run.targets.borrow();
                         let id = (targets.id(self.target), name.as_bytes());
-                        emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, millis: None, solo: false })?;
+                        emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, at_ms: None, solo: false })?;
                     }
                     OutputMode::Rich => report_skipped(name, run.settings.color)?,
                 }
@@ -2476,8 +2481,8 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let settings = runtime_settings(&environment, &harness, parser)?;
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
-    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots)), RefCell::new(frame_line));
+    let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms)), RefCell::new(frame_line));
     emit_begin(&render, &settings, &environment)?;
     let inherited_count = environment
         .collect(inherited)
@@ -2579,7 +2584,7 @@ type RunStorage<'environment> = (
         Box<Watches>,
     ),
     (Box<[u8]>, Box<[u8]>, Box<[u32]>),
-    (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>),
+    (Box<[u8]>, Box<[u32]>, Box<Line<FRAME_BYTES>>, Box<[u8]>),
 );
 
 // run-sized fixed storage too large for any stack frame or future, allocated straight on the heap once at setup: the cargo and listing buffers, the session tables, and the render frame, failure ledger and name arena
@@ -2605,7 +2610,7 @@ fn run_storage<'environment>(process: ProcessMode) -> RunStorage<'environment> {
             ),
             ProcessMode::Test => (zeroed(0), zeroed(crate::build_defaults::SCHED_RECORD_BYTES), std::vec::Vec::new().into_boxed_slice()),
         },
-        (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame()),
+        (zeroed(crate::view_defaults::NAME_BYTES), std::vec![0; FAILURES].into_boxed_slice(), zeroed_frame(), zeroed(crate::view_defaults::INFLIGHT_BYTES)),
     )
 }
 
@@ -2905,7 +2910,7 @@ fn agent_exit(run: &ListingRun<'_>, code: i32) -> Result<(), RunError> {
     emit(run.render(), &Event::Exited { code: u8::try_from(code).unwrap_or(u8::MAX) })
 }
 
-fn monotonic_millis() -> u64 {
+pub(crate) fn monotonic_millis() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -3220,7 +3225,7 @@ fn report_doc_result(
     counter.set(counter.get() + 1);
     if observation.render.0 != OutputMode::Rich {
         let id = (&b"doc-tests"[..], name);
-        return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), millis: None, solo: false });
+        return emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false });
     }
     let mut report = [0; NAME_CAPACITY + 34];
     let name_length = name.len().min(NAME_CAPACITY);
@@ -3659,6 +3664,8 @@ mod listing_allocation_tests {
             output_why: "flag",
             color: false,
             exit_with_parent: crate::config::ExitWithParent::Off,
+            test_limit_ms: None,
+            heartbeat_ms: 10_000,
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
         let mut arena = [0_u8; 64];

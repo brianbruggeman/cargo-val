@@ -20,8 +20,8 @@ impl<const RERUN: usize> State<'_, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, why: Some(why), .. } => run(frame, version, shard, jobs, why),
             Event::Listed { binaries, tests } => listed(frame, binaries, tests),
-            Event::Started { id, .. } => started(frame, id),
-            Event::Settled { id, outcome, millis, solo } => settled(frame, id, outcome, millis, solo),
+            Event::Started { id, at_ms, limit_ms, .. } => started(frame, id, at_ms, limit_ms),
+            Event::Settled { id, outcome, solo, .. } => settled(frame, id, outcome, self.settled_ms, solo),
             Event::Captured { id, stdout, stderr, exit } => failure(frame, id, [stdout, stderr], exit),
             Event::BuildFailed { diagnostic, exit } => build_failed(frame, diagnostic, exit),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
@@ -184,10 +184,15 @@ fn listed<const FRAME: usize>(frame: &mut Line<FRAME>, binaries: usize, tests: u
     close(frame);
 }
 
-fn started<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>) {
+fn started<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, at_ms: u64, limit_ms: Option<u32>) {
     open(frame, b"start");
     id_field(frame, id);
     null(frame, b"slot");
+    number(frame, b"at_ms", usize::try_from(at_ms).unwrap_or(usize::MAX));
+    match limit_ms {
+        Some(limit) => number(frame, b"limit_ms", usize::try_from(limit).unwrap_or(usize::MAX)),
+        None => null(frame, b"limit_ms"),
+    }
     close(frame);
 }
 
