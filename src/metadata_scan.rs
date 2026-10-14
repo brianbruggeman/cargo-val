@@ -1,10 +1,11 @@
-//! Which packages have `bin` targets, plus the workspace root and target directory, read from `cargo metadata --no-deps --format-version 1`
-//! one byte at a time over fixed storage, so the scan allocates only its package table once and keeps no whole-document buffer.
+//! Each package's targets, which are workspace members, which the resolve graph reaches, plus the workspace root and target directory, read from
+//! `cargo metadata --filter-platform <triple> --format-version 1` one byte at a time over fixed storage, so the scan allocates only its package table
+//! once and keeps no whole-document buffer.
 
 use std::boxed::Box;
 use std::vec;
 
-const MAX_PACKAGES: usize = 256;
+const MAX_PACKAGES: usize = 4096;
 const ID_CAPACITY: usize = 192;
 const MAX_DEPTH: usize = 8;
 /// Longest `target_directory` or `workspace_root` the scan keeps; a longer path makes it report none.
@@ -32,6 +33,9 @@ enum Key {
     DefaultMembers,
     TargetDirectory,
     WorkspaceRoot,
+    WorkspaceMembers,
+    Resolve,
+    Nodes,
 }
 
 const LIB: u8 = 1;
@@ -72,6 +76,15 @@ struct Frame {
     key: Key,
 }
 
+/// What one package's targets contribute to a test build, counted once per target.
+#[derive(Clone, Copy, Default)]
+struct Targets {
+    libs: u16,
+    scripts: u16,
+    tests: u16,
+    examples: u16,
+}
+
 #[derive(Clone, Copy)]
 struct Entry {
     id: [u8; ID_CAPACITY],
@@ -79,17 +92,24 @@ struct Entry {
     bins: usize,
     built: usize,
     tests: usize,
+    targets: Targets,
     named: bool,
     excluded: bool,
     default: bool,
+    marks: u8,
 }
 
-/// Per workspace package: how many `bin` targets it has and how many were built so far, plus the test executables the run's flags select in it.
+const MEMBER: u8 = 1;
+const REACHABLE: u8 = 2;
+
+/// Every package the document lists: how many `bin` targets it has and how many were built so far, the test executables the run's flags select in it,
+/// whether it is a workspace member and whether the resolve graph reaches it.
 pub struct BinCounts {
     entries: Box<[Entry]>,
     count: usize,
     unselectable: bool,
     default_members_seen: bool,
+    members_marked: bool,
 }
 
 impl BinCounts {
@@ -102,14 +122,22 @@ impl BinCounts {
                 bins: 0,
                 built: 0,
                 tests: 0,
+                targets: Targets { libs: 0, scripts: 0, tests: 0, examples: 0 },
                 named: false,
                 excluded: false,
                 default: false,
+                marks: 0,
             }; MAX_PACKAGES].into_boxed_slice(),
             count: 0,
             unselectable: false,
             default_members_seen: false,
+            members_marked: false,
         }
+    }
+
+    // a document that lists workspace members (the empty list included in fixtures) filters to them; one without keeps every package
+    fn is_member(&self, entry: &Entry) -> bool {
+        entry.marks & MEMBER != 0 || !self.members_marked
     }
 
     fn find(&self, package_id: &[u8]) -> Option<usize> {
@@ -125,17 +153,55 @@ impl BinCounts {
         }
     }
 
-    /// Whether `package_id` still has a `bin` target that has not been built.
+    /// Whether `package_id` is a workspace member that still has a `bin` target that has not been built.
     #[must_use]
     pub fn awaiting(&self, package_id: &str) -> bool {
         self.find(package_id.as_bytes())
-            .is_some_and(|index| self.entries[index].built < self.entries[index].bins)
+            .is_some_and(|index| self.is_member(&self.entries[index]) && self.entries[index].built < self.entries[index].bins)
     }
 
-    /// Number of packages with at least one `bin` target.
+    /// Number of workspace members with at least one `bin` target.
     #[must_use]
     pub fn packages(&self) -> usize {
-        self.entries[..self.count].iter().filter(|entry| entry.bins > 0).count()
+        self.entries[..self.count].iter().filter(|entry| self.is_member(entry) && entry.bins > 0).count()
+    }
+
+    fn mark(&mut self, id: &[u8], member: bool) {
+        if let Some(index) = self.find(id) {
+            self.entries[index].marks |= if member { MEMBER } else { REACHABLE };
+        }
+    }
+
+    /// The directory of each workspace member whose id is a `path+file://` url, in document order.
+    pub fn member_directories(&self) -> impl Iterator<Item = &[u8]> {
+        self.entries[..self.count].iter().filter(|entry| self.is_member(entry)).filter_map(|entry| {
+            let rest = entry.id[..entry.id_length].strip_prefix(b"path+file://")?;
+            let end = memchr::memchr(b'#', rest).unwrap_or(rest.len());
+            Some(&rest[..end])
+        })
+    }
+
+    /// Compile units a `cargo test --no-run` is expected to report as compiler artifacts, from the resolve graph; `None` when the document had no resolve.
+    /// Dependencies count their library and build script; a member counts its test harness library, its normal library when its own bins, tests or examples need it,
+    /// its build script, each bin, test and example. Resolver-2 host/target feature duplicates are not visible in the graph, so the count can fall short of the build.
+    #[must_use]
+    pub fn predicted_units(&self) -> Option<usize> {
+        if self.unselectable || !self.entries[..self.count].iter().any(|entry| entry.marks & REACHABLE != 0) {
+            return None;
+        }
+        let units = self.entries[..self.count].iter().filter(|entry| entry.marks != 0).map(|entry| self.units_of(entry)).sum();
+        Some(units)
+    }
+
+    fn units_of(&self, entry: &Entry) -> usize {
+        let targets = entry.targets;
+        let scripts = usize::from(targets.scripts);
+        if !self.is_member(entry) {
+            return usize::from(targets.libs) + scripts;
+        }
+        let dependent = entry.bins + usize::from(targets.tests) + usize::from(targets.examples);
+        let normal_lib = if dependent > 0 { usize::from(targets.libs) } else { 0 };
+        scripts + usize::from(targets.libs) + normal_lib + dependent
     }
 
     fn add(&mut self, id: &[u8], bins: usize) -> Result<(), ScanFault> {
@@ -231,6 +297,8 @@ pub struct MetadataScan<'a> {
     package_id_overflow: bool,
     package_bins: usize,
     package_tests: usize,
+    package_targets: Targets,
+    target_script: bool,
     package_name: [u8; ID_CAPACITY],
     package_name_length: Option<usize>,
     target_kinds: u8,
@@ -280,6 +348,8 @@ impl<'a> MetadataScan<'a> {
             package_id_overflow: false,
             package_bins: 0,
             package_tests: 0,
+            package_targets: Targets { libs: 0, scripts: 0, tests: 0, examples: 0 },
+            target_script: false,
             package_name: [0; ID_CAPACITY],
             package_name_length: Some(0),
             target_kinds: 0,
@@ -325,10 +395,13 @@ impl<'a> MetadataScan<'a> {
         }
         let workspace = has_flag(self.arguments, b"--workspace") || has_flag(self.arguments, b"--all");
         let named = option_values(self.arguments, b"--package", b"-p").next().is_some();
-        let chosen = |entry: &Entry| match (workspace, named) {
-            (true, _) => !entry.excluded,
-            (false, true) => entry.named,
-            (false, false) => !self.counts.default_members_seen || entry.default,
+        let chosen = |entry: &Entry| {
+            self.counts.is_member(entry)
+                && match (workspace, named) {
+                    (true, _) => !entry.excluded,
+                    (false, true) => entry.named,
+                    (false, false) => !self.counts.default_members_seen || entry.default,
+                }
         };
         let entries = &self.counts.entries[..self.counts.count];
         Some(entries.iter().filter(|entry| chosen(entry)).map(|entry| entry.tests).sum())
@@ -400,6 +473,9 @@ impl<'a> MetadataScan<'a> {
                 b"workspace_default_members" => Key::DefaultMembers,
                 b"target_directory" => Key::TargetDirectory,
                 b"workspace_root" => Key::WorkspaceRoot,
+                b"workspace_members" => Key::WorkspaceMembers,
+                b"resolve" => Key::Resolve,
+                b"nodes" => Key::Nodes,
                 _ => Key::Other,
             };
             self.counts.default_members_seen |= key == Key::DefaultMembers && depth == 1;
@@ -432,6 +508,11 @@ impl<'a> MetadataScan<'a> {
         } else if depth == 2 && self.stack[0].object && self.stack[0].key == Key::DefaultMembers && !self.stack[1].object {
             let member = &self.text[..text_length];
             self.counts.mark_default(member);
+        } else if depth == 2 && self.stack[0].key == Key::WorkspaceMembers && !self.stack[1].object {
+            self.counts.members_marked = true;
+            self.counts.mark(&self.text[..text_length], true);
+        } else if depth == 4 && self.in_resolve_node() {
+            self.counts.mark(&self.text[..text_length], false);
         } else if depth == 6 && self.in_kind_list() {
             self.count_kind(text_length);
         }
@@ -444,6 +525,7 @@ impl<'a> MetadataScan<'a> {
         if kind == b"bin" {
             self.package_bins += 1;
         }
+        self.target_script |= kind == b"custom-build";
         self.target_kinds |= match kind {
             b"bin" => BIN,
             b"test" => TEST,
@@ -452,6 +534,27 @@ impl<'a> MetadataScan<'a> {
             library if LIBRARY_KINDS.contains(&library) => LIB,
             _ => 0,
         };
+    }
+
+    // a target with several kinds (`lib` and `cdylib`) is one compile unit, so each counter moves once per target
+    fn finish_target(&mut self) {
+        let kinds = self.target_kinds;
+        let totals = &mut self.package_targets;
+        totals.libs += u16::from(kinds & LIB != 0);
+        totals.tests += u16::from(kinds & TEST != 0);
+        totals.examples += u16::from(kinds & EXAMPLE != 0);
+        totals.scripts += u16::from(self.target_script);
+    }
+
+    // root object, `resolve` object, `nodes` array, one node object
+    fn in_resolve_node(&self) -> bool {
+        self.depth == 4
+            && self.stack[0].key == Key::Resolve
+            && self.stack[1].object
+            && self.stack[1].key == Key::Nodes
+            && !self.stack[2].object
+            && self.stack[3].object
+            && self.stack[3].key == Key::Id
     }
 
     // package -> targets array -> target object
@@ -491,6 +594,7 @@ impl<'a> MetadataScan<'a> {
         self.depth += 1;
         if object && self.depth == 5 && self.in_target() {
             self.target_kinds = 0;
+            self.target_script = false;
             self.target_name_length = Some(0);
         }
         if object && self.depth == 3 && self.in_package() {
@@ -498,6 +602,7 @@ impl<'a> MetadataScan<'a> {
             self.package_id_overflow = false;
             self.package_bins = 0;
             self.package_tests = 0;
+            self.package_targets = Targets::default();
             self.package_name_length = Some(0);
         }
         Ok(())
@@ -505,8 +610,11 @@ impl<'a> MetadataScan<'a> {
 
     fn close(&mut self) -> Result<(), ScanFault> {
         let closing_package = self.depth == 3 && self.in_package();
-        if self.depth == 5 && self.in_target() && self.target_selected() {
-            self.package_tests += 1;
+        if self.depth == 5 && self.in_target() {
+            self.finish_target();
+            if self.target_selected() {
+                self.package_tests += 1;
+            }
         }
         self.depth = self.depth.saturating_sub(1);
         if closing_package {
@@ -528,6 +636,7 @@ impl<'a> MetadataScan<'a> {
         let (named, excluded) = (matches(b"--package", b"-p"), matches(b"--exclude", b""));
         let entry = &mut self.counts.entries[self.counts.count - 1];
         entry.tests = self.package_tests;
+        entry.targets = self.package_targets;
         entry.named = named;
         entry.excluded = excluded;
         Ok(())
@@ -646,6 +755,33 @@ mod tests {
         scan.feed(document.as_bytes()).expect("document fits");
 
         assert_eq!(scan.finish().test_targets, Some(1));
+    }
+
+    const DEMO_METADATA: &str = include_str!("../tests/fixtures/demo_metadata.json");
+
+    #[proxima::test]
+    async fn the_demo_resolve_graph_predicts_312_of_the_328_artifacts_of_a_cold_build_the_gap_is_host_and_target_feature_duplicates() {
+        let mut scan = Box::new(MetadataScan::new());
+        for chunk in DEMO_METADATA.as_bytes().chunks(65_536) {
+            scan.feed(chunk).expect("document fits");
+        }
+        let facts = scan.finish();
+
+        assert_eq!(facts.bins.predicted_units(), Some(312));
+        assert_eq!(facts.test_targets, Some(2));
+    }
+
+    #[proxima::test]
+    async fn dependencies_with_bins_never_hold_back_a_member_and_members_are_the_only_directories() {
+        let document = r#"{"packages":[{"name":"app","id":"path+file:///w/app#0.1.0","targets":[{"kind":["lib"],"name":"app","test":true}]},{"name":"tool","id":"registry+https://github.com/rust-lang/crates.io-index#tool@1.0.0","targets":[{"kind":["bin"],"name":"tool","test":true}]}],"workspace_members":["path+file:///w/app#0.1.0"],"workspace_default_members":["path+file:///w/app#0.1.0"],"resolve":{"nodes":[{"id":"path+file:///w/app#0.1.0","dependencies":["registry+https://github.com/rust-lang/crates.io-index#tool@1.0.0"],"deps":[{"name":"tool","pkg":"registry+https://github.com/rust-lang/crates.io-index#tool@1.0.0","dep_kinds":[{"kind":null,"target":null}]}],"features":[]},{"id":"registry+https://github.com/rust-lang/crates.io-index#tool@1.0.0","dependencies":[],"deps":[],"features":[]}],"root":null},"target_directory":"/w/target","version":1}"#;
+        let mut scan = Box::new(MetadataScan::new());
+        scan.feed(document.as_bytes()).expect("document fits");
+        let facts = scan.finish();
+
+        assert!(!facts.bins.awaiting("registry+https://github.com/rust-lang/crates.io-index#tool@1.0.0"));
+        assert_eq!(facts.bins.member_directories().collect::<std::vec::Vec<_>>(), [b"/w/app".as_slice()]);
+        assert_eq!(facts.test_targets, Some(1));
+        assert_eq!(facts.bins.predicted_units(), Some(1));
     }
 
     #[proxima::test]

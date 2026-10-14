@@ -59,7 +59,7 @@ async fn the_second_run_state_carries_the_first_runs_wall_time_and_test_count() 
 
     let first = run("chain").await;
     let after_first = std::fs::read(record_path("chain")).expect("the first run leaves a record");
-    let (wall_ms, tests, exit) = decode(&after_first).expect("the record is well formed");
+    let (wall_ms, tests, exit, _, _, _) = decode(&after_first).expect("the record is well formed");
     let second = run("chain").await;
 
     assert!(!stderr_of(&first).contains(PREVIOUS_MARK), "no record existed before the first run:\n{}", stderr_of(&first));
@@ -74,7 +74,7 @@ async fn the_second_run_state_carries_the_first_runs_wall_time_and_test_count() 
 async fn a_corrupt_record_is_ignored_and_replaced_by_the_run() {
     fresh("corrupt");
     std::fs::create_dir_all(record_path("corrupt").parent().expect("record has a directory")).expect("directory is creatable");
-    let mut wrong_version = encode((9, 9, 0));
+    let mut wrong_version = encode((9, 9, 0, 0, 0, 0));
     wrong_version[0] = 7;
     for damaged in [vec![1_u8, 2, 3], wrong_version.to_vec()] {
         std::fs::write(record_path("corrupt"), &damaged).expect("damaged record is writable");
