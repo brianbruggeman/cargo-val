@@ -129,7 +129,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[proxima::test(timeout = "60s")]
 async fn a_child_that_exits_before_writing_ready_fails_promptly_naming_its_status_and_output() {
-    let directory = probe_directory("ready-wait");
+    let directory = probe_directory("ready-wait-child-exits");
     let ready = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "echo said-this-first; echo and-this-to-stderr >&2; exit 7"]);
@@ -151,7 +151,7 @@ async fn a_child_that_exits_before_writing_ready_fails_promptly_naming_its_statu
 
 #[proxima::test(timeout = "60s")]
 async fn a_line_the_child_writes_is_returned_while_it_keeps_running() {
-    let directory = probe_directory("ready-wait");
+    let directory = probe_directory("ready-wait-line-written");
     let ready = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "echo 4242 > \"$READY\"; exec sleep 600"]).env("READY", directory.join("ready"));
