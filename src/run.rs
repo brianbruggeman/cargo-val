@@ -369,7 +369,7 @@ fn handle(
             let stream = slot.as_deref().ok_or(RunError::Reactor)?;
             let bytes = stream.window(range).ok_or(RunError::Reactor)?;
             if lane == CARGO_LANE {
-                driver.forward_stderr(&bytes)
+                driver.forward_stderr(&bytes, run.render())
             } else {
                 write_fd(2, &bytes)
             }
@@ -383,7 +383,7 @@ fn handle(
             Ok(())
         }
         Item::OutEnd(lane) => session_ended(run, ledger, watches, lane - JOB_BASE, true),
-        Item::ErrEnd(CARGO_LANE) => driver.stderr_ended(),
+        Item::ErrEnd(CARGO_LANE) => driver.stderr_ended(run.render()),
         Item::ErrEnd(LISTING_LANE) => {
             driver.listing_stderr_ended();
             Ok(())

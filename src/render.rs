@@ -27,6 +27,7 @@ const LABEL_WIDTH: usize = 9;
 const HEARTBEAT_MS: u64 = HEARTBEAT_SECS as u64 * 1000;
 const INFLIGHT_HEAD: usize = 13;
 const FAILURE_HEAD: usize = 13;
+const LOCK_BYTES: usize = 32;
 const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
@@ -52,7 +53,8 @@ pub enum Mode {
 /// Everything the driver reports to the renderer. `B` payloads borrow from buffers the driver owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event<'a> {
-    Begin { version: &'a [u8], shard: bool, jobs: usize, github: bool },
+    Begin { version: &'a [u8], shard: bool, jobs: usize, github: bool, at_ms: u64 },
+    Waiting { lock: &'a [u8] },
     Listed { binaries: usize, of: Option<usize>, tests: usize },
     Built { done: u16, total: Option<u16> },
     Resize { cols: u16 },
@@ -79,6 +81,7 @@ impl Mode {
             (
                 Self::Running,
                 Event::Begin { .. }
+                | Event::Waiting { .. }
                 | Event::Listed { .. }
                 | Event::Built { .. }
                 | Event::Resize { .. }
@@ -132,6 +135,8 @@ pub struct State<'storage, const RERUN: usize> {
     reason: [u8; REASON_BYTES],
     reason_len: usize,
     color: bool,
+    lock: [u8; LOCK_BYTES],
+    lock_len: usize,
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
@@ -167,6 +172,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             reason: [0; REASON_BYTES],
             reason_len: 0,
             color: false,
+            lock: [0; LOCK_BYTES],
+            lock_len: 0,
         }
     }
 
@@ -234,9 +241,13 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.beat_due = false;
         self.settled_ms = None;
         match *event {
-            Event::Begin { github, jobs, .. } => self.begin(github, jobs),
+            Event::Begin { github, jobs, at_ms, .. } => self.begin(github, jobs, at_ms),
+            Event::Waiting { lock } => self.wait_on(lock),
             Event::Listed { binaries, of, tests } => (self.listed_binaries, self.binaries_total, self.listed_tests) = (binaries, of, tests),
-            Event::Built { done, total } => (self.built, self.units) = (done, total),
+            Event::Built { done, total } => {
+                (self.built, self.units) = (done, total);
+                self.lock_len = 0;
+            }
             Event::Resize { cols } => self.cols = cols,
             Event::Captured { id, stdout, stderr } => self.remember_reason(id, stdout.0, stderr.0),
             Event::Started { id, at_ms, limit_ms, .. } => self.track(id, at_ms, limit_ms),
@@ -253,7 +264,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
     }
 
-    fn begin(&mut self, github: bool, jobs: usize) {
+    fn begin(&mut self, github: bool, jobs: usize, at_ms: u64) {
         self.mode = Mode::Running;
         self.github = github;
         self.jobs = jobs;
@@ -264,7 +275,9 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.binaries_total = None;
         self.listed_tests = 0;
         self.reason_len = 0;
-        self.origin_ms = None;
+        self.origin_ms = Some(at_ms);
+        self.now_ms = at_ms;
+        self.lock_len = 0;
         self.drawn_rows = 0;
         self.used = 0;
         self.stored = 0;
@@ -362,6 +375,12 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
     }
 
+    fn wait_on(&mut self, lock: &[u8]) {
+        let kept = lock.len().min(LOCK_BYTES);
+        self.lock[..kept].copy_from_slice(&lock[..kept]);
+        self.lock_len = kept;
+    }
+
     fn remember_reason(&mut self, id: Identity<'_>, stdout: &[u8], stderr: &[u8]) {
         let first = self.failures().next();
         if self.reason_len != 0 || first != Some(id) {
@@ -404,7 +423,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
-            Event::Built { .. } | Event::Resize { .. } => {}
+            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
@@ -740,7 +759,7 @@ mod tests {
         let mut arena = [0_u8; 512];
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
-        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true });
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true, at_ms: 0 });
 
         let fail = settle(&mut state, FAILING, Outcome::Failed);
         let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", false), stderr: (b"", false) };
@@ -863,7 +882,7 @@ mod tests {
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
         let events = [
-            Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true },
+            Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true, at_ms: 0 },
             Event::Listed { binaries: 19, of: Some(19), tests: 383 },
             Event::Started { id: FAILING, solo: true, at_ms: 0, limit_ms: None },
             Event::Warned { id: FAILING, what: b"rerun failed to start" },

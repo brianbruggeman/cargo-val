@@ -236,7 +236,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
     pub fn project_live<const FRAME: usize>(&mut self, event: &Event<'_>, frame: &mut Line<FRAME>) -> Result<(), usize> {
         match *event {
             Event::Tick { .. } if self.mode == Mode::Running => self.project_rich(self.color, frame),
-            Event::Begin { .. } => self.project_rich(self.color, frame),
+            Event::Begin { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
             Event::Captured { .. } | Event::Warned { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Finished { .. } => {
                 self.erase_rich(frame);
                 self.project(event, frame)
@@ -291,7 +291,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
 
     fn pinned_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
         let Some(first) = self.failures().next() else {
-            frame.text(b"\n");
+            self.lock_note(color, frame);
             return;
         };
         let mut head = Line::<32>::new();
@@ -311,6 +311,17 @@ impl<const RERUN: usize> State<'_, RERUN> {
             let mut tail = Line::<256>::new();
             ellipsis_end(&mut tail, reason, room - used - 2);
             paint(frame, color, Tone::Red, tail.bytes());
+        }
+        frame.text(b"\n");
+    }
+
+    fn lock_note<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
+        if self.lock_len != 0 {
+            let mut note = Line::<96>::new();
+            note.text(b" waiting for cargo's ");
+            note.text(&self.lock[..self.lock_len]);
+            note.text(b" lock");
+            paint(frame, color, Tone::Dim, note.bytes());
         }
         frame.text(b"\n");
     }
@@ -347,7 +358,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         bar(frame, color, bar_width, (settled, live), Tone::Green);
         frame.text(b" ");
         padded(frame, self.done, 3);
-        frame.text(if exact { b"/ " } else { b"/~" });
+        frame.text(if exact { b"/" } else { b"/~" });
         frame.number(total);
         if with_word {
             paint(frame, color, Tone::Dim, b" tests");
@@ -487,7 +498,7 @@ mod tests {
 
     fn midrun<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], inflight: &'storage mut [u8], cols: u16) -> State<'storage, 200> {
         let mut state = State::<200>::new(arena, ledger).with_inflight(inflight);
-        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false });
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, at_ms: 0 });
         state.apply(&Event::Resize { cols });
         state.apply(&Event::Built { done: 19, total: Some(19) });
         state.apply(&Event::Listed { binaries: 12, of: Some(19), tests: 240 });
@@ -513,7 +524,7 @@ mod tests {
 
     #[test]
     fn eighty_columns_with_colour_draw_solid_bars_in_role_colours() {
-        let expected = "\x1b[?25l \x1b[1mcargo val\x1b[0m  \x1b[2m8 jobs\x1b[0m                                                         \x1b[1m0:46\x1b[0m\n\
+        let expected = "\x1b[?25l \x1b[1mcargo val\x1b[0m  \x1b[2m8 jobs\x1b[0m                                                         \x1b[1m0:47\x1b[0m\n\
 \x1b[31m\x1b[1m FAIL 1  \x1b[0msched_records::the_\u{2026}d_with_flags_and_group  \x1b[31massertion failed: left ==\u{2026}\x1b[0m\n\
 \n\
 \x1b[2m build \x1b[0m██████████████████████████████ 19/19 compile units\n \
@@ -530,7 +541,7 @@ mod tests {
 
     #[test]
     fn eighty_columns_without_colour_keep_every_state_as_a_glyph_texture() {
-        let expected = "\x1b[?25l cargo val  8 jobs                                                         0:46\n\
+        let expected = "\x1b[?25l cargo val  8 jobs                                                         0:47\n\
 \x20FAIL 1  sched_records::the_\u{2026}d_with_flags_and_group  assertion failed: left ==\u{2026}\n\
 \n\
 \x20build ██████████████████████████████ 19/19 compile units\n\
@@ -547,7 +558,7 @@ mod tests {
 
     #[test]
     fn sixty_columns_drop_the_listed_note_and_ellipsise_names() {
-        let expected = "\x1b[?25l cargo val  8 jobs                                     0:46\n\
+        let expected = "\x1b[?25l cargo val  8 jobs                                     0:47\n\
 \x20FAIL 1  sched_records:\u{2026}flags_and_group  assertion failed:\u{2026}\n\
 \n\
 \x20build ██████████████████████████████ 19/19 compile units\n\
@@ -564,7 +575,7 @@ mod tests {
 
     #[test]
     fn forty_columns_shrink_the_bars_and_keep_the_counts_whole() {
-        let expected = "\x1b[?25l cargo val  8 jobs                 0:46\n\
+        let expected = "\x1b[?25l cargo val  8 jobs                 0:47\n\
 \x20FAIL 1  sched_re\u{2026}and_group  assertion\u{2026}\n\
 \n\
 \x20build █████████████ 19/19 compile units\n\
@@ -610,7 +621,7 @@ mod tests {
     fn an_idle_frame_counts_test_binaries_while_some_are_pending_and_waits_when_none_are_known() {
         let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
         let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
-        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false });
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, at_ms: 0 });
         state.apply(&Event::Resize { cols: 80 });
         let mut unknown = Line::<4096>::new();
         state.project_rich(false, &mut unknown).expect("fits");
@@ -622,6 +633,38 @@ mod tests {
         let pending = String::from_utf8_lossy(pending.bytes());
         assert!(unknown.contains("   waiting for the first test binary\n"), "{unknown}");
         assert!(pending.contains("   building 3/19 test binaries\n"), "{pending}");
+    }
+
+    #[test]
+    fn an_exact_test_total_has_no_space_inside_the_fraction_and_the_clock_runs_from_the_begin_event() {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 10, github: false, at_ms: 4_000 });
+        state.apply(&Event::Listed { binaries: 1, of: Some(1), tests: 2 });
+        state.apply(&Event::Settled { id: (b"fixture", b"settles_at_once"), outcome: Outcome::Passed, at_ms: None, solo: false });
+        state.apply(&Event::Tick { now_ms: 65_000 });
+        let mut frame = Line::<4096>::new();
+        state.project_rich(false, &mut frame).expect("fits");
+
+        let text = String::from_utf8_lossy(frame.bytes());
+        assert!(text.contains("  1/2 tests"), "{text}");
+        assert!(text.contains(" 1:01\n"), "{text}");
+    }
+
+    #[test]
+    fn a_lock_wait_becomes_a_note_in_the_frame_until_a_build_unit_lands() {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 10, github: false, at_ms: 0 });
+        state.apply(&Event::Waiting { lock: b"package cache" });
+        let mut waiting = Line::<4096>::new();
+        state.project_rich(false, &mut waiting).expect("fits");
+        state.apply(&Event::Built { done: 1, total: Some(3) });
+        let mut moving = Line::<4096>::new();
+        state.project_rich(false, &mut moving).expect("fits");
+
+        assert!(String::from_utf8_lossy(waiting.bytes()).contains(" waiting for cargo's package cache lock\n"));
+        assert!(!String::from_utf8_lossy(moving.bytes()).contains("waiting for cargo's"));
     }
 
     #[test]

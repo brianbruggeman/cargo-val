@@ -890,8 +890,8 @@ pub(crate) fn projected(render: &Render<'_>, event: &Event<'_>) -> Line<PROJECTE
     line
 }
 
-/// Writes bytes a shard child kept for the terminal; a rich run erases its live frame first so nothing lands mid-frame.
-pub(crate) fn emit_kept(render: &Render<'_>, bytes: &[u8]) -> Result<(), RunError> {
+/// Moves the cursor back over the live frame, if one is drawn, so what is written next lands where the frame was.
+pub(crate) fn erase_live(render: &Render<'_>) -> Result<(), RunError> {
     let (output, state, frame) = render;
     let mut frame = frame.borrow_mut();
     let frame: &mut Line<FRAME_BYTES> = &mut frame;
@@ -899,10 +899,49 @@ pub(crate) fn emit_kept(render: &Render<'_>, bytes: &[u8]) -> Result<(), RunErro
     if *output == OutputMode::Rich {
         state.borrow_mut().erase_rich(frame);
     }
-    if !frame.bytes().is_empty() {
-        write_fd(1, frame.bytes())?;
+    if frame.bytes().is_empty() {
+        return Ok(());
     }
+    write_fd(1, frame.bytes())
+}
+
+/// Writes bytes a shard child kept for the terminal; a rich run erases its live frame first so nothing lands mid-frame.
+pub(crate) fn emit_kept(render: &Render<'_>, bytes: &[u8]) -> Result<(), RunError> {
+    erase_live(render)?;
     write_fd(1, bytes)
+}
+
+const STATUS_WORDS: [&[u8]; 14] = [
+    b"Compiling", b"Fresh", b"Finished", b"Blocking", b"Checking", b"Building", b"Downloading", b"Downloaded", b"Updating", b"Locking", b"Adding", b"Documenting", b"Running", b"Dirty",
+];
+
+const LOCK_WAIT: &[u8] = b"waiting for file lock on ";
+
+fn is_status_line(line: &[u8]) -> bool {
+    STATUS_WORDS.iter().any(|word| {
+        let mut seen = visible(line).skip_while(|byte| *byte == b' ');
+        seen.by_ref().take(word.len() + 1).eq(word.iter().copied().chain(core::iter::once(b' ')))
+    })
+}
+
+// a rich run shows cargo's progress in the frame, so status lines are consumed; anything else erases the frame and prints
+fn summarize_status_lines(bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let length = memchr::memchr(b'\n', rest).map_or(rest.len(), |newline| newline + 1);
+        let (line, after) = rest.split_at(length);
+        rest = after;
+        if !is_status_line(line) {
+            erase_live(render)?;
+            write_fd(2, line)?;
+            continue;
+        }
+        if let Some(at) = memchr::memmem::find(line, LOCK_WAIT) {
+            let lock = line[at + LOCK_WAIT.len()..].trim_ascii_end();
+            emit(render, &Event::Waiting { lock })?;
+        }
+    }
+    Ok(())
 }
 
 /// Applies `event` to the render state and writes its projection to standard output; a frame that was too small says so on stderr.
@@ -1697,18 +1736,20 @@ fn whole_lines_len(pending: &[u8], closed: bool) -> usize {
 }
 
 // a coloured run has cargo wrap "error" in SGR sequences, so the prefix only matches once escapes are skipped
-fn begins_build_failure(line: &[u8]) -> bool {
+fn visible(line: &[u8]) -> impl Iterator<Item = u8> {
     let mut inside_escape = false;
-    line.iter()
-        .copied()
-        .filter(move |&byte| {
-            if inside_escape {
-                inside_escape = !byte.is_ascii_alphabetic();
-                return false;
-            }
-            inside_escape = byte == 0x1b;
-            !inside_escape
-        })
+    line.iter().copied().filter(move |&byte| {
+        if inside_escape {
+            inside_escape = !byte.is_ascii_alphabetic();
+            return false;
+        }
+        inside_escape = byte == 0x1b;
+        !inside_escape
+    })
+}
+
+fn begins_build_failure(line: &[u8]) -> bool {
+    visible(line)
         .take(BUILD_FAILURE_PREFIX.len())
         .eq(BUILD_FAILURE_PREFIX.iter().copied())
 }
@@ -1939,7 +1980,7 @@ impl CargoDriver<'_> {
         };
         debug_build_end(run.settings.debug, event, self.parked.len());
         self.discovery.build_finished(success);
-        self.report_diagnostics(success)?;
+        self.report_diagnostics(success, run.render())?;
         self.finishing = true;
         self.reason = reason;
         self.release_parked(run, ledger, lanes)
@@ -2038,7 +2079,7 @@ impl CargoDriver<'_> {
                 | CargoSourceStep::Ignored => {}
                 CargoSourceStep::Eof => {
                     self.discovery.stdout_eof();
-                    self.report_diagnostics(false)?;
+                    self.report_diagnostics(false, run.render())?;
                     debug_build_end(run.settings.debug, b" stdout-eof", self.parked.len());
                     self.finishing = true;
                     self.reason = b"stdout-eof";
@@ -2076,9 +2117,10 @@ impl CargoDriver<'_> {
         self.cargo_eof = true;
     }
 
-    fn report_diagnostics(&mut self, success: bool) -> Result<(), RunError> {
+    fn report_diagnostics(&mut self, success: bool, render: &Render<'_>) -> Result<(), RunError> {
         let held = core::mem::take(&mut self.diagnostics);
         if !success && !held.is_empty() {
+            erase_live(render)?;
             write_fd(2, &held)?;
             if held.len() >= DIAGNOSTIC_CAPACITY {
                 write_fd(2, b"cargo-val: compiler diagnostics were truncated\n")?;
@@ -2086,38 +2128,41 @@ impl CargoDriver<'_> {
         }
         self.diagnostics_reported = true;
         let withheld = core::mem::take(&mut self.stderr_held);
-        self.emit_whole_lines(&withheld)
+        self.emit_whole_lines(&withheld, render)
     }
 
-    fn emit_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+    fn emit_stderr(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
+        if render.0 == OutputMode::Rich {
+            return summarize_status_lines(bytes, render);
+        }
         write_fd(2, bytes)?;
         announce_lock_wait(&mut self.lock_watch, bytes)
     }
 
     // cargo writes one line in several pieces, so a piece written whole would let cargo-val's own lines land inside it
-    fn emit_whole_lines(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+    fn emit_whole_lines(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
         self.stderr_held.extend_from_slice(bytes);
         let pending = core::mem::take(&mut self.stderr_held);
         let end = whole_lines_len(&pending, self.discovery.stderr_closed());
-        let emitted = if end == 0 { Ok(()) } else { self.emit_stderr(&pending[..end]) };
+        let emitted = if end == 0 { Ok(()) } else { self.emit_stderr(&pending[..end], render) };
         self.stderr_held = pending;
         self.stderr_held.drain(..end);
         emitted
     }
 
-    pub(crate) fn forward_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
+    pub(crate) fn forward_stderr(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
         if self.diagnostics_reported {
-            return self.emit_whole_lines(bytes);
+            return self.emit_whole_lines(bytes, render);
         }
         self.stderr_held.extend_from_slice(bytes);
         if begins_build_failure(&self.stderr_held) {
             return Ok(());
         }
-        self.release_ahead_of_failure()
+        self.release_ahead_of_failure(render)
     }
 
     // cargo's failure summary must follow rustc's rendered diagnostics, which arrive on the other pipe; lines before it stream through.
-    fn release_ahead_of_failure(&mut self) -> Result<(), RunError> {
+    fn release_ahead_of_failure(&mut self, render: &Render<'_>) -> Result<(), RunError> {
         let pending = core::mem::take(&mut self.stderr_held);
         let mut start = 0;
         while let Some(newline) = memchr::memchr(b'\n', &pending[start..]) {
@@ -2125,7 +2170,7 @@ impl CargoDriver<'_> {
             if begins_build_failure(&pending[start..end]) {
                 break;
             }
-            self.emit_stderr(&pending[start..end])?;
+            self.emit_stderr(&pending[start..end], render)?;
             start = end;
         }
         self.stderr_held = pending;
@@ -2138,10 +2183,10 @@ impl CargoDriver<'_> {
         self.discovery.exited(code);
     }
 
-    pub(crate) fn stderr_ended(&mut self) -> Result<(), RunError> {
+    pub(crate) fn stderr_ended(&mut self, render: &Render<'_>) -> Result<(), RunError> {
         self.discovery.stderr_eof();
         if self.diagnostics_reported {
-            return self.emit_whole_lines(&[]);
+            return self.emit_whole_lines(&[], render);
         }
         Ok(())
     }
@@ -2441,6 +2486,19 @@ fn watch_parent() -> Result<(), RunError> {
     Err(RunError::Settings)
 }
 
+fn emit_begin(render: &Render<'_>, settings: &Settings, environment: &Environment, at_ms: u64) -> Result<(), RunError> {
+    emit(
+        render,
+        &Event::Begin {
+            version: env!("CARGO_PKG_VERSION").as_bytes(),
+            shard: settings.process == ProcessMode::Shard,
+            jobs: settings.jobs,
+            github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
+            at_ms,
+        },
+    )
+}
+
 fn begin_rich(render: &Render<'_>) -> Result<(), RunError> {
     if !crate::edge_output::enable_virtual_terminal(1) {
         return Err(RunError::Settings);
@@ -2465,15 +2523,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
     let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color)), RefCell::new(frame_line));
-    emit(
-        &render,
-        &Event::Begin {
-            version: env!("CARGO_PKG_VERSION").as_bytes(),
-            shard: settings.process == ProcessMode::Shard,
-            jobs: settings.jobs,
-            github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
-        },
-    )?;
+    emit_begin(&render, &settings, &environment, started_millis)?;
     if settings.output == OutputMode::Rich {
         begin_rich(&render)?;
     }
@@ -3390,7 +3440,16 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, RunError, is_status_line, whole_lines_len};
+
+    #[proxima::test]
+    async fn cargo_status_lines_are_recognised_with_or_without_colour_and_diagnostics_are_not() {
+        let status: [&[u8]; 4] = [b"   Compiling cargo-val v0.1.0 (/work)\n", b"    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.21s\n", b"    Blocking waiting for file lock on package cache\n", b"\x1b[1m\x1b[32m   Compiling\x1b[0m serde v1.0.0\n"];
+        let kept: [&[u8]; 4] = [b"error[E0308]: mismatched types\n", b"warning: unused variable: `scale`\n", b"error: could not compile `build_error` (lib test) due to 1 previous error\n", b"  --> src/lib.rs:4:5\n"];
+
+        assert!(status.iter().all(|line| is_status_line(line)));
+        assert!(!kept.iter().any(|line| is_status_line(line)));
+    }
 
     fn rendered(cause: LaunchCause) -> std::string::String {
         let line: ErrorLine = RunError::Launch(cause).render();
