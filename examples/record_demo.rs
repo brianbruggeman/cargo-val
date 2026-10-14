@@ -12,6 +12,18 @@ const THEME: &str = "dracula";
 const FONT_SIZE: &str = "16";
 const MAX_GIF_BYTES: u64 = 2 * 1024 * 1024;
 
+// recorder dwell times: a viewer needs to read each screen before the next key changes it
+const HOLD_LIVE_RUN_MS: u64 = 0;
+const HOLD_REVIEW_LIST_MS: u64 = 2000;
+const HOLD_AFTER_J_MS: u64 = 1200;
+const HOLD_AFTER_K_MS: u64 = 1200;
+const HOLD_DETAIL_MS: u64 = 3000;
+const HOLD_BACK_TO_LIST_MS: u64 = 0;
+const HOLD_RERUN_RUNNING_MS: u64 = 0;
+const HOLD_RERUN_RESULT_MS: u64 = 2000;
+const HOLD_CONFIRM_QUIT_MS: u64 = 1000;
+const HOLD_RECEIPT_MS: u64 = 3000;
+
 fn main() -> ExitCode {
     let driving = env::args_os()
         .nth(1)
@@ -36,6 +48,7 @@ fn record() -> Result<(), String> {
     clean_demo_crate(&root, &target_directory)?;
 
     record_session(&root, &target_directory)?;
+    drop_leading_delay(&cast)?;
     run(Command::new("agg").current_dir(&root).args([
         "--theme",
         THEME,
@@ -66,6 +79,15 @@ fn record_session(root: &Path, target_directory: &Path) -> Result<(), String> {
             &format!("{} {DRIVE_FLAG}", executable.display()),
             "assets/demo.cast",
         ]))
+}
+
+// a v3 cast stamps each event with the delay since the previous one, so zeroing the first delay starts the recording at the first output byte instead of on a blank screen
+fn drop_leading_delay(cast: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(cast).map_err(|error| format!("{}: {error}", cast.display()))?;
+    let (header, events) = text.split_once('\n').ok_or("cast has no events")?;
+    let (_, rest) = events.split_once(',').ok_or("first event has no delay")?;
+    fs::write(cast, format!("{header}\n[0.0,{rest}"))
+        .map_err(|error| format!("{}: {error}", cast.display()))
 }
 
 fn demo_target_directory(root: &Path) -> PathBuf {
@@ -210,22 +232,30 @@ fn skip_sub_blocks(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
 mod terminal {
     use std::fs::File;
     use std::io::{self, Read, Write};
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    // each step names the screen text that must be drawn before its keys are typed; an empty key list only waits for the screen
-    const KEYS: [(&str, &[u8]); 10] = [
-        ("searching for tests", b""),
-        ("\u{203a}ASSERT", b"j"),
-        ("\u{203a}PANIC", b"k"),
-        ("\u{203a}ASSERT", b"\r"),
-        ("enter list", b"\r"),
-        ("j/k move", b"r"),
-        ("RERUN", b""),
-        ("rerun 1", b"q"),
-        ("again to confirm", b"q"),
-        ("SUMMARY", b""),
+    use super::{
+        HOLD_AFTER_J_MS, HOLD_AFTER_K_MS, HOLD_BACK_TO_LIST_MS, HOLD_CONFIRM_QUIT_MS,
+        HOLD_DETAIL_MS, HOLD_LIVE_RUN_MS, HOLD_RECEIPT_MS, HOLD_RERUN_RESULT_MS,
+        HOLD_RERUN_RUNNING_MS, HOLD_REVIEW_LIST_MS,
+    };
+
+    // each step names the screen text that must be drawn, how long it stays on screen, then the keys typed; an empty key list only waits for the screen
+    const KEYS: [(&str, u64, &[u8]); 10] = [
+        ("searching for tests", HOLD_LIVE_RUN_MS, b""),
+        ("\u{203a}ASSERT", HOLD_REVIEW_LIST_MS, b"j"),
+        ("\u{203a}PANIC", HOLD_AFTER_J_MS, b"k"),
+        ("\u{203a}ASSERT", HOLD_AFTER_K_MS, b"\r"),
+        ("enter list", HOLD_DETAIL_MS, b"\r"),
+        ("j/k move", HOLD_BACK_TO_LIST_MS, b"r"),
+        ("RERUN", HOLD_RERUN_RUNNING_MS, b""),
+        ("rerun 1", HOLD_RERUN_RESULT_MS, b"q"),
+        ("again to confirm", HOLD_CONFIRM_QUIT_MS, b"q"),
+        ("SUMMARY", HOLD_RECEIPT_MS, b""),
     ];
 
     // the screen is matched as the text a reader sees, so colour and hyperlink escapes between words do not hide a marker
@@ -263,17 +293,15 @@ mod terminal {
         let mut next = keys.next();
         let mut buffer = [0_u8; 4096];
         let mut stdout = io::stdout();
-        loop {
-            let read = match master.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => read,
-            };
-            stdout
-                .write_all(&buffer[..read])
-                .and_then(|()| stdout.flush())
-                .map_err(|error| format!("stdout: {error}"))?;
-            shown.push_str(&String::from_utf8_lossy(&buffer[..read]));
-            while let Some((screen, bytes)) = next.filter(|(screen, _)| visible_text(&shown).contains(screen)) {
+        let mut open = true;
+        while open {
+            open = forward(&mut master, &mut buffer, &mut stdout, &mut shown, None)?;
+            while let Some((screen, hold_ms, bytes)) = next.filter(|(screen, _, _)| visible_text(&shown).contains(screen)) {
+                let deadline = Instant::now() + Duration::from_millis(*hold_ms);
+                while open && Instant::now() < deadline {
+                    open = forward(&mut master, &mut buffer, &mut stdout, &mut shown, Some(deadline))?;
+                }
+                thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 master
                     .write_all(bytes)
                     .map_err(|error| format!("keys after {screen:?}: {error}"))?;
@@ -284,9 +312,37 @@ mod terminal {
         child
             .wait()
             .map_err(|error| format!("cargo val wait: {error}"))?;
-        next.map_or(Ok(()), |(screen, _)| {
+        next.map_or(Ok(()), |(screen, _, _)| {
             Err(format!("the run never drew {screen:?}"))
         })
+    }
+
+    // output keeps flowing to the recording while a screen is held, so a redraw during a dwell is stamped when it happens; returns false once the child closes the terminal
+    fn forward(
+        master: &mut File,
+        buffer: &mut [u8],
+        stdout: &mut io::Stdout,
+        shown: &mut String,
+        deadline: Option<Instant>,
+    ) -> Result<bool, String> {
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let mut poll = libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let timeout = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+            if unsafe { libc::poll(&raw mut poll, 1, timeout) } <= 0 {
+                return Ok(true);
+            }
+        }
+        let read = match master.read(buffer) {
+            Ok(0) | Err(_) => return Ok(false),
+            Ok(read) => read,
+        };
+        stdout
+            .write_all(&buffer[..read])
+            .and_then(|()| stdout.flush())
+            .map_err(|error| format!("stdout: {error}"))?;
+        shown.push_str(&String::from_utf8_lossy(&buffer[..read]));
+        Ok(true)
     }
 
     fn spawn_on_terminal(slave: &OwnedFd) -> Result<Child, String> {
