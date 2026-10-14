@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -87,6 +88,10 @@ fn open_ready(path: &Path) -> File {
 }
 
 fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -> (Fixture, ChildStream) {
+    start_as(label, fixture, arguments, block_variable, "rich", Stdio::null())
+}
+
+fn start_as(label: &str, fixture: &str, arguments: &[&str], block_variable: &str, output: &str, stdout: Stdio) -> (Fixture, ChildStream) {
     let directory = target_directory()
         .join("c74-rendezvous")
         .join(format!("{label}-{}", std::process::id()));
@@ -102,7 +107,7 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
     let mut command = binary::command();
     group::lead_group(&mut command);
     let child = command
-        .env("CARGO_VAL_OUTPUT", "rich")
+        .env("CARGO_VAL_OUTPUT", output)
         .arg("--manifest-path")
         .arg(manifest)
         .args(arguments)
@@ -118,7 +123,7 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
             target_directory().join(format!("c74-fixture-{label}")),
         )
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(Stdio::null())
         .spawn()
         .expect("cargo-val binary is spawnable");
@@ -195,4 +200,31 @@ async fn c74_running_test_receives_sigint_sent_to_cargo_val_alone_and_exits_130(
         libc::SIGINT,
         SIGINT_STATUS
     );
+}
+
+#[proxima::test(timeout = "310s")]
+async fn an_interrupted_agent_run_names_the_signal_and_the_blocked_test_and_closes_with_exit_130() {
+    let (mut fixture, ready) = start_as(
+        "agent-int",
+        "blocked_test",
+        &["--lib", "unit_blocks_when_requested"],
+        "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR",
+        "agent",
+        Stdio::piped(),
+    );
+    let line = fifo::first_line(&ready, "the blocked test never reached the rendezvous").await;
+    fixture.holder = line.trim().parse().expect("the blocked process wrote its pid");
+    let cargo_val = libc::pid_t::try_from(fixture.child.id()).expect("pid fits pid_t");
+
+    assert_eq!(unsafe { libc::kill(cargo_val, libc::SIGINT) }, 0);
+    let status = wait::wait_bounded(&mut fixture.child, group::SYNC_DEADLINE).unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
+    let mut report = String::new();
+    fixture.child.stdout.take().expect("stdout is piped").read_to_string(&mut report).expect("agent output is UTF-8");
+
+    assert_eq!(status.code(), Some(SIGINT_STATUS), "{report}");
+    let lines: Vec<&str> = report.lines().collect();
+    assert_eq!(lines.len(), 4, "header, INTERRUPTED, RUNNING, EXIT:\n{report}");
+    assert_eq!(lines[1], "INTERRUPTED  signal=2  forwarded_groups=1", "{report}");
+    assert_eq!(lines[2], "RUNNING  cargo_val_blocked_fixture tests::unit_blocks_when_requested", "{report}");
+    assert_eq!(lines[3], "EXIT     130  interrupted", "{report}");
 }
