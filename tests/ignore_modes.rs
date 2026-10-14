@@ -305,6 +305,7 @@ mod bin_gate_hold {
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     use std::thread;
+    use std::time::Duration;
 
     use futures::future::join3;
     use proxima_primitives::pipe::Pipe;
@@ -314,6 +315,8 @@ mod bin_gate_hold {
     use crate::supervise::supervised;
 
     const TEST_NAME: &str = "the_bin_target_exists_when_the_test_starts";
+    // the bin and its unit-test target both block on the fifo, each holding a job slot, so the integration test unit needs a third slot or it never links and the park line never comes; an ambient build.jobs, CARGO_BUILD_JOBS or jobserver of 2 or fewer would stall the run until its deadline
+    const FIXTURE_BUILD_JOBS: &str = "8";
     const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
 
     /// What proves the bin-less window was observed, so the bin build may be released.
@@ -362,6 +365,10 @@ mod bin_gate_hold {
     }
 
     pub async fn cold_run(label: &str, environment: &[(&str, &str)], release: Release) -> Run {
+        cold_run_within(label, environment, release, FIXTURE_DEADLINE).await
+    }
+
+    pub async fn cold_run_within(label: &str, environment: &[(&str, &str)], release: Release, deadline: Duration) -> Run {
         let target = target_directory().join(format!("bin-gate-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&target);
         std::fs::create_dir_all(&target).expect("target directory is creatable");
@@ -377,11 +384,15 @@ mod bin_gate_hold {
             .env("CARGO_VAL_LOG", "debug")
             .env("CARGO_TARGET_DIR", &target)
             .env("CARGO_VAL_TARGET_DIR", "shared")
-            .env("CARGO_VAL_BIN_GATE_HOLD", &fifo);
+            .env("CARGO_VAL_BIN_GATE_HOLD", &fifo)
+            .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS)
+            .env_remove("MAKEFLAGS")
+            .env_remove("CARGO_MAKEFLAGS")
+            .env_remove("MFLAGS");
         for (key, value) in environment {
             command.env(key, value);
         }
-        let (status, stdout, stderr) = supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+        let (status, stdout, stderr) = supervised(&mut command, deadline, async |_, stdout, stderr, exit| {
             let settled: fn(&str) -> bool = test_settled;
             let parked: fn(&str) -> bool = |text| text.contains(GATE_PARKED_LINE);
             let (stdout_proof, stderr_proof) = match release {
@@ -440,6 +451,23 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
             .contains("the_bin_target_exists_when_the_test_starts"),
         "{context}"
     );
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "60s")]
+async fn a_run_whose_bin_fails_before_any_hold_ends_on_its_own_exit_within_seconds() {
+    let started = std::time::Instant::now();
+    let result = bin_gate_hold::cold_run_within(
+        "unreadable-hold",
+        &[("CARGO_VAL_BIN_GATE_HOLD", "/nonexistent/bin-hold")],
+        bin_gate_hold::Release::AfterTestArtifactLinks,
+        Duration::from_secs(30),
+    ).await;
+    let context = format!("{}{}", result.stdout, result.stderr);
+
+    assert_eq!(result.status, Some(3), "{context}");
+    assert!(result.stderr.contains("cargo test build failed"), "{context}");
+    assert!(started.elapsed() < Duration::from_secs(30), "the run took {:?}: {context}", started.elapsed());
 }
 
 #[cfg(unix)]
