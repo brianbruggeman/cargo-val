@@ -43,7 +43,7 @@ the Proxima repository.
 ## GitHub Action
 
 Any repository can run its tests with cargo val. The caller installs the Rust
-toolchain first (the action does not); the runner installs on Linux and macOS.
+toolchain first (the action does not); the action runs on Linux, macOS and Windows runners.
 
 ```yaml
 steps:
@@ -55,17 +55,21 @@ steps:
       no-fail-fast: true
 ```
 
-The action resolves `version` to a commit with `git ls-remote`, restores a cached
-binary keyed on runner OS, architecture and that commit, runs `cargo install
---locked --git` on a miss, runs `cargo val --tests`, writes the `total:` line to
-the job summary and fails the step when cargo val fails.
+`version` selects the source. A semver version (`0.1.0`, `v0.1.0`, `0.1`) installs that
+release from crates.io with `cargo install --locked cargo-val --version`, cached per
+version. Anything else is a git ref: it is resolved to a commit with `git ls-remote`,
+installed with `cargo install --locked --git`, and cached per commit. With the default,
+`uses: brianbruggeman/cargo-val@v0.1.0` installs the registry 0.1.0 while `@main` or a
+sha installs from git. The action then runs `cargo val --tests`, writes the `total:`
+line to the job summary and fails the step when cargo val fails. On Windows, pass
+`args: -- --test-threads=1` when the suite asserts process-wide handle counts.
 
 | input | default | meaning |
 | --- | --- | --- |
-| `version` | the action's own ref, else `main` | git ref (branch, tag or full sha) of cargo-val to install |
+| `version` | the action's own ref, else `main` | semver version (installed from crates.io) or git ref (branch, tag or full sha, installed from GitHub) |
 | `args` | empty | extra arguments for `cargo val`, split on whitespace |
 | `working-directory` | `.` | directory cargo val runs in |
 | `filterset` | empty | passed as `-E` |
 | `no-fail-fast` | `false` | passed as `--no-fail-fast` |
 
-Outputs: `total` (the `total:` line) and `sha` (the installed commit).
+Outputs: `total` (the `total:` line) and `sha` (the installed commit; empty for a crates.io install).
