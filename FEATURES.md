@@ -90,3 +90,5 @@ Status: **built** (in tree, uncommitted) · **designed** · **queued** · **late
 ## Config
 - **designed** — one `RunConfig` builder, one method per axis; TOML sections mirror it; CLI sets builder values
 - **designed** — every option is one conflaguration setting (builder ↔ TOML ↔ env parity)
+- **built** — `--test-timeout <secs|none>` / `CARGO_VAL_TEST_TIMEOUT`: the deadline every test is declared to have (1 to 4294967 seconds, default none), shown as `limit=<secs>s` on the `RUNNING` line; unknown stays absent, never zero; it declares, it does not kill
+- **built** — `--heartbeat <secs>` / `CARGO_VAL_HEARTBEAT_SECS`: seconds between plain `RUNNING <binary> <test> <age>s [limit=..] (oldest of N running)` lines (default the `heartbeat_secs` sizing constant, 10), fed by a prime timer tick (`tick_ms`) that stops when the run finishes

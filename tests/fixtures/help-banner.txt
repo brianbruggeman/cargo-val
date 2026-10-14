@@ -22,6 +22,10 @@ Options:
                    Select tests with a nextest filterset subset (see below)
       --target-dir <isolated|shared|PATH>
                    Where the build directories live (see below; default: shared)
+      --test-timeout <secs|none>
+                   The deadline every test is declared to have, shown as limit= on RUNNING lines (default: none)
+      --heartbeat <secs>
+                   Seconds between RUNNING lines for the oldest test in flight (default: the build-time heartbeat_secs, 10)
       --exit-with-parent
                    Kill the running tests and exit when the parent process exits (macOS, Linux; default: off)
 
@@ -76,6 +80,19 @@ Plain output is append-only, one line per event, labels padded to nine columns:
   SUMMARY passed=P failed=F ignored=I not_run=N wall=S, one FAILED line per failure, and
   RERUN, a cargo val command that reruns only the failures. GITHUB_ACTIONS=true also wraps
   each block in ::group::/::endgroup:: and prints one ::error annotation per failure.
+
+Test timeout, highest precedence first (default: none):
+  1. --test-timeout <secs|none>
+  2. CARGO_VAL_TEST_TIMEOUT=<secs|none>
+secs is a whole number from 1 to 4294967. It declares a deadline for the RUNNING line; it does not kill a test.
+
+Heartbeat, highest precedence first (default: the heartbeat_secs sizing constant, 10):
+  1. --heartbeat <secs>
+  2. CARGO_VAL_HEARTBEAT_SECS=<secs>
+  3. the build-time default (the heartbeat_secs sizing constant)
+In plain output, every interval while a test is in flight prints one line for the oldest:
+  RUNNING  <binary id>  <test>  <age>s  [limit=<secs>s]  (oldest of N running)
+
 
 Exit with parent, highest precedence first (default: off):
   1. --exit-with-parent
