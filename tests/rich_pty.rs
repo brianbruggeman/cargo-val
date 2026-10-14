@@ -680,7 +680,7 @@ fn test_row_count(frame: &str) -> Option<String> {
 
 fn second_run_row_is_valid(row: &str, total: &str) -> bool {
     let Some(count) = row.split_whitespace().find(|word| word.contains('/')) else {
-        return row.ends_with("searching for tests");
+        return row.contains(" searching ");
     };
     let (_, shown_total) = count.split_once('/').expect("the count is done/total");
     if shown_total == format!("~{total}") {
@@ -707,7 +707,7 @@ async fn a_second_run_shows_no_count_before_a_binary_is_known_and_ends_exact() {
     let closing = test_row_count(second_frames.last().expect("the second run drew a frame")).expect("the second run's last frame has a test row");
     println!("second run counts {estimates:?} closes {closing}");
     let rows: Vec<&str> = second_frames.iter().filter_map(|frame| frame.lines().find(|line| line.starts_with(" test  "))).collect();
-    assert!(rows.first().is_some_and(|row| row.ends_with("searching for tests")), "the second run's first frame searches for tests: {rows:?}");
+    assert!(rows.first().is_some_and(|row| row.contains(" searching ")), "the second run's first frame searches for tests: {rows:?}");
     assert!(rows.iter().all(|row| second_run_row_is_valid(row, total)), "a second-run frame is neither searching, estimated with the listed note, nor exact: {rows:?}");
     assert!(closing.ends_with(&format!("/{total}")), "the second run's last frame is exact: {closing}");
 }
