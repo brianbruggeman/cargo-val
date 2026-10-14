@@ -12,7 +12,10 @@
 use memchr::memchr;
 
 use crate::line::Line;
-use crate::view_defaults::HEARTBEAT_SECS;
+use crate::failure_class::{Exit, classify};
+use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
+
+mod rich;
 
 /// A test id as two borrowed fields: the binary, then the test name.
 pub type Identity<'a> = (&'a [u8], &'a [u8]);
@@ -23,7 +26,7 @@ pub type Stream<'a> = (&'a [u8], bool);
 const LABEL_WIDTH: usize = 9;
 const HEARTBEAT_MS: u64 = HEARTBEAT_SECS as u64 * 1000;
 const INFLIGHT_HEAD: usize = 13;
-const FAILURE_HEAD: usize = 9;
+const FAILURE_HEAD: usize = 13;
 const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
@@ -50,7 +53,9 @@ pub enum Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event<'a> {
     Begin { version: &'a [u8], shard: bool, jobs: usize, github: bool },
-    Listed { binaries: usize, tests: usize },
+    Listed { binaries: usize, of: Option<usize>, tests: usize },
+    Built { done: u16, total: Option<u16> },
+    Resize { cols: u16 },
     Started { id: Identity<'a>, solo: bool, at_ms: u64, limit_ms: Option<u32> },
     Settled { id: Identity<'a>, outcome: Outcome, at_ms: Option<u64>, solo: bool },
     Tick { now_ms: u64 },
@@ -75,6 +80,8 @@ impl Mode {
                 Self::Running,
                 Event::Begin { .. }
                 | Event::Listed { .. }
+                | Event::Built { .. }
+                | Event::Resize { .. }
                 | Event::Started { .. }
                 | Event::Settled { .. }
                 | Event::Captured { .. }
@@ -112,6 +119,18 @@ pub struct State<'storage, const RERUN: usize> {
     now_ms: u64,
     beat_due: bool,
     settled_ms: Option<u64>,
+    jobs: usize,
+    done: usize,
+    built: u16,
+    units: Option<u16>,
+    listed_binaries: usize,
+    binaries_total: Option<usize>,
+    listed_tests: usize,
+    cols: u16,
+    origin_ms: Option<u64>,
+    drawn_rows: u16,
+    reason: [u8; REASON_BYTES],
+    reason_len: usize,
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
@@ -134,6 +153,18 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             now_ms: 0,
             beat_due: false,
             settled_ms: None,
+            jobs: 0,
+            done: 0,
+            built: 0,
+            units: None,
+            listed_binaries: 0,
+            binaries_total: None,
+            listed_tests: 0,
+            cols: 80,
+            origin_ms: None,
+            drawn_rows: 0,
+            reason: [0; REASON_BYTES],
+            reason_len: 0,
         }
     }
 
@@ -194,9 +225,14 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.beat_due = false;
         self.settled_ms = None;
         match *event {
-            Event::Begin { github, .. } => self.begin(github),
+            Event::Begin { github, jobs, .. } => self.begin(github, jobs),
+            Event::Listed { binaries, of, tests } => (self.listed_binaries, self.binaries_total, self.listed_tests) = (binaries, of, tests),
+            Event::Built { done, total } => (self.built, self.units) = (done, total),
+            Event::Resize { cols } => self.cols = cols,
+            Event::Captured { id, stdout, stderr } => self.remember_reason(id, stdout.0, stderr.0),
             Event::Started { id, at_ms, limit_ms, .. } => self.track(id, at_ms, limit_ms),
             Event::Settled { id, outcome, at_ms, .. } => {
+                self.done += 1;
                 self.settled_ms = self.untrack(id, at_ms);
                 if outcome == Outcome::Failed {
                     self.record(id, self.settled_ms);
@@ -208,9 +244,19 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
     }
 
-    fn begin(&mut self, github: bool) {
+    fn begin(&mut self, github: bool, jobs: usize) {
         self.mode = Mode::Running;
         self.github = github;
+        self.jobs = jobs;
+        self.done = 0;
+        self.built = 0;
+        self.units = None;
+        self.listed_binaries = 0;
+        self.binaries_total = None;
+        self.listed_tests = 0;
+        self.reason_len = 0;
+        self.origin_ms = None;
+        self.drawn_rows = 0;
         self.used = 0;
         self.stored = 0;
         self.unstored = 0;
@@ -225,6 +271,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
 
     fn beat(&mut self, now_ms: u64) {
         self.now_ms = now_ms;
+        self.origin_ms.get_or_insert(now_ms);
         self.beat_due = self.inflight_count != 0 && now_ms.saturating_sub(self.last_beat_ms) >= self.heartbeat_ms;
         if self.beat_due {
             self.last_beat_ms = now_ms;
@@ -295,7 +342,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Ok(offset) if self.stored < self.failures.len() && end <= self.arena.len() => {
                 let head = self.used + FAILURE_HEAD;
                 self.arena[self.used] = u8::from(duration_ms.is_some());
-                self.arena[self.used + 1..head].copy_from_slice(&duration_ms.unwrap_or(0).to_le_bytes());
+                self.arena[self.used + 1..head - 4].copy_from_slice(&duration_ms.unwrap_or(0).to_le_bytes());
+                self.arena[head - 4..head].copy_from_slice(&u32::try_from(self.done).unwrap_or(u32::MAX).to_le_bytes());
                 write_names(&mut self.arena[head..end], id);
                 self.used = end;
                 self.failures[self.stored] = offset;
@@ -305,10 +353,34 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
     }
 
+    fn remember_reason(&mut self, id: Identity<'_>, stdout: &[u8], stderr: &[u8]) {
+        let first = self.failures().next();
+        if self.reason_len != 0 || first != Some(id) {
+            return;
+        }
+        let Ok(record) = classify(stderr, Exit::Code(101), 0).or_else(|_| classify(stdout, Exit::Code(101), 0)) else {
+            return;
+        };
+        let line = &record.message[..memchr(b'\n', record.message).unwrap_or(record.message.len())];
+        let kept = line.len().min(REASON_BYTES);
+        self.reason[..kept].copy_from_slice(&line[..kept]);
+        self.reason_len = kept;
+    }
+
+    /// The settled-test count at which each stored failure landed, for the tick row.
+    pub fn failure_positions(&self) -> impl Iterator<Item = usize> + '_ {
+        self.failures[..self.stored].iter().map(|offset| {
+            let start = *offset as usize;
+            let mut done = [0; 4];
+            done.copy_from_slice(&self.arena[start + 9..start + FAILURE_HEAD]);
+            u32::from_le_bytes(done) as usize
+        })
+    }
+
     fn resolve(&self, offset: u32) -> (Identity<'_>, Option<u64>) {
         let start = offset as usize;
         let mut duration = [0; 8];
-        duration.copy_from_slice(&self.arena[start + 1..start + FAILURE_HEAD]);
+        duration.copy_from_slice(&self.arena[start + 1..start + 9]);
         let measured = self.arena[start] != 0;
         let (id, _) = names(&self.arena[start + FAILURE_HEAD..self.used]);
         (id, measured.then(|| u64::from_le_bytes(duration)))
@@ -322,7 +394,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     pub fn project<const FRAME: usize>(&self, event: &Event<'_>, frame: &mut Line<FRAME>) -> Result<(), usize> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
-            Event::Listed { binaries, tests } => listed(frame, binaries, tests),
+            Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
+            Event::Built { .. } | Event::Resize { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
@@ -782,7 +855,7 @@ mod tests {
         let mut state = Small::new(&mut arena, &mut ledger);
         let events = [
             Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true },
-            Event::Listed { binaries: 19, tests: 383 },
+            Event::Listed { binaries: 19, of: Some(19), tests: 383 },
             Event::Started { id: FAILING, solo: true, at_ms: 0, limit_ms: None },
             Event::Warned { id: FAILING, what: b"rerun failed to start" },
             Event::BlockOpened { id: FAILING },

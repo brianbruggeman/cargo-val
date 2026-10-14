@@ -34,7 +34,7 @@ fn run_with_failure() -> Result<(), String> {
     let mut inflight = [0_u8; INFLIGHT_BYTES];
     let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
     show(&mut state, Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true })?;
-    show(&mut state, Event::Listed { binaries: 19, tests: 383 })?;
+    show(&mut state, Event::Listed { binaries: 19, of: Some(19), tests: 383 })?;
     show(&mut state, Event::Started { id: PASSING, solo: false, at_ms: 1_000, limit_ms: None })?;
     show(&mut state, Event::Started { id: FAILING, solo: false, at_ms: 1_200, limit_ms: Some(120_000) })?;
     show(&mut state, Event::Tick { now_ms: 11_000 })?;
