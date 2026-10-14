@@ -774,6 +774,26 @@ async fn cargo_warnings_and_build_script_stderr_never_reach_the_terminal_between
 }
 
 #[proxima::test]
+#[case::eighty(80)]
+#[case::one_ninety(190)]
+async fn with_debug_logging_every_redraw_reports_the_rows_it_erased_and_the_rows_the_frame_wrote(#[case] columns: u16) {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let environment = [("NO_COLOR", "1"), ("CARGO_VAL_LOG", "debug")];
+    let (output, status) = run_sized("rich_pty", "rich", &environment, (true, &target_run, columns), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
+
+    assert!(status.success(), "cargo-val exited {status} at {columns} columns");
+    let reports: Vec<&str> = output.lines().filter(|line| line.contains("cargo-val: debug: frame ")).collect();
+    println!("{} frame reports, first {:?}", reports.len(), reports.first());
+    assert!(reports.len() >= 3, "a live run redraws at least three times, got {}:\n{}", reports.len(), shown(&output));
+    let agreed = format!("cols={columns} ");
+    for report in &reports {
+        let field = |name: &str| report.split_once(name).and_then(|(_, rest)| rest.split_whitespace().next()).unwrap_or_default().trim_end_matches('\r').to_owned();
+        assert!(report.contains(&agreed), "{report}");
+        assert_eq!(field("erased_rows="), field("written_rows="), "{report}");
+    }
+}
+
+#[proxima::test]
 #[case::eighty_to_one_ninety(80, 190)]
 #[case::one_twenty_to_one_ninety_one(120, 191)]
 #[case::one_ninety_to_one_ninety_one(190, 191)]
