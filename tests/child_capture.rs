@@ -68,3 +68,11 @@ async fn cargo_val_version_is_captured_byte_for_byte_with_its_exit_code() {
 async fn cargo_val_help_is_captured_byte_for_byte_with_its_exit_code() {
     capture_equals_std(help_command()).await;
 }
+
+// windows keeps eight process-group jobs live at once, so nine runs expose a harness that never releases a finished child's group
+#[proxima::test]
+async fn children_past_the_group_table_capacity_are_each_captured_in_full() {
+    for _round in 0..12 {
+        capture_equals_std(echo_command()).await;
+    }
+}

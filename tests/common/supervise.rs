@@ -6,7 +6,7 @@ use futures::FutureExt;
 use proxima_core::time::timeout;
 use proxima_primitives::pipe::UnpinPipe;
 
-use crate::common::{ChildStream, ExitSource, interrupt_then_kill, kill_group, launch};
+use crate::common::{ChildStream, ExitSource, interrupt_then_kill, kill_group, launch, release_group};
 
 /// Spawns `command` as the leader of its own process group and lends `interact` the child's pid, its stdout and stderr streams and its exit source, all driven on the calling prime worker; then guarantees the group is gone before returning or unwinding.
 ///
@@ -20,6 +20,7 @@ pub async fn supervised<Outcome>(
     let body = AssertUnwindSafe(interact(leader, &stdout, &stderr, &exit)).catch_unwind();
     let outcome = timeout(deadline, body).await;
     let failures = settle(leader, &exit).await;
+    release_group(leader);
     match outcome {
         Ok(Ok(value)) => {
             assert!(failures.is_empty(), "{command:?} (pid {leader}) group cleanup failed: {failures:?}");
