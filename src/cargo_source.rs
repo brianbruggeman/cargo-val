@@ -43,6 +43,13 @@ pub enum CargoSourceStep<'path> {
         /// false when a unit failed to build, so executables still waiting for a bin will never get it.
         success: bool,
     },
+    /// A compiler diagnostic that is reported only if the build fails.
+    Diagnostic {
+        /// rustc's level such as `error` or `warning`.
+        level: &'path str,
+        /// the text rustc would print, escapes decoded.
+        rendered: &'path str,
+    },
     /// The reader produced bytes in this step, or zero when it reported EOF.
     Read {
         /// Bytes newly read from Cargo stdout in this step.
@@ -232,6 +239,10 @@ impl<'buffer> CargoSource<'buffer> {
                 consumed_bytes,
             ),
             RecordStep::Parsed {
+                parsed: Some(CargoMessage::Diagnostic { level, rendered }),
+                consumed_bytes,
+            } => (CargoSourceStep::Diagnostic { level, rendered }, consumed_bytes),
+            RecordStep::Parsed {
                 parsed: Some(CargoMessage::BuildFinished { success }),
                 consumed_bytes,
             } => (CargoSourceStep::BuildFinished { success }, consumed_bytes),
@@ -360,7 +371,8 @@ mod tests {
                     Poll::Ready(Ok(
                         CargoSourceStep::Ignored
                         | CargoSourceStep::BinBuilt { .. }
-                        | CargoSourceStep::BuildFinished { .. },
+                        | CargoSourceStep::Diagnostic { .. }
+                    | CargoSourceStep::BuildFinished { .. },
                     )) => {
                         ignored_records += 1;
                     }
@@ -514,6 +526,7 @@ mod tests {
                     | CargoSourceStep::Ignored
                     | CargoSourceStep::BuildScript(_)
                     | CargoSourceStep::BinBuilt { .. }
+                    | CargoSourceStep::Diagnostic { .. }
                     | CargoSourceStep::BuildFinished { .. },
                 )) => {}
                 Poll::Ready(Ok(CargoSourceStep::Eof)) => break paths,

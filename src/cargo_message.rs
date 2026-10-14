@@ -115,6 +115,13 @@ pub enum CargoMessage<'text> {
         /// false when a unit failed to build.
         success: bool,
     },
+    /// A `compiler-message` whose rustc rendering is reported verbatim when the build fails.
+    Diagnostic {
+        /// rustc's level such as `error` or `warning`.
+        level: &'text str,
+        /// the text rustc would print, such as `error[E0308]: mismatched types\n --> src/lib.rs:2:5\n...`.
+        rendered: &'text str,
+    },
     /// A valid message that carries nothing a test launch needs.
     Ignored,
 }
@@ -122,6 +129,7 @@ pub enum CargoMessage<'text> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Reason {
     Other,
+    CompilerMessage,
     CompilerArtifact,
     BuildScriptExecuted,
     BuildFinished,
@@ -261,6 +269,27 @@ impl<'input> Json<'input, '_> {
         Ok(())
     }
 
+    fn read_message(&mut self, fields: &mut Fields<'input>) -> Result<(), ParseError> {
+        self.whitespace();
+        if self.input.get(self.offset) != Some(&b'{') {
+            return self.skip_value(1);
+        }
+        self.enter(1)?;
+        self.byte(b'{')?;
+        let mut first = true;
+        while let Some(key) = self.member_key(first)? {
+            first = false;
+            if text_equals(key, b"level") {
+                read_once(&mut fields.level, self)?;
+            } else if text_equals(key, b"rendered") && self.input.get(self.offset..self.offset + 4) != Some(b"null") {
+                read_once(&mut fields.rendered, self)?;
+            } else {
+                self.skip_value(2)?;
+            }
+        }
+        Ok(())
+    }
+
     fn first_of_list(&mut self, slot: &mut Option<Slot<'input>>) -> Result<(), ParseError> {
         if slot.is_some() {
             return Err(ParseError::InvalidJson);
@@ -335,6 +364,8 @@ struct Fields<'input> {
     linked_paths: Option<Span>,
     environment: Option<Span>,
     success: Option<bool>,
+    level: Option<Slot<'input>>,
+    rendered: Option<Slot<'input>>,
 }
 
 fn read_success(json: &mut Json<'_, '_>) -> Result<bool, ParseError> {
@@ -395,6 +426,8 @@ fn read_fields<'input>(json: &mut Json<'input, '_>) -> Result<Fields<'input>, Pa
             read_once(&mut fields.manifest_path, json)?;
         } else if text_equals(key, b"target") {
             json.read_target(&mut fields)?;
+        } else if text_equals(key, b"message") {
+            json.read_message(&mut fields)?;
         } else if text_equals(key, b"success") {
             if fields.success.is_some() {
                 return Err(ParseError::InvalidJson);
@@ -426,6 +459,8 @@ fn read_reason(json: &mut Json<'_, '_>) -> Result<Reason, ParseError> {
         Reason::BuildScriptExecuted
     } else if text_equals(reason, b"build-finished") {
         Reason::BuildFinished
+    } else if text_equals(reason, b"compiler-message") {
+        Reason::CompilerMessage
     } else {
         Reason::Other
     })
@@ -517,6 +552,13 @@ pub fn parse_cargo_message<'text>(
         Some(Reason::BuildFinished) => Ok(CargoMessage::BuildFinished {
             success: fields.success.ok_or(ParseError::MissingArtifactField)?,
         }),
+        Some(Reason::CompilerMessage) => match (fields.level, fields.rendered) {
+            (Some(level), Some(rendered)) => Ok(CargoMessage::Diagnostic {
+                level: resolve(scratch, level)?,
+                rendered: resolve(scratch, rendered)?,
+            }),
+            _ => Ok(CargoMessage::Ignored),
+        },
         Some(Reason::BuildScriptExecuted) => {
             let package_id = fields.package_id.ok_or(ParseError::MissingArtifactField)?;
             let out_dir = fields.out_dir.ok_or(ParseError::MissingArtifactField)?;
