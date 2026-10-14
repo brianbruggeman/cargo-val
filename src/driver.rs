@@ -1520,6 +1520,23 @@ pub(crate) struct CargoDriver<'buffer> {
     diagnostics_reported: bool,
 }
 
+// a coloured run has cargo wrap "error" in SGR sequences, so the prefix only matches once escapes are skipped
+fn begins_build_failure(line: &[u8]) -> bool {
+    let mut inside_escape = false;
+    line.iter()
+        .copied()
+        .filter(move |&byte| {
+            if inside_escape {
+                inside_escape = !byte.is_ascii_alphabetic();
+                return false;
+            }
+            inside_escape = byte == 0x1b;
+            !inside_escape
+        })
+        .take(BUILD_FAILURE_PREFIX.len())
+        .eq(BUILD_FAILURE_PREFIX.iter().copied())
+}
+
 fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
     let kept = match level {
         "error" => true,
@@ -1884,7 +1901,7 @@ impl CargoDriver<'_> {
             return self.emit_stderr(bytes);
         }
         self.stderr_held.extend_from_slice(bytes);
-        if self.stderr_held.starts_with(BUILD_FAILURE_PREFIX) {
+        if begins_build_failure(&self.stderr_held) {
             return Ok(());
         }
         self.release_ahead_of_failure()
@@ -1896,7 +1913,7 @@ impl CargoDriver<'_> {
         let mut start = 0;
         while let Some(newline) = memchr::memchr(b'\n', &pending[start..]) {
             let end = start + newline + 1;
-            if pending[start..end].starts_with(BUILD_FAILURE_PREFIX) {
+            if begins_build_failure(&pending[start..end]) {
                 break;
             }
             self.emit_stderr(&pending[start..end])?;

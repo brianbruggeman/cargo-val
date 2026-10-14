@@ -113,6 +113,26 @@ async fn colour_off_diagnostics_carry_no_escape_bytes() {
 }
 
 #[proxima::test(timeout = "310s")]
+async fn coloured_diagnostics_still_precede_cargos_coloured_summary() {
+    let mut command = Command::new(CARGO_VAL);
+    command
+        .arg("--manifest-path")
+        .arg(manifest())
+        .arg("--lib")
+        .env_remove("NO_COLOR")
+        .env("CARGO_VAL_COLOR", "true")
+        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-coloured-fixture"));
+    let output = fixture_output(&mut command).await;
+    let text = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.stderr.contains(&ESCAPE), "colour is on, so cargo's summary carries SGR bytes:\n{text}");
+    let diagnostic = text.find("E0308").unwrap_or_else(|| panic!("rustc's E0308 is missing:\n{text}"));
+    let summary = text.find(": could not compile").unwrap_or_else(|| panic!("cargo's summary is missing:\n{text}"));
+    let failed = text.find("cargo-val: cargo test build failed").unwrap_or_else(|| panic!("the build-failed line is missing:\n{text}"));
+    assert!(diagnostic < summary && summary < failed, "{text}");
+}
+
+#[proxima::test(timeout = "310s")]
 async fn a_build_failure_exits_3() {
     let result = run_build_error().await;
 
