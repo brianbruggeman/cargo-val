@@ -365,6 +365,16 @@ pub enum OutputMode {
     Plain,
     /// Counts, failures with class and location, and a rerun command; no per-test lines, no escape bytes.
     Agent,
+    /// One JSON object per line, one record per event: the agent projection's fields as keys.
+    Json,
+}
+
+impl OutputMode {
+    /// Whether the mode is a machine projection (agent or json): no per-test lines, no escape bytes, cargo progress withheld.
+    #[must_use]
+    pub const fn is_agent_like(self) -> bool {
+        matches!(self, Self::Agent | Self::Json)
+    }
 }
 
 /// What the user asked for: a forced mode, or `auto`, which lets the terminal and the CI environment decide.
@@ -374,6 +384,7 @@ pub enum OutputSetting {
     Rich,
     Plain,
     Agent,
+    Json,
 }
 
 impl TryFrom<&[u8]> for OutputSetting {
@@ -385,6 +396,7 @@ impl TryFrom<&[u8]> for OutputSetting {
             b"rich" => Ok(Self::Rich),
             b"plain" => Ok(Self::Plain),
             b"agent" => Ok(Self::Agent),
+            b"json" => Ok(Self::Json),
             _ => Err(()),
         }
     }
@@ -419,6 +431,7 @@ impl OutputSetting {
             Self::Auto | Self::Plain => OutputMode::Plain,
             Self::Rich => OutputMode::Rich,
             Self::Agent => OutputMode::Agent,
+            Self::Json => OutputMode::Json,
         }
     }
 
@@ -451,8 +464,8 @@ impl OutputSetting {
 pub const OUTPUT: Layers<'static> = Layers::setting(
     "CARGO_VAL_OUTPUT",
     [
-        b"cargo-val: --output must be auto, rich, plain, or agent\n",
-        b"cargo-val: CARGO_VAL_OUTPUT must be auto, rich, plain, or agent\n",
+        b"cargo-val: --output must be auto, rich, plain, agent, or json\n",
+        b"cargo-val: CARGO_VAL_OUTPUT must be auto, rich, plain, agent, or json\n",
         b"cargo-val: the build default output setting is invalid\n",
     ],
 );

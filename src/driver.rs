@@ -858,7 +858,7 @@ fn settled(
             {
                 match run.settings.output {
                     OutputMode::Rich => watch.output.write_failure()?,
-                    OutputMode::Plain | OutputMode::Agent => {}
+                    OutputMode::Plain | OutputMode::Agent | OutputMode::Json => {}
                 }
             }
             watches[index] = None;
@@ -1053,12 +1053,12 @@ fn deliver<'bytes>(
         } => {
             reporting.settle_ready(ledger);
             match reporting.render.0 {
-                OutputMode::Plain | OutputMode::Agent => {
+                OutputMode::Plain | OutputMode::Agent | OutputMode::Json => {
                     let name = &report[..name_length.saturating_sub(1)];
                     let millis = monotonic_millis().saturating_sub(watch.started_millis);
                     let targets = reporting.targets.borrow();
                     let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-                    let withdrawn = reporting.interrupted && reporting.render.0 == OutputMode::Agent;
+                    let withdrawn = reporting.interrupted && reporting.render.0.is_agent_like();
                     if !withdrawn {
                         emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), millis: Some(millis), solo: false })?;
                     }
@@ -1240,7 +1240,7 @@ fn launch_listed(
     run.targets.borrow_mut().tally(target, Tally::Launched);
     start_session(ledger, watches, scan.lanes, slot, None)?;
     match run.settings.output {
-        OutputMode::Plain | OutputMode::Agent => {
+        OutputMode::Plain | OutputMode::Agent | OutputMode::Json => {
             let targets = run.targets.borrow();
             let id = (targets.id(target), intent.test_name().as_bytes());
             emit(run.render(), &Event::Started { id, solo: false })?;
@@ -1343,7 +1343,7 @@ impl ListingRun<'_> {
         let Some(signal) = self.signals.received() else {
             return Ok(());
         };
-        if self.settings.output != OutputMode::Agent || self.interrupt_reported.replace(true) {
+        if !self.settings.output.is_agent_like() || self.interrupt_reported.replace(true) {
             return Ok(());
         }
         let groups = watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot)).count();
@@ -1503,7 +1503,7 @@ impl ListingScan<'_, '_> {
             }
             ListingSourceStep::IgnoredTest(name) => {
                 match run.settings.output {
-                    OutputMode::Plain | OutputMode::Agent => {
+                    OutputMode::Plain | OutputMode::Agent | OutputMode::Json => {
                         let targets = run.targets.borrow();
                         let id = (targets.id(self.target), name.as_bytes());
                         emit(run.render(), &Event::Settled { id, outcome: Outcome::Ignored, millis: None, solo: false })?;
@@ -2088,7 +2088,7 @@ impl CargoDriver<'_> {
 
     fn emit_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
         for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-            if self.output != OutputMode::Agent || !is_cargo_progress(line) {
+            if !self.output.is_agent_like() || !is_cargo_progress(line) {
                 write_fd(2, line)?;
             }
         }
@@ -2447,6 +2447,23 @@ fn watch_parent(_signals: &SignalPipe, setting: ExitWithParent) -> Result<(), Ru
     }
 }
 
+fn emit_begin(render: &Render<'_>, settings: &Settings, environment: &Environment<'_>) -> Result<(), RunError> {
+    match settings.output {
+        OutputMode::Plain | OutputMode::Agent | OutputMode::Json => emit(
+            render,
+            &Event::Begin {
+                version: env!("CARGO_PKG_VERSION").as_bytes(),
+                shard: settings.process == ProcessMode::Shard,
+                jobs: settings.jobs,
+                github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
+                why: settings.output.is_agent_like().then_some(settings.output_why.as_bytes()),
+                json: settings.output == OutputMode::Json,
+            },
+        ),
+        OutputMode::Rich => Ok(()),
+    }
+}
+
 /// Runs the whole cargo-val run: setup, the awaited prime loop, and the summary.
 ///
 /// # Errors
@@ -2461,19 +2478,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line)) = storage;
     let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots)), RefCell::new(frame_line));
-    match settings.output {
-        OutputMode::Plain | OutputMode::Agent => emit(
-            &render,
-            &Event::Begin {
-                version: env!("CARGO_PKG_VERSION").as_bytes(),
-                shard: settings.process == ProcessMode::Shard,
-                jobs: settings.jobs,
-                github: environment.get(b"GITHUB_ACTIONS") == Some(b"true".as_slice()),
-                why: (settings.output == OutputMode::Agent).then_some(settings.output_why.as_bytes()),
-            },
-        )?,
-        OutputMode::Rich => {}
-    }
+    emit_begin(&render, &settings, &environment)?;
     let inherited_count = environment
         .collect(inherited)
         .map_err(|_| RunError::Environment)?;
@@ -2873,7 +2878,7 @@ fn finish_run(
     if cargo_exit_code.is_some_and(|code| code != 0) {
         run.interrupt_doc_tests();
         let error = if build_reported { RunError::CargoFailed } else { RunError::CargoRefused };
-        if build_reported && run.settings.output == OutputMode::Agent {
+        if build_reported && run.settings.output.is_agent_like() {
             let exit = u8::try_from(error.exit_code()).unwrap_or(u8::MAX);
             emit(run.render(), &Event::BuildFailed { diagnostic: b"diagnostics on stderr", exit })?;
         }
@@ -2894,7 +2899,7 @@ fn finish_run(
 
 // the closing EXIT line of an agent run that ends in an error; every other ending already printed its own
 fn agent_exit(run: &ListingRun<'_>, code: i32) -> Result<(), RunError> {
-    if run.settings.output != OutputMode::Agent {
+    if !run.settings.output.is_agent_like() {
         return Ok(());
     }
     emit(run.render(), &Event::Exited { code: u8::try_from(code).unwrap_or(u8::MAX) })
@@ -3043,7 +3048,7 @@ fn spawn_doc_tests(
     }
     let plain_color = [cargo_term_color(false)];
     let doc_term_color: &[&[u8]] = match output {
-        OutputMode::Plain | OutputMode::Agent => &plain_color,
+        OutputMode::Plain | OutputMode::Agent | OutputMode::Json => &plain_color,
         OutputMode::Rich => &[],
     };
     let child = spawn_reserved(|| {
@@ -3334,7 +3339,7 @@ fn conclude(
     if let Some(doc) = &doc_tests {
         write_doc_notice(doc)?;
     }
-    let total = write_summary(targets, doc_tests.as_ref(), started_millis, settings.output != OutputMode::Agent)?;
+    let total = write_summary(targets, doc_tests.as_ref(), started_millis, !settings.output.is_agent_like())?;
     let empty = total.passed + total.failed == 0;
     let exit = match (total.failed, empty, settings.no_tests) {
         (0, true, NoTestsPolicy::Fail) => NO_TESTS_EXIT_CODE,
@@ -3342,10 +3347,10 @@ fn conclude(
         _ => 1,
     };
     match settings.output {
-        OutputMode::Plain | OutputMode::Agent => close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path(), exit))?,
+        OutputMode::Plain | OutputMode::Agent | OutputMode::Json => close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path(), exit))?,
         OutputMode::Rich => {}
     }
-    if empty && settings.no_tests != NoTestsPolicy::Pass && settings.output != OutputMode::Agent {
+    if empty && settings.no_tests != NoTestsPolicy::Pass && !settings.output.is_agent_like() {
         write_no_tests(parser, settings.ignore)?;
     }
     Ok(RunSummary {

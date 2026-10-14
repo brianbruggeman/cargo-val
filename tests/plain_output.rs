@@ -215,9 +215,9 @@ async fn an_unknown_output_value_is_refused_naming_its_source() {
     let environment = run(&[("CARGO_VAL_OUTPUT", "fancy")], &[]).await;
 
     assert_eq!(flag.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&flag.stderr).contains("--output must be auto, rich, plain, or agent"));
+    assert!(String::from_utf8_lossy(&flag.stderr).contains("--output must be auto, rich, plain, agent, or json"));
     assert_eq!(environment.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&environment.stderr).contains("CARGO_VAL_OUTPUT must be auto, rich, plain, or agent"));
+    assert!(String::from_utf8_lossy(&environment.stderr).contains("CARGO_VAL_OUTPUT must be auto, rich, plain, agent, or json"));
 }
 
 #[proxima::test(timeout = "310s")]

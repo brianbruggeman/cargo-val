@@ -10,10 +10,10 @@ use crate::failure_class::{Absent, Class, Enforcer, Exit, Record, classify};
 use crate::line::Line;
 use crate::view_defaults::{OUTPUT_BYTES, OUTPUT_HEAD_BYTES};
 
-const ESCAPE: u8 = 0x1b;
-const CARRIAGE_RETURN: u8 = b'\r';
+pub(super) const ESCAPE: u8 = 0x1b;
+pub(super) const CARRIAGE_RETURN: u8 = b'\r';
 const CONTINUATION: &[u8] = b"         ";
-const TRUNCATION_MARK: &[u8] = b"...\n";
+pub(super) const TRUNCATION_MARK: &[u8] = b"...\n";
 const SECTION_OPEN: &[u8] = b"---- ";
 const SECTION_CLOSE: &[u8] = b" stdout ----";
 const FAILURES_LIST: &[u8] = b"\nfailures:\n";
@@ -206,7 +206,7 @@ fn output<const FRAME: usize>(frame: &mut Line<FRAME>, capture: &[u8], dropped: 
 
 // the verbatim test output sits between libtest's `---- name stdout ----` header and the closing `failures:` list; a run
 // that died before printing either keeps only what follows the leading `running` and `test ... ` lines
-fn libtest_body(capture: &[u8]) -> &[u8] {
+pub(super) fn libtest_body(capture: &[u8]) -> &[u8] {
     let Some(start) = section_start(capture) else {
         return unframed(capture);
     };
@@ -249,7 +249,7 @@ fn frame_open<const FRAME: usize>(frame: &Line<FRAME>) -> bool {
     frame.bytes().last().is_some_and(|byte| *byte != b'\n')
 }
 
-fn count_escapes(bytes: &[u8]) -> usize {
+pub(super) fn count_escapes(bytes: &[u8]) -> usize {
     memchr::memchr_iter(ESCAPE, bytes).count()
 }
 
@@ -268,7 +268,7 @@ fn clean<const FRAME: usize>(frame: &mut Line<FRAME>, bytes: &[u8]) {
     }
 }
 
-fn after_sequence(bytes: &[u8], escape: usize) -> usize {
+pub(super) fn after_sequence(bytes: &[u8], escape: usize) -> usize {
     let mut position = escape + 1;
     if bytes.get(position) == Some(&b'[') {
         position += 1;
