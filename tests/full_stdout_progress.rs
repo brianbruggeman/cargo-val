@@ -16,6 +16,9 @@ use std::process::{Child, Stdio};
 #[path = "common/binary.rs"]
 mod binary;
 
+#[path = "common/group.rs"]
+mod group;
+
 #[cfg(target_os = "linux")]
 use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
 #[cfg(target_os = "macos")]
@@ -50,6 +53,7 @@ impl Drop for Running {
         if Pipe::call(&self.exit, ()).now_or_never().is_some() {
             return;
         }
+        let _ = group::kill_process_group(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -118,7 +122,9 @@ fn spawn_cargo_val(directory: &Path, fixture: &str, stdout: PipeWriter) -> Child
         .join(fixture)
         .join("Cargo.toml");
     let stderr = fs::File::create(directory.join("stderr.log")).expect("stderr log is creatable");
-    binary::command()
+    let mut command = binary::command();
+    group::lead_group(&mut command);
+    command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)
@@ -206,13 +212,13 @@ async fn c75_full_stdout_never_stalls_the_run_and_delivers_every_line_after_drai
     let unread = unread_bytes(stdout_descriptor);
     assert!(unread > 0, "no stdout was pending while the stdout pipe went unread");
 
-    let (output, exited) = join(drain_stdout(&stdout), Pipe::call(&running.exit, ())).await;
+    let (output, status) = drain_and_exit(&stdout, &running).await;
     assert!(
         output.len() > PIPE_CEILING_BYTES,
         "stdout ({} bytes) must exceed any pipe buffer to prove the stall path",
         output.len()
     );
-    let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
+
     assert_eq!(status.code(), Some(0), "cargo-val exit status");
 
     let text = String::from_utf8(output).expect("stdout is text");
@@ -255,8 +261,8 @@ async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_
     let alive = running.child.try_wait().expect("cargo-val status reads");
     assert!(alive.is_none(), "cargo-val waits on a full stdout instead of exiting: {alive:?}");
 
-    let (output, exited) = join(drain_stdout(&stdout), Pipe::call(&running.exit, ())).await;
-    let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
+    let (output, status) = drain_and_exit(&stdout, &running).await;
+
     let stderr = fs::read_to_string(directory.join("stderr.log")).expect("stderr log reads");
     assert_eq!(status.code(), Some(0), "cargo-val exit status; stderr: {stderr}");
 
@@ -270,4 +276,12 @@ async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_
         .collect();
     assert_eq!(skipped.len(), IGNORED_FLOOD_COUNT, "one skip line per ignored test");
     assert!(skipped.iter().zip(&expected).all(|(printed, name)| printed == name), "skip lines arrive in listing order");
+}
+// the test-level timeout only fails the test; the watchdog kills cargo-val's whole group at the bound, which ends the drain and the exit wait
+async fn drain_and_exit(stdout: &ChildStream, running: &Running) -> (Vec<u8>, std::process::ExitStatus) {
+    let (cancel, fired) = group::watchdog(running.child.id(), group::SYNC_DEADLINE);
+    let (output, exited) = join(drain_stdout(stdout), Pipe::call(&running.exit, ())).await;
+    drop(cancel);
+    assert!(!fired.join().unwrap_or(false), "cargo-val (pid {}) outlived {:?} while its stdout drained and its group was killed", running.child.id(), group::SYNC_DEADLINE);
+    (output, exited.expect("the exit source is unspent").expect("cargo-val exit status reads"))
 }

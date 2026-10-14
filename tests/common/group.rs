@@ -52,15 +52,25 @@ pub fn kill_process_group(leader: u32) -> Result<(), String> {
     }
 }
 
-// taskkill /T walks the parent chain, the closest std-only reach to a job object; spawned and not waited so the kill path itself cannot block
+// taskkill /T walks the parent chain, the closest std-only reach to a job object; its exit is awaited on a thread so a hung taskkill is reported at TASKKILL_DEADLINE instead of blocking
+#[cfg(windows)]
+const TASKKILL_DEADLINE: Duration = Duration::from_secs(30);
+
 #[cfg(windows)]
 pub fn kill_process_group(leader: u32) -> Result<(), String> {
-    Command::new("taskkill")
+    let mut child = Command::new("taskkill")
         .args(["/PID", &leader.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map(drop)
-        .map_err(|error| format!("taskkill for pid {leader} did not run: {error}"))
+        .map_err(|error| format!("taskkill for pid {leader} did not run: {error}"))?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(child.wait()));
+    match receiver.recv_timeout(TASKKILL_DEADLINE) {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(format!("taskkill for pid {leader} exited {status}")),
+        Ok(Err(error)) => Err(format!("taskkill for pid {leader} could not be waited on: {error}")),
+        Err(_) => Err(format!("taskkill for pid {leader} did not exit within {TASKKILL_DEADLINE:?}")),
+    }
 }
 
