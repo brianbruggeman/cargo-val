@@ -210,6 +210,14 @@ pub(super) fn take_backlog(watch: &mut TestWatch) -> Option<(Range<u32>, usize)>
     watch.shard.as_mut().and_then(|shard| shard.backlog.take())
 }
 
+// gate: In = one event, Out = the same event, Err = Cancelled once the trip fired; counted results and the closing tally both refuse to arrive after it
+fn trip_gate<'line>(run: &ListingRun<'_>, ledger: &Ledger<'_>, event: DocEvent<'line>) -> Result<DocEvent<'line>, RunError> {
+    match event {
+        DocEvent::Result { .. } | DocEvent::Finished { .. } if run.tripped(ledger) => Err(RunError::Cancelled),
+        admitted => Ok(admitted),
+    }
+}
+
 // frame: In = unframed lane bytes, Out = one line with its newline (a trailing partial line is the whole remainder), Err = none.
 // it consumes exactly the bytes it returns and never captures them; the output capture happened before any parse.
 fn frame_line(bytes: &[u8]) -> &[u8] {
@@ -268,12 +276,9 @@ pub(super) fn observe(
     } = shard_watch;
     let shard = *shard;
     let mut stop = false;
-    let mut settle = |event: DocEvent<'_>| -> Result<(), RunError> {
+    let mut apply = |ledger: &mut Ledger<'_>, event: DocEvent<'_>| -> Result<(), RunError> {
         match event {
             DocEvent::Result { name, outcome, stray } => {
-                if run.tripped(ledger) {
-                    return Ok(());
-                }
                 let located = run.shards.borrow().locate(shard, *expected, name);
                 let Some(Located { ordinal, next }) = located else {
                     return write_fd(2, b"cargo-val: a shard child reported a test that was not in its shard\n");
@@ -319,13 +324,17 @@ pub(super) fn observe(
             }
             DocEvent::Finished { passed, failed: failed_count, ignored } => {
                 let expected_counts = (streamed.0 + deferred.0, streamed.1 + deferred.1, streamed.2 + deferred.2);
-                if !run.tripped(ledger) && (passed, failed_count, ignored) != expected_counts {
+                if (passed, failed_count, ignored) != expected_counts {
                     write_fd(2, b"cargo-val: a shard child's test result line disagrees with the results it streamed\n")?;
                 }
             }
             DocEvent::Running { .. } => {}
         }
         Ok(())
+    };
+    let mut settle = |event: DocEvent<'_>| match trip_gate(run, ledger, event).and_then(|admitted| apply(ledger, admitted)) {
+        Err(RunError::Cancelled) => Ok(()),
+        settled => settled,
     };
     let mut offset = 0;
     while offset < bytes.len() {
