@@ -1451,3 +1451,16 @@ async fn an_editor_opened_mid_run_that_exits_three_shows_the_footer_notice_in_th
     assert!(first_frame.contains("editor exited with status 3: "), "the notice is missing from the first frame after the editor:\n{}", shown(first_frame));
     assert_eq!(status.code(), Some(1), "{status}");
 }
+
+#[proxima::test]
+async fn e_mid_run_settles_every_test_of_a_stderr_storm_while_the_editor_is_open_and_the_receipt_counts_them() {
+    let log = editor_log();
+    let visual = fake_editor_named("vim").display().to_string();
+    let environment = [("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_AWAIT_RUN", "1")];
+    let (output, status) = run_driven("rich_pty_storm", "rich", &environment, async |master, keys, release, _leader| open_editor_mid_run(master, keys, release, "24 failed  5 passed").await).await;
+
+    let screen = without_sgr(&output);
+    let done = screen.find(EDITOR_DONE).expect("the editor saw every test finish while it was open");
+    assert!(screen[done..].contains("SUMMARY  passed=5 failed=24"), "q q did not print the finished storm's receipt:\n{}", shown(&screen[done..]));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
