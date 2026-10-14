@@ -35,6 +35,7 @@ async fn run(mode: &str, fixture_name: &str, environment: &[(&str, &str)], argum
         .env_remove("CARGO_VAL_COLOR")
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
+        .env("VISUAL", "code")
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("json-fixture-target"))
         .env("CARGO_VAL_LOG", "debug")
         .envs(environment.iter().copied());

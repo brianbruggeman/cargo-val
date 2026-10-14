@@ -29,6 +29,7 @@ use crate::last_run;
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
 use crate::failure_class::Exit;
+use crate::hyperlink::{editor_template, links_enabled, site_in, write_link};
 use crate::source_excerpt::{colour_allowed, for_failure, for_span, splice_excerpt};
 use crate::render::review::{Action, Key};
 use crate::render::{Event, Mode, Outcome, State, Stream, located};
@@ -42,6 +43,7 @@ use prime::os::readiness::Readiness;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
+use std::format;
 use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::OnceLock;
@@ -532,6 +534,7 @@ struct Settings {
     debug: bool,
     ignore: IgnoreMode,
     filterset: Option<Filterset>,
+    link_template: Option<String>,
     jobs: usize,
     max_fail: Option<usize>,
     no_tests: NoTestsPolicy,
@@ -545,7 +548,7 @@ struct Settings {
     source_root: PathBuf,
 }
 
-const SETTING_KEYS: [&str; 22] = [
+const SETTING_KEYS: [&str; 26] = [
     "RUST_TEST_THREADS",
     "CARGO_VAL_JOBS",
     "CARGO_VAL_MAX_FAIL",
@@ -568,6 +571,10 @@ const SETTING_KEYS: [&str; 22] = [
     "CODEX_SANDBOX",
     "CURSOR_TRACE_ID",
     "GEMINI_CLI",
+    "CARGO_VAL_EDITOR_URL",
+    "VISUAL",
+    "EDITOR",
+    "TERM_PROGRAM",
 ];
 
 fn runtime_settings(
@@ -636,6 +643,11 @@ fn runtime_settings(
             })
         })
         .transpose()?;
+    let editor_url = crate::hyperlink::EDITOR_URL
+        .from_settings(&source, None)
+        .supplied()
+        .map(|(_, text)| core::str::from_utf8(text).map(String::from).map_err(|_| RunError::Settings))
+        .transpose()?;
     let bin_gate = match source.get("CARGO_VAL_BIN_GATE") {
         None | Some("on") => true,
         Some("off") => false,
@@ -652,6 +664,7 @@ fn runtime_settings(
         debug,
         ignore,
         filterset,
+        link_template: links_enabled(output, color, true).then(|| String::from_utf8_lossy(editor_template(editor_url.as_deref(), &source)).into_owned()),
         jobs,
         max_fail,
         no_tests,
@@ -1999,11 +2012,27 @@ fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
     }
 }
 
+fn absolute_directory(root: &Path) -> String {
+    let root = if root.as_os_str().is_empty() { Path::new(".") } else { root };
+    std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()).to_string_lossy().into_owned()
+}
+
+fn linked_location(settings: &Settings, root: &Path, rendered: &str, (file, line, column): (&str, u32, u32)) -> Option<String> {
+    let template = settings.link_template.as_deref()?;
+    let range = site_in(rendered.as_bytes(), (file.as_bytes(), line, column))?;
+    let mut wrapped = Line::<1024>::new();
+    let position = (usize::try_from(line).unwrap_or(0), usize::try_from(column).unwrap_or(0));
+    write_link(&mut wrapped, true, template.as_bytes(), absolute_directory(root).as_bytes(), file.as_bytes(), position, &rendered.as_bytes()[range.clone()]);
+    Some(format!("{}{}{}", &rendered[..range.start], String::from_utf8_lossy(wrapped.bytes()), &rendered[range.end..]))
+}
+
 fn keep_rich_error(held: &mut Vec<u8>, settings: &Settings, root: &Path, rendered: &str, span: Option<(&str, u32, u32, u32, Option<&str>)>) {
     let colour = settings.color && colour_allowed();
     let Some(located) = span else {
         return keep_diagnostic(held, "error", rendered);
     };
+    let linked = linked_location(settings, root, rendered, (located.0, located.1, located.2));
+    let rendered = linked.as_deref().unwrap_or(rendered);
     match for_span(root, colour, located) {
         Ok(rows) if splice_excerpt(held, rendered.as_bytes(), &rows) => {}
         Ok(rows) => {
@@ -2851,7 +2880,9 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let mut storage = run_storage(settings.process, timeline_arena_bytes(settings.output, parser.timeline()));
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots, timeline_slots)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_timeline(timeline_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color)), RefCell::new(frame_line));
+    let link_directory = absolute_directory(&settings.source_root);
+    let link_template = settings.link_template.as_deref().unwrap_or("");
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_timeline(timeline_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color).with_links(link_template.as_bytes(), link_directory.as_bytes())), RefCell::new(frame_line));
     emit_begin(&render, &settings, &environment, started_millis)?;
     if settings.output == OutputMode::Rich {
         begin_rich(&render)?;
@@ -3868,7 +3899,11 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, RunSummary, is_status_line, last_run, last_run_record, persist_last_run, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, Environment, ErrorLine, LaunchCause, OutcomeError, OutputMode, RunError, RunSummary, is_status_line, last_run, last_run_record, persist_last_run, runtime_settings, validated_harness, whole_lines_len};
+    use std::string::String;
+    use std::vec::Vec;
+
+    use crate::cli::CliParser;
     use crate::config::NoTestsPolicy;
     use crate::test_dir::tempdir;
 
@@ -3901,6 +3936,45 @@ mod tests {
         assert_eq!(last_run::read(target.path()), Some((50, 4, 0)));
         persist_last_run(None, 60, &Ok(summary));
         assert_eq!(last_run::read(target.path()), Some((50, 4, 0)));
+    }
+
+    const RICH_WITH_COLOUR: [(&str, Option<&str>); 3] = [("CARGO_VAL_OUTPUT", Some("rich")), ("CARGO_VAL_COLOR", Some("true")), ("NO_COLOR", None)];
+
+    fn link_template_under(extra: &[(&str, Option<&str>)]) -> Option<String> {
+        let pairs: Vec<(&str, Option<&str>)> = RICH_WITH_COLOUR.iter().chain(extra).copied().collect();
+        temp_env::with_vars(pairs, || {
+            let parser = CliParser::new();
+            let harness = validated_harness(&parser).expect("an empty command line is a valid harness request");
+            let environment = unsafe { Environment::current() };
+            runtime_settings(&environment, &harness, &parser).expect("settings resolve from the process environment").link_template
+        })
+    }
+
+    #[proxima::test]
+    async fn the_editor_url_environment_layer_is_the_rich_link_template_over_a_derived_editor() {
+        let resolved = link_template_under(&[("CARGO_VAL_EDITOR_URL", Some("idea://open?file={file}&line={line}")), ("VISUAL", Some("code"))]);
+
+        assert_eq!(resolved.as_deref(), Some("idea://open?file={file}&line={line}"));
+    }
+
+    #[proxima::test]
+    async fn visual_code_derives_the_vscode_template_when_no_layer_supplies_editor_url() {
+        let resolved = link_template_under(&[("CARGO_VAL_EDITOR_URL", None), ("VISUAL", Some("code"))]);
+
+        assert_eq!(resolved.as_deref(), Some("vscode://file{file}:{line}:{col}"));
+    }
+
+    #[proxima::test]
+    async fn plain_and_uncoloured_runs_resolve_no_link_template() {
+        let plain = temp_env::with_vars([("CARGO_VAL_OUTPUT", Some("plain")), ("VISUAL", Some("code"))], || {
+            let parser = CliParser::new();
+            let harness = validated_harness(&parser).expect("an empty command line is a valid harness request");
+            let environment = unsafe { Environment::current() };
+            runtime_settings(&environment, &harness, &parser).expect("settings resolve").link_template
+        });
+
+        assert_eq!(plain, None);
+        assert_eq!(link_template_under(&[("NO_COLOR", Some("1")), ("VISUAL", Some("code"))]), None);
     }
 
     #[proxima::test]
@@ -4136,6 +4210,7 @@ mod listing_allocation_tests {
             debug: false,
             ignore: IgnoreMode::Include,
             filterset: None,
+            link_template: None,
             jobs: 2,
             max_fail: None,
             no_tests: NoTestsPolicy::Pass,

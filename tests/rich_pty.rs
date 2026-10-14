@@ -59,6 +59,10 @@ fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, 
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
         .env_remove("NO_COLOR")
+        .env_remove("VISUAL")
+        .env_remove("EDITOR")
+        .env_remove("TERM_PROGRAM")
+        .env_remove("CARGO_VAL_EDITOR_URL")
         .envs(environment.iter().copied())
         .env("CARGO_VAL_FIXTURE_RELEASE_FILE", release)
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-{fixture}-{run}")))
@@ -305,7 +309,7 @@ fn failure_source_block(output: &str) -> &str {
 
 #[proxima::test]
 async fn after_the_frame_is_erased_the_failure_block_has_the_source_fence_and_the_marker_row() {
-    let (output, status) = run_failing_on_pty(&[FAILING_RUN, ("NO_COLOR", "1")]).await;
+    let (output, status) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
 
     assert!(!status.success(), "a failing test must fail the run");
     let block = failure_source_block(&output);
@@ -317,7 +321,7 @@ async fn after_the_frame_is_erased_the_failure_block_has_the_source_fence_and_th
 
 #[proxima::test]
 async fn with_no_color_set_the_failure_source_block_has_zero_escape_bytes() {
-    let (output, _) = run_failing_on_pty(&[FAILING_RUN, ("NO_COLOR", "1")]).await;
+    let (output, _) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
 
     let block = failure_source_block(&output);
 
@@ -347,7 +351,7 @@ const EXCERPT_MARKER: &str = "panic!(\"requested fixture failure\");";
 
 #[proxima::test]
 async fn with_no_color_set_the_pinned_and_review_detail_excerpt_rows_have_zero_escape_bytes() {
-    let environment = [FAILING_RUN, ("NO_COLOR", "1")];
+    let environment = [FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")];
     let (output, _) = run_driven("rich_pty", "rich", &environment, async |master, keys, release, _leader| release_open_detail_quit(master, keys, release).await).await;
 
     let lines: Vec<&str> = output.split('\n').collect();
@@ -593,7 +597,7 @@ fn final_scrollback(output: &str) -> Vec<String> {
 
 #[proxima::test]
 async fn the_final_scrollback_holds_the_excerpt_once_and_no_pinned_row_after_the_closing_block() {
-    let (output, status) = run_failing_on_pty(&[FAILING_RUN, ("NO_COLOR", "1")]).await;
+    let (output, status) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
 
     let scrollback = final_scrollback(&output);
     let marker = "panic!(\"requested fixture failure\");";
@@ -683,4 +687,48 @@ async fn a_test_that_reads_stdin_under_a_controlling_terminal_completes_without_
     let _ = child.try_wait();
 
     assert!(status.success(), "cargo-val exited {status} while its test child read stdin");
+}
+
+const OSC8_OPEN: &str = "\x1b]8;;";
+const OSC8_CLOSE: &str = "\x1b]8;;\x1b\\";
+const VISUAL_CODE: (&str, &str) = ("VISUAL", "code");
+
+fn panic_site_link(text: &str) -> String {
+    let directory = fixture_manifest("rich_pty").parent().expect("the manifest has a directory").display().to_string();
+    format!("{OSC8_OPEN}vscode://file{directory}/src/lib.rs:28:13\x1b\\{text}{OSC8_CLOSE}")
+}
+
+#[proxima::test]
+async fn with_visual_code_the_closing_block_panic_location_is_one_osc8_link_to_the_line_and_column() {
+    let (output, _) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE]).await;
+
+    let linked = format!("panicked at {}:", panic_site_link("src/lib.rs:28:13"));
+    assert_eq!(output.matches(&linked).count(), 1, "{}", shown(&output));
+    assert_eq!(output.matches(&panic_site_link("src/lib.rs:28:13")).count(), 1, "{}", shown(&output));
+}
+
+#[proxima::test]
+async fn with_visual_code_the_review_detail_location_row_is_an_osc8_link_to_the_line_and_column() {
+    let (output, _) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE]).await;
+
+    let linked = format!("{}\x1b[2m  e opens", panic_site_link("src/lib.rs:28"));
+    assert!(output.matches(&linked).count() >= 1, "{}", shown(&output));
+}
+
+#[proxima::test]
+async fn with_no_color_set_and_visual_code_the_whole_run_has_zero_osc8_bytes() {
+    let (output, _) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
+
+    assert_eq!(output.matches("\x1b]8").count(), 0, "{}", shown(&output));
+    assert!(output.contains("panicked at src/lib.rs:28:13:"), "{}", shown(&output));
+}
+
+#[proxima::test]
+async fn with_visual_code_the_rich_build_error_location_line_is_an_osc8_link_to_the_line_and_column() {
+    let (output, status) = run_on_pty_with("build_error", &[VISUAL_CODE]).await;
+
+    assert_eq!(status.code(), Some(3), "{}", shown(&output));
+    let directory = fixture_manifest("build_error").parent().expect("the manifest has a directory").display().to_string();
+    let linked = format!("{OSC8_OPEN}vscode://file{directory}/src/lib.rs:4:5\x1b\\src/lib.rs:4:5{OSC8_CLOSE}");
+    assert_eq!(output.matches(&linked).count(), 1, "{}", shown(&output));
 }

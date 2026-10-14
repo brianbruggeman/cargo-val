@@ -193,6 +193,7 @@ async fn plain_and_agent_build_error_output_is_byte_identical_to_the_pre_excerpt
         .env_remove("CI")
         .env_remove("CARGO_VAL_COLOR")
         .env("NO_COLOR", "1")
+        .env("VISUAL", "code")
         .env("CARGO_TERM_COLOR", "always")
         .env("CARGO_TARGET_DIR", target_directory().join(format!("build-diagnostics-golden-{mode}")));
 

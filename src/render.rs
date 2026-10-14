@@ -18,7 +18,8 @@ pub mod review;
 use memchr::memchr;
 
 use crate::line::Line;
-use crate::failure_class::{Absent, Class, Exit, Record, Reject, classify};
+use crate::failure_class::{Absent, Class, Exit, Location, Record, Reject, classify};
+use crate::hyperlink::write_linked;
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
 use review::{Key, Rerun, Verdict};
 
@@ -263,6 +264,8 @@ pub struct State<'storage, const RERUN: usize> {
     skipped: usize,
     warnings: usize,
     key_carry: u8,
+    link_template: &'storage [u8],
+    link_directory: &'storage [u8],
 }
 
 impl<'storage, const RERUN: usize> State<'storage, RERUN> {
@@ -315,6 +318,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             skipped: 0,
             warnings: 0,
             key_carry: 0,
+            link_template: &[],
+            link_directory: &[],
         }
     }
 
@@ -323,6 +328,20 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     pub const fn with_color(mut self, color: bool) -> Self {
         self.color = color;
         self
+    }
+
+    /// Turns every rich `file:line` into an OSC 8 link built from `template` (see [`crate::hyperlink::editor_template`]); an empty template leaves them as text.
+    ///
+    /// `directory` is the absolute directory relative panic paths resolve against. The driver resolves both at its edge, so the render reads no environment.
+    #[must_use]
+    pub const fn with_links(mut self, template: &'storage [u8], directory: &'storage [u8]) -> Self {
+        self.link_template = template;
+        self.link_directory = directory;
+        self
+    }
+
+    pub(crate) const fn links(&self) -> (&[u8], &[u8]) {
+        (self.link_template, self.link_directory)
     }
 
     /// Gives the state the byte arena its in-flight tests live in; without one every start is counted as untracked.
@@ -696,6 +715,16 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         &self.arena[start + PAYLOAD_HEAD..start + PAYLOAD_HEAD + usize::from(u16::from_le_bytes(size))]
     }
 
+    fn panic_site<'a>(&self, (stdout, stderr): (Stream<'a>, Stream<'a>), exit: Exit) -> Option<Location<'a>> {
+        if self.link_template.is_empty() {
+            return None;
+        }
+        [stdout.0, stderr.0].into_iter().find_map(|capture| match classify(capture, exit, 0).ok()?.location {
+            Ok(site) | Err(Absent::External(site)) => Some(site),
+            Err(Absent::NoPanicSite) => None,
+        })
+    }
+
     /// A failure's class, source location and verbatim output, classified from the bytes [`State::retain`] kept.
     #[must_use]
     pub fn detail(&self, id: Identity<'_>) -> review::Detail<'_> {
@@ -826,7 +855,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
-            Event::Captured { id, stdout, stderr, excerpt, .. } => self.captured(frame, id, (stdout, stderr), excerpt),
+            Event::Captured { id, stdout, stderr, exit, excerpt } => self.captured(frame, id, (stdout, stderr, exit), excerpt),
             Event::Warned { id, what } => warned(frame, id, what),
             Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
@@ -894,7 +923,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         &self,
         frame: &mut Line<FRAME>,
         id: Identity<'_>,
-        (stdout, stderr): (Stream<'_>, Stream<'_>),
+        (stdout, stderr, exit): (Stream<'_>, Stream<'_>, Exit),
         excerpt: ExcerptRows<'_>,
     ) {
         if self.github {
@@ -904,8 +933,9 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             frame.text(id.1);
             frame.text(b"\n");
         }
-        stream(frame, id, STDOUT_STREAM, stdout);
-        stream(frame, id, STDERR_STREAM, stderr);
+        let links = (self.link_template, self.link_directory, self.panic_site((stdout, stderr), exit));
+        stream(frame, id, STDOUT_STREAM, stdout, links);
+        stream(frame, id, STDERR_STREAM, stderr, links);
         source_block(frame, id, excerpt);
         if self.github {
             frame.text(b"::endgroup::\n");
@@ -1149,12 +1179,15 @@ fn source_block<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, e
     block_close(frame, SOURCE_STREAM);
 }
 
-fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, dropped): Stream<'_>) {
+fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, dropped): Stream<'_>, (template, directory, site): (&[u8], &[u8], Option<Location<'_>>)) {
     if bytes.is_empty() {
         return;
     }
     block_open(frame, id, name);
-    frame.text(bytes);
+    match site {
+        Some(site) => write_linked(frame, (template, directory), bytes, (site.file, site.line, site.col)),
+        None => frame.text(bytes),
+    }
     if bytes.last() != Some(&b'\n') {
         frame.text(b"\n");
     }

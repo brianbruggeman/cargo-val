@@ -892,3 +892,63 @@ fn the_state_classifies_a_signal_death_and_a_silent_deadline_kill_without_a_pani
     }
     assert_eq!(checked, 3);
 }
+
+const VSCODE: &[u8] = b"vscode://file{file}:{line}:{col}";
+const SHARD_LINK: &str = "\x1b]8;;vscode://file/work/tests/shard_process.rs:575:31\x1b\\tests/shard_process.rs:575\x1b]8;;\x1b\\  e opens";
+
+#[test]
+fn the_detail_location_row_is_wrapped_in_one_osc8_link_to_the_line_and_column() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let state = scenario("detail", &mut arena, &mut ledger).with_links(VSCODE, b"/work");
+
+    let frame = frame_of(&state, 80, false);
+
+    assert_eq!(frame.matches("\x1b]8;;vscode://").count(), 1, "{frame}");
+    assert!(frame.contains(SHARD_LINK), "{frame:?}");
+}
+
+#[test]
+fn links_add_zero_columns_and_zero_rows_to_the_review_frame_and_the_erase_count() {
+    let mut checked = 0;
+    for width in WIDTHS {
+        let (mut plain_arena, mut plain_ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (mut linked_arena, mut linked_ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let mut plain = scenario("detail", &mut plain_arena, &mut plain_ledger);
+        let mut linked = scenario("detail", &mut linked_arena, &mut linked_ledger).with_links(VSCODE, b"/work");
+        let (mut plain_frame, mut linked_frame) = (Line::<8192>::new(), Line::<8192>::new());
+        plain.apply(&Event::Resize { cols: u16::try_from(width).expect("widths fit") });
+        linked.apply(&Event::Resize { cols: u16::try_from(width).expect("widths fit") });
+
+        plain.project_live(&Event::Tick { now_ms: CLOCK_MS }, &mut plain_frame).expect("the plain screen fits");
+        linked.project_live(&Event::Tick { now_ms: CLOCK_MS }, &mut linked_frame).expect("the linked screen fits");
+
+        assert!(linked_frame.bytes().len() > plain_frame.bytes().len(), "the links added bytes at {width} columns");
+        assert_eq!(linked.drawn_rows, plain.drawn_rows, "the erase moves up the same rows at {width} columns");
+        let (plain_text, linked_text) = (String::from_utf8_lossy(plain_frame.bytes()), String::from_utf8_lossy(linked_frame.bytes()));
+        for (bare, wrapped) in plain_text.lines().zip(linked_text.lines()) {
+            assert_eq!(excerpt::visible(wrapped.as_bytes()), excerpt::visible(bare.as_bytes()), "{wrapped:?}");
+        }
+        assert_eq!(plain_text.lines().count(), linked_text.lines().count());
+        checked += 1;
+    }
+    assert_eq!(checked, 3);
+}
+
+#[test]
+fn ten_thousand_review_frames_with_links_allocate_nothing() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let state = scenario("detail", &mut arena, &mut ledger).with_links(VSCODE, b"/work");
+    let mut frame = Line::<8192>::new();
+    let mut linked = 0_usize;
+
+    let ((), allocations) = measure_allocations(|| {
+        for round in 0..10_000_usize {
+            frame.clear();
+            state.screen(detail, WIDTHS[round % 3], round % 2 == 0, &mut frame).expect("the frame holds a review screen");
+            linked += usize::from(frame.bytes().windows(5).any(|window| window == b"\x1b]8;;"));
+        }
+    });
+
+    assert_eq!(linked, 10_000, "every frame carried a link, so a zero is not an unlinked loop");
+    assert_eq!(allocations, 0);
+}
