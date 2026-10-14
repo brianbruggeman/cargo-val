@@ -28,7 +28,8 @@ use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
 use crate::failure_class::Exit;
-use crate::render::{Event, Outcome, State, Stream};
+use crate::source_excerpt::{colour_allowed, for_failure};
+use crate::render::{Event, Outcome, State, Stream, located};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
     CARGO_LANE, DOC_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
@@ -39,6 +40,7 @@ use prime::os::readiness::Readiness;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 use std::vec::Vec;
@@ -508,6 +510,14 @@ fn parse_result_line(line: &[u8]) -> Option<(usize, usize, usize)> {
 }
 const STDOUT: i32 = 1;
 
+// panic paths are relative to the directory cargo ran rustc in, which is the manifest's workspace; no manifest means the current directory
+fn manifest_directory(manifest: Option<&[u8]>) -> PathBuf {
+    manifest
+        .and_then(|bytes| core::str::from_utf8(bytes).ok())
+        .and_then(|path| Path::new(path).parent())
+        .map_or_else(PathBuf::new, Path::to_path_buf)
+}
+
 
 struct Settings {
     bin_gate: bool,
@@ -524,6 +534,7 @@ struct Settings {
     exit_with_parent: ExitWithParent,
     test_limit_ms: Option<u32>,
     heartbeat_ms: u64,
+    source_root: PathBuf,
 }
 
 const SETTING_KEYS: [&str; 22] = [
@@ -640,6 +651,7 @@ fn runtime_settings(
         exit_with_parent,
         test_limit_ms: TEST_TIMEOUT.from_settings(&source, parser.test_timeout()).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
         heartbeat_ms: crate::config::heartbeat_millis(&source, parser.heartbeat()).map_err(RunError::Setting)?,
+        source_root: manifest_directory(parser.manifest_path()),
     })
 }
 
@@ -1146,7 +1158,7 @@ fn deliver<'bytes>(
             if outcome == TerminalOutcome::Failed && !withdrawn {
                 let (stdout, stderr) = watch.output.captured();
                 let exit = watch.status.map_or(Exit::Code(1), Exit::from_status);
-                emit(reporting.render, &Event::Captured { id, stdout, stderr, exit })?;
+                reporting.run.emit_captured(id, (stdout, stderr), exit)?;
             }
             drop(targets);
             if let Some(target) = target {
@@ -1403,6 +1415,15 @@ impl<'run> ListingRun<'run> {
 }
 
 impl ListingRun<'_> {
+    /// Emits a failure with its source excerpt, read once here on the cold path and shaped for this run's output mode.
+    pub(crate) fn emit_captured(&self, id: (&[u8], &[u8]), (stdout, stderr): (Stream<'_>, Stream<'_>), exit: Exit) -> Result<(), RunError> {
+        let colour = self.settings.output == OutputMode::Rich && self.settings.color && colour_allowed();
+        let record = located(stdout, stderr, exit);
+        let excerpt = for_failure(&self.settings.source_root, colour, &record);
+        let rows = excerpt.as_ref().map(Vec::as_slice).map_err(Vec::as_slice);
+        emit(self.render(), &Event::Captured { id, stdout, stderr, exit, excerpt: rows })
+    }
+
     pub(crate) const fn signals(&self) -> &SignalPipe {
         self.signals
     }
@@ -3831,6 +3852,7 @@ mod listing_allocation_tests {
             exit_with_parent: crate::config::ExitWithParent::Off,
             test_limit_ms: None,
             heartbeat_ms: 10_000,
+            source_root: std::path::PathBuf::new(),
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
         let mut arena = [0_u8; 64];

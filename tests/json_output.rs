@@ -277,3 +277,21 @@ async fn zero_tests_close_with_run_zero_and_exit_four() {
     assert!(lines.iter().any(|line| line.contains("\"t\":\"summary\"") && line.contains("\"run\":0")), "{lines:?}");
     assert_eq!(lines.last().expect("records"), "{\"v\":1,\"t\":\"exit\",\"code\":4,\"outcome\":\"no_tests\"}");
 }
+
+#[proxima::test(timeout = "310s")]
+async fn a_fail_record_carries_the_bounded_unhighlighted_source_excerpt() {
+    let output = run("json", "cli_run", &[("CARGO_VAL_C52D_FAIL", "1")], &[]).await;
+    let lines = lines_of(&output);
+
+    let fail = lines.iter().find(|line| line.contains("\"t\":\"fail\"")).expect("a fail record");
+    let expected = concat!(
+        "\"excerpt\":\"     9 |             print!(\\\"{}\\\", \\\"X\\\".repeat(5000));\\u000a",
+        "    10 |         }\\u000a",
+        "    11 |         if std::env::var_os(\\\"CARGO_VAL_C52D_FAIL\\\").is_some() {\\u000a",
+        ">   12 |             panic!(\\\"requested fixture failure\\\");\\u000a",
+        "      |             ^^^^^ panicked here\\u000a",
+    );
+    assert!(fail.contains(expected), "{fail}");
+    assert!(fail.contains("\"excerpt_absent\":null"), "{fail}");
+    assert_no_escape(&output);
+}

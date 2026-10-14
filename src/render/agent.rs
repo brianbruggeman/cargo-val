@@ -5,8 +5,8 @@
 
 use memchr::{memchr, memmem};
 
-use super::{Event, Identity, State, Stream, label};
-use crate::failure_class::{Absent, Class, Enforcer, Exit, Record, classify};
+use super::{Event, ExcerptRows, Identity, State, Stream, label, located};
+use crate::failure_class::{Absent, Class, Enforcer, Exit, Record};
 use crate::line::Line;
 use crate::view_defaults::{OUTPUT_BYTES, OUTPUT_HEAD_BYTES};
 
@@ -22,7 +22,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
     pub(super) fn project_agent<const FRAME: usize>(&self, event: &Event<'_>, frame: &mut Line<FRAME>) {
         match *event {
             Event::Begin { version, why: Some(why), .. } => header(frame, version, why),
-            Event::Captured { id, stdout, stderr, exit } => failure_block(frame, id, [stdout, stderr], exit),
+            Event::Captured { id, stdout, stderr, exit, excerpt } => failure_block(frame, id, [stdout, stderr], exit, excerpt),
             Event::BuildFailed { diagnostic, exit } => build_failed(frame, diagnostic, exit),
             Event::Interrupted { signal, groups } => super::interrupted(frame, signal, groups),
             Event::Running { id } => super::text_pair(frame, b"RUNNING", id),
@@ -102,9 +102,10 @@ fn failure_block<const FRAME: usize>(
     id: Identity<'_>,
     [stdout, stderr]: [Stream<'_>; 2],
     exit: Exit,
+    excerpt: ExcerptRows<'_>,
 ) {
     let (capture, dropped) = if stdout.0.is_empty() { stderr } else { stdout };
-    let record = classify(capture, exit, dropped).or_else(|_| classify(stderr.0, exit, stderr.1));
+    let record = located(stdout, stderr, exit);
     label(frame, b"FAIL");
     frame.text(id.0);
     frame.text(b"  ");
@@ -114,6 +115,7 @@ fn failure_block<const FRAME: usize>(
         Ok(found) => classified(frame, &found),
         Err(_) => unclassified(frame),
     }
+    excerpt_rows(frame, excerpt);
     output(frame, capture, dropped);
     label(frame, b"END");
     frame.text(b"rerun: cargo val --no-fail-fast -E '(binary(=");
@@ -142,6 +144,26 @@ fn classified<const FRAME: usize>(frame: &mut Line<FRAME>, record: &Record<'_>) 
         frame.text(line);
     }
     frame.text(b"\n");
+}
+
+fn excerpt_rows<const FRAME: usize>(frame: &mut Line<FRAME>, excerpt: ExcerptRows<'_>) {
+    match excerpt {
+        Ok(rows) => {
+            label(frame, b"EXCERPT");
+            frame.text(b"\n");
+            for row in rows.split_inclusive(|byte| *byte == b'\n') {
+                frame.text(CONTINUATION);
+                frame.text(row);
+            }
+        }
+        Err(reason) if !reason.is_empty() => {
+            label(frame, b"EXCERPT");
+            frame.text(b"absent:");
+            frame.text(reason);
+            frame.text(b"\n");
+        }
+        Err(_) => {}
+    }
 }
 
 fn unclassified<const FRAME: usize>(frame: &mut Line<FRAME>) {

@@ -15,13 +15,30 @@ mod json;
 use memchr::memchr;
 
 use crate::line::Line;
-use crate::failure_class::{Exit, classify};
+use crate::failure_class::{Exit, Record, Reject, classify};
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
 
 mod rich;
 
 /// A test id as two borrowed fields: the binary, then the test name.
 pub type Identity<'a> = (&'a [u8], &'a [u8]);
+
+/// The driver's rendered source excerpt for a failure: the rows, or the reason there are none. An empty reason means the
+/// driver did not look, and no block is printed.
+pub type ExcerptRows<'a> = Result<&'a [u8], &'a [u8]>;
+
+/// Marks an event whose producer did not read a source file.
+pub const UNREAD: ExcerptRows<'static> = Err(b"");
+
+/// Classifies a failure's two captures the way every projection and the driver must agree on: stdout when it has bytes, else stderr, then the other stream.
+///
+/// # Errors
+///
+/// `Reject` exactly as `classify` returns it.
+pub fn located<'a>(stdout: Stream<'a>, stderr: Stream<'a>, exit: Exit) -> Result<Record<'a>, Reject> {
+    let (capture, dropped) = if stdout.0.is_empty() { stderr } else { stdout };
+    classify(capture, exit, dropped).or_else(|_| classify(stderr.0, exit, stderr.1))
+}
 
 /// One captured stream: its bytes, and how many bytes the driver's buffer discarded after it filled.
 pub type Stream<'a> = (&'a [u8], u64);
@@ -35,6 +52,7 @@ const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
 const STDOUT_STREAM: &[u8] = b"stdout";
 const STDERR_STREAM: &[u8] = b"stderr";
+const SOURCE_STREAM: &[u8] = b"source";
 
 /// How one test ended, as the settle event reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +82,7 @@ pub enum Event<'a> {
     Started { id: Identity<'a>, solo: bool, at_ms: u64, limit_ms: Option<u32> },
     Settled { id: Identity<'a>, outcome: Outcome, at_ms: Option<u64>, solo: bool },
     Tick { now_ms: u64 },
-    Captured { id: Identity<'a>, stdout: Stream<'a>, stderr: Stream<'a>, exit: Exit },
+    Captured { id: Identity<'a>, stdout: Stream<'a>, stderr: Stream<'a>, exit: Exit, excerpt: ExcerptRows<'a> },
     Warned { id: Identity<'a>, what: &'a [u8] },
     BlockOpened { id: Identity<'a> },
     BlockClosed,
@@ -446,7 +464,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
-            Event::Captured { id, stdout, stderr, .. } => self.captured(frame, id, stdout, stderr),
+            Event::Captured { id, stdout, stderr, excerpt, .. } => self.captured(frame, id, (stdout, stderr), excerpt),
             Event::Warned { id, what } => warned(frame, id, what),
             Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
@@ -513,8 +531,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         &self,
         frame: &mut Line<FRAME>,
         id: Identity<'_>,
-        stdout: Stream<'_>,
-        stderr: Stream<'_>,
+        (stdout, stderr): (Stream<'_>, Stream<'_>),
+        excerpt: ExcerptRows<'_>,
     ) {
         if self.github {
             frame.text(b"::group::");
@@ -525,6 +543,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
         stream(frame, id, STDOUT_STREAM, stdout);
         stream(frame, id, STDERR_STREAM, stderr);
+        source_block(frame, id, excerpt);
         if self.github {
             frame.text(b"::endgroup::\n");
         }
@@ -739,6 +758,22 @@ fn block_close<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8]) {
     frame.text(b" ------\n");
 }
 
+fn source_block<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, excerpt: ExcerptRows<'_>) {
+    if excerpt == UNREAD {
+        return;
+    }
+    block_open(frame, id, SOURCE_STREAM);
+    match excerpt {
+        Ok(rows) => frame.text(rows),
+        Err(reason) => {
+            frame.text(b"source absent: ");
+            frame.text(reason);
+            frame.text(b"\n");
+        }
+    }
+    block_close(frame, SOURCE_STREAM);
+}
+
 fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, dropped): Stream<'_>) {
     if bytes.is_empty() {
         return;
@@ -761,7 +796,7 @@ mod tests {
     use std::string::String;
     use std::vec::Vec;
 
-    use super::{Event, Identity, Mode, Outcome, State};
+    use super::{Event, Identity, Mode, Outcome, State, UNREAD};
     use crate::failure_class::Exit;
     use crate::line::Line;
     use crate::test_alloc::measure_allocations;
@@ -808,7 +843,7 @@ mod tests {
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true, why: None, json: false, at_ms: 0 });
 
         let fail = settle(&mut state, FAILING, Outcome::Failed);
-        let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", 0), stderr: (b"", 0), exit: Exit::Code(101) };
+        let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
         let block = projected(&state, &captured);
 
         assert!(fail.ends_with("::error title=cargo val::cli_run::fixture::fails_when_requested failed\n"), "{fail}");
@@ -960,7 +995,7 @@ mod tests {
                     Event::Started { id: FAILING, solo: false, at_ms: round, limit_ms: Some(120_000) },
                     Event::Tick { now_ms: round + 3 },
                     Event::Settled { id: FAILING, outcome, at_ms: Some(round + 5), solo: false },
-                    Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", 0), stderr: (b"", 0), exit: Exit::Code(101) },
+                    Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD },
                     Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml"), discovered: 0, filtered: 0, exit: 0 },
                 ] {
                     frame.clear();
@@ -987,7 +1022,7 @@ mod tests {
         let capture = b"\nthread 't' panicked at src/lib.rs:12:13:\nrequested \x1b[31mfixture\x1b[0m failure\n";
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: Some(b"flag"), json: false, at_ms: 0 });
         state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false });
-        let block = Event::Captured { id: FAILING, stdout: (capture, 0), stderr: (b"", 0), exit: Exit::Code(101) };
+        let block = Event::Captured { id: FAILING, stdout: (capture, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
         let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 9, manifest: None, discovered: 2, filtered: 0, exit: 1 };
         let mut projections = 0_usize;
 
@@ -1020,7 +1055,7 @@ mod tests {
         let events = [
             Event::Started { id: FAILING, solo: false, at_ms: 0, limit_ms: None },
             Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: Some(7), solo: false },
-            Event::Captured { id: FAILING, stdout: (capture, 0), stderr: (b"", 0), exit: Exit::Code(101) },
+            Event::Captured { id: FAILING, stdout: (capture, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD },
             Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 9, manifest: None, discovered: 2, filtered: 0, exit: 1 },
         ];
         let mut records = 0_usize;
