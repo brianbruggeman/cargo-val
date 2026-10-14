@@ -27,6 +27,8 @@ const LAST_ROW: u32 = 6;
 const GUTTER_BLANK: &[u8] = b"      | ";
 const CARET: u8 = b'^';
 const PANIC_LABEL: &[u8] = b"panicked here";
+const ROW_BYTES: usize = 512;
+const CUT_MARK: &[u8] = "…".as_bytes();
 
 /// Why no excerpt exists: always a named reason, never an empty success.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,7 @@ pub struct Excerpt<'a> {
     first: u32,
     len: usize,
     spans: [Range<usize>; WINDOW],
+    cut: u8,
     failing: usize,
     col: u32,
 }
@@ -87,8 +90,8 @@ impl<'a> Excerpt<'a> {
         let wanted = line.saturating_sub(ABOVE).max(1);
         let first = wanted.min(total.saturating_sub(LAST_ROW).max(1));
         let mut spans: [Range<usize>; WINDOW] = core::array::from_fn(|_| 0..0);
-        let len = fill_spans(source, first, &mut spans);
-        Ok(Self { source, first, len, spans, failing: (line - first) as usize, col: col.max(1) })
+        let (len, cut) = fill_spans(source, first, &mut spans);
+        Ok(Self { source, first, len, spans, cut, failing: (line - first) as usize, col: col.max(1) })
     }
 
     #[must_use]
@@ -116,6 +119,12 @@ impl<'a> Excerpt<'a> {
         &self.source[self.spans[index].clone()]
     }
 
+    pub(crate) fn write_cut_mark(&self, out: &mut Vec<u8>, index: usize) {
+        if self.cut >> index & 1 == 1 {
+            out.extend_from_slice(CUT_MARK);
+        }
+    }
+
     #[cfg(feature = "highlight")]
     pub(crate) fn source(&self) -> &'a [u8] {
         self.source
@@ -126,11 +135,12 @@ impl<'a> Excerpt<'a> {
         self.spans[index].clone()
     }
 
-    /// Plain form, section 10.2 of the design: ASCII gutter, no ESC byte, code uncut.
+    /// Plain form, section 10.2 of the design: ASCII gutter, no ESC byte, rows past 512 bytes cut at a char boundary and marked.
     pub fn write_plain(&self, out: &mut Vec<u8>, label: &[u8]) {
         for index in 0..self.len {
             self.write_gutter(out, index);
             out.extend_from_slice(self.row(index));
+            self.write_cut_mark(out, index);
             out.push(b'\n');
             if index == self.failing {
                 self.write_caret_row(out, label);
@@ -199,7 +209,9 @@ pub fn for_failure(root: &Path, colour: bool, record: &Result<Record<'_>, Reject
     let source = read_source(root, site.file).map_err(|error| error.to_string().into_bytes())?;
     let excerpt = Excerpt::new(&source, site.line, site.col).map_err(|error| error.to_string().into_bytes())?;
     let mut rows = Vec::new();
-    excerpt.write(&mut rows, PANIC_LABEL, colour);
+    if let Some(reason) = excerpt.write(&mut rows, PANIC_LABEL, colour) {
+        proxima_telemetry::debug!(reason = reason, file = %String::from_utf8_lossy(site.file), "highlight unavailable, plain excerpt rendered");
+    }
     Ok(rows)
 }
 
@@ -216,20 +228,31 @@ fn line_count(source: &[u8]) -> u32 {
     u32::try_from(newlines + usize::from(unterminated)).unwrap_or(u32::MAX)
 }
 
-fn fill_spans(source: &[u8], first: u32, spans: &mut [Range<usize>; WINDOW]) -> usize {
+fn fill_spans(source: &[u8], first: u32, spans: &mut [Range<usize>; WINDOW]) -> (usize, u8) {
     let mut start = 0;
     for _ in 1..first {
         start += memchr(b'\n', &source[start..]).map_or(source.len(), |at| at + 1);
     }
     let mut len = 0;
+    let mut cut = 0;
     while len < WINDOW && start < source.len() {
         let end = memchr(b'\n', &source[start..]).map_or(source.len(), |at| start + at);
         let trimmed = if end > start && source[end - 1] == b'\r' { end - 1 } else { end };
-        spans[len] = start..trimmed;
+        let bounded = bounded_end(source, start, trimmed);
+        cut |= u8::from(bounded < trimmed) << len;
+        spans[len] = start..bounded;
         len += 1;
         start = end + 1;
     }
-    len
+    (len, cut)
+}
+
+fn bounded_end(source: &[u8], start: usize, end: usize) -> usize {
+    let mut bounded = end.min(start + ROW_BYTES);
+    while bounded < end && is_continuation(source[bounded]) {
+        bounded -= 1;
+    }
+    bounded
 }
 
 fn token_len(rest: &[u8]) -> usize {
@@ -388,6 +411,22 @@ mod tests {
 
         assert_eq!(memchr_iter(b'\r', &out).count(), 0);
         assert!(memchr::memmem::find(&out, b"      |     ^^^^ here\n").is_some(), "{}", String::from_utf8_lossy(&out));
+    }
+
+    #[test]
+    fn a_row_past_the_budget_is_cut_on_a_char_boundary_and_ends_with_the_cut_mark() {
+        let wide = "é".repeat(ROW_BYTES);
+        let source = format!("let before = 1;\n{wide}\nlet after = 2;\n");
+        let excerpt = Excerpt::new(source.as_bytes(), 2, 1).expect("three lines");
+        let mut out = Vec::new();
+
+        excerpt.write_plain(&mut out, b"");
+
+        let text = String::from_utf8(out).expect("the cut kept every char whole");
+        let cut_row = text.lines().find(|row| row.starts_with('>')).expect("the failing row");
+        assert!(cut_row.ends_with("é…"), "{cut_row}");
+        assert!(cut_row.len() <= ROW_BYTES + 16, "{} bytes", cut_row.len());
+        assert!(text.contains("let after = 2;\n"), "rows after the cut row survive");
     }
 
     #[test]

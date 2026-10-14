@@ -244,6 +244,7 @@ dependencies = [
  "proxima-prime",
  "proxima-primitives",
  "proxima-runtime",
+ "proxima-telemetry",
  "serde_json",
  "temp-env",
  "tempfile",
