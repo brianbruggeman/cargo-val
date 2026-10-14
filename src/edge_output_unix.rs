@@ -179,26 +179,6 @@ pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
     OutputSink::new(unsafe { OwnedFd::from_raw_fd(copy) })
 }
 
-/// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until the kernel takes them; used only where no prime reactor runs.
-///
-/// The synchronous twin of [`OutputSink`] for callers with no reactor: callers with no reactor, such as pre-runtime errors in `main`; the run never uses it.
-///
-/// # Errors
-///
-/// Returns the OS error of a failed write, or `WriteZero` when the descriptor accepts no bytes.
-pub fn write(descriptor: i32, mut bytes: &[u8]) -> io::Result<()> {
-    while !bytes.is_empty() {
-        // safety: the pointer and length come from a live slice, and the descriptor is a plain integer.
-        let written = unsafe { libc::write(descriptor, bytes.as_ptr().cast(), bytes.len()) };
-        let count = usize::try_from(written).map_err(|_| io::Error::last_os_error())?;
-        if count == 0 {
-            return Err(io::ErrorKind::WriteZero.into());
-        }
-        bytes = &bytes[count..];
-    }
-    Ok(())
-}
-
 /// Whether `descriptor` is an interactive terminal: a character device that answers `isatty`, so a file, a pipe, or /dev/null is not.
 #[must_use]
 pub fn is_terminal(descriptor: i32) -> bool {
