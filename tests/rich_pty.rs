@@ -732,3 +732,228 @@ async fn with_visual_code_the_rich_build_error_location_line_is_an_osc8_link_to_
     let linked = format!("{OSC8_OPEN}vscode://file{directory}/src/lib.rs:4:5\x1b\\src/lib.rs:4:5{OSC8_CLOSE}");
     assert_eq!(output.matches(&linked).count(), 1, "{}", shown(&output));
 }
+
+fn rerun_scratch(label: &str) -> PathBuf {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-rerun-{label}-{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&directory).expect("the rerun scratch directory is creatable");
+    directory
+}
+
+fn rerun_environment(scratch: &Path, hang: bool) -> Vec<(String, String)> {
+    let path = |name: &str| scratch.join(name).to_string_lossy().into_owned();
+    let hanging = [("CARGO_VAL_FIXTURE_HANG_STATE".to_owned(), path("hang.state")), ("CARGO_VAL_FIXTURE_HANG_PID".to_owned(), path("hang.pid"))];
+    let mut environment = vec![
+        ("NO_COLOR".to_owned(), "1".to_owned()),
+        ("CARGO_VAL_FIXTURE_RUNS_LOG".to_owned(), path("runs.log")),
+        ("CARGO_VAL_FIXTURE_ONCE_STATE".to_owned(), path("once.state")),
+        ("CARGO_VAL_FIXTURE_EXE_FILE".to_owned(), path("exe.path")),
+    ];
+    if hang {
+        environment.extend(hanging);
+    }
+    environment
+}
+
+async fn run_rerun_fixture<Drive>(environment: &[(String, String)], drive: Drive) -> (String, ExitStatus)
+where
+    Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
+{
+    let borrowed: Vec<(&str, &str)> = environment.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+    run_driven("rich_pty_rerun", "rich", &borrowed, drive).await
+}
+
+fn review_frames(output: &str) -> Vec<String> {
+    let whole = |frame: &&str| frame.contains("r rerun") || frame.contains("any key cancels");
+    without_sgr(output).split(REVIEW_HEADER).skip(1).filter(whole).map(str::to_owned).collect()
+}
+
+fn rerun_settled(bytes: &[u8]) -> bool {
+    let frames = review_frames(&String::from_utf8_lossy(bytes));
+    frames.iter().position(|frame| frame.contains("RERUN")).is_some_and(|first| frames[first..].iter().any(|frame| !frame.contains("RERUN")))
+}
+
+fn flaky_cleared(bytes: &[u8]) -> bool {
+    review_frames(&String::from_utf8_lossy(bytes)).iter().any(|frame| frame.contains(" 3 failed  1 passed") && !frame.contains("RERUN"))
+}
+
+fn passed_row_shown(bytes: &[u8]) -> bool {
+    review_frames(&String::from_utf8_lossy(bytes)).iter().any(|frame| frame.contains("PASS "))
+}
+
+async fn press_then_quit(master: &ChildStream, mut keys: File, pressed: &[u8], settled: fn(&[u8]) -> bool) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(pressed).expect("the rerun key is writable");
+    let (finished, _) = drain::drain_until(master, settled).await;
+    output.extend_from_slice(&finished);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn run_counts(scratch: &Path) -> Vec<String> {
+    std::fs::read_to_string(scratch.join("runs.log")).expect("the fixture logged its runs").lines().map(str::to_owned).collect()
+}
+
+fn assert_receipt_after_review(output: &str, status: ExitStatus) -> &str {
+    assert_eq!(status.code(), Some(1), "a receipt with unresolved failures exits 1: {status}\n{}", shown(output));
+    let receipt = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(output)));
+    let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(output)));
+    assert!(receipt < shown_cursor, "the cursor returns only after the receipt: receipt at {receipt}, cursor at {shown_cursor}");
+    assert!(output.ends_with(SHOW_CURSOR), "the last bytes of the run show the cursor:\n{}", shown(output));
+    &output[receipt..]
+}
+
+#[proxima::test]
+async fn r_in_review_reruns_the_selected_failure_with_a_rerun_row_then_its_result_and_review_stays_open() {
+    let scratch = rerun_scratch("one");
+    let mut environment = rerun_environment(&scratch, false);
+    environment.retain(|(key, _)| key != "CARGO_VAL_FIXTURE_ONCE_STATE");
+    let (output, status) = run_rerun_fixture(&environment, async |master, keys, _release, _leader| press_then_quit(master, keys, b"r", rerun_settled).await).await;
+
+    let frames = review_frames(&output);
+    let running = frames.iter().position(|frame| frame.contains("RERUN")).unwrap_or_else(|| panic!("no frame showed a RERUN row:\n{}", shown(&output)));
+    println!("frame with the RERUN row (80 columns):\n{}", shown(&format!("{REVIEW_HEADER}{}", frames[running])));
+    let settled = frames[running..].iter().find(|frame| !frame.contains("RERUN")).unwrap_or_else(|| panic!("review never left the RERUN state:\n{}", shown(&output)));
+    assert!(settled.contains("ASSERT") || settled.contains("PANIC"), "a failing rerun leaves the row with its class:\n{}", shown(settled));
+    let receipt = assert_receipt_after_review(&output, status);
+    assert!(receipt.starts_with("SUMMARY  passed=0 failed=4 "), "one rerun that failed again leaves all 4 failures:\n{}", shown(receipt));
+    assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun");
+}
+
+#[proxima::test]
+async fn capital_r_in_review_reruns_every_failure_and_the_receipt_counts_the_one_that_passed_as_flaky() {
+    let scratch = rerun_scratch("all");
+    let (output, status) = run_rerun_fixture(&rerun_environment(&scratch, false), async |master, keys, _release, _leader| press_then_quit(master, keys, b"R", flaky_cleared).await).await;
+    let receipt = assert_receipt_after_review(&output, status);
+    assert!(receipt.starts_with("SUMMARY  passed=0 failed=3 flaky=1 "), "3 failures stay and 1 is flaky:\n{}", shown(receipt));
+    assert_eq!(receipt.lines().filter(|line| line.starts_with("FAILED")).count(), 3, "{}", shown(receipt));
+    assert!(receipt.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("fails_once_then_passes")), "{}", shown(receipt));
+    assert_eq!(run_counts(&scratch).len(), 8, "4 first runs plus exactly 4 reruns");
+}
+
+fn process_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+async fn interrupt_during_rerun(master: &ChildStream, mut keys: File, (scratch, leader, via_key): (&Path, u32, bool)) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(b"R").expect("the rerun key is writable");
+    let pid_file = scratch.join("hang.pid");
+    let (running, _) = drain::drain_until(master, |_| pid_file.exists()).await;
+    output.extend_from_slice(&running);
+    let pid: i32 = std::fs::read_to_string(&pid_file).expect("the blocked rerun wrote its pid").trim().parse().expect("the pid parses");
+    assert!(process_alive(pid), "the blocked rerun is alive before the interrupt");
+    let group = unsafe { libc::getpgid(pid) };
+    std::fs::write(scratch.join("hang.pgid"), group.to_string()).expect("the group id is writable");
+    if via_key {
+        keys.write_all(b"c").expect("the interrupt key is writable");
+    } else {
+        let cargo_val = libc::pid_t::try_from(leader).expect("a pid fits pid_t");
+        assert_ne!(group, unsafe { libc::getpgid(cargo_val) }, "the rerun leads its own group, apart from cargo-val's");
+        assert_eq!(unsafe { libc::kill(cargo_val, libc::SIGINT) }, 0, "SIGINT reaches cargo-val's pid alone");
+    }
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn assert_rerun_interrupted(output: &str, status: ExitStatus, group: i32) {
+    assert_eq!(status.code(), Some(130), "an interrupted rerun exits 130: {status}\n{}", shown(output));
+    let block = output.rfind("INTERRUPTED  signal=2  forwarded_groups=").unwrap_or_else(|| panic!("no interrupted block naming the rerun's group:\n{}", shown(output)));
+    let named = format!("killed group={group}");
+    assert!(output[block..].contains(&named), "the interrupted block names the rerun's group {group}:\n{}", shown(&output[block..]));
+    assert!(output.ends_with(SHOW_CURSOR), "the cursor is the last thing shown:\n{}", shown(output));
+}
+
+async fn interrupted_rerun(label: &str, via_key: bool) {
+    let scratch = rerun_scratch(label);
+    let (output, status) = run_rerun_fixture(&rerun_environment(&scratch, true), async |master, keys, _release, leader| interrupt_during_rerun(master, keys, (&scratch, leader, via_key)).await).await;
+
+    let pid: i32 = std::fs::read_to_string(scratch.join("hang.pid")).expect("pid file").trim().parse().expect("pid");
+    let group: i32 = std::fs::read_to_string(scratch.join("hang.pgid")).expect("pgid file").trim().parse().expect("pgid");
+    assert!(!process_alive(pid), "the rerun child {pid} must be gone after the run exits");
+    assert!(!process_alive(-group), "the rerun's process group {group} must be gone after the run exits");
+    assert_rerun_interrupted(&output, status, group);
+}
+
+#[proxima::test]
+async fn sigint_to_cargo_val_alone_during_a_rerun_is_forwarded_to_the_reruns_own_group_and_exits_130() {
+    interrupted_rerun("sigint", false).await;
+}
+
+#[proxima::test]
+async fn the_c_key_during_a_rerun_exits_130_kills_the_rerun_and_restores_the_terminal() {
+    interrupted_rerun("ckey", true).await;
+}
+
+#[proxima::test]
+async fn r_on_the_row_that_fails_only_on_its_first_run_shows_pass_and_the_receipt_counts_it_flaky() {
+    let scratch = rerun_scratch("flaky");
+    let mut environment = rerun_environment(&scratch, false);
+    environment.push(("CARGO_VAL_FIXTURE_ONLY_ONCE".to_owned(), "1".to_owned()));
+    let (output, status) = run_rerun_fixture(&environment, async |master, keys, _release, _leader| press_then_quit(master, keys, b"r", passed_row_shown).await).await;
+
+    let frames = review_frames(&output);
+    let passed = frames.iter().find(|frame| frame.contains("PASS ")).unwrap_or_else(|| panic!("no frame showed a PASS row:\n{}", shown(&output)));
+    assert!(passed.contains("fails_once_then_passes"), "the PASS row names the flaky test:\n{}", shown(passed));
+    let receipt = assert_receipt_after_review(&output, status);
+    assert!(receipt.starts_with("SUMMARY  passed=3 failed=0 flaky=1 "), "the test that passed alone is flaky, not passed and not failed:\n{}", shown(receipt));
+    assert!(receipt.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("tests::fails_once_then_passes")), "{}", shown(receipt));
+    assert_eq!(receipt.lines().filter(|line| line.starts_with("FAILED")).count(), 0, "{}", shown(receipt));
+    assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun");
+}
+
+fn rerun_refused(bytes: &[u8]) -> bool {
+    without_sgr(&String::from_utf8_lossy(bytes)).contains("rerun not started")
+}
+
+async fn delete_the_binary_then_rerun(master: &ChildStream, mut keys: File, scratch: &Path) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    let executable = std::fs::read_to_string(scratch.join("exe.path")).expect("the fixture noted its test binary");
+    std::fs::remove_file(executable.trim()).expect("the test binary is deletable while review is open");
+    keys.write_all(b"r").expect("the rerun key is writable");
+    let (refused, _) = drain::drain_until(master, rerun_refused).await;
+    output.extend_from_slice(&refused);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[proxima::test]
+async fn a_rerun_that_cannot_launch_restores_the_row_says_why_on_the_footer_and_keeps_review_open() {
+    let scratch = rerun_scratch("refused");
+    let (output, status) = run_rerun_fixture(&rerun_environment(&scratch, false), async |master, keys, _release, _leader| delete_the_binary_then_rerun(master, keys, &scratch).await).await;
+
+    let frames = review_frames(&output);
+    let refused = frames.iter().position(|frame| without_sgr(frame).contains("rerun not started")).unwrap_or_else(|| panic!("no review frame carried the footer message:\n{}", shown(&output)));
+    let notice = without_sgr(&frames[refused]);
+    assert!(notice.contains("rerun not started: the OS refused the launch, error 2: "), "the footer names the OS error:\n{}", shown(&notice));
+    assert!(!notice.contains("RERUN"), "the row left RERUN when the launch was refused:\n{}", shown(&notice));
+    assert!(frames[refused].contains("r rerun"), "review is still open with its keys:\n{}", shown(&frames[refused]));
+    let receipt = assert_receipt_after_review(&output, status);
+    assert!(receipt.starts_with("SUMMARY  passed=0 failed=4 "), "a refused rerun leaves every failure standing:\n{}", shown(receipt));
+    assert_eq!(run_counts(&scratch).len(), 4, "4 first runs and no rerun, because none could launch");
+}
+
+fn second_attempt_shown(bytes: &[u8]) -> bool {
+    review_frames(&String::from_utf8_lossy(bytes)).iter().any(|frame| frame.contains("second attempt") && frame.contains("rerun 1"))
+}
+
+#[proxima::test]
+async fn a_rerun_that_fails_with_a_new_message_shows_that_message_in_the_detail_labelled_with_the_attempt() {
+    let scratch = rerun_scratch("changing");
+    let mut environment = rerun_environment(&scratch, false);
+    environment.push(("CARGO_VAL_FIXTURE_ONLY_CHANGING".to_owned(), "1".to_owned()));
+    environment.push(("CARGO_VAL_FIXTURE_CHANGING_STATE".to_owned(), scratch.join("changing.state").to_string_lossy().into_owned()));
+    let (output, status) = run_rerun_fixture(&environment, async |master, keys, _release, _leader| press_then_quit(master, keys, b"r", second_attempt_shown).await).await;
+
+    let frames = review_frames(&output);
+    let before = frames.first().unwrap_or_else(|| panic!("no review frame:\n{}", shown(&output)));
+    assert!(before.contains("first attempt") && !before.contains("rerun 1"), "the first review frame shows the original failure unlabelled:\n{}", shown(before));
+    let after = frames.iter().find(|frame| frame.contains("second attempt")).unwrap_or_else(|| panic!("no frame showed the rerun's message:\n{}", shown(&output)));
+    assert!(!after.contains("first attempt"), "the detail replaced the original output:\n{}", shown(after));
+    assert!(after.contains("rerun 1"), "the header names the attempt:\n{}", shown(after));
+    assert_eq!(status.code(), Some(1), "{status}");
+}

@@ -952,3 +952,66 @@ fn ten_thousand_review_frames_with_links_allocate_nothing() {
     assert_eq!(linked, 10_000, "every frame carried a link, so a zero is not an unlinked loop");
     assert_eq!(allocations, 0);
 }
+
+#[test]
+fn r_marks_the_selected_failure_rerunning_and_each_tick_advances_its_elapsed_time() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = scenario("detail", &mut arena, &mut ledger);
+
+    keys(&mut state, &[Key::Char(b'r')]);
+    let started = frame_of(&state, 80, false);
+    state.apply(&Event::Tick { now_ms: CLOCK_MS + 1_200 });
+    let ticking = frame_of(&state, 80, false);
+
+    assert_eq!(state.rerunning().collect::<Vec<_>>(), vec![SHARD], "only the selected row reruns");
+    assert!(list_rows(&started)[1].contains("RERUN") && list_rows(&started)[1].contains("0.0s"), "{started}");
+    assert!(list_rows(&ticking)[1].contains("RERUN") && list_rows(&ticking)[1].contains("1.2s"), "{ticking}");
+    assert!(!list_rows(&ticking)[0].contains("RERUN"), "{ticking}");
+}
+
+#[test]
+fn capital_r_marks_every_listed_failure_rerunning_and_a_second_press_starts_nothing_new() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = scenario("detail", &mut arena, &mut ledger);
+
+    keys(&mut state, &[Key::Char(b'R')]);
+    state.apply(&Event::Tick { now_ms: CLOCK_MS + 700 });
+    keys(&mut state, &[Key::Char(b'R')]);
+    let frame = frame_of(&state, 80, false);
+
+    assert_eq!(state.rerunning().count(), 2);
+    assert!(list_rows(&frame).iter().all(|row| row.contains("0.7s")), "a running row keeps its own start: {frame}");
+}
+
+#[test]
+fn a_rerun_that_failed_again_keeps_its_row_shows_the_new_seconds_and_can_be_rerun_once_more() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = scenario("detail", &mut arena, &mut ledger);
+    keys(&mut state, &[Key::Char(b'r')]);
+
+    state.apply(&Event::Reran { id: SHARD, rerun: Rerun::Failed { millis: 4_560 } });
+    let failed_again = frame_of(&state, 80, false);
+    let again = state.action(Key::Char(b'r'), detail);
+
+    assert_eq!(state.open(), 2, "a failing rerun never leaves the list");
+    assert!(list_rows(&failed_again)[1].contains("PANIC") && list_rows(&failed_again)[1].contains("4.56s"), "{failed_again}");
+    assert_eq!(again, Action::RerunOne { id: SHARD });
+}
+
+#[test]
+fn the_closing_block_counts_a_failure_that_passed_alone_as_flaky_and_lists_the_rest_as_failed() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = scenario("detail", &mut arena, &mut ledger);
+    state.apply(&Event::Reran { id: SHARD, rerun: Rerun::Passed { millis: 1_840 } });
+    let finished = Event::Finished { passed: 381, failed: 2, ignored: 0, not_run: 0, wall_ms: 9, manifest: None, discovered: 383, filtered: 0, exit: 1 };
+    state.apply(&finished);
+    let mut block = Line::<4096>::new();
+
+    state.project(&finished, &mut block).expect("the closing block fits");
+
+    let text = String::from_utf8(block.bytes().to_vec()).expect("a closing block is utf-8");
+    assert!(text.starts_with("SUMMARY  passed=381 failed=1 flaky=1 ignored=0"), "{text}");
+    assert_eq!(text.lines().filter(|line| line.starts_with("FAILED")).count(), 1, "{text}");
+    assert!(text.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly")), "{text}");
+    assert!(!text.contains("a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly'"), "the flaky test leaves the rerun command: {text}");
+}

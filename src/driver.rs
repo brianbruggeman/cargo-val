@@ -31,7 +31,7 @@ use crate::line::Line;
 use crate::failure_class::Exit;
 use crate::hyperlink::{editor_template, links_enabled, site_in, write_link};
 use crate::source_excerpt::{colour_allowed, for_failure, for_span, splice_excerpt};
-use crate::render::review::{Action, Key};
+use crate::render::review::{Action, Key, Rerun as Standing};
 use crate::render::{Event, Mode, Outcome, State, Stream, located};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
@@ -49,7 +49,7 @@ use std::string::String;
 use std::sync::OnceLock;
 use std::time::Instant;
 use std::vec::Vec;
-use crate::parked_artifacts::{ParkFault, ParkedArtifacts};
+use crate::parked_artifacts::{OwnedArtifact, ParkFault, ParkedArtifacts};
 use crate::status_queue::{self, EVENT_RESERVE};
 use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
 use crate::edge_signal::{
@@ -394,6 +394,7 @@ pub(crate) struct TestWatch {
     group_length: usize,
     started_ms: u64,
     status: Option<i32>,
+    rerun: Option<u64>,
 }
 
 impl TestWatch {
@@ -744,6 +745,7 @@ fn start_session(
         group_length: 0,
         started_ms: monotonic_millis(),
         status: None,
+        rerun: None,
     });
     Ok(())
 }
@@ -862,6 +864,11 @@ pub(crate) fn session_exited(
     watch.status = Some(code);
     release_group(watch.process_id);
     let (slot, exit) = (watch.slot, watch.exit(code));
+    if watch.rerun.is_some() && exit == Err(RunError::Cancelled) {
+        watches[index] = None;
+        ledger.retire(slot).ok_or(RunError::Outcome)?;
+        return Ok(());
+    }
     if run.settings.process == ProcessMode::Test && exit == Err(RunError::Cancelled) {
         let target = ledger.sessions().get(slot).map(RunningChild::target);
         watches[index] = None;
@@ -1216,6 +1223,16 @@ fn deliver<'bytes>(
             let name = &report[..name_length.saturating_sub(1)];
             let targets = reporting.targets.borrow();
             let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+            if let Some(started) = watch.rerun {
+                let millis = monotonic_millis().saturating_sub(started);
+                let rerun = if outcome == TerminalOutcome::Passed { Standing::Passed { millis } } else { Standing::Failed { millis } };
+                if outcome == TerminalOutcome::Failed {
+                    let (stdout, stderr) = watch.output.captured();
+                    reporting.run.emit_captured(id, (stdout, stderr), watch.status.map_or(Exit::Code(1), Exit::from_status))?;
+                }
+                emit(reporting.render, &Event::Reran { id, rerun })?;
+                return Ok(step);
+            }
             let withdrawn = reporting.interrupted && reporting.render.0.is_agent_like();
             if !withdrawn {
                 emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo: false })?;
@@ -1243,6 +1260,37 @@ fn deliver<'bytes>(
         | OutcomeStep::Stdout(_)
         | OutcomeStep::Stderr(_) => Ok(step),
     }
+}
+
+// a rerun is a fix-loop step: a launch that fails puts the row back and says why on the review footer, and review stays open
+fn refuse_rerun(run: &ListingRun<'_>, id: (&[u8], &[u8]), error: RunError) -> Result<(), RunError> {
+    let mut notice = Line::<120>::new();
+    notice.text(b"rerun not started: ");
+    match error {
+        RunError::Launch(LaunchCause::Spawn { os_code }) => {
+            notice.text(b"the OS refused the launch, error ");
+            notice.number(usize::try_from(os_code).unwrap_or(0));
+        }
+        RunError::Launch(LaunchCause::Full) => notice.text(b"no free job slot"),
+        RunError::Launch(LaunchCause::Duplicate) => notice.text(b"the test is already running"),
+        RunError::Launch(_) => notice.text(b"the launch was refused"),
+        RunError::TestEnvironment => notice.text(b"the test environment could not be built"),
+        other => return Err(other),
+    }
+    notice.text(b": ");
+    notice.text(id.1);
+    emit(run.render(), &Event::Reran { id, rerun: Standing::Idle })?;
+    emit(run.render(), &Event::Warned { id, what: notice.bytes() })
+}
+
+fn rerun_live(run: &ListingRun<'_>, ledger: &Ledger<'_>, watches: &Watches, id: (&[u8], &[u8])) -> bool {
+    let targets = run.targets.borrow();
+    watches
+        .iter()
+        .flatten()
+        .filter(|watch| watch.rerun.is_some())
+        .filter_map(|watch| ledger.sessions().get(watch.slot))
+        .any(|session| targets.id(session.target()) == id.0 && session.name_bytes() == id.1)
 }
 
 fn override_entries<'storage>(
@@ -1363,9 +1411,31 @@ fn launch_listed(
     watches: &mut Watches,
     intent: ExactTestIntent<'_, '_, '_>,
 ) -> Result<(), RunError> {
+    let (run, target) = (scan.run, scan.target);
+    let slot = spawn_exact(scan, ledger, watches, intent, None).map_err(|error| match error {
+        RunError::Launch(cause) => report_launch_failure(cause, intent.test_name(), executable_text(intent.executable())),
+        other => other,
+    })?;
+    run.targets.borrow_mut().tally(target, Tally::Launched);
+    let targets = run.targets.borrow();
+    let id = (targets.id(target), intent.test_name().as_bytes());
+    emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
+    drop(targets);
+    shard::note_group(run, watches, slot.index(), intent.test_name());
+    Ok(())
+}
+
+// the one spawn, capture and settle path: a rerun differs only in the scope its session lives under and the start it carries to its watch
+fn spawn_exact(
+    scan: &ListingScan<'_, '_>,
+    ledger: &mut OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+    watches: &mut Watches,
+    intent: ExactTestIntent<'_, '_, '_>,
+    rerun_started: Option<u64>,
+) -> Result<SessionSlotId, RunError> {
     let (run, target, environment, layout) = (scan.run, scan.target, scan.environment, scan.layout);
     let (overrides, override_count) = override_entries(layout, environment)?;
-    if run.tripped(ledger) {
+    if rerun_started.is_none() && run.tripped(ledger) {
         run.policy.borrow_mut().launched();
     }
     let mut storage = run.launch_storage.borrow_mut();
@@ -1382,25 +1452,17 @@ fn launch_listed(
             current_directory: layout.current_directory(environment).as_bytes(),
         }
         .launch_as(park)
-        .map_err(|error| {
-            report_launch_failure(
-                LaunchCause::from(&error),
-                intent.test_name(),
-                executable_text(intent.executable()),
-            )
-        })
+        .map_err(|error| RunError::Launch(LaunchCause::from(&error)))
     })?;
     if park {
         run.ready.set(Some(slot));
     }
-    run.targets.borrow_mut().tally(target, Tally::Launched);
-    start_session(ledger, watches, scan.lanes, slot, (None, run.session_scope(None)))?;
-    let targets = run.targets.borrow();
-    let id = (targets.id(target), intent.test_name().as_bytes());
-    emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
-    drop(targets);
-    shard::note_group(run, watches, slot.index(), intent.test_name());
-    Ok(())
+    let scope = run.session_scope(rerun_started.map(|_| Rerun::OutputOnly));
+    start_session(ledger, watches, scan.lanes, slot, (None, scope))?;
+    if let Some(watch) = watches[slot.index()].as_mut() {
+        watch.rerun = rerun_started;
+    }
+    Ok(slot)
 }
 
 // an output-only rerun is the only place a tripping test's block is printed, so only an interrupt scopes it
@@ -1955,6 +2017,7 @@ pub(crate) struct CargoDriver<'buffer> {
     reason: &'static [u8],
     discovery: DiscoveryFsm,
     parked: ParkedArtifacts,
+    listed: Vec<(usize, OwnedArtifact)>,
     dropped: usize,
     lock_watch: LockWatch,
     diagnostics: Vec<u8>,
@@ -2161,6 +2224,47 @@ impl CargoDriver<'_> {
             && self.pending_listing.is_none()
     }
 
+    /// Launches each failure the review marked RERUN that has no child yet, as a solo exact-test child through [`spawn_exact`],
+    /// the same spawn the run's own tests use; a full job table leaves the row marked until a child settles.
+    pub(crate) fn launch_reruns(&mut self, lanes: &Lanes, run: &ListingRun<'_>, ledger: &mut Ledger<'_>, watches: &mut Watches) -> Result<(), RunError> {
+        let state = run.render().1.borrow();
+        let wanted: Vec<(Vec<u8>, Vec<u8>)> = state.rerunning().map(|(binary, name)| (binary.to_vec(), name.to_vec())).collect();
+        drop(state);
+        for (binary, name) in &wanted {
+            let id = (binary.as_slice(), name.as_slice());
+            if ledger.sessions().len() >= run.settings.jobs {
+                break;
+            }
+            if !rerun_live(run, ledger, watches, id) {
+                self.launch_rerun(lanes, run, (ledger, watches), id).or_else(|error| refuse_rerun(run, id, error))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn launch_rerun(&mut self, lanes: &Lanes, run: &ListingRun<'_>, (ledger, watches): (&mut Ledger<'_>, &mut Watches), id: (&[u8], &[u8])) -> Result<(), RunError> {
+        let target = {
+            let targets = run.targets.borrow();
+            (0..targets.len()).find(|index| targets.id(*index) == id.0).ok_or(RunError::Outcome)?
+        };
+        let (_, owned) = self.listed.iter().find(|(listed, _)| *listed == target).ok_or(RunError::Outcome)?;
+        let artifact = owned.as_artifact();
+        let environment = &mut self.environments[slot_range(free_slot(self.active.as_ref()))];
+        let input = TestEnvironmentInput {
+            artifact,
+            linked_directories: self.linked.as_str(),
+            library_directories: run.library_directories,
+            inherited_dylib_path: run.inherited_dylib_path,
+            home: run.home,
+            build_script: self.build_scripts.find(artifact.package_id),
+        };
+        let layout = TestEnvironmentLayout::build(&input, environment).map_err(|_| RunError::TestEnvironment)?;
+        let name = core::str::from_utf8(id.1).map_err(|_| RunError::Arguments)?;
+        let scan = ListingScan { run, lanes, executable: artifact.executable, target, environment: &*environment, layout: &layout };
+        let intent = ExactTestIntent::new(ExecutablePath::Borrowed(artifact.executable), name);
+        spawn_exact(&scan, ledger, watches, intent, Some(monotonic_millis())).map(|_| ())
+    }
+
     pub(crate) fn finished(&self, run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
         self.drained(ledger.unaccounted()) && run.doc_tests_finished()
     }
@@ -2182,11 +2286,13 @@ impl CargoDriver<'_> {
     fn queue_listing(
         &mut self,
         started: Option<PendingListing>,
+        kept: &OwnedArtifact,
         lanes: &Lanes,
     ) -> Result<(), RunError> {
         let Some(next) = started else {
             return Ok(());
         };
+        self.listed.push((next.target, *kept));
         if self.active.is_some() {
             self.pending_listing = Some(next);
             return Ok(());
@@ -2235,7 +2341,8 @@ impl CargoDriver<'_> {
                 free_slot(self.active.as_ref()),
                 &mut *self.environments,
             )?;
-            self.queue_listing(started, lanes)?;
+            let kept = OwnedArtifact::copy_of(&artifact).map_err(RunError::Parked)?;
+            self.queue_listing(started, &kept, lanes)?;
         }
         Ok(())
     }
@@ -2330,7 +2437,8 @@ impl CargoDriver<'_> {
                             free_slot(self.active.as_ref()),
                             &mut *self.environments,
                         )?;
-                        self.queue_listing(started, lanes)?;
+                        let kept = OwnedArtifact::copy_of(&artifact).map_err(RunError::Parked)?;
+                        self.queue_listing(started, &kept, lanes)?;
                     }
                 }
                 CargoSourceStep::Compiled { .. } => note_built(&mut self.built, run)?,
@@ -3076,6 +3184,7 @@ fn new_driver(
         reason: b"",
         discovery: DiscoveryFsm::new(bins, gate),
         parked: ParkedArtifacts::new(),
+        listed: Vec::new(),
         dropped: 0,
         lock_watch,
         diagnostics: Vec::new(),

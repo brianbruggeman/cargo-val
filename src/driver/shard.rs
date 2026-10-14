@@ -902,6 +902,7 @@ mod tests {
                 group_length: 0,
                 started_ms: 0,
                 status: None,
+                rerun: None,
             };
             assert_eq!(frozen.exit(0), Ok(0));
             root.fire();
@@ -1074,6 +1075,7 @@ mod pause_tests {
             group_length: 0,
             started_ms: 0,
             status: None,
+            rerun: None,
         }
     }
 

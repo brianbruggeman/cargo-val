@@ -6,7 +6,7 @@
 
 use super::review::{Rerun, Verdict};
 
-pub(super) const TAIL: usize = 46;
+pub(super) const TAIL: usize = 47;
 const VERDICT: usize = 0;
 const BUDGET: usize = 1;
 const RERUN: usize = 5;
@@ -15,6 +15,7 @@ const SECOND: usize = 14;
 const CLEARED: usize = 22;
 const LINES: usize = 30;
 const PAYLOAD: usize = 38;
+const ATTEMPT: usize = 46;
 
 fn get(tail: &[u8], at: usize) -> u64 {
     let mut word = [0_u8; 8];
@@ -75,6 +76,7 @@ pub(super) fn rerun(tail: &[u8]) -> Rerun {
     match tail[RERUN] {
         1 => Rerun::Running { elapsed_ms: get(tail, FIRST), expected_ms: get(tail, SECOND).checked_sub(1) },
         2 => Rerun::Passed { millis: get(tail, FIRST) },
+        3 => Rerun::Failed { millis: get(tail, FIRST) },
         _ => Rerun::Idle,
     }
 }
@@ -86,11 +88,31 @@ pub(super) fn set_rerun(tail: &mut [u8], rerun: Rerun, now_ms: u64) {
             tail[RERUN] = 1;
             put(tail, FIRST, elapsed_ms);
             put(tail, SECOND, expected_ms.map_or(0, |expected| expected.saturating_add(1)));
+            put(tail, CLEARED, now_ms.saturating_sub(elapsed_ms));
         }
         Rerun::Passed { millis } => {
             tail[RERUN] = 2;
             put(tail, FIRST, millis);
             put(tail, CLEARED, now_ms);
         }
+        Rerun::Failed { millis } => {
+            tail[RERUN] = 3;
+            put(tail, FIRST, millis);
+        }
+    }
+}
+
+pub(super) fn attempts(tail: &[u8]) -> u8 {
+    tail[ATTEMPT]
+}
+
+pub(super) fn note_attempt(tail: &mut [u8]) {
+    tail[ATTEMPT] = tail[ATTEMPT].saturating_add(1);
+}
+
+pub(super) fn tick_running(tail: &mut [u8], now_ms: u64) {
+    if tail[RERUN] == 1 {
+        let started = get(tail, CLEARED);
+        put(tail, FIRST, now_ms.saturating_sub(started));
     }
 }
