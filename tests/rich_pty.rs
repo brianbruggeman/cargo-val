@@ -5,6 +5,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::num::NonZeroI32;
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(target_os = "linux")]
 use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
@@ -24,6 +25,8 @@ mod group;
 mod lead;
 
 const FRAME_START: &str = "\x1b[?25l";
+static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
+
 const COLUMNS: u16 = 80;
 const ROWS: u16 = 40;
 
@@ -44,7 +47,7 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
 }
 
-fn spawn_on(slave: &OwnedFd, fixture: &str, release: &Path, environment: &[(&str, &str)]) -> std::process::Child {
+fn spawn_on(slave: &OwnedFd, fixture: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
     let stream = || Stdio::from(slave.try_clone().expect("the slave descriptor duplicates"));
     let mut command = binary::command();
     lead::lead_group(&mut command);
@@ -60,7 +63,7 @@ fn spawn_on(slave: &OwnedFd, fixture: &str, release: &Path, environment: &[(&str
         .env_remove("NO_COLOR")
         .envs(environment.iter().copied())
         .env("CARGO_VAL_FIXTURE_RELEASE_FILE", release)
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-{fixture}-{}", std::process::id())))
+        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-{fixture}-{run}")))
         .stdin(stream())
         .stdout(stream())
         .stderr(stream())
@@ -130,11 +133,12 @@ async fn run_on_pty(fixture: &str) -> (String, ExitStatus) {
 }
 
 async fn run_on_pty_with(fixture: &str, environment: &[(&str, &str)]) -> (String, ExitStatus) {
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{}", std::process::id()));
+    let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{run}"));
     std::fs::create_dir_all(&directory).expect("the release directory is creatable");
     let release = directory.join("release");
     let Pty { master, slave } = open_pty();
-    let mut child = spawn_on(&slave, fixture, &release, environment);
+    let mut child = spawn_on(&slave, fixture, (&release, &run), environment);
     drop(slave);
     let leader = child.id();
     let exit = ExitSource::new(NonZeroI32::new(leader.cast_signed()).expect("a spawned child has a nonzero pid"));
