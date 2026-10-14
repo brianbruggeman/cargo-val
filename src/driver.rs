@@ -934,6 +934,14 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
     write_fd(2, notice.bytes())
 }
 
+/// Emits an event that only the live frame shows; plain output already prints its totals once, at the close.
+pub(crate) fn emit_live(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunError> {
+    if render.0 == OutputMode::Rich {
+        return emit(render, event);
+    }
+    Ok(())
+}
+
 /// Set once the live frame hides the cursor; [`restore_cursor`] shows it again exactly once on any exit path.
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 
@@ -1675,6 +1683,9 @@ pub(crate) struct CargoDriver<'buffer> {
     diagnostics: Vec<u8>,
     stderr_held: Vec<u8>,
     diagnostics_reported: bool,
+    built: u16,
+    listed_binaries: usize,
+    test_targets: Option<usize>,
 }
 
 // the byte count of `pending` that ends on a newline, or all of it once the stream has ended with no newline to come
@@ -1811,6 +1822,11 @@ fn start_listing(
     spawn_listing(artifact, run, linked.as_str(), build_script, slot, environments).map(Some)
 }
 
+fn note_built(built: &mut u16, run: &ListingRun<'_>) -> Result<(), RunError> {
+    *built = built.saturating_add(1);
+    emit_live(run.render(), &Event::Built { done: *built, total: None })
+}
+
 pub(crate) type Ledger<'ledger> =
     OutcomeLedger<'ledger, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>;
 pub(crate) type Watches = [Option<TestWatch>];
@@ -1910,6 +1926,32 @@ impl CargoDriver<'_> {
         }
     }
 
+    fn build_finished(
+        &mut self,
+        success: bool,
+        (run, ledger, lanes): (&ListingRun<'_>, &Ledger<'_>, &Lanes),
+    ) -> Result<(), RunError> {
+        emit_live(run.render(), &Event::Built { done: self.built, total: Some(self.built) })?;
+        let (event, reason): (&[u8], &'static [u8]) = if success {
+            (b" build-finished success=true", b"build-succeeded")
+        } else {
+            (b" build-finished success=false", b"build-failed")
+        };
+        debug_build_end(run.settings.debug, event, self.parked.len());
+        self.discovery.build_finished(success);
+        self.report_diagnostics(success)?;
+        self.finishing = true;
+        self.reason = reason;
+        self.release_parked(run, ledger, lanes)
+    }
+
+    fn note_listed(&mut self, run: &ListingRun<'_>) -> Result<(), RunError> {
+        self.listed_binaries += 1;
+        let total = self.test_targets.map(|found| found.max(self.listed_binaries));
+        let tests = run.targets.borrow().total().discovered;
+        emit_live(run.render(), &Event::Listed { binaries: self.listed_binaries, of: total, tests })
+    }
+
     /// Parses one lent chunk of Cargo stdout, or the end-of-stream drain when `eof`, acting on every record it completes while a listing slot is free.
     /// Returns how many chunk bytes were consumed.
     fn advance(
@@ -1949,6 +1991,7 @@ impl CargoDriver<'_> {
             let progressed = consumed > 0 || ready_before;
             match step {
                 CargoSourceStep::Artifact(artifact) => {
+                    note_built(&mut self.built, run)?;
                     let gated = matches!(artifact.target_kind, "test" | "bench")
                         && self.discovery.waits(artifact.package_id);
                     debug_artifact(run.settings.debug, gated, self.discovery.gate(), &artifact);
@@ -1967,29 +2010,19 @@ impl CargoDriver<'_> {
                         self.queue_listing(started, lanes)?;
                     }
                 }
+                CargoSourceStep::Compiled { .. } => note_built(&mut self.built, run)?,
                 CargoSourceStep::BinBuilt {
                     package_id,
                     executable,
                 } => {
+                    note_built(&mut self.built, run)?;
                     debug_bin_built(run.settings.debug, executable, package_id);
                     self.discovery.bin_built(package_id);
                     self.reason = b"bin-built";
                     self.release_parked(run, ledger, lanes)?;
                 }
                 CargoSourceStep::Diagnostic { level, rendered } => keep_diagnostic(&mut self.diagnostics, level, rendered),
-                CargoSourceStep::BuildFinished { success } => {
-                    let (event, reason): (&[u8], &'static [u8]) = if success {
-                        (b" build-finished success=true", b"build-succeeded")
-                    } else {
-                        (b" build-finished success=false", b"build-failed")
-                    };
-                    debug_build_end(run.settings.debug, event, self.parked.len());
-                    self.discovery.build_finished(success);
-                    self.report_diagnostics(success)?;
-                    self.finishing = true;
-                    self.reason = reason;
-                    self.release_parked(run, ledger, lanes)?;
-                }
+                CargoSourceStep::BuildFinished { success } => self.build_finished(success, (run, ledger, lanes))?,
                 CargoSourceStep::BuildScript(script) => {
                     for reported in script.linked_paths.iter() {
                         self.linked
@@ -2374,6 +2407,7 @@ impl CargoDriver<'_> {
             return Ok(false);
         }
         self.active = None;
+        self.note_listed(run)?;
         if let Some(next) = self.pending_listing.take() {
             self.begin_listing(next, lanes)?;
         }
@@ -2464,11 +2498,13 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         directories,
         bins,
         gate,
+        test_targets,
         lock_watch,
     } = start_children(parser, &settings, target_mode, inherited).await?;
     let cargo_process_id = cargo_child.process_id();
     let shared_directory = lock_watch.directory().to_vec();
-    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, lock_watch)?;
+    let mut driver = new_driver(cargo_storage, cargo_process_id, bins, gate, test_targets, lock_watch)?;
+    emit_live(&render, &Event::Listed { binaries: 0, of: test_targets, tests: 0 })?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
         .await
@@ -2589,6 +2625,7 @@ fn new_driver(
     process_id: u32,
     bins: BinCounts,
     gate: BinGate,
+    test_targets: Option<usize>,
     lock_watch: LockWatch,
 ) -> Result<Box<CargoDriver<'_>>, RunError> {
     Ok(Box::new(CargoDriver {
@@ -2616,6 +2653,9 @@ fn new_driver(
         diagnostics: Vec::new(),
         stderr_held: Vec::new(),
         diagnostics_reported: false,
+        built: 0,
+        listed_binaries: 0,
+        test_targets,
     }))
 }
 
@@ -2650,6 +2690,7 @@ struct StartedChildren {
     directories: Option<BuildDirectories>,
     bins: BinCounts,
     gate: BinGate,
+    test_targets: Option<usize>,
     lock_watch: LockWatch,
 }
 
@@ -2661,7 +2702,7 @@ async fn start_children(
     environment: &[&[u8]],
 ) -> Result<StartedChildren, RunError> {
     let isolating = target_mode == TargetDirMode::Isolated;
-    let mut metadata_child = (settings.bin_gate || isolating)
+    let mut metadata_child = (settings.bin_gate || isolating || settings.output == OutputMode::Rich)
         .then(|| spawn_metadata(parser, environment))
         .and_then(Result::ok);
     let spawned = metadata_child.is_some();
@@ -2683,12 +2724,14 @@ async fn start_children(
         }
         (None, None) => {}
     }
+    let test_targets = facts.as_deref().map(|found| found.test_targets);
     let (bins, gate) = resolve_bin_gate(settings, spawned, facts);
     Ok(StartedChildren {
         cargo,
         directories,
         bins,
         gate,
+        test_targets,
         lock_watch,
     })
 }
