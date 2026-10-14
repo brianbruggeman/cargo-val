@@ -441,6 +441,17 @@ pub const EXIT_WITH_PARENT: Layers<'static> = Layers::setting(
     ],
 );
 
+/// The refusal when a layer turns `exit-with-parent` on where the target has no parent watch, naming that layer's flag or key.
+#[must_use]
+pub const fn exit_with_parent_unsupported(source: Source) -> SettingError {
+    let message: &'static [u8] = match source {
+        Source::CommandLine => b"cargo-val: --exit-with-parent is not supported on windows (CARGO_VAL_EXIT_WITH_PARENT)\n",
+        Source::Configured => b"cargo-val: CARGO_VAL_EXIT_WITH_PARENT=on is not supported on windows\n",
+        Source::BuildDefault => b"cargo-val: the build default exit-with-parent setting is not supported on windows\n",
+    };
+    SettingError { source, message }
+}
+
 impl<'argument> HarnessRequest<'argument> {
     /// The ignore mode a harness flag selected, else the `CARGO_VAL_IGNORED` setting, else skip.
     ///
@@ -982,6 +993,19 @@ mod layers_tests {
         ];
         for (layers, expected) in table {
             assert_eq!(layers.resolve::<ExitWithParent>(), expected, "{layers:?}");
+        }
+    }
+
+    #[test]
+    fn an_unsupported_exit_with_parent_names_what_was_refused_and_the_layer_that_supplied_it() {
+        let table: [(Source, &[u8]); 3] = [
+            (Source::CommandLine, b"cargo-val: --exit-with-parent is not supported on windows (CARGO_VAL_EXIT_WITH_PARENT)\n"),
+            (Source::Configured, b"cargo-val: CARGO_VAL_EXIT_WITH_PARENT=on is not supported on windows\n"),
+            (Source::BuildDefault, b"cargo-val: the build default exit-with-parent setting is not supported on windows\n"),
+        ];
+        for (source, message) in table {
+            let error = exit_with_parent_unsupported(source);
+            assert_eq!((error.source, error.message()), (source, message));
         }
     }
 
