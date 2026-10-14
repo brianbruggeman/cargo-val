@@ -174,6 +174,7 @@ pub enum RunError {
     DocTests,
     Spawn,
     Reactor,
+    StatusQueue,
     SignalSlots,
     CargoStream,
     ListingStream,
@@ -218,6 +219,7 @@ impl RunError {
             Self::DocTests => b"cargo-val: cargo test --doc failed before reporting results\n",
             Self::Spawn => b"cargo-val: child spawn failed\n",
             Self::Reactor => b"cargo-val: reactor operation failed\n",
+            Self::StatusQueue => b"cargo-val: status queue refused a record: a writer appended without room\n",
             Self::SignalSlots => b"cargo-val: the signal table has no free slot; raise CARGO_VAL_BUILD_SIGNAL_SLOTS and rebuild\n",
             Self::CargoStream => b"cargo-val: cargo output could not be parsed\n",
             Self::ListingStream => b"cargo-val: libtest listing could not be parsed\n",
@@ -771,6 +773,9 @@ pub(crate) fn session_resume(
     if !shard::stalled(watch) || !status_queue::has_room() {
         return Ok(!shard::stalled(watch));
     }
+    if !shard::resume_announcing(run, ledger, watch)? {
+        return Ok(false);
+    }
     let Some((window, offset)) = shard::take_backlog(watch) else {
         return Ok(true);
     };
@@ -1281,7 +1286,7 @@ pub(crate) struct ListingRun<'run> {
     specials: RefCell<SpecialPlan<'run>>,
     sched_target: Cell<Option<usize>>,
     stop_sent: Cell<bool>,
-    interrupt_reported: Cell<bool>,
+    interrupt_reported: Cell<usize>,
 }
 
 pub(crate) struct DocObservation<'run> {
@@ -1348,15 +1353,28 @@ impl ListingRun<'_> {
         let Some(signal) = self.signals.received() else {
             return Ok(());
         };
-        if !self.settings.output.is_agent_like() || self.interrupt_reported.replace(true) {
+        if !self.settings.output.is_agent_like() {
             return Ok(());
         }
         let groups = watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot)).count();
-        emit(self.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups })?;
+        if self.interrupt_reported.get() == 0 {
+            if !status_queue::room_for(EVENT_RESERVE) {
+                status_queue::defer();
+                return Ok(());
+            }
+            emit(self.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups })?;
+            self.interrupt_reported.set(1);
+        }
         let targets = self.targets.borrow();
-        for session in watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot)) {
+        let sessions = watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot));
+        for session in sessions.skip(self.interrupt_reported.get() - 1) {
+            if !status_queue::room_for(EVENT_RESERVE) {
+                status_queue::defer();
+                return Ok(());
+            }
             let id = (targets.id(session.target()), session.name_bytes());
             emit(self.render(), &Event::Running { id })?;
+            self.interrupt_reported.set(self.interrupt_reported.get() + 1);
         }
         Ok(())
     }
@@ -2545,7 +2563,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
-            interrupt_reported: Cell::new(false),
+            interrupt_reported: Cell::new(0),
     });
     let mut launch_doc = doc_wanted.then_some(|| {
         let mut doc = spawn_doc_tests(parser, (settings.ignore, settings.output), inherited, directories.as_ref().map(|chosen| &chosen.doc))?;
@@ -3697,7 +3715,7 @@ mod listing_allocation_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
-            interrupt_reported: Cell::new(false),
+            interrupt_reported: Cell::new(0),
         };
         let artifact = TestArtifact {
             executable,

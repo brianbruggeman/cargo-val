@@ -211,11 +211,11 @@ pub(crate) async fn flush_bounded() {
 /// Queues `bytes` for descriptor 1 or 2.
 ///
 /// # Errors
-/// [`RunError::Reactor`] when no [`Capture`] scope is open or the queue refuses the append; the refusal is counted by the queue's
-/// drop counter and ends the run through the caller's `?`, so no output is silently lost and nothing writes blocking.
+/// [`RunError::StatusQueue`] when no [`Capture`] scope is open or the queue refuses the append. Every burst writer gates on [`room_for`]
+/// or [`has_room`] and [`defer`]s first, so a refusal means a writer skipped its gate: the queue counts it as a drop and the run ends, never silently losing output or writing blocking.
 pub(crate) fn write(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
     let appended = QUEUE.with(|queue| queue.capturing.get() && append(queue, descriptor, bytes));
-    if appended { Ok(()) } else { Err(RunError::Reactor) }
+    if appended { Ok(()) } else { Err(RunError::StatusQueue) }
 }
 
 fn append(queue: &Queue, descriptor: i32, bytes: &[u8]) -> bool {

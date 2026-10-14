@@ -18,7 +18,7 @@ use crate::edge_signal::release_child;
 use crate::edge_spawn::STOP_SIGNAL;
 #[cfg(not(unix))]
 use crate::edge_spawn::STATUS_CONTROL_C_EXIT;
-use crate::run::Lanes;
+use crate::run::{JOB_BASE, Lanes};
 use crate::runner::LibtestVerdict;
 use crate::sched_file::{Loaded, load};
 use crate::shard_arena::{Located, PushError, Rerun, Reported, Shard, ShardArena};
@@ -55,6 +55,8 @@ pub(super) struct ShardWatch {
     backlog: Option<(Range<u32>, usize)>,
     /// How many times framing paused on a full status queue.
     pauses: usize,
+    /// The ordinals of this shard's names whose START has not been queued yet; non-empty keeps the lane gated.
+    announcing: Range<usize>,
 }
 
 impl ShardWatch {
@@ -74,6 +76,7 @@ impl ShardWatch {
             deferred: (0, 0, 0),
             backlog: None,
             pauses: 0,
+            announcing: 0..0,
             group: [0; GROUP_CAPACITY],
             group_length: group.len().min(GROUP_CAPACITY),
         };
@@ -246,7 +249,7 @@ pub(super) struct Observed {
 
 /// Whether this shard's framing is paused on a window the status queue could not take whole.
 pub(super) fn stalled(watch: &TestWatch) -> bool {
-    watch.shard.as_ref().is_some_and(|shard| shard.backlog.is_some())
+    watch.shard.as_ref().is_some_and(|shard| shard.backlog.is_some() || !shard.announcing.is_empty())
 }
 
 /// Records where framing paused; the first pause in a window wins, since later pieces of that window are fed by the resume.
@@ -658,9 +661,12 @@ impl CargoDriver<'_> {
                 (0..shard.count).for_each(|_| run.targets.borrow_mut().tally(active.target, Tally::Launched));
             }
             let (group, group_length) = group_of(run, shard);
-            let watch = ShardWatch::new(shard, &group[..group_length]);
+            let mut watch = ShardWatch::new(shard, &group[..group_length]);
+            watch.announcing = 0..announcement_total(run.settings.output, shard);
+            announce_starts(run, active.target, &mut watch)?;
+            let paused = !watch.announcing.is_empty();
             start_session(ledger, watches, lanes, slot, Some(watch))?;
-            announce_starts(run, active.target, shard)?;
+            lanes[JOB_BASE + slot.index()].3.set(!paused);
             moved = true;
         }
         Ok(moved)
@@ -668,24 +674,42 @@ impl CargoDriver<'_> {
 }
 
 // a shard child starts all its names at once; a rerun starts only the one name its exit will decide
-fn announce_starts(run: &ListingRun<'_>, target: usize, shard: Shard) -> Result<(), RunError> {
-    let solo = match shard.rerun {
-        None => false,
-        Some(Rerun::Decides { .. }) => true,
-        Some(Rerun::OutputOnly) => return Ok(()),
-    };
-    if run.settings.output == OutputMode::Rich {
-        return Ok(());
+const fn announcement_total(output: OutputMode, shard: Shard) -> usize {
+    match (output, shard.rerun) {
+        (OutputMode::Rich, _) | (_, Some(Rerun::OutputOnly)) => 0,
+        (_, Some(Rerun::Decides { .. })) => 1,
+        (_, None) => shard.count,
     }
+}
+
+// each START takes room first; a full queue defers the rest and the watch stays stalled until the pump drains and resumes it
+pub(super) fn announce_starts(run: &ListingRun<'_>, target: usize, watch: &mut ShardWatch) -> Result<(), RunError> {
+    let solo = watch.shard.rerun.is_some();
     let arena = run.shards.borrow();
     let targets = run.targets.borrow();
-    let count = if solo { 1 } else { shard.count };
-    (0..count)
-        .filter_map(|ordinal| arena.nth(shard, ordinal))
-        .try_for_each(|name| {
+    while !watch.announcing.is_empty() {
+        if !status_queue::room_for(EVENT_RESERVE) {
+            status_queue::defer();
+            return Ok(());
+        }
+        let ordinal = watch.announcing.start;
+        watch.announcing.start += 1;
+        if let Some(name) = arena.nth(watch.shard, ordinal) {
             let started = Event::Started { id: (targets.id(target), name), solo, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms };
-            emit(run.render(), &started)
-        })
+            emit(run.render(), &started)?;
+        }
+    }
+    Ok(())
+}
+
+/// Continues a paused START announcement once the queue has room; true when none remain.
+pub(super) fn resume_announcing(run: &ListingRun<'_>, ledger: &Ledger<'_>, watch: &mut TestWatch) -> Result<bool, RunError> {
+    let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
+    let Some((shard_watch, target)) = watch.shard.as_mut().zip(target) else {
+        return Ok(true);
+    };
+    announce_starts(run, target, shard_watch)?;
+    Ok(shard_watch.announcing.is_empty())
 }
 
 /// Settles a shard child that exited: names that never reported are failed, a crash is pinned on the test that was running
@@ -1026,7 +1050,7 @@ mod pause_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             stop_sent: Cell::new(false),
-            interrupt_reported: Cell::new(false),
+            interrupt_reported: Cell::new(0),
         }
     }
 
