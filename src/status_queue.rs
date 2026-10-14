@@ -149,7 +149,7 @@ pub(crate) fn spill_into(store: Rc<Store>) {
 }
 
 /// How many scrollback pages the overflow holds that the screen has not been given yet.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn unread_pages() -> u64 {
     QUEUE.with(|queue| queue.unread.get())
 }
@@ -178,7 +178,7 @@ fn note_pause(queue: &Queue) {
     queue.paused_noticed.set(try_stderr(line));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn pause_noticed() -> bool {
     QUEUE.with(|queue| queue.paused_noticed.get())
 }
