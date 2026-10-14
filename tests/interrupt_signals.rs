@@ -230,3 +230,22 @@ async fn an_interrupted_agent_run_names_the_signal_and_the_blocked_test_and_clos
     assert_eq!(lines[2], "RUNNING  cargo_val_blocked_fixture tests::unit_blocks_when_requested", "{report}");
     assert_eq!(lines[3], "EXIT     130  interrupted", "{report}");
 }
+
+#[proxima::test(timeout = "310s")]
+async fn an_interrupted_run_leaves_the_earlier_last_run_record_intact() {
+    let record = target_directory().join("c74-fixture-record-int").join("cargo-val").join("last-run");
+    let earlier = cargo_val::last_run::encode((258_230, 383, 0));
+    fs::create_dir_all(record.parent().expect("record has a directory")).expect("record directory is creatable");
+    fs::write(&record, earlier).expect("earlier record is writable");
+
+    interrupt!(
+        "record-int",
+        "blocked_test",
+        &["--lib", "unit_blocks_when_requested"],
+        "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR",
+        libc::SIGINT,
+        SIGINT_STATUS
+    );
+
+    assert_eq!(fs::read(&record).expect("record still exists"), earlier);
+}

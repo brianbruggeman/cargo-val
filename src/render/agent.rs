@@ -36,6 +36,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             }
             Event::Begin { .. }
             | Event::Waiting { .. }
+            | Event::Previous { .. }
             | Event::Listed { .. }
             | Event::Built { .. }
             | Event::Resize { .. }

@@ -78,6 +78,7 @@ pub enum Mode {
 pub enum Event<'a> {
     Begin { version: &'a [u8], shard: bool, jobs: usize, github: bool, why: Option<&'a [u8]>, json: bool, at_ms: u64 },
     Waiting { lock: &'a [u8] },
+    Previous { wall_ms: u64, tests: u32 },
     Listed { binaries: usize, of: Option<usize>, tests: usize },
     Built { done: u16, total: Option<u16> },
     Resize { cols: u16 },
@@ -107,6 +108,7 @@ impl Mode {
                 Self::Running,
                 Event::Begin { .. }
                 | Event::Waiting { .. }
+                | Event::Previous { .. }
                 | Event::Listed { .. }
                 | Event::Built { .. }
                 | Event::Resize { .. }
@@ -152,6 +154,7 @@ pub struct State<'storage, const RERUN: usize> {
     peak_ms: u64,
     busy_ms: u64,
     wall_ms: Option<u64>,
+    previous: Option<(u64, u32)>,
     heartbeat_ms: u64,
     last_beat_ms: u64,
     now_ms: u64,
@@ -198,6 +201,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             peak_ms: 0,
             busy_ms: 0,
             wall_ms: None,
+            previous: None,
             heartbeat_ms: HEARTBEAT_MS,
             last_beat_ms: 0,
             now_ms: 0,
@@ -263,6 +267,12 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         self.failures[..self.stored].iter().map(|offset| self.resolve(*offset))
     }
 
+    /// The previous run's wall time in milliseconds and discovered test count; `None` is no previous run.
+    #[must_use]
+    pub const fn previous(&self) -> Option<(u64, u32)> {
+        self.previous
+    }
+
     /// Tests in flight right now.
     #[must_use]
     pub const fn inflight_len(&self) -> usize {
@@ -294,6 +304,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { github, why, json, jobs, at_ms, .. } => self.begin((github, why.is_some(), json), jobs, at_ms),
             Event::Waiting { lock } => self.wait_on(lock),
+            Event::Previous { wall_ms, tests } => self.previous = Some((wall_ms, tests)),
             Event::Listed { binaries, of, tests } => (self.listed_binaries, self.binaries_total, self.listed_tests) = (binaries, of, tests),
             Event::Built { done, total } => {
                 (self.built, self.units) = (done, total);
@@ -329,6 +340,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     fn begin(&mut self, (github, agent, json): (bool, bool, bool), jobs: usize, at_ms: u64) {
         self.mode = Mode::Running;
         self.github = github;
+        self.previous = None;
         self.agent_json = agent.then_some(json);
         self.jobs = jobs;
         self.done = 0;
@@ -554,7 +566,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
-            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Exited { .. } => {}
+            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
@@ -927,6 +939,45 @@ mod tests {
 
         assert_eq!(line, "FAIL     cli_run  fixture::fails_when_requested  3.123s\n");
         assert_eq!(state.failures().collect::<Vec<_>>(), [FAILING]);
+    }
+
+    #[test]
+    fn the_previous_run_reaches_the_state_without_changing_a_byte_of_any_output_mode() {
+        let begins = [(None, false), (Some(b"flag".as_slice()), false), (Some(b"flag".as_slice()), true)];
+        for (why, json) in begins {
+            let mut arena = [0_u8; 64];
+            let mut ledger = [0_u32; 2];
+            let mut state = Small::new(&mut arena, &mut ledger);
+            state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why, json, at_ms: 0 });
+            assert_eq!(state.previous(), None);
+            let previous = Event::Previous { wall_ms: 258_230, tests: 383 };
+            let mut frame = Line::<256>::new();
+
+            let ((), allocations) = measure_allocations(|| {
+                for _ in 0..10_000 {
+                    state.apply(&previous);
+                }
+            });
+            state.project(&previous, &mut frame).expect("the frame holds the projection");
+
+            assert_eq!((state.previous(), frame.bytes(), allocations), (Some((258_230, 383)), b"".as_slice(), 0), "agent_like={why:?} json={json}");
+        }
+    }
+
+    #[test]
+    fn the_live_view_draws_nothing_for_the_previous_run() {
+        let mut arena = [0_u8; 64];
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
+        let mut frame = Line::<256>::new();
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+        let previous = Event::Previous { wall_ms: 1, tests: 2 };
+        state.apply(&previous);
+
+        state.project_live(&previous, &mut frame).expect("the live view accepts the event");
+
+        assert_eq!(frame.bytes(), b"");
+        assert_eq!(state.previous(), Some((1, 2)));
     }
 
     #[test]
