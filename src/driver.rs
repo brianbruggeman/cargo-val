@@ -2404,7 +2404,6 @@ fn watch_parent(_signals: &SignalPipe, setting: ExitWithParent) -> Result<(), Ru
 ///
 /// Returns [`RunError`] naming the stage that failed.
 pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunError> {
-    let _scope = status_queue::Capture::enter();
     let started_millis = monotonic_millis();
     let harness = validated_harness(parser)?;
     let environment = unsafe { Environment::current() };
@@ -2499,7 +2498,6 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
         return Err(RunError::CargoStream);
     }
     let summary = finish_run(parser, &run, driver.discovery.exit_code(), driver.discovery.build_reported())?;
-    status_queue::flush().await?;
     Ok(summary)
 }
 
@@ -3335,7 +3333,6 @@ async fn run_doc_only<'run>(
         None,
         Some(totals),
     )?;
-    status_queue::flush().await?;
     Ok(summary)
 }
 

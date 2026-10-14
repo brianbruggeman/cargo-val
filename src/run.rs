@@ -272,14 +272,14 @@ pub(crate) async fn pump(
         .await;
         drained?;
         let Ok(item) = polled else {
-            poll_fn(|context| sinks.poll_drain(context)).await?;
+            status_queue::drain_bounded(&mut sinks).await?;
             return Ok(parks);
         };
         let flow = on_item(item);
         if matches!(flow, Ok(ControlFlow::Continue(()))) {
             continue;
         }
-        let delivered = poll_fn(|context| sinks.poll_drain(context)).await;
+        let delivered = status_queue::drain_bounded(&mut sinks).await;
         flow.map(|_| ())?;
         delivered?;
         return Ok(parks);
@@ -635,7 +635,10 @@ pub async fn drive(arguments: Vec<Vec<u8>>) -> Result<RunSummary, RunError> {
     for argument in &arguments {
         parser.push(argument);
     }
-    run_body(&parser).await
+    let _scope = Capture::enter();
+    let outcome = run_body(&parser).await;
+    status_queue::flush_bounded().await;
+    outcome
 }
 
 #[cfg(all(test, unix))]

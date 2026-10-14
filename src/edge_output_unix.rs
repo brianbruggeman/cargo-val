@@ -181,7 +181,7 @@ pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
 
 /// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until the kernel takes them; used only where no prime reactor runs.
 ///
-/// The synchronous twin of [`OutputSink`] for callers with no reactor: pre-runtime errors in `main`, and the error-exit drain of `status_queue::Capture`.
+/// The synchronous twin of [`OutputSink`] for callers with no reactor: callers with no reactor, such as pre-runtime errors in `main`; the run never uses it.
 ///
 /// # Errors
 ///
