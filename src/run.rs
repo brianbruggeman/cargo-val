@@ -718,15 +718,20 @@ pub(crate) async fn observe_cargo(
     })
     .await?;
     if run.open_review()? {
-        pump(&lanes, Some((&signal, &interrupt, run.signals())), None, |item| review_item(item, &lanes, run)).await?;
+        let review_beat = Beat::new(None);
+        pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&review_beat), |item| review_item(item, &lanes, run)).await?;
     }
     Ok(())
 }
 
-// only the key lane acts while a finished run waits in review; a signal or a closed terminal ends the wait
+// only the key lane and the tick act while a finished run waits in review; the tick resolves a held escape, and a signal or a closed terminal ends the wait
 fn review_item(item: Item, lanes: &Lanes, run: &ListingRun<'_>) -> Result<ControlFlow<()>, RunError> {
     match item {
         Item::Out(KEY_LANE, range) => keys_chunk(lanes, range, run)?,
+        Item::Tick => {
+            emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })?;
+            flush_keys(run)?;
+        }
         Item::OutEnd(KEY_LANE) | Item::Interrupt | Item::Signal(Err(_)) => return Ok(ControlFlow::Break(())),
         Item::Signal(Ok(())) => {
             run.drain_signals()?;
