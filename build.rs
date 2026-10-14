@@ -215,6 +215,9 @@ fn main() -> conflaguration::Result<()> {
     {
         settings.jobs = thread::available_parallelism().map_or(2, |count| count.get().min(MAX_JOBS));
     }
+    if let Some(triple) = env::var_os("TARGET") {
+        println!("cargo:rustc-env=CARGO_VAL_HOST_TRIPLE={}", triple.to_string_lossy());
+    }
     codegen::write_consts(&settings, "cargo_val_build.rs")?;
     codegen::rerun_for::<BuildDefaults>();
     let view = conflaguration::init::<ViewDefaults>()?;

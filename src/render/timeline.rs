@@ -511,7 +511,7 @@ mod tests {
         let mut events = run_events().take(7);
         events.next().iter().for_each(|begin| state.apply(begin));
         if let Some(wall_ms) = previous {
-            state.apply(&Event::Previous { wall_ms, tests: 383 });
+            state.apply(&Event::Previous { wall_ms, tests: 383, build: (0, 0), matched: false });
         }
         events.for_each(|event| state.apply(&event));
         state.apply(&Event::Tick { now_ms: ORIGIN + elapsed_ms });
@@ -542,7 +542,7 @@ mod tests {
         let mut events = run_events().take(7);
         events.next().iter().for_each(|begin| state.apply(begin));
         state.apply(&Event::Resize { cols: 80 });
-        state.apply(&Event::Built { done: 1, total: Some(1) });
+        state.apply(&Event::Built { done: 1, total: Some(1), exact: true, binaries: 1, at_ms: 0 });
         state.apply(&Event::Listed { binaries: 1, of: Some(1), tests: 4 });
         events.for_each(|event| state.apply(&event));
         state.apply(&Event::Tick { now_ms: ORIGIN + 9_000 });
@@ -879,7 +879,7 @@ mod tests {
         let (mut arena, mut ledger, mut timed, mut inflight) = ([0_u8; 512], [0_u32; 4], [0_u8; 512], [0_u8; 512]);
         let mut state = State::<64>::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_timeline(&mut timed).with_color(true);
         run_events().take(4).for_each(|event| state.apply(&event));
-        state.apply(&Event::Previous { wall_ms: 30_000, tests: 383 });
+        state.apply(&Event::Previous { wall_ms: 30_000, tests: 383, build: (0, 0), matched: false });
         let mut frame = Line::<8192>::new();
         let (mut drawn_live_axes, mut drawn_running) = (0_usize, 0_usize);
 
@@ -903,7 +903,7 @@ mod tests {
         let (mut arena, mut ledger, mut timed, mut inflight) = ([0_u8; 512], [0_u32; 4], [0_u8; 512], [0_u8; 512]);
         let mut state = State::<64>::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_timeline(&mut timed);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: ORIGIN });
-        state.apply(&Event::Previous { wall_ms: 66_000, tests: 383 });
+        state.apply(&Event::Previous { wall_ms: 66_000, tests: 383, build: (0, 0), matched: false });
         state.apply(&Event::Started { id: SHORT, solo: false, at_ms: ORIGIN + 2_000, limit_ms: None });
         state.apply(&Event::Settled { id: SHORT, outcome: Outcome::Passed, at_ms: Some(ORIGIN + 9_000), solo: false });
         if running {

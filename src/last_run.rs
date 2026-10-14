@@ -1,27 +1,32 @@
-//! The last-run record: 14 bytes under the workspace's target directory, read once at the start of a run and replaced once at its end.
+//! The last-run record: 34 bytes under the workspace's target directory, read once at the start of a run and replaced once at its end.
 //!
-//! Layout: `version u8 (1) | wall_ms u64 LE | tests u32 LE | exit u8`. Reading and writing both happen at the run's
-//! edges, never inside the event loop; the record reaches the render state as data through `Event::Previous`.
+//! Layout: `version u8 (2) | wall_ms u64 LE | tests u32 LE | exit u8 | fingerprint u64 LE | units u32 LE | build_ms u64 LE`.
+//! `fingerprint` names the inputs that decide the build's unit set, `units` is the exact count of compiler artifacts that build reported and
+//! `build_ms` the wall time up to its `build-finished`. A version 1 record has no fingerprint and reads as no previous run.
+//! Reading and writing both happen at the run's edges, never inside the event loop; the record reaches the render state as data through `Event::Previous`.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-const VERSION: u8 = 1;
-const RECORD_BYTES: usize = 14;
+const VERSION: u8 = 2;
+const RECORD_BYTES: usize = 34;
 const DIRECTORY: &str = "cargo-val";
 const FILE: &str = "last-run";
 
-/// What a finished run leaves behind: its wall time, the tests it discovered, and its exit code.
-pub type Record = (u64, u32, u8);
+/// What a finished run leaves behind: `(wall_ms, tests, exit, fingerprint, units, build_ms)`.
+pub type Record = (u64, u32, u8, u64, u32, u64);
 
 #[must_use]
-pub fn encode((wall_ms, tests, exit): Record) -> [u8; RECORD_BYTES] {
+pub fn encode((wall_ms, tests, exit, fingerprint, units, build_ms): Record) -> [u8; RECORD_BYTES] {
     let mut bytes = [0_u8; RECORD_BYTES];
     bytes[0] = VERSION;
     bytes[1..9].copy_from_slice(&wall_ms.to_le_bytes());
     bytes[9..13].copy_from_slice(&tests.to_le_bytes());
     bytes[13] = exit;
+    bytes[14..22].copy_from_slice(&fingerprint.to_le_bytes());
+    bytes[22..26].copy_from_slice(&units.to_le_bytes());
+    bytes[26..34].copy_from_slice(&build_ms.to_le_bytes());
     bytes
 }
 
@@ -35,9 +40,33 @@ pub fn decode(bytes: &[u8]) -> Result<Record, &'static str> {
     if record[0] != VERSION {
         return Err("wrong version");
     }
-    let wall = <[u8; 8]>::try_from(&record[1..9]).map_err(|_| "wrong length")?;
-    let tests = <[u8; 4]>::try_from(&record[9..13]).map_err(|_| "wrong length")?;
-    Ok((u64::from_le_bytes(wall), u32::from_le_bytes(tests), record[13]))
+    Ok((
+        u64::from_le_bytes(field(&record, 1)),
+        u32::from_le_bytes(field(&record, 9)),
+        record[13],
+        u64::from_le_bytes(field(&record, 14)),
+        u32::from_le_bytes(field(&record, 22)),
+        u64::from_le_bytes(field(&record, 26)),
+    ))
+}
+
+fn field<const WIDTH: usize>(record: &[u8; RECORD_BYTES], from: usize) -> [u8; WIDTH] {
+    let mut bytes = [0_u8; WIDTH];
+    bytes.copy_from_slice(&record[from..from + WIDTH]);
+    bytes
+}
+
+/// Names a build by the bytes that decide its unit set (`Cargo.lock`, each member's `Cargo.toml`, `rustc -vV`, the profile, the forwarded arguments).
+///
+/// Each input is length-prefixed so `["ab", "c"]` and `["a", "bc"]` hash apart. Zero is reserved for "no fingerprint", so a real hash of zero becomes one.
+#[must_use]
+pub fn fingerprint(inputs: &[&[u8]]) -> u64 {
+    let mut state = xxhash_rust::xxh3::Xxh3::new();
+    for input in inputs {
+        state.update(&(input.len() as u64).to_le_bytes());
+        state.update(input);
+    }
+    state.digest().max(1)
 }
 
 /// The record's place: `<target>/cargo-val/last-run`.
@@ -116,26 +145,55 @@ fn commit(temporary: &Path, place: &Path) -> io::Result<()> {
 mod tests {
     use std::vec::Vec;
 
-    use super::{commit, decode, encode, path, read, stage, target_directory, write};
+    use super::{commit, decode, encode, fingerprint, path, read, stage, target_directory, write};
     use crate::test_dir::tempdir;
 
-    const RUN: (u64, u32, u8) = (258_230, 383, 1);
+    const RUN: super::Record = (258_230, 383, 1, 0xA1B2_C3D4_E5F6_0718, 1204, 91_500);
 
     #[test]
     fn a_record_survives_the_round_trip_in_fixed_little_endian_fields() {
         let bytes = encode(RUN);
-        assert_eq!(bytes, [1, 0xB6, 0xF0, 0x03, 0, 0, 0, 0, 0, 0x7F, 0x01, 0, 0, 1]);
+        let expected = [
+            2, 0xB6, 0xF0, 0x03, 0, 0, 0, 0, 0, 0x7F, 0x01, 0, 0, 1, 0x18, 0x07, 0xF6, 0xE5, 0xD4, 0xC3, 0xB2, 0xA1, 0xB4, 0x04, 0, 0, 0x6C, 0x65, 0x01, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(bytes, expected);
         assert_eq!(decode(&bytes), Ok(RUN));
+    }
+
+    #[test]
+    fn the_fingerprint_changes_with_any_input_and_with_where_the_input_boundaries_fall() {
+        let lock = b"version = 4\n[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n".as_slice();
+        let manifest = b"[package]\nname = \"tinyserve\"\nversion = \"0.1.0\"\n".as_slice();
+        let commented = b"[package]\nname = \"tinyserve\"\nversion = \"0.1.0\"\n# touched\n".as_slice();
+        let toolchain = b"rustc 1.93.0 (abc 2026-01-01)\nhost: aarch64-apple-darwin\n".as_slice();
+
+        let base = fingerprint(&[lock, manifest, toolchain, b"test", b"--workspace"]);
+
+        assert_eq!(base, fingerprint(&[lock, manifest, toolchain, b"test", b"--workspace"]));
+        assert_ne!(base, fingerprint(&[lock, commented, toolchain, b"test", b"--workspace"]));
+        assert_ne!(base, fingerprint(&[lock, manifest, toolchain, b"test", b"--workspace", b"-p"]));
+        assert_ne!(fingerprint(&[b"ab", b"c"]), fingerprint(&[b"a", b"bc"]));
+        assert_ne!(fingerprint(&[]), 0);
+    }
+
+    #[test]
+    fn a_version_one_record_without_a_fingerprint_reads_as_no_previous_run() {
+        let version_one = [1_u8, 0xB6, 0xF0, 0x03, 0, 0, 0, 0, 0, 0x7F, 0x01, 0, 0, 1];
+        assert_eq!(decode(&version_one), Err("wrong length"));
+        let target = tempdir().expect("tempdir is creatable");
+        std::fs::create_dir_all(path(target.path()).parent().expect("record has a directory")).expect("directory is creatable");
+        std::fs::write(path(target.path()), version_one).expect("old record is writable");
+        assert_eq!(read(target.path()), None);
     }
 
     #[test]
     fn a_wrong_length_or_version_is_not_a_record() {
         let good = encode(RUN);
         let mut other_version = good;
-        other_version[0] = 2;
+        other_version[0] = 3;
         let mut longer = good.to_vec();
         longer.push(0);
-        assert_eq!(decode(&good[..13]), Err("wrong length"));
+        assert_eq!(decode(&good[..33]), Err("wrong length"));
         assert_eq!(decode(&longer), Err("wrong length"));
         assert_eq!(decode(&[]), Err("wrong length"));
         assert_eq!(decode(&other_version), Err("wrong version"));
@@ -147,8 +205,8 @@ mod tests {
         assert_eq!(read(target.path()), None);
         write(target.path(), RUN).expect("first run writes its record");
         assert_eq!(read(target.path()), Some(RUN));
-        write(target.path(), (1_000, 12, 0)).expect("second run replaces it");
-        assert_eq!(read(target.path()), Some((1_000, 12, 0)));
+        write(target.path(), (1_000, 12, 0, 7, 40, 600)).expect("second run replaces it");
+        assert_eq!(read(target.path()), Some((1_000, 12, 0, 7, 40, 600)));
     }
 
     #[test]
@@ -172,12 +230,12 @@ mod tests {
         let target = tempdir().expect("tempdir is creatable");
         write(target.path(), RUN).expect("earlier run writes its record");
         let place = path(target.path());
-        let temporary = stage(&place, &encode((5, 6, 0))).expect("staging succeeds");
+        let temporary = stage(&place, &encode((5, 6, 0, 8, 9, 3))).expect("staging succeeds");
         assert_eq!(temporary.parent(), place.parent());
         assert_eq!(read(target.path()), Some(RUN));
-        assert_eq!(std::fs::read(&temporary).expect("staged file is readable"), encode((5, 6, 0)));
+        assert_eq!(std::fs::read(&temporary).expect("staged file is readable"), encode((5, 6, 0, 8, 9, 3)));
         commit(&temporary, &place).expect("rename succeeds");
-        assert_eq!(read(target.path()), Some((5, 6, 0)));
+        assert_eq!(read(target.path()), Some((5, 6, 0, 8, 9, 3)));
         assert!(!temporary.exists());
     }
 

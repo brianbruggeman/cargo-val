@@ -27,6 +27,7 @@ pub mod child_completion;
 pub mod cli;
 pub mod config;
 pub mod discover_cargo;
+pub mod eta;
 pub mod failure_class;
 pub mod filter_glob;
 pub mod filterset;

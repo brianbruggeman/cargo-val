@@ -145,7 +145,7 @@ mod tests {
 
     const PROBE: &str = "path+file:///work/buildscript_probe#2.7.1-rc.2";
     const ELSEWHERE: &str = "path+file:///elsewhere#0.1.0";
-    const METADATA: &str = r#"{"packages":[{"name":"buildscript_probe","version":"2.7.1-rc.2","id":"path+file:///work/buildscript_probe#2.7.1-rc.2","targets":[{"kind":["lib"],"crate_types":["lib"],"name":"buildscript_probe"},{"kind":["bin"],"crate_types":["bin"],"name":"probe"}],"manifest_path":"/work/buildscript_probe/Cargo.toml"}],"workspace_members":[],"resolve":null,"target_directory":"/work/probe_target","version":1}"#;
+    const METADATA: &str = r#"{"packages":[{"name":"buildscript_probe","version":"2.7.1-rc.2","id":"path+file:///work/buildscript_probe#2.7.1-rc.2","targets":[{"kind":["lib"],"crate_types":["lib"],"name":"buildscript_probe"},{"kind":["bin"],"crate_types":["bin"],"name":"probe"}],"manifest_path":"/work/buildscript_probe/Cargo.toml"}],"workspace_members":["path+file:///work/buildscript_probe#2.7.1-rc.2"],"resolve":null,"target_directory":"/work/probe_target","version":1}"#;
 
     fn bins_of_probe() -> BinCounts {
         let mut scan = Box::new(MetadataScan::new());
