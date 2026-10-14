@@ -1,2 +1,0 @@
-{"case":"c47d_fixture","status":"prospective","input":{"host":"macos","child_slot":{"index":0,"generation":1},"sibling_slot":{"index":1,"generation":1},"child_held_on_parent_barrier":true,"deadline_milliseconds":25},"expected":{"tests_passed":2,"tests_failed":0,"deadline_wakes":1,"owned_children_canceled_and_reaped":1,"busy_polls":0}}
-{"case":"c47d_negative_control","status":"prospective","control":{"mutation":"observe held child before the registered deadline","same_comparator":"deadline_event","expected_rejected":true,"timeout_events":0}}

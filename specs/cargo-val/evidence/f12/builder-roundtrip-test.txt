@@ -1,9 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
-     Running tests/borrowed_settings.rs (/tmp/conflaguration_f10_target/debug/deps/borrowed_settings-70f07e2e6a4c60ca)
-
-running 1 test
-test builder_roundtrip ... {"typed_fields":2,"builder_to_serialization_roundtrip":1,"missing_field_rejected":1}
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
-

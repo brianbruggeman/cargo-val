@@ -1,2 +1,0 @@
-{"target": "x86_64-pc-windows-msvc", "library_artifacts": 1, "product_errors": 0}
-{"rejected_missing_target_preflight_controls": 1}

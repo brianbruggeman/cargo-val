@@ -1,2 +1,0 @@
-   Compiling cargo_val_fixture v0.1.0 (/tmp/cargo_val_fixture_10m)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s

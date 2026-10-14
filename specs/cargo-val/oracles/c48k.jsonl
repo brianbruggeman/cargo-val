@@ -1,2 +1,0 @@
-{"case":"c48k_fixture","status":"prospective","input":{"host":"unix","executable":"cargo","path_entry":"/fixture/bin","fixture_executable":"/fixture/bin/cargo","argv":["cargo","test","--no-run","--message-format=json"]},"expected":{"tests_passed":2,"tests_failed":0,"cargo_path_launches":1,"child_exits":1,"descriptor_leaks":0}}
-{"case":"c48k_negative_control","status":"prospective","control":{"mutation":"remove /fixture/bin from child PATH","same_comparator":"command_launch","expected_rejected":true,"launches":0,"launch_errors":1}}

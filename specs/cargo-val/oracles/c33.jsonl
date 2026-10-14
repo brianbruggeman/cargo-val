@@ -1,2 +1,0 @@
-{"case":"c33_fixture","input":{"events":["filtered","ignored","pass_a","pass_b","fail"],"expected":{"discovered":5,"filtered":1,"ignored":1,"passed":2,"failed":1,"unaccounted":0}},"status":"observed"}
-{"case":"c33_negative_control","control":{"mutation":"duplicate terminal event for retired slot generation","expected_rejected":true},"status":"observed"}

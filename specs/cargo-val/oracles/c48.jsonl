@@ -1,2 +1,0 @@
-{"case":"c48_fixture","input":{"host":"windows","children":["timed_out","sibling"],"expected":{"terminated_and_reaped":1,"live_siblings":1,"orphans":0}},"status":"prospective"}
-{"case":"c48_negative_control","control":{"mutation":"reuse buffer before pending pipe cancellation completes","expected_rejected":true},"status":"prospective"}

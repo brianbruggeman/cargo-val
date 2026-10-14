@@ -1,4 +1,0 @@
-case: first cargo test fixture baseline attempted the configured shared target directory /tmp/cargo_target
-observation: test process integration_fixture-c192ef95dfef63d1 remained at _dyld_start; sample is cargo-test-shared-target-startup.sample
-control: rebuilding the same fixture with CARGO_TARGET_DIR=/tmp/cargo_val_wallclock_probe_target completed in 0.22 s and five later invocations each exited 0
-source limitation: the trace identifies the process state but does not establish why the shared-target binary remained in dyld startup

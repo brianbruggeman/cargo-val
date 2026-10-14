@@ -1,4 +1,0 @@
-{"kind":"chunk","bytes":"{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"bin\"],\"test\":true},\"profile\":{\"test\":true},\"executable\":\"/fixture/first\"","producer_open":true}
-{"kind":"chunk","bytes":"}\n{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"test\"],\"test\":true},\"profile\":{\"test\":true},\"executable\":\"/fixture/second\"","producer_open":true}
-{"kind":"chunk","bytes":"}\n","producer_open":true}
-{"kind":"eof","producer_open":false}

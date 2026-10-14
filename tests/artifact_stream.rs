@@ -47,10 +47,10 @@ fn counted_parse<'input, 'scratch>(
 }
 
 fn assert_escaped_and_bounded_parses(scratch: &mut [u8]) {
-    let escaped = include_bytes!("../specs/cargo-val/oracles/c2-windows-escaped.jsonl");
+    let escaped = include_bytes!("fixtures/artifact-stream/c2-windows-escaped.jsonl");
     let escaped = &escaped[..escaped.len() - 1];
     let expected_escaped =
-        include_str!("../specs/cargo-val/oracles/c2-windows-escaped.expected.jsonl");
+        include_str!("fixtures/artifact-stream/c2-windows-escaped.expected.jsonl");
     let expected_escaped: serde_json::Value = serde_json::from_str(expected_escaped)
         .expect("the escaped-path expected record must parse");
     let decoded_path = expected_escaped["decoded_executable"]
@@ -83,7 +83,7 @@ fn assert_escaped_and_bounded_parses(scratch: &mut [u8]) {
     let (result, allocations) = counted_parse(&over_byte_record, scratch, 629, 4);
     assert_eq!(allocations, 0);
     assert_eq!(result, Err(ParseError::RecordTooLarge));
-    let too_deep = include_bytes!("../specs/cargo-val/oracles/c2-over-depth.jsonl");
+    let too_deep = include_bytes!("fixtures/artifact-stream/c2-over-depth.jsonl");
     let (result, allocations) = counted_parse(too_deep, scratch, 629, 4);
     assert_eq!(allocations, 0);
     assert_eq!(result, Err(ParseError::DepthExceeded));
@@ -135,10 +135,10 @@ fn assert_malformed_and_escaped_field_parses(scratch: &mut [u8]) {
         ),
         Err(ParseError::InvalidJson)
     );
-    let escaped_fields = include_bytes!("../specs/cargo-val/oracles/c2-escaped-fields.jsonl");
+    let escaped_fields = include_bytes!("fixtures/artifact-stream/c2-escaped-fields.jsonl");
     let escaped_fields = &escaped_fields[..escaped_fields.len() - 1];
     let expected_escaped_fields =
-        include_str!("../specs/cargo-val/oracles/c2-escaped-fields.expected.jsonl");
+        include_str!("fixtures/artifact-stream/c2-escaped-fields.expected.jsonl");
     let expected_escaped_fields: serde_json::Value = serde_json::from_str(expected_escaped_fields)
         .expect("the escaped-field expected record must parse");
     let (result, allocations) = counted_parse(escaped_fields, scratch, 629, 4);
@@ -177,8 +177,8 @@ async fn artifact_records_borrow_decode_and_enforce_caller_bounds() {
     assert_eq!(ALLOCATION_COUNT.with(Cell::get), 1);
     assert_eq!(allocation_control, [1]);
 
-    let input = include_str!("../specs/cargo-val/oracles/c2.jsonl");
-    let expected = include_str!("../specs/cargo-val/oracles/c2.expected.jsonl");
+    let input = include_str!("fixtures/artifact-stream/c2.jsonl");
+    let expected = include_str!("fixtures/artifact-stream/c2.expected.jsonl");
     let expected: serde_json::Value =
         serde_json::from_str(expected).expect("the expected record must parse");
     let mut emitted_executables = Vec::new();

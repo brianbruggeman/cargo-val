@@ -1,2 +1,0 @@
-{"case":"c45e_fixture","status":"prospective","input":{"host":"windows","slot":{"index":0,"generation":2},"stdout":"out","stderr":"err","iocp_handle_associations":2},"expected":{"tests_passed":2,"tests_failed":0,"associated_read_handles":2,"borrowed_stream_completions":2,"synchronous_child_reads":0,"copied_payload_bytes":0}}
-{"case":"c45e_negative_control","status":"prospective","control":{"mutation":"replace stdout completion generation 2 with generation 1","same_comparator":"slot_and_payload","expected_rejected":true,"accepted_bytes":0}}

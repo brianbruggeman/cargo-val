@@ -1,3 +1,0 @@
-{"active_child":"alpha child","consumed_bytes":0,"event":"pull_while_full","listing_record":"beta: test\\n","result":"Full"}
-{"active_child":"alpha child","event":"retire_child","slot_capacity":1}
-{"borrowed_name":"beta","consumed_bytes":11,"event":"pull_after_retire","listing_record":"beta: test\\n","result":"Test"}

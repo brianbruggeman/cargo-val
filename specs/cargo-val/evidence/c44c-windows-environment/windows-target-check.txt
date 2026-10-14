@@ -1,3 +1,0 @@
-$ CARGO_TARGET_DIR=/tmp/cargo_val_target cargo check --target x86_64-pc-windows-msvc --no-default-features --features proxima-codec,proxima-primitives --tests
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.17s
-exit status: 0

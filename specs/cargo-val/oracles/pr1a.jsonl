@@ -1,2 +1,0 @@
-{"case":"alloc_only_host_driver_api","expected_poll_entries":1,"std_imports":0}
-{"case":"alloc_only_local_executor_control","expected_completed_tasks":1,"expected_std_feature":false}

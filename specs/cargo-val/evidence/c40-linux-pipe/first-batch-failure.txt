@@ -1,8 +1,0 @@
-running 1 test
-test host::linux_pipe::tests::c40_reads_both_child_streams_without_intermediate_buffers ...
-thread 'host::linux_pipe::tests::c40_reads_both_child_streams_without_intermediate_buffers' panicked:
-assertion `left == right` failed
-  left: 2
- right: 3
-test result: FAILED. 0 passed; 1 failed
-C40_TEST_STATUS=101

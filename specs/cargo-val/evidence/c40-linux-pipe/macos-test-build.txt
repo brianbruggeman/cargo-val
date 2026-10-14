@@ -1,2 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
-  Executable unittests src/lib.rs (/tmp/cargo_val_c40_target/debug/deps/cargo_val-90174107ff274261)

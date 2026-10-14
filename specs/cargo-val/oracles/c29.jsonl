@@ -1,3 +1,0 @@
-{"event":"cargo_selection_options","args":["--package","cargo_val_fixture","--test","integration_fixture"],"positional_filter":"fixture::passes","expected_filter":"fixture::passes"}
-{"event":"missing_selection_value","args":["--test"],"expected":"invalid"}
-{"event":"allocation_probe","parser_allocations":0,"positive_control_allocations":1}

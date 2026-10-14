@@ -1,3 +1,5 @@
 /target
 /tools/*/target
 __pycache__/
+specs/
+cards/

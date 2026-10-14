@@ -1,2 +1,0 @@
-{"case":"c46b_fixture","input":{"old_slot":{"index":0,"generation":1},"new_slot":{"index":0,"generation":2},"expected":{"retired_slots":1,"reused_slots":1,"new_child_completions":1,"stale_retirements":0}},"status":"prospective"}
-{"case":"c46b_negative_control","control":{"mutation":"deliver generation 1 callback after generation 2 reuse","expected":{"new_child_retirements":0}},"status":"prospective"}

@@ -1,2 +1,0 @@
-{"case":"c53a_fixture","input":{"host":"linux","producer_eof":"held until first test starts","tests":["pass","fail"],"expected":{"starts_before_eof":1,"passed":1,"failed":1,"orphans":0,"blocking_child_calls":0,"dedicated_child_threads":0}},"status":"prospective"}
-{"case":"c53a_negative_control","control":{"mutation":"wait for producer eof before launch","expected_rejected":true},"status":"prospective"}

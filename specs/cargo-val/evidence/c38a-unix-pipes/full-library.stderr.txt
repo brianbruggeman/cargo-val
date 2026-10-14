@@ -1,2 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
-     Running unittests src/lib.rs (/tmp/cargo_val_target/debug/deps/cargo_val-13745ac8aab338b2)

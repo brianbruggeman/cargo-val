@@ -1,1 +1,0 @@
-First attempt failed with E0207 because the pinned Proxima `Pipe` trait uses ordinary associated types rather than generic associated types, so intent input/output lifetimes were not constrained by the lifetime-free pipe type. The pipe now carries the executable, scratch, and test-name lifetimes in `ExactTestIntentPipe` through `PhantomData`, matching the pinned Pipe contract.

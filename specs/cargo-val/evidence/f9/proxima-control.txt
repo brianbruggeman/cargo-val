@@ -1,9 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
-     Running tests/no_std_graph.rs (/tmp/conflaguration_f8a_target/debug/deps/no_std_graph-3f74c545a75c1831)
-
-running 1 test
-test no_std_export ... {"package":"proxima-primitives","std_feature_edges":0,"library_artifacts":1,"exports_compiled":1,"std_env_mutation_rejections":1}
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.90s
-

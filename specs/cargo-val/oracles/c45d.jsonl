@@ -1,2 +1,0 @@
-{"case":"c45d_fixture","input":{"control_event":"remote_wake_after_ready_drain","expected":{"iocp_control_packets":1,"resumed_coordinators":1,"pre_wake_resumes":0}},"status":"prospective"}
-{"case":"c45d_negative_control","control":{"mutation":"suppress PostQueuedCompletionStatus control packet","expected_rejected":true},"status":"prospective"}

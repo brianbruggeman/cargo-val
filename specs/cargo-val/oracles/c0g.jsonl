@@ -1,1 +1,0 @@
-{"exit_code":0,"host":"windows","std_edges":0,"stdout":"cargo-val\nRun Rust tests as isolated processes with streaming discovery.\n\nUsage: cargo val [OPTIONS] [FILTER] [-- <TEST-ARGS>...]\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version\n","unresolved_entry_symbols":0}

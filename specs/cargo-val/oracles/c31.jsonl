@@ -1,2 +1,0 @@
-{"case":"c31_fixture","input":{"names":["alpha","alphabet","beta"],"filter":"alpha","modes":["substring","exact"],"expected":{"substring":["alpha","alphabet"],"exact":["alpha"],"nonmatch":["beta"],"owned_name_copies":0,"borrowed_name_pointers":4}},"status":"observed"}
-{"case":"c31_negative_control","control":{"mutation":"select beta in exact alpha mode","expected_rejected":true},"status":"observed"}
