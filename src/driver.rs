@@ -390,6 +390,7 @@ pub(crate) struct TestWatch {
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
     group_length: usize,
+    started_ms: u64,
     status: Option<i32>,
 }
 
@@ -688,6 +689,11 @@ fn track(target: u32) -> Result<(), RunError> {
     track_child(target).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })
 }
 
+// a session child leads its own process group, so the signal table holds its group and a forwarded signal reaches what the test spawned
+fn track_leader(target: u32) -> Result<(), RunError> {
+    track_group(target).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })
+}
+
 /// Runs `spawn` only after claiming a signal-table slot, so a full table refuses while no child exists, and hands the slot back if the spawn fails.
 ///
 /// # Errors
@@ -712,7 +718,7 @@ fn start_session(
         .ok_or(RunError::Outcome)?
         .child();
     let process_id = child.process_id();
-    track(process_id)?;
+    track_leader(process_id)?;
     attach_session(&lanes[JOB_BASE + slot.index()], child)?;
     *lanes[JOB_BASE + slot.index()].4.borrow_mut() = Some(SignalSource::new(&scope));
     watches[slot.index()] = Some(TestWatch {
@@ -723,6 +729,7 @@ fn start_session(
         shard,
         group: [0; GROUP_CAPACITY],
         group_length: 0,
+        started_ms: monotonic_millis(),
         status: None,
     });
     Ok(())
@@ -840,7 +847,7 @@ pub(crate) fn session_exited(
         return Ok(());
     };
     watch.status = Some(code);
-    release_child(watch.process_id);
+    release_group(watch.process_id);
     let (slot, exit) = (watch.slot, watch.exit(code));
     if run.settings.process == ProcessMode::Test && exit == Err(RunError::Cancelled) {
         let target = ledger.sessions().get(slot).map(RunningChild::target);
@@ -1415,6 +1422,7 @@ pub(crate) struct ListingRun<'run> {
     specials: RefCell<SpecialPlan<'run>>,
     sched_target: Cell<Option<usize>>,
     interrupt_reported: Cell<usize>,
+    interrupt_not_run: Cell<usize>,
     root: Signal,
     trip: Signal,
 }
@@ -1497,32 +1505,41 @@ impl ListingRun<'_> {
         }
     }
 
-    // agent output names the interrupt once, with every session still alive at that moment, before they are ended
+    // every session still alive at the moment of the signal is named once, with the group the forward reached and its age, before they are ended
     pub(crate) fn report_interrupt(&self, ledger: &Ledger<'_>, watches: &Watches) -> Result<(), RunError> {
         let Some(signal) = self.signals.received() else {
             return Ok(());
         };
-        if !self.settings.output.is_agent_like() {
-            return Ok(());
-        }
-        let groups = watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot)).count();
+        let live = || {
+            watches
+                .iter()
+                .flatten()
+                .filter(|watch| watch.status.is_none())
+                .filter_map(|watch| ledger.sessions().get(watch.slot).map(|session| (watch, session)))
+        };
         if self.interrupt_reported.get() == 0 {
             if !status_queue::room_for(EVENT_RESERVE) {
                 status_queue::defer();
                 return Ok(());
             }
-            emit(self.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups })?;
+            emit(self.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups: live().count() })?;
             self.interrupt_reported.set(1);
         }
         let targets = self.targets.borrow();
-        let sessions = watches.iter().flatten().filter_map(|watch| ledger.sessions().get(watch.slot));
-        for session in sessions.skip(self.interrupt_reported.get() - 1) {
+        let arena = self.shards.borrow();
+        let now_ms = monotonic_millis();
+        let running = live().flat_map(|(watch, session)| {
+            let shard_names = watch.shard.iter().flat_map(|shard| shard.unreported(&arena));
+            let solo_name = watch.shard.is_none().then(|| session.name_bytes()).into_iter();
+            shard_names.chain(solo_name).map(move |name| (watch, session.target(), name))
+        });
+        for (watch, target, name) in running.skip(self.interrupt_reported.get() - 1) {
             if !status_queue::room_for(EVENT_RESERVE) {
                 status_queue::defer();
                 return Ok(());
             }
-            let id = (targets.id(session.target()), session.name_bytes());
-            emit(self.render(), &Event::Running { id })?;
+            let id = (targets.id(target), name);
+            emit(self.render(), &Event::Running { id, group: watch.process_id, age_ms: now_ms.saturating_sub(watch.started_ms) })?;
             self.interrupt_reported.set(self.interrupt_reported.get() + 1);
         }
         Ok(())
@@ -1603,7 +1620,7 @@ impl ListingRun<'_> {
         if self.tripped(ledger) { Err(RunError::Tripped) } else { Ok(()) }
     }
 
-    // the one place a refused launch is counted: a tripped refusal puts its names in listed-not-run, an interrupt counts nothing
+    // the one place a refused launch is counted: a tripped refusal puts its names in listed-not-run, an interrupt puts them in the interrupted run's not_run
     pub(crate) fn shed(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
@@ -1615,7 +1632,10 @@ impl ListingRun<'_> {
                 (0..names).for_each(|_| self.policy.borrow_mut().listed_test_skipped());
                 true
             }
-            Err(_) => true,
+            Err(_) => {
+                self.interrupt_not_run.set(self.interrupt_not_run.get() + names);
+                true
+            }
         }
     }
 
@@ -2903,6 +2923,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0),
+            interrupt_not_run: Cell::new(0),
             trip: root.child(),
             root,
     });
@@ -3259,7 +3280,7 @@ fn finish_run(
 ) -> Result<RunSummary, RunError> {
     if let Err(error) = interrupted(run.signals) {
         agent_exit(run, error.exit_code())?;
-        rich_interrupted(run, &error)?;
+        close_interrupted(parser, run, error.exit_code())?;
         return Err(error);
     }
     if cargo_exit_code.is_some_and(|code| code != 0) {
@@ -3282,20 +3303,6 @@ fn finish_run(
         stop,
         doc_tests,
     )
-}
-
-// agent output names the interrupt as it happens; a rich run names it once, as it leaves
-fn rich_interrupted(run: &ListingRun<'_>, error: &RunError) -> Result<(), RunError> {
-    let RunError::Interrupted(signal) = *error else {
-        return Ok(());
-    };
-    if run.settings.output != OutputMode::Rich {
-        return Ok(());
-    }
-    let mut block = LineBuffer::new();
-    let event = Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups: 0 };
-    run.render().1.borrow().project(&event, &mut block).map_err(|_| RunError::Reactor)?;
-    emit_kept(run.render(), block.bytes())
 }
 
 // the closing EXIT line of an agent run that ends in an error; every other ending already printed its own
@@ -3458,7 +3465,7 @@ fn spawn_doc_tests(
         })
     })?;
     let process_id = child.process_id();
-    track_group(process_id).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })?;
+    track_leader(process_id)?;
     if child.lower_priority().is_err() {
         write_fd(2, b"cargo-val: could not lower the doc test priority\n")?;
     }
@@ -3736,7 +3743,8 @@ fn conclude(
         (0, ..) => 0,
         _ => 1,
     };
-    close_plain(render, (targets.len(), &total), stop, (started_millis, parser.manifest_path(), exit))?;
+    emit(render, &Event::Listed { binaries: targets.len(), of: Some(targets.len()), tests: total.discovered })?;
+    emit_finished(render, &total, stop.map_or(0, |report| report.listed_not_run), (started_millis, parser.manifest_path(), exit))?;
     if parser.timeline() && matches!(settings.output, OutputMode::Plain | OutputMode::Rich) {
         emit_timeline(render)?;
     }
@@ -3754,20 +3762,48 @@ fn conclude(
     })
 }
 
-fn close_plain(
+// an interrupted plain or rich run closes with the Finished event a finished run closes with; not_run is what was discovered and never settled
+fn close_interrupted(parser: &CliParser<'_>, run: &ListingRun<'_>, exit: i32) -> Result<(), RunError> {
+    if run.settings.output.is_agent_like() {
+        return Ok(());
+    }
+    name_interrupt(run)?;
+    let targets = run.targets.borrow();
+    let not_run = run.interrupt_not_run.get();
+    let settled = (0..targets.len()).fold(Counts::default(), |sum, target| sum.plus(&targets.counts(target)));
+    // a withdrawn name left the discovered count when its child was ended, so the interrupted run puts it back as not_run
+    let total = Counts { discovered: settled.discovered + not_run, ..settled };
+    erase_frame(run.render())?;
+    emit_finished(run.render(), &total, not_run, (run.started_millis, parser.manifest_path(), exit))?;
+    close_cursor()
+}
+
+// a signal that arrived after the run loop stopped listening (post-run review, the last instant) is named here with no live groups
+fn name_interrupt(run: &ListingRun<'_>) -> Result<(), RunError> {
+    let Some(signal) = run.signals.received() else {
+        return Ok(());
+    };
+    if run.interrupt_reported.get() != 0 {
+        return Ok(());
+    }
+    emit(run.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups: 0 })?;
+    run.interrupt_reported.set(1);
+    Ok(())
+}
+
+fn emit_finished(
     render: &Render<'_>,
-    (binaries, total): (usize, &Counts),
-    stop: Option<StopReport>,
+    total: &Counts,
+    not_run: usize,
     (started_millis, manifest, exit): (u64, Option<&[u8]>, i32),
 ) -> Result<(), RunError> {
-    emit(render, &Event::Listed { binaries, of: Some(binaries), tests: total.discovered })?;
     emit(
         render,
         &Event::Finished {
             passed: total.passed,
             failed: total.failed,
             ignored: total.ignored,
-            not_run: stop.map_or(0, |report| report.listed_not_run),
+            not_run,
             wall_ms: monotonic_millis().saturating_sub(started_millis),
             manifest,
             discovered: total.discovered,
@@ -4142,6 +4178,7 @@ mod listing_allocation_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0),
+            interrupt_not_run: Cell::new(0),
             trip: root.child(),
             root,
         };

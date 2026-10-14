@@ -242,11 +242,11 @@ impl<const RERUN: usize> State<'_, RERUN> {
             Event::Tick { .. } if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
             Event::Begin { .. } | Event::Previous { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
             Event::Key(_) if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
-            Event::Captured { .. } | Event::Warned { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Finished { .. } => {
+            Event::Captured { .. } | Event::Warned { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Running { .. } | Event::Finished { .. } => {
                 self.erase_rich(frame);
                 self.project(event, frame)
             }
-            Event::Tick { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Running { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
+            Event::Tick { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
         }
     }
 

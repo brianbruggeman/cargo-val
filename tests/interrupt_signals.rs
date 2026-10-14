@@ -7,7 +7,8 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::collections::BTreeSet;
+use std::process::{Child, ExitStatus, Stdio};
 
 #[path = "common/fifo.rs"]
 mod fifo;
@@ -20,17 +21,26 @@ mod binary;
 
 #[path = "common/group.rs"]
 mod group;
+#[path = "common/drain.rs"]
+mod drain;
 #[path = "common/lead.rs"]
 mod lead;
+#[path = "common/pty.rs"]
+mod pty;
 #[path = "common/wait.rs"]
 mod wait;
 
 use cargo_val::edge_stream_unix::ChildStream;
 use exit_wait::{ExitSource, until_exit};
 use core::num::NonZeroI32;
+use futures::future::join;
+use pty::{Pty, open_pty};
 
 const SIGINT_STATUS: i32 = 130;
 const SIGTERM_STATUS: i32 = 143;
+const IN_FLIGHT: usize = 2;
+const DISCOVERED: usize = 3;
+const SHOW_CURSOR: &str = "\x1b[?25h";
 
 struct Fixture {
     child: Child,
@@ -231,6 +241,154 @@ async fn an_interrupted_agent_run_names_the_signal_and_the_blocked_test_and_clos
     assert_eq!(lines[3], "EXIT     130  interrupted", "{report}");
 }
 
+struct Observed {
+    output: String,
+    status: ExitStatus,
+    groups: BTreeSet<libc::pid_t>,
+    leader_group: libc::pid_t,
+}
+
+type Launch = (&'static str, &'static str, usize);
+
+const TEST_PROCESSES: Launch = ("test", "--test-threads=2", IN_FLIGHT);
+const ONE_SHARD_AT_A_TIME: Launch = ("shard", "--test-threads=1", 1);
+
+fn spawned_arguments((process, threads, _): Launch) -> [&'static str; 7] {
+    ["--lib", "--process", process, "--no-fail-fast", "--no-tests=pass", "--", threads]
+}
+
+async fn announced_holders(ready: &ChildStream, wanted: usize) -> Vec<libc::pid_t> {
+    let mut seen = String::new();
+    loop {
+        let complete: Vec<&str> = seen.split_inclusive('\n').filter(|line| line.ends_with('\n')).collect();
+        if complete.len() >= wanted {
+            return complete.iter().map(|line| line.trim().parse().expect("a blocked test wrote its pid")).collect();
+        }
+        seen.push_str(&fifo::first_line(ready, "a blocked test never reached the rendezvous").await);
+    }
+}
+
+// the groups are read before the signal because a killed holder has no group left to ask about
+async fn interrupt_once_in_flight(fixture: &mut Fixture, ready: &ChildStream, wanted: usize) -> BTreeSet<libc::pid_t> {
+    let holders = announced_holders(ready, wanted).await;
+    let groups = holders.iter().map(|holder| unsafe { libc::getpgid(*holder) }).collect();
+    fixture.holder = holders[0];
+    let cargo_val = libc::pid_t::try_from(fixture.child.id()).expect("pid fits pid_t");
+    assert_eq!(unsafe { libc::kill(cargo_val, libc::SIGINT) }, 0);
+    groups
+}
+
+async fn interrupted_plain_run(label: &str, launch: Launch) -> Observed {
+    let (mut fixture, ready) = start_as(label, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "plain", Stdio::piped());
+    let ready = Box::new(ready);
+    let groups = interrupt_once_in_flight(&mut fixture, &ready, launch.2).await;
+    let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
+    let mut output = String::new();
+    fixture.child.stdout.take().expect("stdout is piped").read_to_string(&mut output).expect("plain output is UTF-8");
+    let leader_group = unsafe { libc::getpgid(0) };
+    Observed { output, status, groups, leader_group }
+}
+
+async fn interrupted_rich_run(label: &str, launch: Launch) -> Observed {
+    let Pty { master, slave } = open_pty();
+    let (mut fixture, ready) = start_as(label, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "rich", Stdio::from(slave));
+    let (ready, master) = (Box::new(ready), Box::new(ChildStream::new(OwnedFd::from(master))));
+    let leader = fixture.child.id();
+    let work = join(interrupt_once_in_flight(&mut fixture, &ready, launch.2), drain::drain_until(&master, |_| false));
+    let (groups, (bytes, _)) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", work).await {
+        Ok(finished) => finished,
+        Err((report, _)) => panic!("{report}"),
+    };
+    let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
+    let leader_group = unsafe { libc::getpgid(0) };
+    Observed { output: String::from_utf8_lossy(&bytes).replace('\r', ""), status, groups, leader_group }
+}
+
+fn closing_block(output: &str) -> Vec<String> {
+    let from = output.find("INTERRUPTED  ").unwrap_or_else(|| panic!("no INTERRUPTED line was printed:\n{output}"));
+    let mut block = Vec::new();
+    for line in output[from..].lines() {
+        block.push(line.to_owned());
+        if line.starts_with("SUMMARY") {
+            break;
+        }
+    }
+    block
+}
+
+fn summary_counts(line: &str) -> Vec<(String, usize)> {
+    line.split_whitespace()
+        .skip(1)
+        .filter_map(|token| token.split_once('='))
+        .filter_map(|(key, value)| value.parse().ok().map(|number| (key.to_owned(), number)))
+        .collect()
+}
+
+fn count_of(counts: &[(String, usize)], key: &str) -> usize {
+    counts.iter().find(|(name, _)| name == key).map_or_else(|| panic!("SUMMARY carries no {key}= key: {counts:?}"), |(_, value)| *value)
+}
+
+fn assert_spec_block(observed: &Observed) {
+    let block = closing_block(&observed.output);
+    let report = format!("{}\nstatus: {:?}", observed.output, observed.status);
+    assert_eq!(observed.status.code(), Some(SIGINT_STATUS), "{report}");
+    assert_eq!(block.len(), IN_FLIGHT + 2, "INTERRUPTED, one RUNNING per test in flight, SUMMARY and nothing between:\n{report}");
+    assert_eq!(block[0], format!("INTERRUPTED  signal=2  forwarded_groups={IN_FLIGHT}"), "{report}");
+    let reported: BTreeSet<libc::pid_t> = block[1..=IN_FLIGHT].iter().map(|line| running_group(line, &report)).collect();
+    assert_eq!(reported, observed.groups, "each RUNNING line names the real process group of a blocked test:\n{report}");
+    assert!(!observed.groups.contains(&observed.leader_group), "the blocked tests lead groups of their own, not the harness group");
+    let counts = summary_counts(&block[IN_FLIGHT + 1]);
+    let accounted = ["passed", "failed", "ignored", "not_run"].iter().map(|key| count_of(&counts, key)).sum::<usize>();
+    assert_eq!(accounted, count_of(&counts, "discovered"), "passed + failed + ignored + not_run = discovered:\n{report}");
+    assert_eq!(count_of(&counts, "discovered"), DISCOVERED, "{report}");
+}
+
+fn running_group(line: &str, report: &str) -> libc::pid_t {
+    let fields: Vec<&str> = line.split("  ").collect();
+    assert_eq!(fields.len(), 5, "RUNNING  <binary>  <test>  <age>  killed group=<pgid>: {line:?}\n{report}");
+    assert_eq!(fields[0].trim_end(), "RUNNING", "{line:?}");
+    assert_eq!(fields[1], "cargo_val_blocked_pair_fixture", "{line:?}");
+    assert!(fields[2].starts_with("tests::unit_blocks_"), "{line:?}");
+    assert!(fields[3].strip_suffix('s').is_some_and(|age| age.parse::<f64>().is_ok()), "the age is seconds with a unit: {line:?}");
+    fields[4].strip_prefix("killed group=").and_then(|group| group.parse().ok()).unwrap_or_else(|| panic!("no killed group=<pgid> on {line:?}"))
+}
+
+fn without_ages_groups_and_wall(block: &[String]) -> String {
+    let token = |token: &str| match token.rsplit_once('=') {
+        Some(("group", _)) => "group=<pgid>".to_owned(),
+        Some((key, seconds)) if seconds.strip_suffix('s').is_some_and(|age| age.parse::<f64>().is_ok()) => format!("{key}=<seconds>"),
+        None if token.strip_suffix('s').is_some_and(|age| age.parse::<f64>().is_ok()) => "<seconds>".to_owned(),
+        _ => token.to_owned(),
+    };
+    block.iter().map(|line| line.split(' ').map(token).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n")
+}
+
+#[proxima::test(timeout = "310s")]
+async fn an_interrupted_plain_run_prints_the_specs_interrupted_block_with_each_tests_real_group_and_exits_130() {
+    let observed = interrupted_plain_run("block-plain", TEST_PROCESSES).await;
+
+    println!("{}", closing_block(&observed.output).join("\n"));
+    assert_spec_block(&observed);
+}
+
+#[proxima::test(timeout = "310s")]
+async fn an_interrupted_rich_run_prints_the_same_block_as_plain_after_the_frame_is_erased() {
+    let plain = interrupted_plain_run("block-rich-reference", TEST_PROCESSES).await;
+    let rich = interrupted_rich_run("block-rich", TEST_PROCESSES).await;
+
+    assert_spec_block(&rich);
+    assert_eq!(without_ages_groups_and_wall(&closing_block(&rich.output)), without_ages_groups_and_wall(&closing_block(&plain.output)));
+    assert_cursor_shown_last(&rich.output);
+}
+
+fn assert_cursor_shown_last(output: &str) {
+    let summary = output.find("SUMMARY").expect("the closing block carries a SUMMARY line");
+    let shown: Vec<usize> = output.match_indices(SHOW_CURSOR).map(|(at, _)| at).collect();
+    assert_eq!(shown.len(), 1, "the cursor is shown exactly once:\n{output:?}");
+    assert!(shown[0] > summary, "the cursor returns after the interrupted block and SUMMARY:\n{output:?}");
+    assert!(output.ends_with(SHOW_CURSOR), "nothing is written after the cursor returns:\n{output:?}");
+}
+
 #[proxima::test(timeout = "310s")]
 async fn an_interrupted_run_leaves_the_earlier_last_run_record_intact() {
     let record = target_directory().join("c74-fixture-record-int").join("cargo-val").join("last-run");
@@ -248,4 +406,21 @@ async fn an_interrupted_run_leaves_the_earlier_last_run_record_intact() {
     );
 
     assert_eq!(fs::read(&record).expect("record still exists"), earlier);
+}
+
+#[proxima::test(timeout = "310s")]
+async fn an_interrupted_shard_run_accounts_for_every_discovered_name() {
+    let observed = interrupted_plain_run("block-shard", ONE_SHARD_AT_A_TIME).await;
+
+    let block = closing_block(&observed.output);
+    let report = format!("{}\nstatus: {:?}", observed.output, observed.status);
+    assert_eq!(observed.status.code(), Some(SIGINT_STATUS), "{report}");
+    assert_eq!(block.len(), DISCOVERED + 2, "INTERRUPTED, one RUNNING per test in the shard, SUMMARY:\n{report}");
+    assert_eq!(block[0], "INTERRUPTED  signal=2  forwarded_groups=1", "one shard process is one group and one job:\n{report}");
+    let groups: BTreeSet<libc::pid_t> = block[1..=DISCOVERED].iter().map(|line| running_group(line, &report)).collect();
+    assert_eq!(groups, observed.groups, "every RUNNING line carries the shard process group:\n{report}");
+    let counts = summary_counts(&block[DISCOVERED + 1]);
+    let accounted = ["passed", "failed", "ignored", "not_run"].iter().map(|key| count_of(&counts, key)).sum::<usize>();
+    assert_eq!(accounted, count_of(&counts, "discovered"), "{report}");
+    assert_eq!(count_of(&counts, "discovered"), DISCOVERED, "{report}");
 }

@@ -2,7 +2,8 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::num::NonZeroI32;
 use std::process::{ExitStatus, Stdio};
@@ -22,29 +23,16 @@ mod binary;
 mod drain;
 #[path = "common/group.rs"]
 mod group;
-#[path = "common/lead.rs"]
-mod lead;
+#[path = "common/pty.rs"]
+mod pty;
+
+use pty::{Pty, open_pty};
 
 const FRAME_START: &str = "\x1b[?25l";
 static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
 const REVIEW_HEADER: &str = "cargo val  review";
 const SHOW_CURSOR: &str = "\x1b[?25h";
 const CLOSING_START: &str = "cargo_val_rich_pty_fail_fixture: discovered";
-const COLUMNS: u16 = 80;
-const ROWS: u16 = 40;
-
-struct Pty {
-    master: File,
-    slave: OwnedFd,
-}
-
-fn open_pty() -> Pty {
-    let mut size = libc::winsize { ws_row: ROWS, ws_col: COLUMNS, ws_xpixel: 0, ws_ypixel: 0 };
-    let (mut master, mut slave) = (0, 0);
-    let opened = unsafe { libc::openpty(&raw mut master, &raw mut slave, core::ptr::null_mut(), core::ptr::null_mut(), &raw mut size) };
-    assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
-    unsafe { Pty { master: File::from(OwnedFd::from_raw_fd(master)), slave: OwnedFd::from_raw_fd(slave) } }
-}
 
 fn fixture_manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
@@ -53,7 +41,14 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
 fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
     let stream = || Stdio::from(slave.try_clone().expect("the slave descriptor duplicates"));
     let mut command = binary::command();
-    lead::lead_group(&mut command);
+    // the slave becomes the controlling terminal, so a background-group child reading stdin would get SIGTTIN here as it does in a shell
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY.into(), 0);
+            Ok(())
+        });
+    }
     command
         .arg("--manifest-path")
         .arg(fixture_manifest(fixture))
@@ -516,8 +511,13 @@ fn assert_interrupted_exit(output: &str, status: ExitStatus) {
     let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(output)));
     assert_eq!(status.code(), Some(130), "an interrupted review exits 130: {status}\n{}", shown(output));
     assert!(shown_cursor > last_frame, "the cursor was shown at {shown_cursor}, before the last review frame at {last_frame}");
-    let block = output.rfind("INTERRUPTED  signal=2").unwrap_or_else(|| panic!("no interrupted block:\n{}", shown(output)));
+    let block = output.rfind("INTERRUPTED  signal=2  forwarded_groups=0").unwrap_or_else(|| panic!("no interrupted block with its group count:\n{}", shown(output)));
     assert!(block > last_frame, "the interrupted block at {block} must follow the last review frame at {last_frame}");
+    let tail = &output[block..];
+    assert!(!tail.contains("RUNNING"), "a post-run review has no in-flight test to name:\n{}", shown(tail));
+    let summary = tail.find("SUMMARY  ").unwrap_or_else(|| panic!("the interrupted block has no summary:\n{}", shown(tail)));
+    assert!(summary > 0 && shown_cursor > block + summary, "the cursor at {shown_cursor} must come after the summary at {}", block + summary);
+    assert!(output.ends_with(SHOW_CURSOR), "the cursor is the last thing shown:\n{}", shown(output));
 }
 
 #[proxima::test]
@@ -661,4 +661,26 @@ async fn a_second_run_opens_with_the_first_runs_test_count_as_an_estimate_and_en
     println!("second run counts {estimates:?} closes {closing}");
     assert!(estimates.iter().any(|count| count.ends_with(&format!("/~{total}"))), "no second-run frame showed the first run's count as an estimate: {estimates:?}");
     assert!(closing.ends_with(&format!("/{total}")), "the second run's last frame is exact: {closing}");
+}
+
+#[proxima::test]
+async fn a_test_that_reads_stdin_under_a_controlling_terminal_completes_without_stopping() {
+    let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let release = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-stdin-{run}"));
+    let Pty { master, slave } = open_pty();
+    let mut child = spawn_on(&slave, Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")), "stdin_reader", "rich", (&release, &run), &NO_COLOR);
+    drop(slave);
+    let leader = child.id();
+    let exit = ExitSource::new(NonZeroI32::new(leader.cast_signed()).expect("a spawned child has a nonzero pid"));
+    // boxed: the stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
+    let master = Box::new(ChildStream::new(OwnedFd::from(master)));
+    let waiting = join(drain::drain_until(&master, |_| false), exit.call(()));
+    let (_, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
+        Ok(finished) => finished,
+        Err((report, _)) => panic!("{report}"),
+    };
+    let status = exited.expect("the exit source is unspent").expect("cargo-val exit status reads");
+    let _ = child.try_wait();
+
+    assert!(status.success(), "cargo-val exited {status} while its test child read stdin");
 }

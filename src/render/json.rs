@@ -25,7 +25,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             Event::Captured { id, stdout, stderr, exit, excerpt } => failure(frame, id, [stdout, stderr], exit, excerpt),
             Event::BuildFailed { diagnostic, exit } => build_failed(frame, diagnostic, exit),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
-            Event::Running { id } => running(frame, id),
+            Event::Running { id, .. } => running(frame, id),
             Event::Exited { code } => exit(frame, code),
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, discovered, filtered, exit: code } => {
                 summary(frame, [discovered, passed, failed, ignored, filtered, not_run], wall_ms);

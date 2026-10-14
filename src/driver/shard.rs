@@ -49,6 +49,14 @@ pub(super) struct ShardWatch {
 }
 
 impl ShardWatch {
+    // a shard child starts all its names at once, so every name that has not reported is in flight inside the one group
+    pub(super) fn unreported<'arena>(&self, arena: &'arena ShardArena) -> impl Iterator<Item = &'arena [u8]> {
+        let (shard, reported) = (self.shard, self.reported);
+        (0..shard.count)
+            .filter(move |ordinal| !reported.has(*ordinal))
+            .filter_map(move |ordinal| arena.nth(shard, ordinal))
+    }
+
     fn new(shard: Shard, group: &[u8]) -> Self {
         let mut watch = Self {
             shard,
@@ -566,6 +574,7 @@ impl CargoDriver<'_> {
         if run.interrupted() {
             run.root.fire();
             let dropped = run.shards.borrow_mut().discard_everything() + run.specials.borrow_mut().discard();
+            run.shed(ledger, dropped);
             withdraw_unlaunched(run, ledger, active.target, dropped)?;
             return Ok(dropped > 0);
         }
@@ -891,6 +900,7 @@ mod tests {
                 shard: None,
                 group: [0; GROUP_CAPACITY],
                 group_length: 0,
+                started_ms: 0,
                 status: None,
             };
             assert_eq!(frozen.exit(0), Ok(0));
@@ -1044,6 +1054,7 @@ mod pause_tests {
             specials: RefCell::new(SpecialPlan::new(&mut [])),
             sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0),
+            interrupt_not_run: Cell::new(0),
             trip: root.child(),
             root,
         }
@@ -1060,6 +1071,7 @@ mod pause_tests {
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],
             group_length: 0,
+            started_ms: 0,
             status: None,
         }
     }
