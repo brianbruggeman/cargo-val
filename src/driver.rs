@@ -53,7 +53,6 @@ use crate::edge_spawn::{
 };
 use crate::host_event::HostEvent;
 use crate::outcomes::{OutcomeError, OutcomeLedger, TerminalOutcome};
-use crate::reporter::write_report;
 use crate::runner::{
     LaunchCause, LibtestVerdict, RunningChild, LaunchInput, LaunchOwner,
     ChildOutcomeError, OutcomeInput, OutcomeStep,
@@ -480,24 +479,6 @@ impl ChildOutput {
             (&self.stderr[..self.stderr_length], self.truncation.stderr),
         )
     }
-
-    fn write_failure(&self) -> Result<(), RunError> {
-        if self.stdout_length != 0 {
-            write_fd(2, b"stdout:\n")?;
-            write_fd(2, &self.stdout[..self.stdout_length])?;
-            if self.truncation.stdout {
-                write_fd(2, b"\n[stdout truncated]\n")?;
-            }
-        }
-        if self.stderr_length != 0 {
-            write_fd(2, b"stderr:\n")?;
-            write_fd(2, &self.stderr[..self.stderr_length])?;
-            if self.truncation.stderr {
-                write_fd(2, b"\n[stderr truncated]\n")?;
-            }
-        }
-        Ok(())
-    }
 }
 
 // `test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 716 filtered out; finished in 0.00s`
@@ -907,6 +888,21 @@ pub(crate) fn projected(render: &Render<'_>, event: &Event<'_>) -> Line<PROJECTE
     let mut line = Line::new();
     _ = render.1.borrow().project(event, &mut line);
     line
+}
+
+/// Writes bytes a shard child kept for the terminal; a rich run erases its live frame first so nothing lands mid-frame.
+pub(crate) fn emit_kept(render: &Render<'_>, bytes: &[u8]) -> Result<(), RunError> {
+    let (output, state, frame) = render;
+    let mut frame = frame.borrow_mut();
+    let frame: &mut Line<FRAME_BYTES> = &mut frame;
+    frame.clear();
+    if *output == OutputMode::Rich {
+        state.borrow_mut().erase_rich(frame);
+    }
+    if !frame.bytes().is_empty() {
+        write_fd(1, frame.bytes())?;
+    }
+    write_fd(1, bytes)
 }
 
 /// Applies `event` to the render state and writes its projection to standard output; a frame that was too small says so on stderr.
