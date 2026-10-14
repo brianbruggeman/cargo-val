@@ -1009,6 +1009,7 @@ mod pause_tests {
             debug: false,
             ignore: IgnoreMode::Include,
             filterset: None,
+            link_template: None,
             jobs: 1,
             max_fail: None,
             test_limit_ms: None,

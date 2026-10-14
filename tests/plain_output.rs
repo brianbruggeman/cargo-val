@@ -516,7 +516,7 @@ async fn sigint_during_a_rich_run_on_a_pty_still_shows_the_cursor_and_exits_130(
 
 #[proxima::test(timeout = "310s")]
 async fn plain_through_a_pipe_emits_zero_escape_bytes_on_both_streams() {
-    let output = run(&[], &["--output", "plain"]).await;
+    let output = run(&[("VISUAL", "code")], &["--output", "plain"]).await;
 
     assert_eq!(output.stdout.iter().chain(&output.stderr).filter(|byte| **byte == ESCAPE).count(), 0);
     assert!(stdout_of(&output).contains("SUMMARY  passed=1 failed=1"));
@@ -618,7 +618,7 @@ mod plain_grammar {
 
 #[proxima::test(timeout = "310s")]
 async fn a_failure_prints_the_seven_line_source_excerpt_with_a_marker_and_a_caret_row_and_no_escape_byte() {
-    let output = run(&[], &[]).await;
+    let output = run(&[("VISUAL", "code")], &[]).await;
     let text = stdout_of(&output);
 
     let expected = [

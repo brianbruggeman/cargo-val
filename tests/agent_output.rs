@@ -34,6 +34,7 @@ async fn run(fixture_name: &str, environment: &[(&str, &str)], arguments: &[&str
         .env_remove("CARGO_VAL_COLOR")
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
+        .env("VISUAL", "code")
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agent-fixture-target"))
         .env("CARGO_VAL_LOG", "debug")
         .envs(environment.iter().copied());

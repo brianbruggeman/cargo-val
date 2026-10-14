@@ -9,6 +9,7 @@ use crate::line::Line;
 use crate::view_defaults::{EXCERPT_ROWS, EXCERPT_ROW_BYTES};
 
 const ESCAPE: u8 = 0x1b;
+const BELL: u8 = 0x07;
 const RESET: &[u8] = b"\x1b[0m";
 const CUT: &str = "\u{2026}";
 const TAB_STOP: usize = 4;
@@ -150,8 +151,16 @@ fn cells(found: char) -> usize {
 }
 
 fn escape_end(row: &[u8], start: usize) -> usize {
-    if row.get(start + 1) != Some(&b'[') {
-        return start + 1;
+    match row.get(start + 1) {
+        Some(b'[') => row[start + 2..].iter().position(|byte| (0x40..=0x7e).contains(byte)).map_or(row.len(), |found| start + 2 + found + 1),
+        Some(b']') => string_end(row, start + 2),
+        _ => start + 1,
     }
-    row[start + 2..].iter().position(|byte| (0x40..=0x7e).contains(byte)).map_or(row.len(), |found| start + 2 + found + 1)
+}
+
+fn string_end(row: &[u8], from: usize) -> usize {
+    memchr::memchr2(BELL, ESCAPE, &row[from..]).map_or(row.len(), |found| match row[from + found] {
+        BELL => from + found + 1,
+        _ => (from + found + 2).min(row.len()),
+    })
 }

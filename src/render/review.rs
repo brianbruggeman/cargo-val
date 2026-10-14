@@ -14,9 +14,11 @@
 use super::{Identity, Mode, State, excerpt, seconds};
 use crate::failure_class::{Class, Enforcer, Location};
 use memchr::memmem;
+use crate::hyperlink::write_link;
 use crate::line::Line;
 
 const MIN_WIDTH: usize = 30;
+const LOCATION_BYTES: usize = 512;
 const LIST_ROWS: usize = 3;
 const OUTPUT_LINES: usize = 6;
 const CLASS_FIELD: usize = 8;
@@ -378,7 +380,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         }
         rule(frame, look.0);
         if let Some(index) = self.listed(selected) {
-            detail_view(frame, look, &self.shown(index, detail), top);
+            detail_view(frame, look, &self.shown(index, detail), (top, self.links()));
         }
         footer(frame, look, if top.is_some() { &SCROLL_KEYS } else { &KEYS }, armed);
     }
@@ -665,10 +667,10 @@ fn middle<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, room: u
     joined_range(frame, id, tail_start, total);
 }
 
-fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, top: Option<u16>) {
+fn detail_view<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, row: &Shown<'_>, (top, links): (Option<u16>, (&[u8], &[u8]))) {
     let (id, millis, verdict, _, (class, location, reason, rows, output)) = *row;
     wrapped_name(frame, look, id);
-    class_line(frame, look, (class, millis, location));
+    class_line(frame, look, (class, millis, location), links);
     if let Some(verdict) = verdict {
         verdict_line(frame, look, verdict, millis);
     }
@@ -716,7 +718,7 @@ fn hard_wrapped<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, text: &
     }
 }
 
-fn class_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, (class, millis, location): (Class, u64, Option<Location<'_>>)) {
+fn class_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, (class, millis, location): (Class, u64, Option<Location<'_>>), (template, directory): (&[u8], &[u8])) {
     let word = class_word(class);
     let mut after = Line::<32>::new();
     after.text(b" after ");
@@ -735,9 +737,13 @@ fn class_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, (class, m
     } else {
         frame.text(b"\n ");
     }
-    frame.text(location.file);
-    frame.text(b":");
-    frame.number(usize::try_from(location.line).unwrap_or(0));
+    let line = usize::try_from(location.line).unwrap_or(0);
+    let mut shown = Line::<LOCATION_BYTES>::new();
+    shown.text(location.file);
+    shown.text(b":");
+    shown.number(line);
+    let position = (line, usize::try_from(location.col).unwrap_or(0));
+    write_link(frame, !template.is_empty(), template, directory, location.file, position, shown.bytes());
     paint(frame, look.1, FAINT, b"  e opens");
     frame.text(b"\n");
 }
