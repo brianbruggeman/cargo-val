@@ -115,7 +115,7 @@ async fn colour_off_diagnostics_carry_no_escape_bytes() {
 }
 
 #[proxima::test(timeout = "310s")]
-async fn coloured_diagnostics_still_precede_cargos_coloured_summary() {
+async fn coloured_diagnostics_carry_sgr_bytes_and_cargos_restating_summary_is_gone() {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -128,11 +128,10 @@ async fn coloured_diagnostics_still_precede_cargos_coloured_summary() {
     let output = fixture_output(&mut command).await;
     let text = String::from_utf8_lossy(&output.stderr);
 
-    assert!(output.stderr.contains(&ESCAPE), "colour is on, so cargo's summary carries SGR bytes:\n{text}");
-    let diagnostic = text.find("E0308").unwrap_or_else(|| panic!("rustc's E0308 is missing:\n{text}"));
-    let summary = text.find(": could not compile").unwrap_or_else(|| panic!("cargo's summary is missing:\n{text}"));
-    let failed = text.find("cargo-val: cargo test build failed").unwrap_or_else(|| panic!("the build-failed line is missing:\n{text}"));
-    assert!(diagnostic < summary && summary < failed, "{text}");
+    assert!(output.stderr.contains(&ESCAPE), "colour is on, so rustc's diagnostic carries SGR bytes:\n{text}");
+    assert_eq!(text.matches("E0308]").count(), 1, "the diagnostic prints once:\n{text}");
+    assert!(!text.contains(": could not compile"), "cargo's summary restates the diagnostics above:\n{text}");
+    assert!(!text.contains("cargo-val: cargo test build failed"), "rich ends on EXIT, not a trailer line:\n{text}");
 }
 
 #[proxima::test(timeout = "310s")]
@@ -184,7 +183,7 @@ fn golden(name: &str) -> String {
 #[proxima::test(timeout = "310s")]
 #[case::plain("plain")]
 #[case::agent("agent")]
-async fn plain_and_agent_build_error_output_is_byte_identical_to_the_pre_excerpt_capture(#[case] mode: &str) {
+async fn plain_and_agent_build_error_output_is_byte_identical_to_the_committed_capture(#[case] mode: &str) {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -277,4 +276,28 @@ async fn a_failing_member_below_the_workspace_root_shows_its_excerpt_with_the_la
     assert_eq!(lines[header + 2..=header + 6], ["     1 | pub fn answer() -> u32 {", "     2 |     let scale = 6;", ">    3 |     \"forty-two\"", "      |     ^^^^^^^^^^^ expected `u32`, found `&str`", "     4 | }"][..], "{text}");
     assert!(!lines.contains(&"3 |     \"forty-two\""), "rustc's own snippet row survived:\n{text}");
     assert!(!text.contains("source not found"), "{text}");
+}
+
+#[proxima::test(timeout = "310s")]
+#[case::plain("plain")]
+#[case::agent("agent")]
+#[case::rich("rich")]
+async fn an_error_in_both_the_lib_and_the_lib_test_target_prints_one_diagnostic_and_counts_one_error(#[case] mode: &str) {
+    let mut command = binary::command();
+    command
+        .arg("--manifest-path")
+        .arg(manifest())
+        .args(["--tests", "--output", mode])
+        .env_remove("CI")
+        .env_remove("CARGO_VAL_COLOR")
+        .env("NO_COLOR", "1")
+        .env("CARGO_TARGET_DIR", target_directory().join(format!("build-diagnostics-dedupe-{mode}")));
+
+    let output = fixture_output(&mut command).await;
+
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    assert_eq!(stderr.matches("error[E0308]: mismatched types").count(), 1, "the lib and lib-test targets share one diagnostic:\n{stderr}");
+    assert_eq!(stderr.matches("warning: unused doc comment").count(), 1, "the shared warning prints once too:\n{stderr}");
+    assert!(mode == "agent" || stdout.contains("BUILD    FAILED  errors=1  "), "the error counts once:\n{stdout}");
 }

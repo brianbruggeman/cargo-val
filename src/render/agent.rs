@@ -23,7 +23,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         match *event {
             Event::Begin { version, why: Some(why), .. } => header(frame, version, why),
             Event::Captured { id, stdout, stderr, exit, excerpt } => failure_block(frame, id, [stdout, stderr], exit, excerpt),
-            Event::BuildFailed { diagnostic, exit } => build_failed(frame, diagnostic, exit),
+            Event::BuildFailed { diagnostic, exit, .. } => build_failed(frame, diagnostic, exit),
             Event::Interrupted { signal, groups } => super::interrupted(frame, signal, groups),
             Event::Running { id, .. } => super::text_pair(frame, b"RUNNING", id),
             Event::Exited { code } => exit_line(frame, code),
@@ -39,6 +39,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
             | Event::Previous { .. }
             | Event::Listed { .. }
             | Event::Built { .. }
+            | Event::Failing { .. }
             | Event::Resize { .. }
             | Event::Started { .. }
             | Event::Settled { .. }
