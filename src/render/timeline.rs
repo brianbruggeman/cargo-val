@@ -20,6 +20,7 @@ const LONGEST: usize = 3;
 const TICK_GAP: u64 = 8;
 const TICK_STEPS: [u64; 9] = [1, 5, 10, 30, 60, 300, 600, 1800, 3600];
 const SENTENCE: usize = 256;
+const LIVE_FLOOR_MS: u64 = 60_000;
 const LOWER: [&str; 9] = [" ", "\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}", "\u{2588}"];
 const BLOCK: &str = "\u{2588}";
 const TICK: &str = "\u{252c}";
@@ -56,11 +57,21 @@ impl<const RERUN: usize> State<'_, RERUN> {
         })
     }
 
-    /// The axis end: the closing block's wall time once the run finished, else the time since `Begin` (never zero).
+    fn elapsed_ms(&self) -> u64 {
+        self.now_ms.saturating_sub(self.origin_ms.unwrap_or(self.now_ms))
+    }
+
+    /// The axis end: the closing block's wall time once the run finished; while live, the previous run's wall time (or `LIVE_FLOOR_MS` without one), doubled each time the run crosses it so the plot never overflows.
     fn timeline_wall(&self) -> (u64, bool) {
-        let live = self.wall_ms.is_none();
-        let elapsed = self.now_ms.saturating_sub(self.origin_ms.unwrap_or(self.now_ms));
-        (self.wall_ms.unwrap_or(elapsed).max(1), live)
+        if let Some(wall) = self.wall_ms {
+            return (wall.max(1), false);
+        }
+        let elapsed = self.elapsed_ms();
+        let mut end = self.previous.map_or(LIVE_FLOOR_MS, |(wall, _)| wall).max(1);
+        while end < elapsed {
+            end = end.saturating_mul(2);
+        }
+        (end, true)
     }
 
     /// Writes the timeline of the run so far into `frame`, `width` terminal columns wide.
@@ -83,16 +94,16 @@ impl<const RERUN: usize> State<'_, RERUN> {
         }
         let chart = (width - LEFT - 1).min(MAX_CHART);
         let (wall, live) = self.timeline_wall();
-        self.timeline_title(frame, width, (wall, live));
+        self.timeline_title(frame, width, if live { self.elapsed_ms().max(1) } else { wall }, live);
         self.timeline_plot(frame, chart, wall);
-        Self::timeline_axis(frame, (chart, wall));
+        Self::timeline_axis(frame, (chart, wall), live);
         self.timeline_legend(frame, width);
         self.timeline_takeaway(frame, width, (wall, live));
         self.timeline_longest(frame, width, (chart, wall));
         Self::checked(frame)
     }
 
-    fn timeline_title<const FRAME: usize>(&self, frame: &mut Line<FRAME>, width: usize, (wall, live): (u64, bool)) {
+    fn timeline_title<const FRAME: usize>(&self, frame: &mut Line<FRAME>, width: usize, wall: u64, live: bool) {
         let mut right = Line::<48>::new();
         right.text(if live { b"so far " } else { b"wall " });
         seconds(&mut right, wall);
@@ -171,7 +182,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         paint(frame, self.color, if failing { Tone::Red } else { Tone::Green }, LOWER[fill].as_bytes());
     }
 
-    fn timeline_axis<const FRAME: usize>(frame: &mut Line<FRAME>, (chart, wall): (usize, u64)) {
+    fn timeline_axis<const FRAME: usize>(frame: &mut Line<FRAME>, (chart, wall): (usize, u64), live: bool) {
         let step = usize::try_from(tick_step(chart, wall)).unwrap_or(1);
         let mut ticks = [false; MAX_CHART];
         for tick in (0..=wall / 1000).step_by(step) {
@@ -184,6 +195,9 @@ impl<const RERUN: usize> State<'_, RERUN> {
         }
         frame.text(b"\n seconds ");
         let mut end = Line::<24>::new();
+        if live {
+            end.text(b"~");
+        }
         seconds(&mut end, wall);
         let reserved = chart.saturating_sub(columns(end.bytes()) + 1);
         let mut written = 0;
@@ -471,6 +485,72 @@ mod tests {
         golden("40 plain", include_str!("timeline_golden/40_plain.txt"), false, 40);
     }
 
+    fn live(previous: Option<u64>, elapsed_ms: u64) -> std::string::String {
+        let (mut arena, mut ledger, mut timed, mut inflight) = ([0_u8; 512], [0_u32; 4], [0_u8; 512], [0_u8; 512]);
+        let mut state = State::<64>::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_timeline(&mut timed);
+        let mut events = run_events().take(7);
+        events.next().iter().for_each(|begin| state.apply(begin));
+        if let Some(wall_ms) = previous {
+            state.apply(&Event::Previous { wall_ms, tests: 383 });
+        }
+        events.for_each(|event| state.apply(&event));
+        state.apply(&Event::Tick { now_ms: ORIGIN + elapsed_ms });
+        let mut frame = Line::<8192>::new();
+        state.project_timeline(80, &mut frame).expect("the frame holds one timeline");
+        std::string::String::from_utf8(frame.bytes().to_vec()).expect("the timeline is utf-8")
+    }
+
+    fn axis_rows(text: &str) -> std::vec::Vec<&str> {
+        let start = text.lines().position(|line| line.contains('\u{252c}')).expect("the tick row is drawn");
+        text.lines().skip(start).take(2).collect()
+    }
+
+    #[test]
+    fn a_live_frame_with_a_previous_run_matches_the_golden() {
+        assert_eq!(live(Some(30_000), 9_000), include_str!("timeline_golden/80_live_previous.txt"));
+    }
+
+    #[test]
+    fn a_live_frame_without_a_previous_run_matches_the_golden() {
+        assert_eq!(live(None, 9_000), include_str!("timeline_golden/80_live_fresh.txt"));
+    }
+
+    #[test]
+    fn a_live_axis_ends_at_the_previous_wall_time_marked_approximate() {
+        let text = live(Some(258_230), 9_000);
+
+        assert!(axis_rows(&text)[1].trim_end().ends_with("~258.230s"), "{text}");
+    }
+
+    #[test]
+    fn ten_live_samples_below_the_end_draw_byte_identical_axis_rows() {
+        for previous in [Some(30_000), None] {
+            let first = live(previous, 1_000);
+            let expected = axis_rows(&first);
+            for elapsed in (2..=10).map(|second| second * 1_000 - 1) {
+                let text = live(previous, elapsed);
+                assert_eq!(axis_rows(&text), expected, "previous={previous:?} elapsed={elapsed}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_live_axis_without_a_previous_run_starts_at_sixty_seconds_and_doubles_when_crossed() {
+        let ends: std::vec::Vec<bool> = [(59_999, "~60.000s"), (60_000, "~60.000s"), (60_001, "~120.000s"), (130_000, "~240.000s")]
+            .iter()
+            .map(|(elapsed, end)| axis_rows(&live(None, *elapsed))[1].trim_end().ends_with(end))
+            .collect();
+
+        assert_eq!(ends, [true; 4]);
+    }
+
+    #[test]
+    fn a_live_run_past_the_previous_wall_time_doubles_it_so_the_plot_never_overflows() {
+        let text = live(Some(30_000), 31_000);
+
+        assert!(axis_rows(&text)[1].trim_end().ends_with("~60.000s"), "{text}");
+    }
+
     #[test]
     fn the_axis_end_is_the_closing_block_wall_time_at_every_width() {
         let mut closing = Line::<128>::new();
@@ -750,6 +830,28 @@ mod tests {
         });
 
         assert!(projected > 10_000 * 400, "every frame drew a chart, so a zero is not an empty loop");
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn ten_thousand_live_timeline_frames_project_with_zero_allocations() {
+        let (mut arena, mut ledger, mut timed, mut inflight) = ([0_u8; 512], [0_u32; 4], [0_u8; 512], [0_u8; 512]);
+        let mut state = State::<64>::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_timeline(&mut timed).with_color(true);
+        run_events().take(4).for_each(|event| state.apply(&event));
+        state.apply(&Event::Previous { wall_ms: 30_000, tests: 383 });
+        let mut frame = Line::<8192>::new();
+        let mut drawn_live_axes = 0_usize;
+
+        let ((), allocations) = measure_allocations(|| {
+            for round in 0..10_000_usize {
+                state.apply(&Event::Tick { now_ms: ORIGIN + round as u64 * 2 });
+                frame.clear();
+                state.project_timeline([80, 60, 40][round % 3], &mut frame).expect("the frame holds one timeline");
+                drawn_live_axes += usize::from(frame.bytes().windows(8).any(|window| window == b"~30.000s"));
+            }
+        });
+
+        assert_eq!(drawn_live_axes, 10_000, "every frame drew the fixed live axis, so a zero is not an empty loop");
         assert_eq!(allocations, 0);
     }
 }
