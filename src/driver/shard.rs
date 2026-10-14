@@ -7,6 +7,7 @@ use super::{
     monotonic_millis, projected, rendered, emit, Render, write_report,
 };
 use crate::config::OutputMode;
+use crate::failure_class::Exit;
 use crate::render::Event;
 use core::ops::Range;
 
@@ -777,7 +778,7 @@ fn finish_rerun(
             match run.settings.output {
                 OutputMode::Plain | OutputMode::Agent => {
                     count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
-                    failure_output(run, target, name, output)?;
+                    failure_output(run, target, name, (output, status))?;
                 }
                 OutputMode::Rich => {
                     output.write_failure()?;
@@ -792,7 +793,7 @@ fn finish_rerun(
         (_, true) => warn_rerun(run, target, name, b"passed when re-run alone"),
         (_, false) => {
             warn_rerun(run, target, name, b"failed when re-run alone")?;
-            failure_output(run, target, name, output)
+            failure_output(run, target, name, (output, status))
         }
     }
 }
@@ -810,13 +811,13 @@ fn warn_rerun(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], what: &[
     write_fd(2, b"\n")
 }
 
-fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], output: &ChildOutput) -> Result<(), RunError> {
+fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], (output, status): (&ChildOutput, i32)) -> Result<(), RunError> {
     match run.settings.output {
         OutputMode::Plain | OutputMode::Agent => {
             let targets = run.targets.borrow();
             let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
             let (stdout, stderr) = output.captured();
-            emit(run.render(), &Event::Captured { id, stdout, stderr })
+            emit(run.render(), &Event::Captured { id, stdout, stderr, exit: Exit::from_status(status) })
         }
         OutputMode::Rich => output.write_failure(),
     }
@@ -1036,6 +1037,7 @@ mod pause_tests {
             group: [0; GROUP_CAPACITY],
             group_length: 0,
             started_millis: 0,
+            status: None,
         }
     }
 

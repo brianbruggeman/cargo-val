@@ -12,13 +12,12 @@ const ESCAPE: u8 = 0x1b;
 const CARRIAGE_RETURN: u8 = b'\r';
 const CONTINUATION: &[u8] = b"         ";
 const TRUNCATION_MARK: &[u8] = b"...\n";
-const LIBTEST_PANIC_EXIT: i32 = 101;
 
 impl<const RERUN: usize> State<'_, RERUN> {
     pub(super) fn project_agent<const FRAME: usize>(&self, event: &Event<'_>, frame: &mut Line<FRAME>) {
         match *event {
             Event::Begin { version, why: Some(why), .. } => header(frame, version, why),
-            Event::Captured { id, stdout, stderr } => failure_block(frame, id, stdout, stderr),
+            Event::Captured { id, stdout, stderr, exit } => failure_block(frame, id, [stdout, stderr], exit),
             Event::Interrupted { signal } => super::interrupted(frame, signal),
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, discovered, filtered, exit } => {
                 if passed + failed == 0 {
@@ -71,12 +70,11 @@ pub(super) fn no_tests_note<const FRAME: usize>(frame: &mut Line<FRAME>, [discov
 fn failure_block<const FRAME: usize>(
     frame: &mut Line<FRAME>,
     id: Identity<'_>,
-    stdout: Stream<'_>,
-    stderr: Stream<'_>,
+    [stdout, stderr]: [Stream<'_>; 2],
+    exit: Exit,
 ) {
     let (capture, truncated) = if stdout.0.is_empty() { stderr } else { stdout };
-    let record = classify(capture, Exit::Code(LIBTEST_PANIC_EXIT), u64::from(truncated))
-        .or_else(|_| classify(stderr.0, Exit::Code(LIBTEST_PANIC_EXIT), u64::from(stderr.1)));
+    let record = classify(capture, exit, u64::from(truncated)).or_else(|_| classify(stderr.0, exit, u64::from(stderr.1)));
     label(frame, b"FAIL");
     frame.text(id.0);
     frame.text(b"  ");

@@ -35,6 +35,15 @@ pub enum Exit {
     DeadlineKilled,
 }
 
+impl Exit {
+    /// Reads the driver's session status: on unix a negative status is the negated number of the signal that ended
+    /// the child (`session_exit_code` in `run.rs`); elsewhere every status is an exit code.
+    #[must_use]
+    pub const fn from_status(status: i32) -> Self {
+        if cfg!(unix) && status < 0 { Self::Signal(status.saturating_neg()) } else { Self::Code(status) }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Enforcer {
     Val,

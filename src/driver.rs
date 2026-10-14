@@ -26,6 +26,7 @@ use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
+use crate::failure_class::Exit;
 use crate::render::{Event, Outcome, State, Stream};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
@@ -373,6 +374,7 @@ pub(crate) struct TestWatch {
     group: [u8; GROUP_CAPACITY],
     group_length: usize,
     started_millis: u64,
+    status: Option<i32>,
 }
 
 impl TestWatch {
@@ -698,6 +700,7 @@ fn start_session(
         group: [0; GROUP_CAPACITY],
         group_length: 0,
         started_millis: monotonic_millis(),
+        status: None,
     });
     Ok(())
 }
@@ -807,9 +810,10 @@ pub(crate) fn session_exited(
     index: usize,
     code: i32,
 ) -> Result<(), RunError> {
-    let Some(watch) = watches[index].as_ref() else {
+    let Some(watch) = watches[index].as_mut() else {
         return Ok(());
     };
+    watch.status = Some(code);
     release_child(watch.process_id);
     let stopped = run.stop_sent.get() && code == shard::STOP_STATUS;
     let never_started = run.withdrawn_ready.get() == Some(watch.slot);
@@ -1056,7 +1060,8 @@ fn deliver<'bytes>(
                     emit(reporting.render, &Event::Settled { id, outcome: rendered(outcome), millis: Some(millis), solo: false })?;
                     if outcome == TerminalOutcome::Failed {
                         let (stdout, stderr) = watch.output.captured();
-                        emit(reporting.render, &Event::Captured { id, stdout, stderr })?;
+                        let exit = watch.status.map_or(Exit::Code(1), Exit::from_status);
+                        emit(reporting.render, &Event::Captured { id, stdout, stderr, exit })?;
                     }
                 }
                 OutputMode::Rich => write_fd(1, &report[..name_length + report_bytes])?,
