@@ -166,3 +166,32 @@ async fn a_line_the_child_writes_is_returned_while_it_keeps_running() {
 
     assert_eq!(line.trim(), "4242");
 }
+
+#[proxima::test(timeout = "60s")]
+async fn a_missed_deadline_names_who_holds_the_build_directory_lock_and_who_does_not() {
+    let target = probe_directory("deadline-lock-holders");
+    let build_directory = target.join("debug");
+    fs::create_dir_all(&build_directory).expect("the profile directory is creatable");
+    let held_path = build_directory.join(".cargo-lock");
+    let free_path = build_directory.join(".cargo-build-lock");
+    let held = File::create(&held_path).expect("the held lock file is creatable");
+    File::create(&free_path).expect("the free lock file is creatable");
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "exec sleep 600"])
+        .env("CARGO_TARGET_DIR", &target)
+        .env("CARGO_HOME", target.join("cargo-home"));
+
+    let unwound = AssertUnwindSafe(supervised(&mut command, Duration::from_millis(50), async |_, _, _, _| std::future::pending::<()>().await))
+        .catch_unwind()
+        .await;
+
+    let message = panic_text(&*unwound.expect_err("a child that never exits must miss the deadline"));
+    let cwd = std::env::current_dir().expect("the test has a working directory");
+    let holder = format!("  pid {} cwd {} argv ", std::process::id(), cwd.display());
+    assert!(message.contains("lock holders at the deadline:"), "{message}");
+    assert!(message.contains(&format!("{}:\n{holder}", held_path.display())), "{message}");
+    assert!(message.contains(&format!("{}:\n  no holder", free_path.display())), "{message}");
+    assert!(message.contains("sccache servers:"), "{message}");
+    drop(held);
+}
