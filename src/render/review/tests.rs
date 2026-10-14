@@ -273,13 +273,13 @@ fn every_transition_of_the_spec_table_lands_where_it_says() {
     let review_at = |selected, armed| Mode::Review { selected, armed, top: None };
     let (running, back_review) = (None, Some(1));
     let interrupted = Mode::Interrupted { signal: 2 };
-    let rows: [(Mode, Key, usize, Mode); 39] = [
+    let rows: [(Mode, Key, usize, Mode); 33] = [
         (Mode::Running, Key::Char(b'f'), 2, review_at(0, false)),
         (Mode::Running, Key::Char(b'f'), 0, Mode::Running),
         (Mode::Running, Key::Char(b's'), 2, Mode::Timeline { back: running }),
-        (Mode::Running, Key::Char(b'/'), 2, Mode::Find { back: running }),
-        (Mode::Running, Key::Char(b'i'), 2, Mode::Skipped { back: running }),
-        (Mode::Running, Key::Char(b'w'), 2, Mode::Warnings { back: running }),
+        (Mode::Running, Key::Char(b'/'), 2, Mode::Running),
+        (Mode::Running, Key::Char(b'i'), 2, Mode::Running),
+        (Mode::Running, Key::Char(b'w'), 2, Mode::Running),
         (Mode::Running, Key::Char(b'q'), 2, Mode::QuitArmed),
         (Mode::QuitArmed, Key::Char(b'q'), 2, Mode::Receipt),
         (Mode::QuitArmed, Key::Char(b'j'), 2, Mode::Running),
@@ -288,9 +288,6 @@ fn every_transition_of_the_spec_table_lands_where_it_says() {
         (review_at(1, false), Key::Char(b'c'), 2, interrupted),
         (review_at(1, false), Key::CtrlC, 2, interrupted),
         (Mode::Timeline { back: running }, Key::CtrlC, 2, interrupted),
-        (Mode::Find { back: running }, Key::CtrlC, 2, interrupted),
-        (Mode::Skipped { back: running }, Key::CtrlC, 2, interrupted),
-        (Mode::Warnings { back: running }, Key::CtrlC, 2, interrupted),
         (review_at(0, false), Key::Char(b'j'), 2, review_at(1, false)),
         (review_at(1, false), Key::Char(b'j'), 2, review_at(1, false)),
         (review_at(0, false), Key::Down, 2, review_at(1, false)),
@@ -301,17 +298,14 @@ fn every_transition_of_the_spec_table_lands_where_it_says() {
         (review_at(1, false), Key::Char(b'R'), 2, review_at(1, false)),
         (review_at(1, false), Key::Char(b'e'), 2, review_at(1, false)),
         (review_at(1, false), Key::Char(b's'), 2, Mode::Timeline { back: back_review }),
-        (review_at(1, false), Key::Char(b'/'), 2, Mode::Find { back: back_review }),
-        (review_at(1, false), Key::Char(b'i'), 2, Mode::Skipped { back: back_review }),
-        (review_at(1, false), Key::Char(b'w'), 2, Mode::Warnings { back: back_review }),
+        (review_at(1, false), Key::Char(b'/'), 2, review_at(1, false)),
+        (review_at(1, false), Key::Char(b'i'), 2, review_at(1, false)),
+        (review_at(1, false), Key::Char(b'w'), 2, review_at(1, false)),
         (review_at(1, false), Key::Char(b'q'), 2, review_at(1, true)),
         (review_at(1, true), Key::Char(b'q'), 2, Mode::Receipt),
         (review_at(1, true), Key::Char(b'j'), 2, review_at(1, false)),
         (Mode::Timeline { back: back_review }, Key::Esc, 2, review_at(1, false)),
         (Mode::Timeline { back: back_review }, Key::Char(b's'), 2, review_at(1, false)),
-        (Mode::Find { back: running }, Key::Esc, 2, Mode::Running),
-        (Mode::Skipped { back: running }, Key::Char(b'i'), 2, Mode::Running),
-        (Mode::Warnings { back: back_review }, Key::Char(b'w'), 2, review_at(1, false)),
         (Mode::Receipt, Key::Char(b'j'), 2, Mode::Receipt),
     ];
 
@@ -367,7 +361,7 @@ fn the_run_events_move_the_screens_the_way_the_spec_table_says() {
         (Mode::Receipt, signal, Mode::Receipt),
         (Mode::Done { wall_ms: 5 }, signal, Mode::Done { wall_ms: 5 }),
         (review_mode, tick, review_mode),
-        (Mode::Find { back: None }, tick, Mode::Find { back: None }),
+        (Mode::Timeline { back: None }, tick, Mode::Timeline { back: None }),
     ];
 
     for (from, event, to) in rows {

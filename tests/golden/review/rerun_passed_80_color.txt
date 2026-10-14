@@ -17,4 +17,4 @@
  [2mcargo val[0m  process group killed after 71.66s
 [1;36mfind the commit[0m  cargo val bisect sched_records
   the_host_binary_format_yields_every_declared_record_with_flags_and_group
- [36mj/k[0m move  [36mr[0m rerun  [36mR[0m all  [36me[0m edit  [36m/[0m find  [36mi[0m skip  [36mw[0m warn  [36ms[0m timeline  [36mq[0m quit
+ [36mj/k[0m move  [36mr[0m rerun  [36mR[0m all  [36me[0m edit  [36ms[0m timeline  [36mq[0m quit
