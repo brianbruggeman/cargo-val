@@ -313,7 +313,7 @@ mod bin_gate_hold {
     use crate::common::{ChildStream, FIXTURE_DEADLINE, drain, drain_until};
     use crate::supervise::supervised;
 
-    const TEST_FAILED_LINE: &str = "the_bin_target_exists_when_the_test_starts FAIL";
+    const TEST_NAME: &str = "the_bin_target_exists_when_the_test_starts";
     const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
 
     /// What proves the bin-less window was observed, so the bin build may be released.
@@ -323,6 +323,15 @@ mod bin_gate_hold {
         AfterTestFails,
         /// gate on: cargo-val is holding the linked test executable for the bin and says so on stderr.
         AfterTestArtifactLinks,
+    }
+
+    // a line naming the test with any verdict, so a grammar that words the verdict differently releases the build at once and the caller's assertion reports what was printed, instead of the wait running to its deadline
+    fn test_settled(text: &str) -> bool {
+        text.lines().any(|line| line.contains(TEST_NAME) && ["FAIL", "PASS", "IGNORED"].iter().any(|verdict| line.contains(verdict)))
+    }
+
+    pub fn test_failed(text: &str) -> bool {
+        text.lines().any(|line| line.contains(TEST_NAME) && line.contains("FAIL"))
     }
 
     fn make_fifo(path: &Path) {
@@ -342,12 +351,12 @@ mod bin_gate_hold {
         });
     }
 
-    // reads `stream` to EOF, releasing the bin build the moment `needle` appears when this stream is the one that proves the window
-    async fn watched(stream: &ChildStream, needle: Option<(&str, &Path)>) -> Vec<u8> {
-        let Some((needle, fifo)) = needle else {
+    // reads `stream` to EOF, releasing the bin build the moment `proves_window` accepts what was read when this stream is the one that proves the window
+    async fn watched(stream: &ChildStream, proves_window: Option<fn(&str) -> bool>, fifo: &Path) -> Vec<u8> {
+        let Some(proves_window) = proves_window else {
             return drain(stream).await.0;
         };
-        let (seen, _) = drain_until(stream, |bytes| String::from_utf8_lossy(bytes).contains(needle)).await;
+        let (seen, _) = drain_until(stream, |bytes| proves_window(&String::from_utf8_lossy(bytes))).await;
         release_bin_build(fifo);
         [seen, drain(stream).await.0].concat()
     }
@@ -373,11 +382,13 @@ mod bin_gate_hold {
             command.env(key, value);
         }
         let (status, stdout, stderr) = supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
-            let (stdout_needle, stderr_needle) = match release {
-                Release::AfterTestFails => (Some((TEST_FAILED_LINE, fifo.as_path())), None),
-                Release::AfterTestArtifactLinks => (None, Some((GATE_PARKED_LINE, fifo.as_path()))),
+            let settled: fn(&str) -> bool = test_settled;
+            let parked: fn(&str) -> bool = |text| text.contains(GATE_PARKED_LINE);
+            let (stdout_proof, stderr_proof) = match release {
+                Release::AfterTestFails => (Some(settled), None),
+                Release::AfterTestArtifactLinks => (None, Some(parked)),
             };
-            let (stdout, stderr, exit) = join3(watched(stdout, stdout_needle), watched(stderr, stderr_needle), exit.call(())).await;
+            let (stdout, stderr, exit) = join3(watched(stdout, stdout_proof, &fifo), watched(stderr, stderr_proof, &fifo), exit.call(())).await;
             let status = exit.expect("cargo-val exit is observed once").expect("cargo-val is waitable");
             (status, String::from_utf8_lossy(&stdout).into_owned(), String::from_utf8_lossy(&stderr).into_owned())
         })
@@ -435,9 +446,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
 #[proxima::test(timeout = "310s")]
 async fn the_same_fixture_fails_with_the_bin_gate_off() {
     let result = bin_gate_hold::cold_run("off", &[("CARGO_VAL_BIN_GATE", "off")], bin_gate_hold::Release::AfterTestFails).await;
-    let failed = result
-        .stdout
-        .contains("the_bin_target_exists_when_the_test_starts FAIL");
+    let failed = bin_gate_hold::test_failed(&result.stdout);
     println!(
         "{{\"event\":\"bin_gate_off\",\"status\":{:?},\"test_failed_without_the_rule\":{failed}}}",
         result.status
