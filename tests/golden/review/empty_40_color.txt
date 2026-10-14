@@ -1,4 +1,4 @@
- [1mcargo val[0m  [1;36mreview[0m                 [2m2:18[0m
+ [1mcargo val[0m  [1;36mreview[0m                 [2m2:19[0m
 
  [2m0 failed[0m  [32m381 passed[0m  [2m0 skipped[0m
  [2m0 warnings[0m

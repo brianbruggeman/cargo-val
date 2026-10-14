@@ -2,8 +2,8 @@
 
  [1;31m1 failed[0m  [32m382 passed[0m  [2m0 skipped[0m  [2m0 warnings[0m
 
-[1;36m›[0m[1;32mPASS[0m        [2m8.40s[0m   sched_records::the_host_binar…_record_with_flags_and_group
- [1;31mPANIC[0m     [2m120.03s[0m   shard_process::a_per_test_int…and_cargo_val_exits_promptly
+[1;36m›[0m[1;32mPASS[0m        [2m8.40s[0m   [1;33mNO-RETRY[0m sched_records::the_host_…ord_with_flags_and_group
+ [1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shard_process::a_per_tes…cargo_val_exits_promptly
  ──────────────────────────────────────────────────────────────────────────────
  [1msched_records::the_host_binary_format_yields_every_declared_record_with_flags_[0m
  [1mand_group[0m

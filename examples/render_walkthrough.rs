@@ -7,7 +7,7 @@ use std::io::Write;
 
 use cargo_val::line::Line;
 use cargo_val::failure_class::{Class, Enforcer, Location};
-use cargo_val::render::review::{Key, Rerun, Review, Row, Verdict, action};
+use cargo_val::render::review::{Detail, Key, Rerun, Verdict};
 use cargo_val::render::{Event, Identity, Mode, Outcome, State};
 use cargo_val::view_defaults::{FAILURES, NAME_BYTES, RERUN_BYTES};
 
@@ -64,9 +64,12 @@ fn run_ended_early() -> Result<(), String> {
     Ok(())
 }
 
-const REVIEW_KEYS: [Key; 14] = [
+const REVIEW_KEYS: [Key; 17] = [
     Key::Char(b'f'),
     Key::Char(b'j'),
+    Key::Enter,
+    Key::Char(b'j'),
+    Key::Enter,
     Key::Char(b'e'),
     Key::Char(b'r'),
     Key::Char(b's'),
@@ -81,51 +84,50 @@ const REVIEW_KEYS: [Key; 14] = [
     Key::CtrlC,
 ];
 
-fn failed_row(id: Identity<'static>, class: Class, millis: u64, rerun: Rerun) -> Row<'static> {
-    Row {
-        id,
-        class,
-        millis,
-        location: Some(Location { file: b"tests/sched_records.rs", line: 55, col: 1 }),
-        output: b"proxima::test: body did not complete within the timeout\n",
-        verdict: Some(Verdict::NotRetried { budget_secs: 30 }),
-        rerun,
-    }
+fn detail(id: Identity<'_>) -> Detail<'static> {
+    let location = Location { file: b"tests/sched_records.rs", line: 55, col: 1 };
+    let class = if id == FAILING { Class::Timeout { enforced_by: Enforcer::Val } } else { Class::Panic };
+    (class, Some(location), b"proxima::test: body did not complete within the timeout\nsecond line\nthird line\n")
 }
 
-fn show_review(state: &mut State<'_, RERUN_BYTES>, rows: &[Row<'_>], key: Key) -> Result<(), String> {
+fn show_review(state: &mut State<'_, RERUN_BYTES>, key: Key) -> Result<(), String> {
     let before = state.mode();
-    let todo = action(before, key, rows);
+    let todo = std::format!("{:?}", state.action(key, detail));
     state.apply(&Event::Key(key));
-    println!("-- key {key:?}: {before:?} -> {:?}  action {todo:?}", state.mode());
-    let review = Review { rows, passed: 381, skipped: 0, warnings: 0, clock_ms: 138_205 };
+    println!("-- key {key:?}: {before:?} -> {:?}  action {todo}", state.mode());
     let mut frame = Line::<16_384>::new();
-    review.project(state.mode(), 80, false, &mut frame).map_err(|lost| format!("frame cut {lost} bytes"))?;
+    state.screen(detail, 80, false, &mut frame).map_err(|lost| format!("frame cut {lost} bytes"))?;
     std::io::stdout().write_all(frame.bytes()).map_err(|error| error.to_string())
 }
 
+fn fail(state: &mut State<'_, RERUN_BYTES>, id: Identity<'static>, millis: u64) {
+    let output: &'static [u8] = b"proxima::test: body did not complete within the timeout\nsecond line\nthird line\n";
+    state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: Some(millis), solo: false });
+    state.apply(&Event::Captured { id, stdout: (output, false), stderr: (b"", false) });
+    state.apply(&Event::Retried { id, verdict: Verdict::NotRetried { budget_secs: 30 } });
+}
+
 fn run_review() -> Result<(), String> {
-    let timeout = Class::Timeout { enforced_by: Enforcer::Val };
-    let rows = [
-        failed_row(FAILING, timeout, 71_660, Rerun::Idle),
-        failed_row(PASSING, Class::Panic, 3_123, Rerun::Running { elapsed_ms: 1_200, expected_ms: Some(8_400) }),
-    ];
     let mut arena = [0_u8; NAME_BYTES];
     let mut ledger = [0_u32; FAILURES];
     let mut state = State::<RERUN_BYTES>::new(&mut arena, &mut ledger);
-    for (id, millis) in [(FAILING, 71_660), (PASSING, 3_123)] {
-        state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: Some(millis), solo: false });
-    }
+    fail(&mut state, FAILING, 71_660);
+    fail(&mut state, PASSING, 3_123);
+    state.apply(&Event::Tick { now_ms: 138_205 });
+    state.apply(&Event::Reran { id: PASSING, rerun: Rerun::Running { elapsed_ms: 1_200, expected_ms: Some(8_400) } });
     for key in REVIEW_KEYS {
-        show_review(&mut state, &rows, key)?;
+        show_review(&mut state, key)?;
     }
     assert_eq!(state.mode(), Mode::Receipt, "q q ends review and a final ctrl-c does not reopen it");
     let mut other_arena = [0_u8; NAME_BYTES];
     let mut other_ledger = [0_u32; FAILURES];
     let mut live = State::<RERUN_BYTES>::new(&mut other_arena, &mut other_ledger);
-    live.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, millis: Some(71_660), solo: false });
-    show_review(&mut live, &rows, Key::Char(b'f'))?;
-    show_review(&mut live, &rows, Key::CtrlC)?;
+    fail(&mut live, FAILING, 71_660);
+    show_review(&mut live, Key::Char(b'f'))?;
+    live.apply(&Event::Reran { id: FAILING, rerun: Rerun::Passed { millis: 1_840 } });
+    live.apply(&Event::Tick { now_ms: 1_500 });
+    show_review(&mut live, Key::Char(b'j'))?;
+    show_review(&mut live, Key::CtrlC)?;
     assert_eq!(live.mode(), Mode::Interrupted { signal: 2 });
     Ok(())
 }

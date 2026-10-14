@@ -3,8 +3,8 @@
  1 failed  382 passed  0 skipped
  0 warnings
 
-›PASS        8.40s   sched_rec…nd_group
- PANIC     120.03s   shard_pro…promptly
+›PASS        8.40s   NO-RETRY sche…roup
+ PANIC     120.03s   NO-RETRY shar…ptly
  ──────────────────────────────────────
  sched_records::the_host_binary_format_
  yields_every_declared_record_with_flag

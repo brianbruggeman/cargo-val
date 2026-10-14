@@ -3,8 +3,8 @@
  [1;31m2 failed[0m  [32m381 passed[0m  [2m0 skipped[0m
  [2m0 warnings[0m
 
-[1;36m›[0m[1;36mRERUN[0m        [36m1.2s[0m [36m█[0m[2m█[0m[2m█[0m[2m█[0m[2m█[0m[2m█[0m sched_…_group
- [1;31mPANIC[0m     [2m120.03s[0m   shard_pro…promptly
+[1;36m›[0m[1;36mRERUN[0m        [36m1.2s[0m [36m█[0m[2m█[0m[2m█[0m[2m█[0m[2m█[0m[2m█[0m [1;33mNO-RETRY[0m sc…p
+ [1;31mPANIC[0m     [2m120.03s[0m   [1;33mNO-RETRY[0m shar…ptly
  ──────────────────────────────────────
  [1msched_records::the_host_binary_format_[0m
  [1myields_every_declared_record_with_flag[0m
