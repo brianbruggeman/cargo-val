@@ -74,6 +74,18 @@ pub(crate) fn register_group(slot: usize, process_id: u32, job: HANDLE) {
     GROUP_PROCESSES[slot].store(process_id, Ordering::SeqCst);
 }
 
+/// Group slots are claimed inside the spawn edge by [`reserve_group`], so nothing is reserved ahead of it.
+///
+/// # Errors
+///
+/// Never fails on this OS; the result matches the edges with a bounded target table.
+pub fn reserve_slot() -> Result<(), i32> {
+    Ok(())
+}
+
+/// Nothing was reserved ahead of the spawn, so there is nothing to hand back.
+pub fn abandon_slot() {}
+
 /// Children join the run job at creation, so there is nothing to register per child.
 ///
 /// # Errors

@@ -3,7 +3,7 @@
 use super::{
     CargoDriver, ChildOutput, ExactTestIntent, ExecutablePath, LaunchCause, LaunchInput, LaunchOwner, Ledger,
     Line, ListingRun, NAME_CAPACITY, ProcessMode, RunError, RunningChild, Tally, TerminalOutcome, TestWatch,
-    Watches, executable_text, override_entries, report_launch_failure, report_nothing_ran, slot_range, start_session, write_fd,
+    Watches, executable_text, override_entries, report_launch_failure, report_nothing_ran, slot_range, spawn_reserved, start_session, write_fd,
     write_report,
 };
 use core::ops::Range;
@@ -589,19 +589,21 @@ impl CargoDriver<'_> {
             let first = names.split('\0').next().unwrap_or("");
             let mut storage = run.launch_storage.borrow_mut();
             let intent = ExactTestIntent::new(ExecutablePath::Borrowed(executable), names);
-            let slot = LaunchInput {
-                target: active.target,
-                owner: LaunchOwner::Ledger(&mut *ledger),
-                intent,
-                inherited_environment: run.environment,
-                child_overrides: &overrides[..override_count],
-                storage: &mut storage,
-                harness_arguments: run.harness_arguments,
-                current_directory: active.layout.current_directory(environment).as_bytes(),
-            }
-            .launch_shard(if shard.rerun.is_some() { 0 } else { shard.count })
-            .map_err(|error| {
-                report_launch_failure(LaunchCause::from(&error), first, executable_text(intent.executable()))
+            let slot = spawn_reserved(|| {
+                LaunchInput {
+                    target: active.target,
+                    owner: LaunchOwner::Ledger(&mut *ledger),
+                    intent,
+                    inherited_environment: run.environment,
+                    child_overrides: &overrides[..override_count],
+                    storage: &mut storage,
+                    harness_arguments: run.harness_arguments,
+                    current_directory: active.layout.current_directory(environment).as_bytes(),
+                }
+                .launch_shard(if shard.rerun.is_some() { 0 } else { shard.count })
+                .map_err(|error| {
+                    report_launch_failure(LaunchCause::from(&error), first, executable_text(intent.executable()))
+                })
             })?;
             drop(storage);
             drop(arena);

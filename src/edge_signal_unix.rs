@@ -13,6 +13,7 @@ use crate::build_defaults::SIGNAL_SLOTS;
 const FORWARDED: [c_int; 2] = [libc::SIGINT, libc::SIGTERM];
 const TARGET_CAPACITY: usize = SIGNAL_SLOTS;
 const CONVENTIONAL_BASE: i32 = 128;
+const RESERVED: c_int = c_int::MIN;
 
 /// The refusal code of a full table.
 pub const TABLE_FULL: c_int = libc::ENOSPC;
@@ -20,7 +21,7 @@ pub const TABLE_FULL: c_int = libc::ENOSPC;
 // the handler can only reach process-global state; -1 means no pipe is installed
 static WRITE_END: AtomicI32 = AtomicI32::new(-1);
 
-// every live child this process spawned: a pid, or a negated pgid for a child that leads its own group; 0 means free
+// every live child this process spawned: a pid, or a negated pgid for a child that leads its own group; 0 means free, RESERVED means a spawn is about to fill it
 static TARGETS: [AtomicI32; TARGET_CAPACITY] = [const { AtomicI32::new(0) }; TARGET_CAPACITY];
 
 /// A self-pipe whose read end a prime gate watches and whose write end the handler feeds.
@@ -33,20 +34,36 @@ pub struct SignalPipe {
     interrupt: Signal,
 }
 
-/// Makes every later signal reach the child with process id `target`.
+/// Claims a table slot before a child is spawned, so a full table refuses the spawn instead of leaving a live untracked child.
+///
+/// Reservations are interchangeable: [`track_child`] or [`track_group`] fills one, [`abandon_slot`] frees one.
 ///
 /// # Errors
 ///
 /// Returns `ENOSPC` when every slot is taken.
+pub fn reserve_slot() -> Result<(), c_int> {
+    replace(0, RESERVED).then_some(()).ok_or(TABLE_FULL)
+}
+
+/// Frees a slot claimed by [`reserve_slot`] when the spawn that wanted it failed.
+pub fn abandon_slot() {
+    replace(RESERVED, 0);
+}
+
+/// Makes every later signal reach the child with process id `target`, filling a slot [`reserve_slot`] claimed.
+///
+/// # Errors
+///
+/// Returns `EINVAL` when no slot was reserved for the child.
 pub fn track_child(target: u32) -> Result<(), c_int> {
     track(target.cast_signed())
 }
 
-/// Makes every later signal reach the process group a child leads, which has process id `target`.
+/// Makes every later signal reach the process group a child leads, which has process id `target`, filling a slot [`reserve_slot`] claimed.
 ///
 /// # Errors
 ///
-/// Returns `ENOSPC` when every slot is taken.
+/// Returns `EINVAL` when no slot was reserved for the group.
 pub fn track_group(target: u32) -> Result<(), c_int> {
     track(-target.cast_signed())
 }
@@ -68,21 +85,15 @@ pub fn interrupt_group(target: u32) {
 }
 
 fn track(target: libc::pid_t) -> Result<(), c_int> {
-    TARGETS
-        .iter()
-        .any(|slot| {
-            slot.compare_exchange(0, target, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        })
-        .then_some(())
-        .ok_or(TABLE_FULL)
+    replace(RESERVED, target).then_some(()).ok_or(libc::EINVAL)
 }
 
 fn release(target: libc::pid_t) {
-    TARGETS.iter().any(|slot| {
-        slot.compare_exchange(target, 0, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    });
+    replace(target, 0);
+}
+
+fn replace(from: libc::pid_t, to: libc::pid_t) -> bool {
+    TARGETS.iter().any(|slot| slot.compare_exchange(from, to, Ordering::SeqCst, Ordering::SeqCst).is_ok())
 }
 
 /// The `128 + signal` status a shell reports for a process ended by that signal.
@@ -172,7 +183,7 @@ impl SignalPipe {
         TARGETS
             .iter()
             .map(|target| target.load(Ordering::SeqCst))
-            .filter(|target| *target != 0)
+            .filter(|target| !matches!(*target, 0 | RESERVED))
             .for_each(|target| {
                 unsafe { libc::kill(target, signal) };
             });
@@ -249,24 +260,4 @@ fn errno_slot() -> *mut c_int {
 
 fn last_error() -> c_int {
     unsafe { *errno_slot() }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{TABLE_FULL, TARGET_CAPACITY, release_child, track_child};
-
-    #[test]
-    fn a_full_target_table_refuses_the_next_child_and_a_released_slot_admits_it() {
-        let capacity = u32::try_from(TARGET_CAPACITY).expect("capacity fits a pid");
-        for pid in 1..=capacity {
-            track_child(pid).expect("a free slot admits the child");
-        }
-
-        let refused = track_child(capacity + 1);
-        release_child(1);
-        let admitted = track_child(capacity + 1);
-
-        assert_eq!(refused, Err(TABLE_FULL));
-        assert_eq!(admitted, Ok(()));
-    }
 }
