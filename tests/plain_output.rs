@@ -20,7 +20,7 @@ mod plain_summary;
 
 use common::fixture_output;
 #[cfg(unix)]
-use common::{FIXTURE_DEADLINE, kill_group};
+use common::{fixture_deadline, kill_group};
 #[cfg(unix)]
 use binary::EXIT_WITH_PARENT;
 
@@ -335,7 +335,7 @@ fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, screen: &mu
     let started = std::time::Instant::now();
     let mut chunk = [0_u8; 4096];
     loop {
-        let remaining = FIXTURE_DEADLINE.saturating_sub(started.elapsed());
+        let remaining = fixture_deadline().saturating_sub(started.elapsed());
         let mut watched = [
             libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(master), events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(ready), events: libc::POLLIN, revents: 0 },
@@ -343,7 +343,7 @@ fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, screen: &mu
         let timeout = i32::try_from(remaining.as_millis()).expect("the deadline fits poll");
         if unsafe { libc::poll(watched.as_mut_ptr(), 2, timeout) } == 0 {
             let failures = kill_group(leader).err();
-            panic!("the blocked test never reached the rendezvous within {FIXTURE_DEADLINE:?}; group kill: {failures:?}\n{}", String::from_utf8_lossy(screen));
+            panic!("the blocked test never reached the rendezvous within {:?}; group kill: {failures:?}\n{}", fixture_deadline(), String::from_utf8_lossy(screen));
         }
         if watched[1].revents & libc::POLLIN != 0 {
             return;
@@ -356,19 +356,19 @@ fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, screen: &mu
     }
 }
 
-// the master reads to the hangup that follows the last slave end closing; a run that outlives FIXTURE_DEADLINE is killed with its group
+// the master reads to the hangup that follows the last slave end closing; a run that outlives fixture_deadline() is killed with its group
 #[cfg(unix)]
 fn read_until_hangup(master: &OwnedFd, leader: u32) -> Vec<u8> {
     let started = std::time::Instant::now();
     let mut received = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
-        let remaining = FIXTURE_DEADLINE.saturating_sub(started.elapsed());
+        let remaining = fixture_deadline().saturating_sub(started.elapsed());
         let mut watched = libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(master), events: libc::POLLIN, revents: 0 };
         let timeout = i32::try_from(remaining.as_millis()).expect("the deadline fits poll");
         if unsafe { libc::poll(&raw mut watched, 1, timeout) } == 0 {
             let failures = kill_group(leader).err();
-            panic!("cargo-val (pid {leader}) outlived {FIXTURE_DEADLINE:?} on a pty; group kill: {failures:?}\nreceived so far:\n{}", String::from_utf8_lossy(&received));
+            panic!("cargo-val (pid {leader}) outlived {:?} on a pty; group kill: {failures:?}\nreceived so far:\n{}", fixture_deadline(), String::from_utf8_lossy(&received));
         }
         let count = unsafe { libc::read(std::os::fd::AsRawFd::as_raw_fd(master), chunk.as_mut_ptr().cast(), chunk.len()) };
         match usize::try_from(count) {

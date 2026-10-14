@@ -112,11 +112,11 @@ fn run_on_pty(fixture: &str) -> (String, ExitStatus) {
     let Pty { master, slave } = open_pty();
     let mut child = spawn_on(&slave, fixture, &release);
     drop(slave);
-    let (cancel, fired) = group::watchdog(child.id(), group::SYNC_DEADLINE);
+    let (cancel, fired) = group::watchdog(child.id(), group::sync_deadline());
     let output = read_until_exit(master, &release);
     let status = child.wait().expect("cargo-val is reaped");
     drop(cancel);
-    assert!(!fired.join().unwrap_or(false), "cargo-val outlived {:?} and its group was killed", group::SYNC_DEADLINE);
+    assert!(!fired.join().unwrap_or(false), "cargo-val outlived {:?} and its group was killed", group::sync_deadline());
     (output, status)
 }
 

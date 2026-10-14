@@ -50,7 +50,7 @@ fn describe(output: &Output) -> String {
 }
 
 async fn capture_equals_std(mut command: Command) {
-    let reference = output::output_bounded(&mut command, group::SYNC_DEADLINE).expect("the reference child finishes within its deadline");
+    let reference = output::output_bounded(&mut command, group::sync_deadline()).expect("the reference child finishes within its deadline");
     let captured = fixture_output(&mut command).await;
 
     assert_eq!(captured.stdout, reference.stdout, "stdout differs\ncaptured: {}\nreference: {}", describe(&captured), describe(&reference));

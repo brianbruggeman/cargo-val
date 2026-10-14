@@ -32,15 +32,26 @@ pub use cargo_val::edge_exit_windows::WindowsExit as ExitSource;
 #[cfg(windows)]
 pub(crate) use cargo_val::edge_signal_windows::release_group;
 
-// a cold fixture build under load 85-96 took up to ~63 s in shard_process; 240 s leaves ~3.8x headroom and matches isolated_target's WAIT_LINE_DEADLINE
-pub const FIXTURE_DEADLINE: Duration = Duration::from_secs(240);
+pub mod settings {
+    include!("settings.rs");
+}
 
-// cargo-val forwards SIGINT to its children's groups and exits 130; interrupt_signals waits up to 60 s for the same exit
-pub(crate) const INTERRUPT_GRACE: Duration = Duration::from_secs(60);
+pub fn fixture_deadline() -> Duration {
+    settings::bound("FIXTURE_DEADLINE")
+}
 
-/// Runs a fixture command to completion, failing the test with the captured output if it outlives [`FIXTURE_DEADLINE`].
+pub(crate) fn interrupt_grace() -> Duration {
+    settings::bound("INTERRUPT_GRACE")
+}
+
+#[cfg(windows)]
+fn taskkill_deadline() -> Duration {
+    settings::bound("TASKKILL_DEADLINE")
+}
+
+/// Runs a fixture command to completion, failing the test with the captured output if it outlives the fixture deadline (`CARGO_VAL_TEST_FIXTURE_DEADLINE`).
 pub async fn fixture_output(command: &mut Command) -> Output {
-    output_within(command, FIXTURE_DEADLINE).await.unwrap_or_else(|failure| panic!("{failure}"))
+    output_within(command, fixture_deadline()).await.unwrap_or_else(|failure| panic!("{failure}\nraise CARGO_VAL_TEST_FIXTURE_DEADLINE if the fixture is only slow"))
 }
 
 /// Like `Command::output`, but the child leads its own process group and a missed `deadline` interrupts it, then kills the whole group.
@@ -52,7 +63,7 @@ pub async fn output_within(command: &mut Command, deadline: Duration) -> Result<
     output_until(command, sleep(deadline)).await
 }
 
-/// The deadline path of [`output_within`] with the clock replaced by `expire`: the child's exit and both its streams are read on the calling prime worker, and once `expire` resolves first the group is interrupted, given [`INTERRUPT_GRACE`], then killed.
+/// The deadline path of [`output_within`] with the clock replaced by `expire`: the child's exit and both its streams are read on the calling prime worker, and once `expire` resolves first the group is interrupted, given [`interrupt_grace()`], then killed.
 ///
 /// # Errors
 ///
@@ -139,13 +150,13 @@ pub async fn drain_until(stream: &ChildStream, done: impl Fn(&[u8]) -> bool) -> 
     (bytes, None)
 }
 
-/// SIGINT to the group, [`INTERRUPT_GRACE`] for `collect` to finish on its own, then SIGKILL to the group and the rest of `collect`.
+/// SIGINT to the group, [`interrupt_grace()`] for `collect` to finish on its own, then SIGKILL to the group and the rest of `collect`.
 pub(crate) async fn interrupt_then_kill<Collect>(leader: u32, mut collect: Collect) -> (Collect::Output, Vec<String>)
 where
     Collect: Future + Unpin,
 {
     let mut failures: Vec<String> = interrupt(leader).err().into_iter().collect();
-    let graceful = timeout(INTERRUPT_GRACE, &mut collect).await;
+    let graceful = timeout(interrupt_grace(), &mut collect).await;
     failures.extend(kill_group(leader).err());
     match graceful {
         Ok(finished) => (finished, failures),
@@ -182,10 +193,7 @@ pub(crate) fn interrupt(leader: u32) -> Result<(), String> {
     kill_group(leader)
 }
 
-// taskkill /T walks the parent chain, the closest std-only reach to a job object; its exit is awaited on a thread so a hung taskkill is reported at TASKKILL_DEADLINE instead of blocking
-#[cfg(windows)]
-const TASKKILL_DEADLINE: Duration = Duration::from_secs(30);
-
+// taskkill /T walks the parent chain, the closest std-only reach to a job object; its exit is awaited on a thread so a hung taskkill is reported at taskkill_deadline() instead of blocking
 #[cfg(windows)]
 pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
     let mut child = Command::new("taskkill")
@@ -196,11 +204,11 @@ pub(crate) fn kill_group(leader: u32) -> Result<(), String> {
         .map_err(|error| format!("taskkill for pid {leader} did not run: {error}"))?;
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || sender.send(child.wait()));
-    match receiver.recv_timeout(TASKKILL_DEADLINE) {
+    match receiver.recv_timeout(taskkill_deadline()) {
         Ok(Ok(status)) if status.success() => Ok(()),
         Ok(Ok(status)) => Err(format!("taskkill for pid {leader} exited {status}")),
         Ok(Err(error)) => Err(format!("taskkill for pid {leader} could not be waited on: {error}")),
-        Err(_) => Err(format!("taskkill for pid {leader} did not exit within {TASKKILL_DEADLINE:?}")),
+        Err(_) => Err(format!("taskkill for pid {leader} did not exit within {:?}", taskkill_deadline())),
     }
 }
 

@@ -7,8 +7,20 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// Deadline for synchronous waits on a child whose run time is not itself under test; a cold fixture build under load took up to ~63 s in `shard_process`, so 240 s is ~3.8x headroom.
-pub const SYNC_DEADLINE: Duration = Duration::from_secs(240);
+pub mod settings {
+    include!("settings.rs");
+}
+
+/// Deadline for synchronous waits on a child whose run time is not itself under test; `CARGO_VAL_TEST_SYNC_DEADLINE` over the build default.
+pub fn sync_deadline() -> Duration {
+    settings::bound("SYNC_DEADLINE")
+}
+
+#[cfg(windows)]
+fn taskkill_deadline() -> Duration {
+    settings::bound("TASKKILL_DEADLINE")
+}
+
 
 /// Makes `command` the leader of its own process group so a missed deadline can kill it together with everything it spawned.
 pub fn lead_group(command: &mut Command) -> &mut Command {
@@ -52,10 +64,7 @@ pub fn kill_process_group(leader: u32) -> Result<(), String> {
     }
 }
 
-// taskkill /T walks the parent chain, the closest std-only reach to a job object; its exit is awaited on a thread so a hung taskkill is reported at TASKKILL_DEADLINE instead of blocking
-#[cfg(windows)]
-const TASKKILL_DEADLINE: Duration = Duration::from_secs(30);
-
+// taskkill /T walks the parent chain, the closest std-only reach to a job object; its exit is awaited on a thread so a hung taskkill is reported at taskkill_deadline() instead of blocking
 #[cfg(windows)]
 pub fn kill_process_group(leader: u32) -> Result<(), String> {
     let mut child = Command::new("taskkill")
@@ -66,11 +75,11 @@ pub fn kill_process_group(leader: u32) -> Result<(), String> {
         .map_err(|error| format!("taskkill for pid {leader} did not run: {error}"))?;
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || sender.send(child.wait()));
-    match receiver.recv_timeout(TASKKILL_DEADLINE) {
+    match receiver.recv_timeout(taskkill_deadline()) {
         Ok(Ok(status)) if status.success() => Ok(()),
         Ok(Ok(status)) => Err(format!("taskkill for pid {leader} exited {status}")),
         Ok(Err(error)) => Err(format!("taskkill for pid {leader} could not be waited on: {error}")),
-        Err(_) => Err(format!("taskkill for pid {leader} did not exit within {TASKKILL_DEADLINE:?}")),
+        Err(_) => Err(format!("taskkill for pid {leader} did not exit within {:?}", taskkill_deadline())),
     }
 }
 

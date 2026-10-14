@@ -37,9 +37,6 @@ use supervise::supervised;
 #[cfg(unix)]
 const WAIT_LINE: &str = "cargo-val: waiting for ";
 #[cfg(unix)]
-const WAIT_LINE_DEADLINE: Duration = Duration::from_secs(240);
-
-#[cfg(unix)]
 const HOLDER_MANIFEST: &str = r#"[package]
 name = "lock_holder"
 version = "0.1.0"
@@ -69,7 +66,7 @@ impl Holder {
     fn release(self) {
         let Self { mut child, release } = self;
         drop(release);
-        let status = wait::wait_bounded(&mut child, group::SYNC_DEADLINE).expect("the holder cargo build finishes once released");
+        let status = wait::wait_bounded(&mut child, group::sync_deadline()).expect("the holder cargo build finishes once released");
         assert!(status.success(), "the holder build finishes once released");
     }
 
@@ -159,6 +156,11 @@ fn passed(stdout: &str) -> usize {
 }
 
 #[cfg(unix)]
+fn wait_line_deadline() -> Duration {
+    common::settings::bound("WAIT_LINE_DEADLINE")
+}
+
+#[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn a_cargo_val_run_completes_while_another_cargo_holds_the_shared_build_lock() {
     let scratch = scratch("isolated-lock");
@@ -190,7 +192,7 @@ async fn shared_mode_waits_on_the_held_lock_and_says_so_once_per_child() {
     let holder = hold_build_lock(&scratch, &shared);
 
     let mut command = cargo_val(&scratch, &shared, &["--target-dir", "shared"]);
-    let (status, stdout, lines) = supervised(&mut command, WAIT_LINE_DEADLINE, async |_, stdout, stderr, exit| {
+    let (status, stdout, lines) = supervised(&mut command, wait_line_deadline(), async |_, stdout, stderr, exit| {
         let watched_stderr = async {
             let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).lines().any(directory_wait)).await;
             assert!(fault.is_none(), "stderr failed to read before a wait line: {fault:?}");
@@ -259,7 +261,7 @@ async fn an_empty_target_dir_setting_is_refused_before_any_build() {
 fn children_matching(parent: u32, pattern: &str) -> usize {
     let mut pgrep = Command::new("pgrep");
     pgrep.arg("-P").arg(parent.to_string()).arg("-f").arg(pattern);
-    let found = output::output_bounded(&mut pgrep, group::SYNC_DEADLINE).expect("pgrep finishes within its deadline");
+    let found = output::output_bounded(&mut pgrep, group::sync_deadline()).expect("pgrep finishes within its deadline");
     String::from_utf8_lossy(&found.stdout).lines().count()
 }
 
@@ -277,7 +279,7 @@ async fn the_doc_cargo_starts_only_after_the_test_build_has_output() {
 
     let mut command = cargo_val(&scratch, &shared, &["--target-dir", "shared"]);
     let (status, stdout, lines, building, documenting) =
-        supervised(&mut command, WAIT_LINE_DEADLINE, async |leader, stdout, stderr, exit| {
+        supervised(&mut command, wait_line_deadline(), async |leader, stdout, stderr, exit| {
             let watched_stderr = async {
                 let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).lines().any(directory_wait)).await;
                 assert!(fault.is_none(), "stderr failed to read before a wait line: {fault:?}");
@@ -316,7 +318,7 @@ async fn a_doc_cargo_started_beside_a_held_test_build_blocks_on_the_build_direct
         .env("CARGO_HOME", scratch.join("cargo-home"))
         .env("CARGO_TARGET_DIR", &shared)
         .env("CARGO_TERM_COLOR", "never");
-    let (status, blocked, released) = supervised(&mut command, WAIT_LINE_DEADLINE, async |_, stdout, stderr, exit| {
+    let (status, blocked, released) = supervised(&mut command, wait_line_deadline(), async |_, stdout, stderr, exit| {
         let watched_stderr = async {
             let (seen, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).contains("Blocking waiting for file lock on build directory")).await;
             assert!(fault.is_none(), "stderr failed to read before the lock line: {fault:?}");

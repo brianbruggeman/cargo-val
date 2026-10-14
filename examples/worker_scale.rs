@@ -333,7 +333,7 @@ fn find_binary(context: &Context, binary: usize) -> Result<PathBuf, String> {
 fn list_names(executable: &Path) -> Result<Vec<String>, String> {
     let mut listing = Command::new(executable);
     listing.arg("--list");
-    let output = output::output_bounded(&mut listing, group::SYNC_DEADLINE).map_err(|failure| format!("list {}: {failure}", executable.display()))?;
+    let output = output::output_bounded(&mut listing, group::sync_deadline()).map_err(|failure| format!("list {}: {failure}", executable.display()))?;
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text.lines().filter_map(|line| line.strip_suffix(": test")).map(str::to_string).collect())
 }
