@@ -195,3 +195,24 @@ async fn a_missed_deadline_names_who_holds_the_build_directory_lock_and_who_does
     assert!(message.contains("sccache servers:"), "{message}");
     drop(held);
 }
+
+#[proxima::test(timeout = "60s")]
+async fn a_missed_deadline_persists_its_report_and_names_the_path_last() {
+    let directory = probe_directory("deadline-persisted-report");
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "read line < \"$BLOCK\""]).env("BLOCK", directory.join("block"));
+
+    let unwound = AssertUnwindSafe(supervised(&mut command, Duration::from_millis(50), async |_, _, _, _| std::future::pending::<()>().await))
+        .catch_unwind()
+        .await;
+
+    let message = panic_text(&*unwound.expect_err("a child blocked on a fifo must miss the deadline"));
+    let last = message.lines().last().expect("the failure message has lines");
+    let path = PathBuf::from(last.strip_prefix("deadline report: ").unwrap_or_else(|| panic!("last line must name the log: {message}")));
+    let report = fs::read_to_string(&path).expect("the named log file exists");
+    fs::remove_file(&path).expect("the test removes its own log");
+    assert!(report.contains("a_missed_deadline_persists_its_report_and_names_the_path_last"), "{report}");
+    assert!(report.contains("lock holders at the deadline:"), "{report}");
+    assert!(report.contains("uptime: "), "{report}");
+    assert!(report.contains("deadline: 50ms"), "{report}");
+}
