@@ -182,7 +182,7 @@ fn count_reported(
     target: Option<usize>,
     name: &[u8],
     (outcome, tally): (TerminalOutcome, Tally),
-    (started_millis, solo): (u64, bool),
+    solo: bool,
 ) -> Result<(), RunError> {
     ledger.count(outcome).map_err(|_| RunError::Outcome)?;
     if let Some(target) = target {
@@ -192,8 +192,7 @@ fn count_reported(
         OutputMode::Plain => {
             let targets = run.targets.borrow();
             let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
-            let millis = Some(monotonic_millis().saturating_sub(started_millis));
-            emit(run.render(), &Event::Settled { id, outcome: rendered(outcome), millis, solo })
+            emit(run.render(), &Event::Settled { id, outcome: rendered(outcome), at_ms: Some(monotonic_millis()), solo })
         }
         OutputMode::Rich => report_line(name, outcome, run.settings.color),
     }
@@ -292,7 +291,6 @@ pub(super) fn observe(
     watch: &mut TestWatch,
     bytes: &[u8],
 ) -> Result<Observed, RunError> {
-    let started_millis = watch.started_millis;
     let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
     let whole = Observed { stop: false, consumed: bytes.len() };
     let Some(shard_watch) = watch.shard.as_mut() else {
@@ -346,7 +344,7 @@ pub(super) fn observe(
                     failed.mark(ordinal);
                 }
                 let counted = terminal(outcome);
-                count_reported(run, ledger, target, name, counted, (started_millis, false))?;
+                count_reported(run, ledger, target, name, counted, false)?;
                 tally_streamed(streamed, counted.0);
                 stop |= counted.0 == TerminalOutcome::Failed && run.tripped(ledger);
             }
@@ -683,7 +681,10 @@ fn announce_starts(run: &ListingRun<'_>, target: usize, shard: Shard) -> Result<
     let count = if solo { 1 } else { shard.count };
     (0..count)
         .filter_map(|ordinal| arena.nth(shard, ordinal))
-        .try_for_each(|name| emit(run.render(), &Event::Started { id: (targets.id(target), name), solo }))
+        .try_for_each(|name| {
+            let started = Event::Started { id: (targets.id(target), name), solo, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms };
+            emit(run.render(), &started)
+        })
 }
 
 /// Settles a shard child that exited: names that never reported are failed, a crash is pinned on the test that was running
@@ -705,7 +706,7 @@ pub(super) fn finish(
     };
     shard_watch.flush_failures(run.render())?;
     if shard_watch.shard.rerun.is_some() {
-        finish_rerun(run, ledger, watches, target, (&shard_watch, &watch.output), (status, watch.started_millis))?;
+        finish_rerun(run, ledger, watches, target, (&shard_watch, &watch.output), status)?;
         ledger.retire(watch.slot);
         run.shards.borrow_mut().finished(shard_watch.shard);
         return Ok(());
@@ -752,7 +753,7 @@ fn finish_rerun(
     watches: &Watches,
     target: Option<usize>,
     (shard_watch, output): (&ShardWatch, &ChildOutput),
-    (status, started_millis): (i32, u64),
+    status: i32,
 ) -> Result<(), RunError> {
     let shard = shard_watch.shard;
     let arena = run.shards.borrow();
@@ -760,7 +761,7 @@ fn finish_rerun(
     if withdrawn_solo(run.interrupted(), run.stop_sent.get(), shard.rerun, status) {
         return withdraw_solo(run, ledger, target);
     }
-    let solo = (started_millis, true);
+    let solo = true;
     match (shard.rerun, status == 0) {
         (Some(Rerun::Decides { after_shard_failure }), true) => {
             if after_shard_failure {
@@ -982,6 +983,8 @@ mod pause_tests {
             filterset: None,
             jobs: 1,
             max_fail: None,
+            test_limit_ms: None,
+            heartbeat_ms: 10_000,
             no_tests: NoTestsPolicy::Pass,
             process: ProcessMode::Shard,
             output: crate::config::OutputMode::Rich,
@@ -1034,7 +1037,6 @@ mod pause_tests {
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],
             group_length: 0,
-            started_millis: 0,
         }
     }
 
