@@ -319,7 +319,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
     }
 
     const fn shows_screen(&self) -> bool {
-        matches!(self.mode, Mode::Review { .. } | Mode::Timeline { .. } | Mode::Find { .. } | Mode::Skipped { .. } | Mode::Warnings { .. })
+        matches!(self.mode, Mode::Review { .. } | Mode::Timeline { .. })
     }
 
     /// While a review screen owns the terminal, input and ledger events redraw it and everything else waits for the close.

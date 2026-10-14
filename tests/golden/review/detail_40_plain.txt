@@ -34,5 +34,4 @@ find the commit  cargo val bisect
   a_per_test_interrupt_ends_a_blocked_c
   hild_and_cargo_val_exits_promptly
  j/k move  r rerun  R all  e edit
- / find  i skip  w warn  s timeline
- q quit
+ s timeline  q quit

@@ -5,4 +5,4 @@
  [1;32mno failures left[0m
  [2m381 passed. q then q to leave.[0m
 
- [36m/[0m find  [36ms[0m timeline  [36mi[0m skip  [36mw[0m warn  [36mq[0m quit
+ [36ms[0m timeline  [36mq[0m quit

@@ -22,4 +22,4 @@ NO-RETRY not retried alone: it failed after 120.030s, over the 30s retry
 
 find the commit  cargo val bisect shard_process
   a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly
- j/k move  r rerun  R all  e edit  / find  i skip  w warn  s timeline  q quit
+ j/k move  r rerun  R all  e edit  s timeline  q quit
