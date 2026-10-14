@@ -182,11 +182,11 @@ mod tests {
     use crate::test_alloc::measure_allocations;
 
     /// Real `sample` output: `/usr/bin/sample <pid> 1 -mayDie -file <path>` against the `tests/fixtures/blocked_test`
-    /// lib test binary while its `unit_blocks_when_requested` test was blocked in `File::open` on a fifo with no
-    /// writer. macOS 15.8 (24H20), ARM64, 2026-10-13. Committed unedited.
+    /// lib test binary while its `unit_blocks_when_requested` test was blocked in `block.read` on a read-write fifo
+    /// no one writes. macOS 15.8 (24H20), ARM64, 2026-10-14. Committed unedited.
     const SAMPLE: &[u8] = include_bytes!("../tests/fixtures/stack/sample_blocked_fixture.txt");
     /// Real kernel stacks of the same fixture blocked the same way on versailles (Linux 7.2.9-zen1-1-zen `x86_64`,
-    /// 2026-10-13): `sudo cat /proc/<pid>/task/<tid>/stack` for each of the two threads of
+    /// 2026-10-14): `sudo cat /proc/<pid>/task/<tid>/stack` for each of the two threads of
     /// `cargo_val_blocked_fixture-2e42461185e9115d --exact tests::unit_blocks_when_requested`, each file prefixed
     /// with the `Thread_<tid>` header line that `edge_stack_linux::capture` writes. Frame lines unedited.
     const KERNEL_STACK: &[u8] = include_bytes!("../tests/fixtures/stack/kernel_stack_blocked_fixture.txt");
@@ -208,8 +208,8 @@ mod tests {
             .rfind(|frame| frame.class == Class::User && frame.thread.contains("unit_blocks_when_requested"))
             .expect("the blocked test thread has a user frame");
         assert!(blocked.symbol.contains("unit_blocks_when_requested"), "{}", blocked.symbol);
-        assert_eq!((blocked.file, blocked.line), (Some("lib.rs"), Some(26)));
-        assert_eq!(all.len(), 32, "every frame line of the call graph");
+        assert_eq!((blocked.file, blocked.line), (Some("lib.rs"), Some(32)));
+        assert_eq!(all.len(), 28, "every frame line of the call graph");
     }
 
     #[test]
@@ -240,15 +240,15 @@ mod tests {
     }
 
     #[test]
-    fn real_kernel_stack_of_a_fifo_open_names_wait_for_partner_under_its_thread() {
+    fn real_kernel_stack_of_a_fifo_read_names_anon_pipe_read_under_its_thread() {
         let all = parse(KERNEL_STACK, Format::KernelStack);
 
-        assert_eq!(all.len(), 14);
-        let leaf = all.iter().find(|frame| frame.symbol == "wait_for_partner").expect("the fifo open wait is a frame");
-        assert_eq!((leaf.thread, leaf.class, leaf.image), ("Thread_2219216", Class::Runtime, "kernel"));
+        assert_eq!(all.len(), 11);
+        let leaf = all.iter().find(|frame| frame.symbol == "anon_pipe_read").expect("the fifo read wait is a frame");
+        assert_eq!((leaf.thread, leaf.class, leaf.image), ("Thread_3043700", Class::Runtime, "kernel"));
         assert_eq!(all[0].symbol, "__futex_wait");
-        assert_eq!(all[0].thread, "Thread_2219215");
-        assert_eq!(all[13].symbol, "entry_SYSCALL_64_after_hwframe");
+        assert_eq!(all[0].thread, "Thread_3043699");
+        assert_eq!(all[10].symbol, "entry_SYSCALL_64_after_hwframe");
     }
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
         let all = parse(KERNEL_WCHAN, Format::KernelStack);
 
         let symbols: Vec<(&str, &str)> = all.iter().map(|frame| (frame.thread, frame.symbol)).collect();
-        assert_eq!(symbols, [("Thread_2219215", "__futex_wait"), ("Thread_2219216", "wait_for_partner")]);
+        assert_eq!(symbols, [("Thread_3043699", "__futex_wait"), ("Thread_3043700", "anon_pipe_read")]);
     }
 
     #[test]
