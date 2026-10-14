@@ -612,3 +612,57 @@ fn open_ready(path: &Path) -> File {
         .open(path)
         .expect("a fifo opens for nonblocking read-write")
 }
+
+// the shard stream frames whole lines and libtest prints `test <name> ... ` unterminated until the verdict, so a start is not observable
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
+async fn a_held_shard_prints_a_shard_line_with_the_shard_age_not_a_test_name_with_that_age() {
+    let directory = scratch("milestone-shard");
+    let ready = directory.join("ready");
+    let hold = directory.join("hold");
+    make_fifo(&ready);
+    make_fifo(&hold);
+    let ready_stream = Box::new(ChildStream::new(OwnedFd::from(open_ready(&ready))));
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shard/Cargo.toml");
+    let mut command = binary::command();
+    command
+        .env("CARGO_VAL_OUTPUT", "plain")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .args(["--process", "shard", "--no-fail-fast"])
+        .env_remove("RUST_TEST_THREADS")
+        .env_remove("CARGO_VAL_MAX_FAIL")
+        .env_remove("CARGO_VAL_FAIL_FAST")
+        .env_remove("CARGO_VAL_PROCESS")
+        .env("NO_COLOR", "1")
+        .env("CARGO_VAL_JOBS", "1")
+        .env("CARGO_VAL_STALL_BACKOFF", "exp:1s,2,5m")
+        .env("CARGO_VAL_SHARD_READY", &ready)
+        .env("CARGO_VAL_SHARD_HOLD", &hold)
+        .env("CARGO_TARGET_DIR", fixture_target());
+    let (running, text, exit) = supervised(&mut command, DEADLINE * 2, async |_, stdout, _, exit| {
+        let has_running = |bytes: &[u8]| String::from_utf8_lossy(bytes).lines().any(|line| line.starts_with("RUNNING  "));
+        let (seen, _) = drain_until(stdout, |bytes| has_running(bytes) && bytes.ends_with(b"\n")).await;
+        let before = String::from_utf8_lossy(&seen).into_owned();
+        let (reported, _) = drain_until(&ready_stream, |bytes| bytes.contains(&b'\n')).await;
+        assert!(String::from_utf8_lossy(&reported).trim().parse::<u32>().is_ok(), "the held test reported its pid: {reported:?}");
+        let mut released = OpenOptions::new().write(true).open(&hold).expect("the held test is blocked opening the hold fifo for reading");
+        std::io::Write::write_all(&mut released, b"1").expect("the release byte fits the fifo");
+        drop(released);
+        let (after, _) = drain(stdout).await;
+        let exit = exit.call(()).await;
+        let running = before.lines().find(|line| line.starts_with("RUNNING  ")).map(str::to_owned);
+        (running, before + &String::from_utf8_lossy(&after), exit)
+    })
+    .await;
+
+    let running = running.expect("a RUNNING line printed while the held test blocked");
+    assert!(
+        running.starts_with("RUNNING  cargo_val_shard_fixture shard (1 unreported, first suite::e_passes_last) age="),
+        "four tests reported and the fifth is held, so the line names the shard and its one unreported test: {running}"
+    );
+    let age: f64 = running.rsplit("age=").next().and_then(|text| text.strip_suffix('s')).and_then(|text| text.parse().ok()).expect("age field parses");
+    assert!((1.0..3.0).contains(&age), "the first milestone is at 1s of shard age and the second not before 3s: {running}");
+    assert!(!running.contains("limit="), "a shard clock carries no per-test limit: {running}");
+    assert_eq!(exit.expect("exit observed").expect("exit status").code(), Some(0), "{text}");
+}
