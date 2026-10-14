@@ -295,39 +295,73 @@ async fn a_failed_build_still_prints_rustcs_diagnostic_and_cargos_summary_after_
 }
 
 const FAILING_RUN: (&str, &str) = ("CARGO_VAL_FIXTURE_FAIL", "1");
-const ERASE_FRAME: &str = "\x1b[J";
-const SOURCE_OPEN: &str = "------ source: ";
-const SOURCE_CLOSE: &str = "------ end source ------";
 #[cfg(feature = "highlight")]
 const KEYWORD_SGR: &str = "\x1b[35mif\x1b[0m";
+const FENCE_TEXT: [&str; 4] = ["------ stdout:", "------ stderr:", "------ source:", "panicked at"];
+const TRIO_CLOSING_START: &str = "cargo_val_rich_pty_fail_trio_fixture: discovered";
 
-fn failure_source_block(output: &str) -> &str {
-    let open = output.rfind(SOURCE_OPEN).unwrap_or_else(|| panic!("no source fence after the frame:\n{}", shown(output)));
-    let erased = output.rfind(ERASE_FRAME).expect("the live frame was erased");
-    assert!(open < erased, "the source block must survive the final frame erase:\n{}", shown(output));
-    let close = open + output[open..].find(SOURCE_CLOSE).unwrap_or_else(|| panic!("no closing fence:\n{}", shown(output)));
-    &output[open..close + SOURCE_CLOSE.len()]
+fn screens_before_each_erase(output: &str) -> Vec<Vec<String>> {
+    let starts = output.match_indices("\r\x1b[J").filter_map(|(at, _)| output[..at].rfind("\x1b["));
+    starts.map(|start| final_scrollback(&output[..start])).collect()
+}
+
+fn header_rows(screen: &[String]) -> Vec<usize> {
+    screen.iter().enumerate().filter(|(_, line)| line.trim_start().starts_with("cargo val")).map(|(index, _)| index).collect()
+}
+
+fn assert_each_frame_replaces_the_last(output: &str) -> Vec<Vec<String>> {
+    let screens = screens_before_each_erase(output);
+    assert!(screens.len() >= 2, "at least a live frame and a review frame were erased, got {}:\n{}", screens.len(), shown(output));
+    for (index, screen) in screens.iter().enumerate() {
+        let headers = header_rows(screen);
+        assert_eq!(headers, [0], "frame {index} must hold exactly one header, on screen row 0, with nothing above it:\n{}", screen.join("\n"));
+        let wide: Vec<&String> = screen.iter().filter(|line| line.chars().count() >= usize::from(pty::COLUMNS)).collect();
+        assert!(wide.is_empty(), "frame {index} has rows that wrap at {} columns: {wide:?}", pty::COLUMNS);
+        let rows = screen.iter().rposition(|line| !line.is_empty()).map_or(0, |last| last + 1);
+        assert!(rows < usize::from(pty::ROWS), "frame {index} is {rows} rows on a {} row screen:\n{}", pty::ROWS, screen.join("\n"));
+    }
+    screens
+}
+
+fn receipt_of(scrollback: &[String]) -> String {
+    scrollback.join("\n").trim().to_owned()
 }
 
 #[proxima::test]
-async fn after_the_frame_is_erased_the_failure_block_has_the_source_fence_and_the_marker_row() {
-    let (output, status) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
+async fn a_rich_run_with_three_failures_writes_nothing_above_its_frame_and_scrollback_ends_as_the_plain_closing_block() {
+    let (output, status) = run_driven("rich_pty_fail_trio", "rich", &NO_COLOR, async |master, keys, _release, _leader| quit_from_review(master, keys).await).await;
+    let (plain, plain_status) = run_driven("rich_pty_fail_trio", "plain", &NO_COLOR, async |master, _keys, _release, _leader| read_plain(master).await).await;
 
+    assert_each_frame_replaces_the_last(&output);
+    let scrollback = final_scrollback(&output);
+    let receipt = receipt_of(&scrollback);
+    let plain = plain.replace('\r', "");
+    let plain_receipt = plain[plain.find(TRIO_CLOSING_START).expect("the plain run prints the closing block")..].replacen("LISTED   binaries=1  tests=4\n", "", 1);
+    assert_eq!((status.code(), plain_status.code()), (Some(1), Some(1)), "both runs exit 1");
+    assert!(plain.contains("------ stderr:") || plain.contains("------ stdout:"), "plain still prints the failure fences:\n{plain}");
+    assert_eq!(plain_receipt.matches("\nFAILED   ").count() + usize::from(plain_receipt.starts_with("FAILED   ")), 3, "{plain_receipt}");
+    assert!(scrollback.iter().all(|line| FENCE_TEXT.iter().all(|fence| !line.contains(fence))), "the final scrollback holds failure text:\n{receipt}");
+    assert_eq!(settle_order_free(&receipt), settle_order_free(plain_receipt.trim()), "rich scrollback differs from the plain closing block");
+}
+
+fn settle_order_free(receipt: &str) -> Vec<String> {
+    let mut lines: Vec<String> = without_wall_values(receipt).lines().map(|line| if line.starts_with("RERUN") { "RERUN".to_owned() } else { line.to_owned() }).collect();
+    lines.sort();
+    lines
+}
+
+#[proxima::test]
+async fn the_live_pinned_review_and_receipt_screens_of_a_failing_run_each_replace_the_last_frame() {
+    let (output, status) = run_failing_on_pty(&[FAILING_RUN, ("NO_COLOR", "1")]).await;
+
+    let screens = assert_each_frame_replaces_the_last(&output);
+    let pinned = screens.iter().rev().find(|screen| screen.iter().any(|line| line.contains(" FAIL ")) && !screen.iter().any(|line| line.trim_start().starts_with(REVIEW_HEADER))).expect("a live frame pinned the failure");
+    let review = screens.iter().rev().find(|screen| screen.iter().any(|line| line.trim_start().starts_with(REVIEW_HEADER))).expect("review was drawn");
+    let receipt = receipt_of(&final_scrollback(&output));
+    println!("PINNED SCREEN\n{}\nREVIEW SCREEN\n{}\nRECEIPT\n{receipt}", pinned.join("\n"), review.join("\n"));
     assert!(!status.success(), "a failing test must fail the run");
-    let block = failure_source_block(&output);
-    assert!(block.starts_with("------ source: cargo_val_rich_pty_fixture tests::fails_when_requested ------"), "{}", shown(block));
-    let marker_rows: Vec<&str> = block.lines().filter(|line| line.starts_with("> ")).collect();
-    assert_eq!(marker_rows.len(), 1, "{}", shown(block));
-    assert!(marker_rows[0].contains("panic!(\"requested fixture failure\");"), "{}", shown(block));
-}
-
-#[proxima::test]
-async fn with_no_color_set_the_failure_source_block_has_zero_escape_bytes() {
-    let (output, _) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
-
-    let block = failure_source_block(&output);
-
-    assert_eq!(block.bytes().filter(|byte| *byte == 0x1b).count(), 0, "{}", shown(block));
+    assert_eq!(pinned.iter().filter(|line| line.trim_start().starts_with("test ")).count(), 1, "one test row per frame:\n{}", pinned.join("\n"));
+    assert!(receipt.starts_with("cargo_val_rich_pty_fixture: discovered"), "{receipt}");
 }
 
 async fn release_open_detail_quit(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
@@ -368,12 +402,10 @@ async fn with_no_color_set_the_pinned_and_review_detail_excerpt_rows_have_zero_e
 
 #[cfg(feature = "highlight")]
 #[proxima::test]
-async fn with_highlight_and_colour_on_the_failure_source_block_colours_the_if_keyword_with_the_keyword_role() {
+async fn with_highlight_and_colour_on_the_pinned_excerpt_colours_the_if_keyword_with_the_keyword_role() {
     let (output, _) = run_failing_on_pty(&[FAILING_RUN]).await;
 
-    let block = failure_source_block(&output);
-
-    assert!(block.contains(KEYWORD_SGR), "{}", shown(block));
+    assert!(output.contains(KEYWORD_SGR), "{}", shown(&output));
 }
 
 const BUILD_ERROR_MARKER: &str = ">    4 |     \"forty-two\"";
@@ -598,20 +630,17 @@ fn final_scrollback(output: &str) -> Vec<String> {
 }
 
 #[proxima::test]
-async fn the_final_scrollback_holds_the_excerpt_once_and_no_pinned_row_after_the_closing_block() {
+async fn the_final_scrollback_holds_no_excerpt_and_no_pinned_row_only_the_closing_block() {
     let (output, status) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
 
     let scrollback = final_scrollback(&output);
     let marker = "panic!(\"requested fixture failure\");";
     let drawn_in_all_bytes = output.matches(marker).count();
-    let kept: Vec<&String> = scrollback.iter().filter(|line| line.contains(marker)).collect();
-    let summary = scrollback.iter().position(|line| line.starts_with("SUMMARY")).unwrap_or_else(|| panic!("no closing block in:\n{}", shown(&output)));
     assert!(!status.success(), "a failing test must fail the run");
-    assert!(drawn_in_all_bytes >= 2, "the block and at least one live pinned frame carried the row, {drawn_in_all_bytes} times:\n{}", shown(&output));
-    assert_eq!(kept.len(), 1, "the settled scrollback keeps the excerpt row once: {kept:?}\n{}", shown(&scrollback.join("\n")));
-    assert!(kept[0].starts_with("> "), "the surviving row is the printed block's marker row: {:?}", kept[0]);
-    assert!(scrollback[summary..].iter().all(|line| !line.contains(marker) && !line.starts_with(" FAIL 1")), "{}", shown(&scrollback.join("\n")));
+    assert!(drawn_in_all_bytes >= 2, "the pinned frame and review detail carried the row, {drawn_in_all_bytes} times:\n{}", shown(&output));
+    assert!(scrollback.iter().all(|line| !line.contains(marker)), "the excerpt row reached scrollback:\n{}", shown(&scrollback.join("\n")));
     assert!(scrollback.iter().all(|line| !line.starts_with(" FAIL 1")), "no pinned row survives the erase:\n{}", shown(&scrollback.join("\n")));
+    assert!(scrollback.iter().any(|line| line.starts_with("SUMMARY")), "no closing block in:\n{}", shown(&output));
 }
 
 const TIMELINE_HEADER: &str = "cargo val  timeline";
@@ -714,12 +743,12 @@ fn panic_site_link(text: &str) -> String {
 }
 
 #[proxima::test]
-async fn with_visual_code_the_closing_block_panic_location_is_one_osc8_link_to_the_line_and_column() {
+async fn with_visual_code_the_closing_block_holds_no_panic_location_and_no_osc8_link() {
     let (output, _) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE]).await;
 
-    let linked = format!("panicked at {}:", panic_site_link("src/lib.rs:28:13"));
-    assert_eq!(output.matches(&linked).count(), 1, "{}", shown(&output));
-    assert_eq!(output.matches(&panic_site_link("src/lib.rs:28:13")).count(), 1, "{}", shown(&output));
+    let scrollback = final_scrollback(&output).join("\n");
+    assert!(!scrollback.contains("panicked at") && !scrollback.contains("]8;;"), "{scrollback}");
+    assert_eq!(output.matches(&panic_site_link("src/lib.rs:28:13")).count(), 0, "{}", shown(&output));
 }
 
 #[proxima::test]
@@ -735,7 +764,7 @@ async fn with_no_color_set_and_visual_code_the_whole_run_has_zero_osc8_bytes() {
     let (output, _) = run_failing_on_pty(&[FAILING_RUN, VISUAL_CODE, ("NO_COLOR", "1")]).await;
 
     assert_eq!(output.matches("\x1b]8").count(), 0, "{}", shown(&output));
-    assert!(output.contains("panicked at src/lib.rs:28:13:"), "{}", shown(&output));
+    assert!(output.contains("src/lib.rs:28"), "{}", shown(&output));
 }
 
 #[proxima::test]
