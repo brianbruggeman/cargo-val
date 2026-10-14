@@ -1053,7 +1053,9 @@ mod pause_tests {
                 let settings = settings();
                 let mut names = [0_u8; 512];
                 let mut arena = [0_u8; 64];
-                let sink: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena)), RefCell::new(Line::new()));
+                let mut ledger = [0_u32; 4];
+                let mut frame = Line::new();
+                let sink: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
                 let run = run_over(&signals, &settings, (&sink, &mut names));
                 let mut sessions = SessionSlots::new();
                 let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
@@ -1091,7 +1093,9 @@ mod pause_tests {
                 let settings = settings();
                 let mut names = [0_u8; 512];
                 let mut arena = [0_u8; 64];
-                let sink: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena)), RefCell::new(Line::new()));
+                let mut ledger = [0_u32; 4];
+                let mut frame = Line::new();
+                let sink: Render<'_> = (OutputMode::Rich, RefCell::new(RenderState::new(&mut arena, &mut ledger)), RefCell::new(&mut frame));
                 let run = run_over(&signals, &settings, (&sink, &mut names));
                 let mut sessions = SessionSlots::new();
                 let mut ledger: Ledger<'_> = OutcomeLedger::new(&mut sessions).expect("table starts empty");
