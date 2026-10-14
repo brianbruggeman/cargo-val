@@ -179,7 +179,7 @@ mod tests {
     #[proxima::test]
     async fn warm_up_replays_the_full_snapshot_into_the_cache() {
         let mut router = Router::new(3);
-        proxima::time::sleep(Duration::from_secs(8)).await;
+        proxima::time::sleep(Duration::from_secs(3)).await;
         for id in 1..=3 {
             send(&mut router, &format!("GET /items/{id} HTTP/1.1"), "");
         }
