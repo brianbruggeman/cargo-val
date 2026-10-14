@@ -13,7 +13,7 @@ use memchr::memchr;
 
 use crate::line::Line;
 use crate::failure_class::{Exit, classify};
-use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
+use crate::view_defaults::REASON_BYTES;
 
 mod rich;
 
@@ -24,7 +24,6 @@ pub type Identity<'a> = (&'a [u8], &'a [u8]);
 pub type Stream<'a> = (&'a [u8], bool);
 
 const LABEL_WIDTH: usize = 9;
-const HEARTBEAT_MS: u64 = HEARTBEAT_SECS as u64 * 1000;
 const INFLIGHT_HEAD: usize = 13;
 const FAILURE_HEAD: usize = 13;
 const LOCK_BYTES: usize = 32;
@@ -61,6 +60,7 @@ pub enum Event<'a> {
     Started { id: Identity<'a>, solo: bool, at_ms: u64, limit_ms: Option<u32> },
     Settled { id: Identity<'a>, outcome: Outcome, at_ms: Option<u64>, solo: bool },
     Tick { now_ms: u64 },
+    Milestone { id: Identity<'a>, age_ms: u64, limit_ms: Option<u32> },
     Captured { id: Identity<'a>, stdout: Stream<'a>, stderr: Stream<'a> },
     Warned { id: Identity<'a>, what: &'a [u8] },
     BlockOpened { id: Identity<'a> },
@@ -92,6 +92,7 @@ impl Mode {
                 | Event::BlockOpened { .. }
                 | Event::BlockClosed
                 | Event::Tick { .. }
+                | Event::Milestone { .. }
                 | Event::Finished { .. },
             ) => Self::Running,
             (Self::BuildError | Self::Interrupted { .. } | Self::Done { .. }, _) => self,
@@ -117,10 +118,7 @@ pub struct State<'storage, const RERUN: usize> {
     inflight_used: usize,
     inflight_count: usize,
     untracked: usize,
-    heartbeat_ms: u64,
-    last_beat_ms: u64,
     now_ms: u64,
-    beat_due: bool,
     settled_ms: Option<u64>,
     jobs: usize,
     done: usize,
@@ -154,10 +152,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             inflight_used: 0,
             inflight_count: 0,
             untracked: 0,
-            heartbeat_ms: HEARTBEAT_MS,
-            last_beat_ms: 0,
             now_ms: 0,
-            beat_due: false,
             settled_ms: None,
             jobs: 0,
             done: 0,
@@ -188,12 +183,6 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
     pub const fn with_inflight(mut self, inflight: &'storage mut [u8]) -> Self {
         self.inflight = inflight;
-        self
-    }
-
-    #[must_use]
-    pub const fn with_heartbeat_ms(mut self, heartbeat_ms: u64) -> Self {
-        self.heartbeat_ms = heartbeat_ms;
         self
     }
 
@@ -238,7 +227,6 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
 
     pub fn apply(&mut self, event: &Event<'_>) {
         self.mode = self.mode.next(event);
-        self.beat_due = false;
         self.settled_ms = None;
         match *event {
             Event::Begin { github, jobs, at_ms, .. } => self.begin(github, jobs, at_ms),
@@ -294,10 +282,6 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     fn beat(&mut self, now_ms: u64) {
         self.now_ms = now_ms;
         self.origin_ms.get_or_insert(now_ms);
-        self.beat_due = self.inflight_count != 0 && now_ms.saturating_sub(self.last_beat_ms) >= self.heartbeat_ms;
-        if self.beat_due {
-            self.last_beat_ms = now_ms;
-        }
     }
 
     fn inflight_at(&self, offset: usize) -> (u64, Option<u32>, Identity<'_>, usize) {
@@ -325,9 +309,6 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     fn track(&mut self, id: Identity<'_>, at_ms: u64, limit_ms: Option<u32>) {
         if let Some((start, end)) = self.find(id) {
             self.drop_span(start, end);
-        }
-        if self.inflight_count == 0 {
-            self.last_beat_ms = at_ms;
         }
         let at = self.inflight_used;
         let end = at + INFLIGHT_HEAD + id.0.len() + id.1.len() + 2;
@@ -423,10 +404,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
-            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } => {}
+            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Tick { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
-            Event::Tick { .. } => self.heartbeat(frame),
+            Event::Milestone { id, age_ms, limit_ms } => Self::milestone(frame, id, age_ms, limit_ms),
             Event::Captured { id, stdout, stderr } => self.captured(frame, id, stdout, stderr),
             Event::Warned { id, what } => warned(frame, id, what),
             Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
@@ -443,23 +424,18 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
     }
 
-    fn heartbeat<const FRAME: usize>(&self, frame: &mut Line<FRAME>) {
-        let Some((id, start, limit)) = self.oldest().filter(|_| self.beat_due) else {
-            return;
-        };
+    fn milestone<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, age_ms: u64, limit_ms: Option<u32>) {
         label(frame, b"RUNNING");
         frame.text(id.0);
-        frame.text(b"  ");
+        frame.text(b" ");
         frame.text(id.1);
-        frame.text(b"  ");
-        seconds(frame, self.now_ms.saturating_sub(start));
-        if let Some(limit) = limit {
-            frame.text(b"  limit=");
+        frame.text(b" age=");
+        seconds(frame, age_ms);
+        if let Some(limit) = limit_ms {
+            frame.text(b" limit=");
             seconds(frame, u64::from(limit));
         }
-        frame.text(b"  (oldest of ");
-        frame.number(self.inflight_count);
-        frame.text(b" running)\n");
+        frame.text(b"\n");
     }
 
     fn settled<const FRAME: usize>(
@@ -902,17 +878,17 @@ mod tests {
         let mut arena = [0_u8; 4096];
         let mut ledger = [0_u32; 64];
         let mut inflight = [0_u8; 4096];
-        let mut state = State::<8192>::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_heartbeat_ms(1);
+        let mut state = State::<8192>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
         let mut frame = Line::<32_768>::new();
         let mut events_applied = 0_usize;
-        let mut heartbeats = 0_usize;
+        let mut milestones = 0_usize;
 
         let ((), allocations) = measure_allocations(|| {
             for round in 0..20_000_u64 {
                 let outcome = if round % 7 == 0 { Outcome::Failed } else { Outcome::Passed };
                 for event in [
                     Event::Started { id: FAILING, solo: false, at_ms: round, limit_ms: Some(120_000) },
-                    Event::Tick { now_ms: round + 3 },
+                    Event::Milestone { id: FAILING, age_ms: round + 3, limit_ms: Some(120_000) },
                     Event::Settled { id: FAILING, outcome, at_ms: Some(round + 5), solo: false },
                     Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", false), stderr: (b"", false) },
                     Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml") },
@@ -920,14 +896,14 @@ mod tests {
                     frame.clear();
                     state.apply(&event);
                     state.project(&event, &mut frame).expect("the frame holds one event");
-                    heartbeats += usize::from(matches!(event, Event::Tick { .. }) && frame.bytes().starts_with(b"RUNNING"));
+                    milestones += usize::from(matches!(event, Event::Milestone { .. }) && frame.bytes().starts_with(b"RUNNING"));
                     events_applied += 1;
                 }
             }
         });
 
         assert_eq!(events_applied, 100_000, "the loop ran every event, so a zero is not an empty loop");
-        assert_eq!(heartbeats, 20_000, "every tick found the test in flight, so the heartbeat path was measured too");
+        assert_eq!(milestones, 20_000, "every milestone projected a RUNNING line, so that path was measured too");
         assert_eq!(allocations, 0);
         assert!(state.unstored() > 0, "the ledger overflowed during the loop, so the overflow path was measured too");
     }
@@ -965,49 +941,35 @@ mod tests {
     }
 
     #[test]
-    fn a_heartbeat_names_the_oldest_in_flight_test_with_its_age_and_declared_deadline() {
+    fn a_milestone_names_its_test_with_the_age_and_the_declared_deadline() {
         let mut arena = [0_u8; 64];
         let mut ledger = [0_u32; 2];
-        let mut inflight = [0_u8; 512];
-        let mut state = Small::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_heartbeat_ms(10_000);
-        state.apply(&started(SLOW, 1_000, Some(120_000)));
-        state.apply(&started(HOURS, 4_000, None));
+        let mut state = Small::new(&mut arena, &mut ledger);
+        let reached = Event::Milestone { id: SLOW, age_ms: 10_795, limit_ms: Some(120_000) };
+        let open = Event::Milestone { id: HOURS, age_ms: 20_000, limit_ms: None };
 
-        let early = Event::Tick { now_ms: 5_000 };
-        state.apply(&early);
-        let silent = projected(&state, &early);
-        let due = Event::Tick { now_ms: 11_795 };
-        state.apply(&due);
-        let beat = projected(&state, &due);
+        state.apply(&reached);
+        let with_limit = projected(&state, &reached);
+        state.apply(&open);
+        let without_limit = projected(&state, &open);
 
-        assert_eq!(silent, "", "four seconds after the start is inside the heartbeat interval");
-        assert_eq!(
-            beat,
-            "RUNNING  shard_process  a_per_test_interrupt_ends_a_blocked_child  10.795s  limit=120.000s  (oldest of 2 running)\n"
-        );
-        assert_eq!(state.inflight_len(), 2);
+        assert_eq!(with_limit, "RUNNING  shard_process a_per_test_interrupt_ends_a_blocked_child age=10.795s limit=120.000s\n");
+        assert_eq!(without_limit, "RUNNING  sched_records the_host_binary_format_yields_every_declared_record age=20.000s\n");
+        assert_eq!(state.inflight_len(), 0);
     }
 
     #[test]
-    fn heartbeats_repeat_each_interval_and_move_to_the_next_oldest_when_the_oldest_settles() {
+    fn a_tick_projects_nothing_in_plain_however_long_a_test_has_run() {
         let mut arena = [0_u8; 64];
         let mut ledger = [0_u32; 2];
         let mut inflight = [0_u8; 512];
-        let mut state = Small::new(&mut arena, &mut ledger).with_inflight(&mut inflight).with_heartbeat_ms(10_000);
-        state.apply(&started(SLOW, 0, None));
-        state.apply(&started(HOURS, 2_000, None));
-        state.apply(&Event::Tick { now_ms: 10_000 });
-        state.apply(&Event::Settled { id: SLOW, outcome: Outcome::Passed, at_ms: Some(12_000), solo: false });
+        let mut state = Small::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&started(SLOW, 0, Some(120_000)));
 
-        let between = Event::Tick { now_ms: 15_000 };
-        state.apply(&between);
-        let quiet = projected(&state, &between);
-        let next = Event::Tick { now_ms: 20_000 };
-        state.apply(&next);
-        let beat = projected(&state, &next);
+        let late = Event::Tick { now_ms: 900_000 };
+        state.apply(&late);
 
-        assert_eq!(quiet, "");
-        assert_eq!(beat, "RUNNING  sched_records  the_host_binary_format_yields_every_declared_record  18.000s  (oldest of 1 running)\n");
+        assert_eq!(projected(&state, &late), "");
     }
 
     #[test]

@@ -237,7 +237,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         match *event {
             Event::Tick { .. } if self.mode == Mode::Running => self.project_rich(self.color, frame),
             Event::Begin { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
-            Event::Captured { .. } | Event::Warned { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Finished { .. } => {
+            Event::Captured { .. } | Event::Warned { .. } | Event::Milestone { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Finished { .. } => {
                 self.erase_rich(frame);
                 self.project(event, frame)
             }

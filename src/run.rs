@@ -4,6 +4,7 @@ use core::future::poll_fn;
 use core::ops::{ControlFlow, Range};
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use core::time::Duration;
 use std::boxed::Box;
 use std::io;
 use std::process::ExitStatus;
@@ -22,7 +23,7 @@ use crate::edge_signal::SignalPipe;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, emit, monotonic_millis, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, emit, monotonic_millis, restore_cursor, run_body, session_cancelled, session_milestone, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
@@ -34,7 +35,7 @@ pub(crate) const DOC_LANE: usize = 2;
 pub(crate) const JOB_BASE: usize = 3;
 const LANES: usize = JOB_BASE + LIVE_CAPACITY;
 const TICK_MS: u64 = crate::view_defaults::TICK_MS as u64;
-const ARMS: usize = LANES * 3 + 3;
+const ARMS: usize = LANES * 3 + 4;
 
 /// One child's stdout and stderr streams, its exit source, and whether its stdout may be read now.
 pub(crate) type Lane = (
@@ -43,12 +44,14 @@ pub(crate) type Lane = (
     RefCell<Option<ExitSource>>,
     Cell<bool>,
     RefCell<Option<SignalSource>>,
+    RefCell<Option<SignalSource>>,
+    RefCell<Option<TimerAtFuture>>,
 );
 
 pub(crate) type Lanes = [Lane; LANES];
 
-/// The pending timer of the next tick; empty until the first poll arms it and again after each tick fires.
-pub(crate) type Beat = RefCell<Option<TimerAtFuture>>;
+/// The pending timer of the next tick, and whether a tick is wanted at all; the timer stays empty while it is not, so nothing is armed.
+pub(crate) type Beat = (RefCell<Option<TimerAtFuture>>, Cell<bool>);
 
 pub(crate) fn empty_lanes() -> Lanes {
     core::array::from_fn(|_| {
@@ -57,6 +60,8 @@ pub(crate) fn empty_lanes() -> Lanes {
             RefCell::new(None),
             RefCell::new(None),
             Cell::new(true),
+            RefCell::new(None),
+            RefCell::new(None),
             RefCell::new(None),
         )
     })
@@ -100,6 +105,7 @@ pub(crate) enum Edge<'edge> {
     Signal(Option<&'edge RefCell<Readiness>>),
     Interrupt(Option<&'edge SignalSource>),
     Tick(Option<&'edge Beat>),
+    Milestone(&'edge Lanes),
 }
 
 pub(crate) enum Item {
@@ -112,6 +118,7 @@ pub(crate) enum Item {
     Signal(io::Result<()>),
     Interrupt,
     Tick,
+    Milestone(usize),
 }
 
 impl DropSafe for Edge<'_> {}
@@ -135,6 +142,7 @@ impl UnpinPipe for Edge<'_> {
                 gate.map_or(Poll::Ready(Err(Exhausted)), |gate| signal_step(gate, context))
             }
             Edge::Tick(beat) => beat.map_or(Poll::Pending, |beat| tick_step(beat, context)),
+            Edge::Milestone(lanes) => (JOB_BASE..LANES).map(|lane| milestone_step(&lanes[lane], lane, context)).find(Poll::is_ready).unwrap_or(Poll::Pending),
             Edge::Interrupt(source) => source
                 .map_or(Poll::Ready(Err(Exhausted)), |source| interrupt_step(source, context)),
         })
@@ -226,11 +234,12 @@ fn interrupt_step(source: &SignalSource, context: &mut Context<'_>) -> Poll<Resu
 }
 
 // one timer on this core's wheel, re-armed a tick ahead of now after each fire, so a busy loop never owes a burst of catch-up ticks
-fn tick_step(beat: &Beat, context: &mut Context<'_>) -> Poll<Result<Item, Exhausted>> {
-    let Some(now) = current_tick_checked() else {
+fn tick_step((armed, wanted): &Beat, context: &mut Context<'_>) -> Poll<Result<Item, Exhausted>> {
+    let mut armed = armed.borrow_mut();
+    let Some(now) = current_tick_checked().filter(|_| wanted.get()) else {
+        *armed = None;
         return Poll::Pending;
     };
-    let mut armed = beat.borrow_mut();
     let timer = armed.get_or_insert_with(|| timer_at(now.saturating_add(TICK_MS)));
     match Pin::new(timer).poll(context) {
         Poll::Ready(()) => {
@@ -238,6 +247,38 @@ fn tick_step(beat: &Beat, context: &mut Context<'_>) -> Poll<Result<Item, Exhaus
             Poll::Ready(Ok(Item::Tick))
         }
         Poll::Pending => Poll::Pending,
+    }
+}
+
+// one deadline per session lane on this core's wheel, all behind one arm so the merge stays small; its child scope firing, which settling or cancelling the session does, drops the deadline unfired
+fn milestone_step(lane: &Lane, id: usize, context: &mut Context<'_>) -> Poll<Result<Item, Exhausted>> {
+    let mut gate = lane.5.borrow_mut();
+    let mut armed = lane.6.borrow_mut();
+    let Some(source) = gate.as_ref() else {
+        *armed = None;
+        return Poll::Pending;
+    };
+    if matches!(step(source, context), Poll::Ready(_)) {
+        *gate = None;
+        *armed = None;
+        return Poll::Pending;
+    }
+    let Some(timer) = armed.as_mut() else {
+        return Poll::Pending;
+    };
+    match Pin::new(timer).poll(context) {
+        Poll::Ready(()) => {
+            *armed = None;
+            Poll::Ready(Ok(Item::Milestone(id)))
+        }
+        Poll::Pending => Poll::Pending,
+    }
+}
+
+/// Arms `lane`'s deadline `delay` from now; off a prime worker there is no wheel, so nothing is armed.
+pub(crate) fn arm_milestone(lane: &Lane, delay: Duration) {
+    if let Some(now) = current_tick_checked() {
+        *lane.6.borrow_mut() = Some(timer_at(now.saturating_add(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX))));
     }
 }
 
@@ -260,6 +301,9 @@ fn edge<'edge>(
 ) -> Edge<'edge> {
     if index == ARMS - 3 {
         return Edge::Tick(beat);
+    }
+    if index == ARMS - 4 {
+        return Edge::Milestone(lanes);
     }
     if index == ARMS - 1 {
         return Edge::Signal(port.map(|(gate, _)| gate));
@@ -432,6 +476,7 @@ fn handle(
             Ok(())
         }
         Item::Interrupt => Ok(()),
+        Item::Milestone(lane) => session_milestone(run, ledger, watches, lanes, lane - JOB_BASE),
         Item::Tick => {
             #[cfg(windows)]
             run.refresh_width()?;
@@ -498,7 +543,7 @@ fn handle_doc(
             doc.exited(exit_code(status)?);
             Ok(())
         }
-        Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick => Ok(()),
+        Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick | Item::Milestone(_) => Ok(()),
     }
 }
 
@@ -561,7 +606,7 @@ pub(crate) async fn collect_child(
             Item::OutEnd(_) => out_ended = true,
             Item::ErrEnd(_) => err_ended = true,
             Item::Exit(_, status) => code = Some(exit_code(status)?),
-            Item::Err(..) | Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick => {}
+            Item::Err(..) | Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick | Item::Milestone(_) => {}
         }
         Ok(if code.is_some() && out_ended && err_ended {
             ControlFlow::Break(())
@@ -653,7 +698,7 @@ pub(crate) async fn observe_cargo(
     attach(&lanes[CARGO_LANE], child)?;
     let signal = RefCell::new(run.signal_gate()?);
     let interrupt = run.interrupt_source();
-    let beat = Beat::new(None);
+    let beat: Beat = (RefCell::new(None), Cell::new(false));
     pump(&lanes, Some((&signal, &interrupt)), Some(&beat), |item| {
         if matches!(item, Item::Out(CARGO_LANE, _) | Item::OutEnd(CARGO_LANE) | Item::Exit(CARGO_LANE, _)) {
             run.start_doc(&lanes, launch_doc)?;
@@ -662,6 +707,7 @@ pub(crate) async fn observe_cargo(
         driver.resume(&lanes, run, ledger, watches)?;
         run.with_doc(|doc, observation| resume_doc(&lanes, doc, observation))?;
         resume_sessions(&lanes, run, ledger, watches)?;
+        beat.1.set(run.tick_wanted());
         lanes[CARGO_LANE].3.set(driver.cargo_open());
         lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
         Ok(if driver.finished(run, ledger) {
@@ -697,6 +743,7 @@ pub async fn drive(arguments: Vec<Vec<u8>>) -> Result<RunSummary, RunError> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use core::cell::{Cell, RefCell};
     use core::ops::ControlFlow;
     use core::task::Waker;
     use std::process::Command;
@@ -705,10 +752,11 @@ mod tests {
     use std::vec::Vec;
 
     use prime::os::core_shard::run_on_this_thread;
+    use proxima_primitives::pipe::{FanIn, Select};
     use proxima_runtime::CoreId;
 
     use super::{
-        CARGO_LANE, Item, RunError, Child, attach, collect_libdir, empty_lanes, pump,
+        Beat, CARGO_LANE, Item, RunError, Child, attach, collect_libdir, empty_lanes, pump,
     };
     use crate::artifact_stream::ArtifactFramer;
     use crate::cargo_source::{CargoSource, CargoSourceStep};
@@ -838,7 +886,7 @@ mod tests {
                     }
                     Item::OutEnd(_) => out_ended = true,
                     Item::ErrEnd(_) => err_ended = true,
-                    Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick => {}
+                    Item::Cancel(_) | Item::Signal(_) | Item::Interrupt | Item::Tick | Item::Milestone(_) => {}
                 }
                 Ok(if exited && out_ended && err_ended {
                     ControlFlow::Break(())
@@ -931,6 +979,48 @@ mod tests {
         let result = libdir_through_prime(child);
 
         assert_eq!(result, Err(RunError::RustcLibdir));
+    }
+
+    #[proxima::test]
+    async fn the_tick_arm_arms_a_timer_only_while_a_tick_is_wanted_and_counts_zero_ticks_when_none_is() {
+        let (ticks, idle_armed, wanted_armed) = run_on_this_thread(CoreId(0), async {
+            let beat: Beat = (RefCell::new(None), Cell::new(false));
+            let alone = FanIn::new([super::Edge::Tick(Some(&beat))], Select::RoundRobin);
+            let mut context = Context::from_waker(Waker::noop());
+            let mut ticks = 0_usize;
+            for _ in 0..1_000 {
+                ticks += usize::from(matches!(super::step(&alone, &mut context), Poll::Ready(Ok(Item::Tick))));
+            }
+            let idle_armed = beat.0.borrow().is_some();
+            beat.1.set(true);
+            let _ = super::step(&alone, &mut context);
+            (ticks, idle_armed, beat.0.borrow().is_some())
+        })
+        .expect("root completes");
+
+        assert_eq!((ticks, idle_armed), (0, false), "a plain, agent or json run never wants a tick, so no timer is armed and none fires");
+        assert!(wanted_armed, "a wanted tick arms its timer");
+    }
+
+    #[proxima::test]
+    async fn firing_a_lane_gate_drops_its_armed_deadline_unfired() {
+        let (before, after) = run_on_this_thread(CoreId(0), async {
+            let gate = proxima_core::signal::Signal::new().child().guard();
+            let lanes = empty_lanes();
+            let lane = &lanes[super::JOB_BASE];
+            *lane.5.borrow_mut() = Some(proxima_primitives::pipe::SignalSource::new(gate.signal()));
+            super::arm_milestone(lane, core::time::Duration::from_secs(3600));
+            let alone = FanIn::new([super::Edge::Milestone(&lanes)], Select::RoundRobin);
+            let mut context = Context::from_waker(Waker::noop());
+            let before = (matches!(super::step(&alone, &mut context), Poll::Pending), lane.6.borrow().is_some());
+            drop(gate);
+            let after = (matches!(super::step(&alone, &mut context), Poll::Pending), lane.6.borrow().is_some());
+            (before, after)
+        })
+        .expect("root completes");
+
+        assert_eq!(before, (true, true), "an hour-long deadline is armed and waiting while the test is in flight");
+        assert_eq!(after, (true, false), "the test settling drops its guard, which cancels the deadline");
     }
 
     #[proxima::test]

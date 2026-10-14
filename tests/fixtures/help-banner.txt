@@ -24,8 +24,8 @@ Options:
                    Where the build directories live (see below; default: shared)
       --test-timeout <secs|none>
                    The deadline every test is declared to have, shown as limit= on RUNNING lines (default: none)
-      --heartbeat <secs>
-                   Seconds between RUNNING lines for the oldest test in flight (default: the build-time heartbeat_secs, 10)
+      --milestones <schedule>
+                   When a running test is named by a RUNNING line: a first offset, x<factor>, and %<percent> of its declared deadline (default: 10s,x2)
       --exit-with-parent
                    Kill the running tests and exit when the parent process exits (macOS, Linux; default: off)
 
@@ -86,13 +86,13 @@ Test timeout, highest precedence first (default: none):
   2. CARGO_VAL_TEST_TIMEOUT=<secs|none>
 secs is a whole number from 1 to 4294967. It declares a deadline for the RUNNING line; it does not kill a test.
 
-Heartbeat, highest precedence first (default: the heartbeat_secs sizing constant, 10):
-  1. --heartbeat <secs>
-  2. CARGO_VAL_HEARTBEAT_SECS=<secs>
-  3. the build-time default (the heartbeat_secs sizing constant)
-In plain output, every interval while a test is in flight prints one line for the oldest:
-  RUNNING  <binary id>  <test>  <age>s  [limit=<secs>s]  (oldest of N running)
-
+Milestones, highest precedence first (default: the milestone_first_secs and milestone_factor sizing constants, 10s,x2):
+  1. --milestones <schedule>
+  2. CARGO_VAL_MILESTONES=<schedule>
+  3. the build-time default (the milestone_first_secs and milestone_factor sizing constants)
+schedule is comma-separated fields: a first offset such as 10s or 250ms, x<2 to 16> as the growth factor, and up to four %<1 to 99> points of a declared deadline.
+Each in-flight test arms one deadline for its next milestone; when it fires, one line names the test, and the next is armed. Nothing fires when nothing is in flight:
+  RUNNING  <binary id> <test> age=<age>s [limit=<secs>s]
 
 Exit with parent, highest precedence first (default: off):
   1. --exit-with-parent

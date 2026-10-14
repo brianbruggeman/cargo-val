@@ -1,6 +1,9 @@
 //! Every setting cargo-val resolves, each with its precedence order, refusal message, and builder.
 
+use core::time::Duration;
+
 use conflaguration::SettingsSource;
+use proxima_primitives::pipe::resilience::backoff::Backoff;
 
 use crate::line::Line;
 
@@ -461,53 +464,57 @@ pub const TEST_TIMEOUT: Layers<'static> = Layers::setting(
 )
 .build_default(Some("none"));
 
-/// The interval between `RUNNING` heartbeats in whole seconds; at least one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeartbeatSecs(u32);
+const MAX_FACTOR: u32 = 64;
 
-impl HeartbeatSecs {
-    #[must_use]
-    pub fn millis(self) -> u64 {
-        u64::from(self.0) * 1000
-    }
+fn duration(text: &str) -> Option<Duration> {
+    let (digits, scale) = [("ms", 1_u64), ("s", 1000), ("m", 60_000)]
+        .into_iter()
+        .find_map(|(suffix, scale)| text.strip_suffix(suffix).map(|digits| (digits, scale)))?;
+    let count = digits.parse::<u64>().ok()?.checked_mul(scale).filter(|millis| *millis != 0)?;
+    Some(Duration::from_millis(count))
 }
 
-impl TryFrom<&[u8]> for HeartbeatSecs {
-    type Error = ();
-
-    fn try_from(text: &[u8]) -> Result<Self, ()> {
-        let seconds = core::str::from_utf8(text).map_err(|_| ())?.parse::<u32>().map_err(|_| ())?;
-        match seconds {
-            1..=MAX_TIMEOUT_SECONDS => Ok(Self(seconds)),
-            _ => Err(()),
-        }
+/// Reads a stall backoff: `const:<duration>`, or `exp:<initial>,<factor>,<max>` with durations such as `250ms`, `10s`, `5m`.
+fn backoff(text: &[u8]) -> Option<Backoff> {
+    let text = core::str::from_utf8(text).ok()?;
+    if let Some(fixed) = text.strip_prefix("const:") {
+        return duration(fixed).map(Backoff::Constant);
     }
+    let mut fields = text.strip_prefix("exp:")?.split(',');
+    let initial = duration(fields.next()?)?;
+    let factor = fields.next()?.parse::<u32>().ok().filter(|factor| (1..=MAX_FACTOR).contains(factor))?;
+    let max = duration(fields.next()?).filter(|max| *max >= initial)?;
+    fields.next().is_none().then_some(Backoff::Exponential { initial, factor, max })
 }
 
-/// `CARGO_VAL_HEARTBEAT_SECS` / `--heartbeat`: seconds between `RUNNING` lines; the build default is the `heartbeat_secs` sizing constant.
-pub const HEARTBEAT: Layers<'static> = Layers::setting(
-    "CARGO_VAL_HEARTBEAT_SECS",
+/// `CARGO_VAL_STALL_BACKOFF` / `--stall-backoff`: how long a running test goes unnamed before a `RUNNING` line, and the wait between the lines after it.
+/// The value is `proxima_primitives::pipe::resilience::backoff::Backoff`'s own fields; the build default is the `stall_*` sizing constants.
+pub const STALL_BACKOFF: Layers<'static> = Layers::setting(
+    "CARGO_VAL_STALL_BACKOFF",
     [
-        b"cargo-val: --heartbeat must be a whole number of seconds between 1 and 4294967\n",
-        b"cargo-val: CARGO_VAL_HEARTBEAT_SECS must be a whole number of seconds between 1 and 4294967\n",
-        b"cargo-val: the default heartbeat is invalid\n",
+        b"cargo-val: --stall-backoff must be const:<duration> or exp:<initial>,<factor 1 to 64>,<max>, durations like 250ms, 10s, 5m\n",
+        b"cargo-val: CARGO_VAL_STALL_BACKOFF must be const:<duration> or exp:<initial>,<factor 1 to 64>,<max>, durations like 250ms, 10s, 5m\n",
+        b"cargo-val: the default stall backoff is invalid\n",
     ],
 );
 
-/// Resolves the heartbeat interval in milliseconds, the sizing constant standing in as the build-default layer.
+/// Resolves the stall backoff, the sizing constants standing in as the build-default layer.
 ///
 /// # Errors
 ///
-/// Returns [`SettingError`] naming the winning layer when its value is not a whole number of seconds from 1 to 4294967.
-pub fn heartbeat_millis(settings: &impl SettingsSource, command_line: Option<&[u8]>) -> Result<u64, SettingError> {
-    let mut default = Line::<24>::new();
-    default.number(crate::view_defaults::HEARTBEAT_SECS);
-    let default = core::str::from_utf8(default.bytes()).ok();
-    HEARTBEAT
-        .build_default(default)
-        .from_settings(settings, command_line)
-        .resolve::<HeartbeatSecs>()
-        .map(|(seconds, _)| seconds.millis())
+/// Returns [`SettingError`] naming the winning layer when its value does not follow the backoff grammar.
+pub fn stall_backoff(settings: &impl SettingsSource, command_line: Option<&[u8]>) -> Result<Backoff, SettingError> {
+    let mut default = Line::<48>::new();
+    default.text(b"exp:");
+    default.number(crate::view_defaults::STALL_INITIAL_SECS);
+    default.text(b"s,");
+    default.number(crate::view_defaults::STALL_FACTOR);
+    default.text(b",");
+    default.number(crate::view_defaults::STALL_MAX_SECS);
+    default.text(b"s");
+    let layers = STALL_BACKOFF.build_default(core::str::from_utf8(default.bytes()).ok()).from_settings(settings, command_line);
+    let (source, text) = layers.supplied().ok_or_else(|| layers.refusal(Source::BuildDefault))?;
+    backoff(text).ok_or_else(|| layers.refusal(source))
 }
 
 /// Whether the run ends when its parent process exits; off, a run outlives its parent as a backgrounded run must.
@@ -1143,7 +1150,7 @@ mod layers_tests {
             ("CARGO_VAL_IGNORED", "include"),
             ("CARGO_VAL_FILTERSET", "test(alpha)"),
             ("CARGO_VAL_TEST_TIMEOUT", "120"),
-            ("CARGO_VAL_HEARTBEAT_SECS", "3"),
+            ("CARGO_VAL_STALL_BACKOFF", "exp:3s,3,1m"),
         ];
         let settings = BorrowedSettings::new(&pairs);
         let empty = BorrowedSettings::new(&[]);
@@ -1169,16 +1176,15 @@ mod layers_tests {
         assert_eq!(TestTimeout::Unset.limit_ms(), None);
         assert_eq!(TEST_TIMEOUT.from_settings(&empty, Some(b"90")).resolve::<TestTimeout>(), Ok((TestTimeout::Seconds(90), Source::CommandLine)));
         assert_eq!(TEST_TIMEOUT.from_settings(&settings, Some(b"none")).resolve::<TestTimeout>(), Ok((TestTimeout::Unset, Source::CommandLine)));
-        assert_eq!(HEARTBEAT.from_settings(&settings, None), HEARTBEAT.configured(Some("3")));
-        assert_eq!(heartbeat_millis(&settings, None), Ok(3_000));
-        assert_eq!(heartbeat_millis(&settings, Some(b"1")), Ok(1_000));
-        assert_eq!(heartbeat_millis(&empty, None), Ok(u64::try_from(crate::view_defaults::HEARTBEAT_SECS).expect("the sizing constant fits u64") * 1000));
-        for refused_text in ["0", "-1", "often", "4294968", ""] {
-            assert!(heartbeat_millis(&empty, Some(refused_text.as_bytes())).is_err(), "{refused_text:?}");
-            assert_eq!(
-                HEARTBEAT.configured(Some(refused_text)).resolve::<HeartbeatSecs>().map_err(SettingError::message),
-                Err(HEARTBEAT.refusal(Source::Configured).message())
-            );
+        let ten = Duration::from_secs(10);
+        let stall = |text: &str| stall_backoff(&empty, Some(text.as_bytes()));
+        assert_eq!(STALL_BACKOFF.from_settings(&settings, None), STALL_BACKOFF.configured(Some("exp:3s,3,1m")));
+        assert_eq!(stall_backoff(&settings, None), Ok(Backoff::Exponential { initial: Duration::from_secs(3), factor: 3, max: Duration::from_secs(60) }));
+        assert_eq!(stall("const:250ms"), Ok(Backoff::Constant(Duration::from_millis(250))));
+        assert_eq!(stall_backoff(&empty, None), Ok(Backoff::Exponential { initial: ten, factor: 2, max: Duration::from_secs(300) }));
+        assert_eq!([0, 1, 2, 5, 9].map(|attempt| stall_backoff(&empty, None).map(|backoff| backoff.base_delay(attempt))), [10, 20, 40, 300, 300].map(|secs| Ok(Duration::from_secs(secs))));
+        for refused_text in ["", "10s", "const:0s", "const:10", "exp:10s,2", "exp:10s,0,5m", "exp:10s,65,5m", "exp:10s,2,5s", "exp:10s,2,5m,1", "often"] {
+            assert!(stall(refused_text).is_err(), "{refused_text:?}");
         }
         for refused_text in ["0", "-3", "soon", "4294968", ""] {
             assert!(TEST_TIMEOUT.configured(Some(refused_text)).resolve::<TestTimeout>().is_err(), "{refused_text:?}");
