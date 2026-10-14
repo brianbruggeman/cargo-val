@@ -10,10 +10,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 
 struct Run {
     status: Option<i32>,
@@ -82,7 +83,7 @@ fn fixture_command(
     environment: &[(&str, &str)],
     probe: Option<&PathBuf>,
 ) -> Command {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
@@ -499,7 +500,7 @@ async fn c68_short_feature_option_builds_with_the_feature_and_runs_the_full_set(
 async fn c68_short_manifest_path_is_forwarded_and_not_taken_as_the_filter() {
     let manifest = fixture_manifest(STOP_POLICY);
     let manifest = manifest.to_str().expect("fixture path is utf-8");
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .env("CARGO_VAL_OUTPUT", "rich")
         .args(["-m", manifest, "--no-fail-fast"])

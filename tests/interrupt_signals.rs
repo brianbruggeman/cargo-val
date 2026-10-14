@@ -6,14 +6,16 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 #[path = "common/fifo.rs"]
 mod fifo;
 
+#[path = "common/binary.rs"]
+mod binary;
+
 use cargo_val::edge_stream_unix::ChildStream;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const SIGINT_STATUS: i32 = 130;
 const SIGTERM_STATUS: i32 = 143;
 
@@ -87,7 +89,7 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
     let held = open_nonblocking_reader(&directory.join("held"));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/{fixture}/Cargo.toml"));
-    let child = Command::new(CARGO_VAL)
+    let child = binary::command()
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)

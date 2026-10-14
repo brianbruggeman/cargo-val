@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const ESCAPE: u8 = 0x1b;
 
 struct Run {
@@ -31,7 +31,7 @@ async fn run_build_error() -> Run {
 }
 
 async fn run_with(arguments: &[&str]) -> Run {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .arg("--manifest-path")
         .arg(manifest())
@@ -114,7 +114,7 @@ async fn colour_off_diagnostics_carry_no_escape_bytes() {
 
 #[proxima::test(timeout = "310s")]
 async fn coloured_diagnostics_still_precede_cargos_coloured_summary() {
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .arg("--manifest-path")
         .arg(manifest())

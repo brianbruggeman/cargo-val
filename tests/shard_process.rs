@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 
 #[cfg(unix)]
 use std::ffi::CString;
@@ -19,6 +19,8 @@ use std::path::Path;
 use std::time::Duration;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 #[cfg(unix)]
@@ -33,7 +35,6 @@ mod supervise;
 #[cfg(unix)]
 use supervise::supervised;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const SHARD: &str = "shard";
 const SHARD_LONG: &str = "shard_long";
 #[cfg(unix)]
@@ -75,7 +76,7 @@ async fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment
     let directory = scratch(label);
     let log = directory.join("pids.log");
     let output: Output = fixture_output(
-        Command::new(CARGO_VAL)
+        binary::command()
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(
@@ -547,7 +548,7 @@ async fn interrupt_ends_blocked_child(process: &str, label: &str) {
     // boxed: the stream owns ~20 KB of capture window, which would trip clippy::large_futures at both awaiting tests
     let ready_stream = Box::new(ChildStream::new(OwnedFd::from(open_ready(&ready))));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shard/Cargo.toml");
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")

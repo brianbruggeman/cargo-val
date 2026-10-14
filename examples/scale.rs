@@ -214,6 +214,10 @@ fn build_command(arm: Arm, context: &Context) -> Command {
         Arm::Test | Arm::Nextest => Command::new("cargo"),
         Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo => Command::new(&context.cargo_val),
     };
+    #[cfg(unix)]
+    if !matches!(arm, Arm::Test | Arm::Nextest) {
+        command.env("CARGO_VAL_EXIT_WITH_PARENT", "1");
+    }
     match arm {
         Arm::Test => command.args(["test", "--lib", "--no-fail-fast", "--color", "never", "--target-dir"]),
         Arm::Nextest => command.args(["nextest", "run", "--lib", "--no-fail-fast", "--color", "never", "--target-dir"]),

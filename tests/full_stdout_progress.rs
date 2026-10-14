@@ -11,7 +11,10 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
+
+#[path = "common/binary.rs"]
+mod binary;
 
 #[cfg(target_os = "linux")]
 use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
@@ -23,7 +26,6 @@ use futures::future::join;
 use prime::os::readiness::{Readiness, ReadyState};
 use proxima_primitives::pipe::{Exhausted, Pipe};
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const FIXTURE_TEST_COUNT: usize = 3000;
 const IGNORED_FLOOD_COUNT: usize = 2500;
 const PIPE_CEILING_BYTES: usize = 65_536;
@@ -116,7 +118,7 @@ fn spawn_cargo_val(directory: &Path, fixture: &str, stdout: PipeWriter) -> Child
         .join(fixture)
         .join("Cargo.toml");
     let stderr = fs::File::create(directory.join("stderr.log")).expect("stderr log is creatable");
-    Command::new(CARGO_VAL)
+    binary::command()
         .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)

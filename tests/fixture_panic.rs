@@ -13,6 +13,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use futures::FutureExt;
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 #[path = "common/fifo.rs"]
 mod fifo;
 #[path = "common/supervise.rs"]
@@ -21,7 +23,6 @@ mod supervise;
 use common::{FIXTURE_DEADLINE, fixture_output};
 use supervise::supervised;
 
-const CARGO_VAL: &str = env!("CARGO_BIN_EXE_cargo-val");
 const CALLER_PANIC: &str = "the caller panics while the blocked test is running";
 
 fn probe_directory() -> PathBuf {
@@ -39,7 +40,7 @@ fn probe_directory() -> PathBuf {
 
 fn blocked_test_command(directory: Option<&Path>) -> Command {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/blocked_test/Cargo.toml");
-    let mut command = Command::new(CARGO_VAL);
+    let mut command = binary::command();
     command
         .arg("--manifest-path")
         .arg(manifest)

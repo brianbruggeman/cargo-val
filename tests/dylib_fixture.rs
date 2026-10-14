@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
+#[path = "common/binary.rs"]
+mod binary;
 
 use common::fixture_output;
 
@@ -63,7 +65,7 @@ async fn proc_macro_test_binary_runs_under_cargo_val_with_the_environment_cargo_
     let mut cargo_test = scrubbed(Command::new("cargo"));
     cargo_test.args(["test", "--lib", "--manifest-path"]);
     cargo_test.arg(fixture_manifest());
-    let mut cargo_val = scrubbed(Command::new(env!("CARGO_BIN_EXE_cargo-val")));
+    let mut cargo_val = scrubbed(binary::command());
     cargo_val.env("CARGO_VAL_OUTPUT", "rich");
     cargo_val.arg("--lib").arg("--manifest-path");
     cargo_val.arg(fixture_manifest());
