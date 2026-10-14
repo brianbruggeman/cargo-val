@@ -943,7 +943,6 @@ mod tests {
 #[cfg(all(test, unix))]
 mod pause_tests {
     use core::cell::{Cell, RefCell};
-    use crate::driver::NO_BLOCKS;
     use core::future::poll_fn;
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -1042,7 +1041,7 @@ mod pause_tests {
             signals,
             store: std::rc::Rc::new(crate::edge_store::unavailable()),
             reads: RefCell::new(&mut []),
-            cursor: Cell::new([0; 5]), blocks: RefCell::new(NO_BLOCKS),
+            cursor: Cell::new([0; 5]), head: Cell::new(0),
             filter: "",
             exact: false,
             targets: RefCell::new(TargetTable::new()),

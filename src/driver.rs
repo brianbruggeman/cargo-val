@@ -88,12 +88,6 @@ use crate::test_environment::{
 };
 use crate::test_intent::ExactTestIntent;
 
-// failure blocks waiting for the screen; one beyond this prints its bounded window at once and the store keeps the rest
-const BLOCKS: usize = 32;
-// head, length and the ring of entries: (position in the status ring, ledger index, the attempt's store chains, the entry's own print cursor)
-type BlockFifo = (usize, usize, [(u64, usize, [edge_store::View; 2], [u64; 5]); BLOCKS]);
-pub(crate) const NO_BLOCKS: BlockFifo = (0, 0, [(0, 0, [(0, 0, 0, 0); 2], [0; 5]); BLOCKS]);
-
 pub(crate) const LIVE_CAPACITY: usize = 64;
 const _: () = assert!(LIVE_CAPACITY < SIGNAL_SLOTS, "jobs are capped at LIVE_CAPACITY, so the signal table needs one more slot for the doc test group");
 const IGNORED_ARGUMENTS: [&[u8]; 1] = [b"--ignored"];
@@ -1564,7 +1558,7 @@ pub(crate) struct ListingRun<'run> {
     probe_output: RefCell<(Vec<u8>, Option<bool>, bool)>,
     reads: RefCell<&'run mut [u8]>,
     cursor: Cell<[u64; 5]>,
-    blocks: RefCell<BlockFifo>,
+    head: Cell<usize>,
     root: Signal,
     trip: Signal,
 }
@@ -1673,88 +1667,68 @@ impl ListingRun<'_> {
             return Ok(false);
         }
         self.render().1.borrow_mut().apply(&event);
-        let index = {
+        let position = status_queue::mark();
+        let queued_at = {
             let mut state = self.render().1.borrow_mut();
             state.keep_views(id, views);
-            state.block_index(id)
+            state.queue_block(id, position)
         };
-        if index.is_some_and(|index| self.push_block(index, views)) {
+        if queued_at.is_some() {
+            self.hold_head();
             return Ok(true);
         }
         show(self.render(), &event)?;
         Ok(false)
     }
 
-    // the entry carries this attempt's store chains and its own cursor, so a rerun that replaces the kept views never changes what a pending block prints
-    fn push_block(&self, index: usize, views: [edge_store::View; 2]) -> bool {
-        let mut blocks = self.blocks.borrow_mut();
-        let (head, length) = (blocks.0, blocks.1);
-        if length == BLOCKS {
-            return false;
-        }
-        let position = status_queue::mark();
-        blocks.2[(head + length) % BLOCKS] = (position, index, views, [0; 5]);
-        blocks.1 += 1;
-        if length == 0 {
-            status_queue::hold(Some(position));
-        }
-        true
+    // the oldest pending block holds the scrollback at its position; with none pending the scrollback flows
+    fn hold_head(&self) {
+        let pending = self.render().1.borrow().pending_block(self.head.get());
+        status_queue::hold(pending.map(|(_, position)| position));
     }
 
-    // the next page of the oldest pending block, its ledger index, store chains and cursor
-    fn head_block(&self) -> Option<(usize, [edge_store::View; 2], [u64; 5])> {
-        let blocks = self.blocks.borrow();
-        (blocks.1 != 0).then(|| {
-            let (_, index, views, cursor) = blocks.2[blocks.0];
-            (index, views, cursor)
-        })
-    }
-
-    fn pop_block(&self) {
-        let mut blocks = self.blocks.borrow_mut();
-        blocks.0 = (blocks.0 + 1) % BLOCKS;
-        blocks.1 -= 1;
-        status_queue::hold((blocks.1 != 0).then(|| blocks.2[blocks.0].0));
+    // the ledger entry is the block: its name, chains, excerpt and links are the attempt's own, so a later attempt never changes what prints
+    fn pop_block(&self, index: usize) {
+        self.render().1.borrow_mut().finish_block(index);
+        self.head.set(index + 1);
+        self.cursor.set([0; 5]);
+        self.hold_head();
     }
 
     /// Whether a failure block still waits to be printed.
     pub(crate) fn failures_pending(&self) -> bool {
-        self.blocks.borrow().1 != 0
+        self.render().1.borrow().pending_block(self.head.get()).is_some()
     }
 
-    /// Prints the queued failure blocks in settle order, one frame at a time, while the status ring ahead of the block is delivered
+    /// Prints the pending failure blocks in settle order, one frame at a time, while the scrollback ahead of the block is delivered
     /// and the inline lane has room; the pump calls it after every item and wakes it as the screen catches up.
     ///
     /// A block is the GitHub group line, each non-empty stream as a fenced run of its store pages, then the source excerpt.
-    /// Pages go through the run's one read page and the render frame, so a block of any size costs no allocation. A full lane only
-    /// pauses the blocks: the pump keeps reading every producer lane, and the store keeps their output.
+    /// Pages go through the run's one read page and the render frame, so a block of any size costs no allocation. The pending
+    /// blocks are the failure ledger entries from the head index on; only the head prints, and the one cursor is its place.
+    /// A full lane only pauses the blocks: the pump keeps reading every producer lane, and the store keeps their output.
     ///
     /// # Errors
     ///
     /// The error of the output write.
     pub(crate) fn resume_failures(&self) -> Result<(), RunError> {
         while status_queue::block_ready() {
-            let Some((index, views, cursor)) = self.head_block() else {
+            let Some((index, _)) = self.render().1.borrow().pending_block(self.head.get()) else {
                 return Ok(());
             };
-            self.cursor.set(cursor);
-            if status_queue::insert(|| self.step_block(index, views))? {
-                self.pop_block();
-            } else {
-                let mut blocks = self.blocks.borrow_mut();
-                let head = blocks.0;
-                blocks.2[head].3 = self.cursor.get();
+            if status_queue::insert(|| self.step_block(index))? {
+                self.pop_block(index);
             }
         }
         Ok(())
     }
 
     // stage 0 opens the block, each stream is three stages (open, pages, close) from stage 1 and 4, and stage 7 closes the block
-    fn step_block(&self, index: usize, views: [edge_store::View; 2]) -> Result<bool, RunError> {
+    fn step_block(&self, index: usize) -> Result<bool, RunError> {
         let (_, state, frame, _) = self.render();
         let (state, mut frame) = (state.borrow(), frame.borrow_mut());
         let frame: &mut Line<FRAME_BYTES> = &mut frame;
-        let (id, links, excerpt) = (state.block_at(index), state.block_links(index), state.block_excerpt(index));
+        let (id, views, links, excerpt) = (state.block_at(index), state.block_views(index), state.block_links(index), state.block_excerpt(index));
         frame.clear();
         let section = self.cursor.get()[0];
         match section {
@@ -3489,7 +3463,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let run = held(ListingRun {
         signals: &signals,
         store: Rc::clone(&store),
-        reads: RefCell::new(read_storage), cursor: Cell::new([0; 5]), blocks: RefCell::new(NO_BLOCKS),
+        reads: RefCell::new(read_storage), cursor: Cell::new([0; 5]), head: Cell::new(0),
         filter,
         exact: parser.exact(),
         targets: RefCell::new(TargetTable::new()),
@@ -3566,7 +3540,6 @@ fn run_storage<'environment>(process: ProcessMode, timeline_bytes: usize) -> Run
         (
             zeroed(FRAME_CAPACITY),
             zeroed(SCRATCH_CAPACITY),
-    status_queue::spill_into(Rc::clone(&store));
             zeroed(LINKED_CAPACITY),
             zeroed(BUILD_SCRIPT_CAPACITY),
             zeroed(SOURCE_CAPACITY + 1),
@@ -3593,6 +3566,7 @@ fn run_storage<'environment>(process: ProcessMode, timeline_bytes: usize) -> Run
 fn open_store(render: &Render<'_>, target: Option<&Path>) -> Rc<edge_store::Store> {
     let store = Rc::new(edge_store::open(target));
     *render.3.borrow_mut() = Some(Rc::clone(&store));
+    status_queue::spill_into(Rc::clone(&store));
     store
 }
 
@@ -4774,7 +4748,6 @@ mod tests {
 mod listing_allocation_tests {
     use core::cell::{Cell, RefCell};
     use std::vec::Vec;
-    use crate::driver::NO_BLOCKS;
 
     use proxima_core::signal::Signal;
 
@@ -4835,7 +4808,7 @@ mod listing_allocation_tests {
             signals: &signals,
             store: std::rc::Rc::new(crate::edge_store::unavailable()),
             reads: RefCell::new(&mut []),
-            cursor: Cell::new([0; 5]), blocks: RefCell::new(NO_BLOCKS),
+            cursor: Cell::new([0; 5]), head: Cell::new(0),
             filter: "",
             exact: false,
             targets: RefCell::new(TargetTable::new()),
@@ -4886,42 +4859,6 @@ mod listing_allocation_tests {
         reap(&mut listing);
         std::println!("{{\"listing_spawn_allocations\":{allocations}}}");
         assert_eq!(allocations, 0);
-    }
-
-    const FIRST_ATTEMPT: [crate::edge_store::View; 2] = [(7, 100, 900, 4_194_304), (8, 200, 800, 4_194_304)];
-    const RERUN_ATTEMPT: [crate::edge_store::View; 2] = [(9, 300, 700, 5), (10, 400, 600, 5)];
-
-    #[test]
-    fn a_rerun_of_a_pending_failure_queues_its_own_entry_and_the_pending_block_keeps_the_first_attempts_chains() {
-        with_run(|run| {
-            assert!(run.push_block(3, FIRST_ATTEMPT), "the first attempt queues");
-            assert!(run.push_block(3, RERUN_ATTEMPT), "the rerun of the same failure queues behind it");
-
-            let pending = run.head_block().expect("a block is pending");
-            run.pop_block();
-            let rerun = run.head_block().expect("the rerun's block is pending");
-
-            assert_eq!((pending.0, pending.1), (3, FIRST_ATTEMPT), "the pending block still prints the first attempt's bytes");
-            assert_eq!((rerun.0, rerun.1), (3, RERUN_ATTEMPT), "the rerun's block prints the rerun's bytes");
-        });
-    }
-
-    #[test]
-    fn each_pending_block_owns_its_cursor_so_a_cut_block_resumes_instead_of_restarting() {
-        with_run(|run| {
-            assert!(run.push_block(0, FIRST_ATTEMPT) && run.push_block(1, RERUN_ATTEMPT));
-            run.blocks.borrow_mut().2[0].3 = [2, 11, 22, 33, 1];
-
-            let cut = run.head_block().expect("the first block is pending");
-            run.pop_block();
-            let next = run.head_block().expect("the second block is pending");
-
-            assert_eq!(cut.2, [2, 11, 22, 33, 1], "a block cut mid-print keeps its place");
-            assert_eq!(next.2, [0; 5], "the next block starts at its own beginning");
-            assert!(run.failures_pending());
-            run.pop_block();
-            assert!(!run.failures_pending());
-        });
     }
 }
 
