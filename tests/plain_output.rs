@@ -414,6 +414,19 @@ async fn rich_on_a_pty_draws_the_frame_ends_with_the_closing_block_and_shows_the
 
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
+async fn shard_mode_rich_on_a_pty_prints_no_per_test_lines_between_frames() {
+    let screen = on_a_pty(&[], &["--output", "rich", "--process", "shard"]);
+    let text = String::from_utf8_lossy(&screen);
+
+    assert!(contains(&screen, HIDE_CURSOR) && last_cursor_up(&screen).is_some(), "the shard run draws the frame:\n{text:?}");
+    let before_closing = &text[..text.rfind("\u{1b}[?25h").expect("the cursor is shown after the last frame")];
+    assert!(!before_closing.contains("fixture::passes"), "a passing test prints no line while frames are live:\n{before_closing:?}");
+    assert!(!before_closing.contains("fixture::ignored_by_default"), "an ignored test prints no line while frames are live:\n{before_closing:?}");
+    assert!(text[text.rfind("\u{1b}[?25h").expect("shown")..].contains("SUMMARY  passed=1 failed=1"), "the closing block follows:\n{text:?}");
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
 async fn sigint_during_a_rich_run_on_a_pty_still_shows_the_cursor_and_exits_130() {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("pty-sigint-{}", std::process::id()));
     _ = std::fs::remove_dir_all(&directory);
