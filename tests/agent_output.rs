@@ -10,6 +10,7 @@ mod binary;
 use fixture::fixture_output;
 
 const ESCAPE: u8 = 0x1b;
+const REFUSED: i32 = 2;
 const GREEN_BUDGET_BYTES: usize = 200;
 const FAILING_TEST: &str = "fixture::fails_when_requested";
 
@@ -34,8 +35,11 @@ async fn run(fixture_name: &str, environment: &[(&str, &str)], arguments: &[&str
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agent-fixture-target"))
+        .env("CARGO_VAL_LOG", "debug")
         .envs(environment.iter().copied());
-    fixture_output(&mut command).await
+    let output = fixture_output(&mut command).await;
+    assert_ne!(output.status.code(), Some(REFUSED), "cargo-val refused the invocation: {:?}\nstderr:\n{}\nstdout:\n{}", output.status, String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+    output
 }
 
 fn stdout_of(output: &Output) -> String {

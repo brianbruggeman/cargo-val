@@ -85,6 +85,18 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[cfg(unix)]
+const CONTEXT_BYTES: usize = 400;
+
+// ESC shows as \e so the frame boundaries around a match are readable in a failure message
+#[cfg(unix)]
+fn around(text: &str, needle: &str) -> String {
+    let Some(start) = text.find(needle) else { return String::from("<needle absent>") };
+    let from = text.floor_char_boundary(start.saturating_sub(CONTEXT_BYTES));
+    let to = text.ceil_char_boundary((start + needle.len() + CONTEXT_BYTES).min(text.len()));
+    format!("match at byte {start} of {}, bytes {from}..{to}:\n{}", text.len(), text[from..to].escape_debug().to_string().replace("\\u{1b}", "\\e"))
+}
+
+#[cfg(unix)]
 fn rposition(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).rposition(|window| window == needle)
 }
@@ -434,8 +446,8 @@ async fn shard_mode_rich_on_a_pty_prints_no_per_test_lines_between_frames() {
     assert!(contains(&screen, HIDE_CURSOR) && last_cursor_up(&screen).is_some(), "the shard run draws the frame:\n{text:?}");
     let last_frame_end = rposition(&screen, b"\x1b[J").expect("the last redraw clears below the cursor") + b"\x1b[J".len();
     let before_closing = &text[..last_frame_end];
-    assert!(!before_closing.contains("fixture::passes"), "a passing test prints no line while frames are live:\n{before_closing:?}");
-    assert!(!before_closing.contains("fixture::ignored_by_default"), "an ignored test prints no line while frames are live:\n{before_closing:?}");
+    assert!(!before_closing.contains("fixture::passes"), "a passing test prints no line while frames are live:\n{}", around(before_closing, "fixture::passes"));
+    assert!(!before_closing.contains("fixture::ignored_by_default"), "an ignored test prints no line while frames are live:\n{}", around(before_closing, "fixture::ignored_by_default"));
     assert!(text[last_frame_end..].contains("SUMMARY  passed=1 failed=1") && screen.ends_with(SHOW_CURSOR), "the closing block follows the erase and the cursor returns after it:\n{text:?}");
 }
 
