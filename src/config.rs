@@ -5,11 +5,122 @@ use conflaguration::SettingsSource;
 const HARNESS_FLAG: &[u8] = b"--test-threads";
 const IGNORED_FLAG: &[u8] = b"--ignored";
 const INCLUDE_IGNORED_FLAG: &[u8] = b"--include-ignored";
-const IGNORED_KEY: &str = "CARGO_VAL_IGNORED";
-const FILTERSET_KEY: &str = "CARGO_VAL_FILTERSET";
 const RUST_TEST_THREADS_KEY: &str = "RUST_TEST_THREADS";
 const CONFIGURED_JOBS_KEY: &str = "CARGO_VAL_JOBS";
-const TARGET_DIR_KEY: &str = "CARGO_VAL_TARGET_DIR";
+
+/// Which layer supplied a value, highest precedence first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    CommandLine,
+    Configured,
+    BuildDefault,
+}
+
+/// A refused value, the layer that supplied it, and the message naming that layer's flag or key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingError {
+    pub source: Source,
+    message: &'static [u8],
+}
+
+impl SettingError {
+    #[must_use]
+    pub const fn message(self) -> &'static [u8] {
+        self.message
+    }
+}
+
+/// The layers of one setting that is a parsed value: command line over a [`SettingsSource`] key over a build default.
+///
+/// A family contributes its key and its three refusal messages through [`Layers::setting`] and its
+/// value type through `TryFrom<&[u8]>`; precedence, parsing and refusals are written here once.
+/// Built from settings or in code with the same result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layers<'value> {
+    key: &'static str,
+    refusals: [&'static [u8]; 3],
+    command_line: Option<&'value [u8]>,
+    configured: Option<&'value str>,
+    build_default: Option<&'value str>,
+}
+
+impl<'value> Layers<'value> {
+    /// `refusals` are the messages for a refused command-line, configured, and build-default value, in that order.
+    #[must_use]
+    pub const fn setting(key: &'static str, refusals: [&'static [u8]; 3]) -> Self {
+        Self {
+            key,
+            refusals,
+            command_line: None,
+            configured: None,
+            build_default: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn command_line(mut self, value: Option<&'value [u8]>) -> Self {
+        self.command_line = value;
+        self
+    }
+
+    #[must_use]
+    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
+        self.configured = value;
+        self
+    }
+
+    #[must_use]
+    pub const fn build_default(mut self, value: Option<&'value str>) -> Self {
+        self.build_default = value;
+        self
+    }
+
+    /// Reads the setting's key from a conflaguration source.
+    #[must_use]
+    pub fn from_settings(
+        self,
+        settings: &'value impl SettingsSource,
+        command_line: Option<&'value [u8]>,
+    ) -> Self {
+        self.command_line(command_line)
+            .configured(settings.get(self.key))
+    }
+
+    /// The highest-precedence supplied text and its layer, unparsed.
+    #[must_use]
+    pub const fn supplied(self) -> Option<(Source, &'value [u8])> {
+        match (self.command_line, self.configured, self.build_default) {
+            (Some(bytes), _, _) => Some((Source::CommandLine, bytes)),
+            (None, Some(text), _) => Some((Source::Configured, text.as_bytes())),
+            (None, None, Some(text)) => Some((Source::BuildDefault, text.as_bytes())),
+            (None, None, None) => None,
+        }
+    }
+
+    /// Picks the highest-precedence supplied layer and parses only that value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingError`] naming the winning layer when its value does not parse, or the
+    /// build-default layer when nothing supplied a value.
+    pub fn resolve<Mode: TryFrom<&'value [u8]>>(self) -> Result<(Mode, Source), SettingError> {
+        let Some((source, bytes)) = self.supplied() else {
+            return Err(self.refusal(Source::BuildDefault));
+        };
+        Mode::try_from(bytes)
+            .map(|mode| (mode, source))
+            .map_err(|_| self.refusal(source))
+    }
+
+    const fn refusal(self, source: Source) -> SettingError {
+        let message = match source {
+            Source::CommandLine => self.refusals[0],
+            Source::Configured => self.refusals[1],
+            Source::BuildDefault => self.refusals[2],
+        };
+        SettingError { source, message }
+    }
+}
 
 /// Where a concurrency value came from, highest precedence first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +197,6 @@ pub struct ThreadsChoice {
     pub source: ThreadsSource,
 }
 
-/// Harness arguments after `--` that cargo val understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HarnessRequest<'argument> {
     /// Set by `--ignored` or `--include-ignored`; unset leaves the configured mode in force.
@@ -94,6 +204,7 @@ pub struct HarnessRequest<'argument> {
     pub test_threads: Option<&'argument [u8]>,
 }
 
+/// What a run does with `#[ignore]`d tests, with libtest's flag meanings.
 /// What a run does with `#[ignore]`d tests, with libtest's flag meanings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IgnoreMode {
@@ -105,134 +216,27 @@ pub enum IgnoreMode {
     Include,
 }
 
-impl IgnoreMode {
-    fn parse(text: &str) -> Option<Self> {
+impl TryFrom<&[u8]> for IgnoreMode {
+    type Error = ();
+
+    fn try_from(text: &[u8]) -> Result<Self, ()> {
         match text {
-            "skip" => Some(Self::Skip),
-            "only" => Some(Self::Only),
-            "include" => Some(Self::Include),
-            _ => None,
+            b"skip" => Ok(Self::Skip),
+            b"only" => Ok(Self::Only),
+            b"include" => Ok(Self::Include),
+            _ => Err(()),
         }
     }
 }
 
-/// Where the ignore mode came from, highest precedence first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IgnoreSource {
-    HarnessArgument,
-    Configured,
-    Default,
-}
+const IGNORE_REFUSAL: &[u8] = b"cargo-val: CARGO_VAL_IGNORED must be skip, only, or include\n";
 
-/// A refused `CARGO_VAL_IGNORED` value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IgnoreError;
+/// `CARGO_VAL_IGNORED`; the harness flags are typed by [`HarnessRequest`], so no command-line text reaches it.
+pub const IGNORE: Layers<'static> =
+    Layers::setting("CARGO_VAL_IGNORED", [IGNORE_REFUSAL; 3]).build_default(Some("skip"));
 
-impl IgnoreError {
-    #[must_use]
-    pub const fn message(self) -> &'static [u8] {
-        b"cargo-val: CARGO_VAL_IGNORED must be skip, only, or include\n"
-    }
-}
-
-/// Every layer that can supply the ignore mode, built from settings or in code with the same result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IgnoreSources<'value> {
-    harness: Option<IgnoreMode>,
-    configured: Option<&'value str>,
-}
-
-impl<'value> IgnoreSources<'value> {
-    #[must_use]
-    pub const fn builder() -> Self {
-        Self {
-            harness: None,
-            configured: None,
-        }
-    }
-
-    #[must_use]
-    pub const fn harness(mut self, value: Option<IgnoreMode>) -> Self {
-        self.harness = value;
-        self
-    }
-
-    #[must_use]
-    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
-        self.configured = value;
-        self
-    }
-
-    /// Reads `CARGO_VAL_IGNORED` from a conflaguration source.
-    #[must_use]
-    pub fn from_settings(settings: &'value impl SettingsSource, harness: Option<IgnoreMode>) -> Self {
-        Self::builder()
-            .harness(harness)
-            .configured(settings.get(IGNORED_KEY))
-    }
-
-    /// Picks the highest-precedence supplied source and validates only that value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`IgnoreError`] when the configured value is not `skip`, `only`, or `include`.
-    pub fn resolve(self) -> Result<(IgnoreMode, IgnoreSource), IgnoreError> {
-        match (self.harness, self.configured) {
-            (Some(mode), _) => Ok((mode, IgnoreSource::HarnessArgument)),
-            (None, Some(text)) => IgnoreMode::parse(text)
-                .map(|mode| (mode, IgnoreSource::Configured))
-                .ok_or(IgnoreError),
-            (None, None) => Ok((IgnoreMode::Skip, IgnoreSource::Default)),
-        }
-    }
-}
-
-/// Every layer that can supply the filterset text; the command line wins over `CARGO_VAL_FILTERSET`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FiltersetSources<'value> {
-    command_line: Option<&'value [u8]>,
-    configured: Option<&'value str>,
-}
-
-impl<'value> FiltersetSources<'value> {
-    #[must_use]
-    pub const fn builder() -> Self {
-        Self {
-            command_line: None,
-            configured: None,
-        }
-    }
-
-    #[must_use]
-    pub const fn command_line(mut self, value: Option<&'value [u8]>) -> Self {
-        self.command_line = value;
-        self
-    }
-
-    #[must_use]
-    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
-        self.configured = value;
-        self
-    }
-
-    /// Reads `CARGO_VAL_FILTERSET` from a conflaguration source.
-    #[must_use]
-    pub fn from_settings(
-        settings: &'value impl SettingsSource,
-        command_line: Option<&'value [u8]>,
-    ) -> Self {
-        Self::builder()
-            .command_line(command_line)
-            .configured(settings.get(FILTERSET_KEY))
-    }
-
-    /// The winning expression text, if any layer supplied one.
-    #[must_use]
-    pub fn resolve(self) -> Option<&'value [u8]> {
-        self.command_line
-            .or_else(|| self.configured.map(str::as_bytes))
-    }
-}
+/// `CARGO_VAL_FILTERSET`; the command line wins, and no layer is validated here.
+pub const FILTERSET: Layers<'static> = Layers::setting("CARGO_VAL_FILTERSET", [b""; 3]);
 
 /// Where cargo val's own cargo children build, a value on the environment axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,108 +249,130 @@ pub enum TargetDirMode<'value> {
     Path(&'value [u8]),
 }
 
-impl<'value> TargetDirMode<'value> {
-    fn parse(text: &'value [u8]) -> Option<Self> {
+impl<'value> TryFrom<&'value [u8]> for TargetDirMode<'value> {
+    type Error = ();
+
+    fn try_from(text: &'value [u8]) -> Result<Self, ()> {
         match text {
-            b"" => None,
-            b"isolated" => Some(Self::Isolated),
-            b"shared" => Some(Self::Shared),
-            path => Some(Self::Path(path)),
+            b"" => Err(()),
+            b"isolated" => Ok(Self::Isolated),
+            b"shared" => Ok(Self::Shared),
+            path => Ok(Self::Path(path)),
         }
     }
 }
 
-/// Where the target-dir mode came from, highest precedence first.
+/// `CARGO_VAL_TARGET_DIR` / `--target-dir`; the build default is supplied by the caller.
+pub const TARGET_DIR: Layers<'static> = Layers::setting(
+    "CARGO_VAL_TARGET_DIR",
+    [
+        b"cargo-val: --target-dir must be isolated, shared, or a non-empty path\n",
+        b"cargo-val: CARGO_VAL_TARGET_DIR must be isolated, shared, or a non-empty path\n",
+        b"cargo-val: the build-time target dir default must be isolated, shared, or a non-empty path\n",
+    ],
+);
+
+/// What a run does when its selection matches no tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetDirSource {
-    CommandLine,
-    Configured,
-    BuildDefault,
+pub enum NoTestsPolicy {
+    Fail,
+    Warn,
+    Pass,
 }
 
-/// A refused target-dir value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TargetDirError {
-    pub source: TargetDirSource,
-}
+impl TryFrom<&[u8]> for NoTestsPolicy {
+    type Error = ();
 
-impl TargetDirError {
-    #[must_use]
-    pub const fn message(self) -> &'static [u8] {
-        match self.source {
-            TargetDirSource::CommandLine => {
-                b"cargo-val: --target-dir must be isolated, shared, or a non-empty path\n"
-            }
-            TargetDirSource::Configured => {
-                b"cargo-val: CARGO_VAL_TARGET_DIR must be isolated, shared, or a non-empty path\n"
-            }
-            TargetDirSource::BuildDefault => {
-                b"cargo-val: the build-time target dir default must be isolated, shared, or a non-empty path\n"
-            }
+    fn try_from(text: &[u8]) -> Result<Self, ()> {
+        match text {
+            b"fail" => Ok(Self::Fail),
+            b"warn" => Ok(Self::Warn),
+            b"pass" => Ok(Self::Pass),
+            _ => Err(()),
         }
     }
 }
 
-/// Every layer that can supply the target-dir mode, built from settings or in code with the same result.
+/// `CARGO_VAL_NO_TESTS` / `--no-tests`, defaulting to `fail`.
+pub const NO_TESTS: Layers<'static> = Layers::setting(
+    "CARGO_VAL_NO_TESTS",
+    [
+        b"cargo-val: --no-tests must be fail, warn, or pass\n",
+        b"cargo-val: CARGO_VAL_NO_TESTS must be fail, warn, or pass\n",
+        b"cargo-val: the default no-tests policy is invalid\n",
+    ],
+)
+.build_default(Some("fail"));
+
+/// How a test binary's selected tests are given to OS processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TargetDirSources<'value> {
-    command_line: Option<&'value [u8]>,
-    configured: Option<&'value str>,
-    default_mode: &'value str,
+pub enum ProcessMode {
+    /// Contiguous groups of tests share one libtest child, so a binary launches about `jobs` children.
+    Shard,
+    /// One exact test per child.
+    Test,
 }
 
-impl<'value> TargetDirSources<'value> {
-    #[must_use]
-    pub const fn builder(default_mode: &'value str) -> Self {
-        Self {
-            command_line: None,
-            configured: None,
-            default_mode,
+/// What the user asked for: a forced mode, or `auto`, which lets the target OS decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessSetting {
+    /// Shard on a Windows target, where process creation dominates; one test per child elsewhere.
+    Auto,
+    Shard,
+    Test,
+}
+
+impl TryFrom<&[u8]> for ProcessSetting {
+    type Error = ();
+
+    fn try_from(text: &[u8]) -> Result<Self, ()> {
+        match text {
+            b"auto" => Ok(Self::Auto),
+            b"shard" => Ok(Self::Shard),
+            b"test" => Ok(Self::Test),
+            _ => Err(()),
         }
     }
+}
 
+impl ProcessSetting {
+    /// The mode this setting runs as for a target; a forced setting ignores the target.
     #[must_use]
-    pub const fn command_line(mut self, value: Option<&'value [u8]>) -> Self {
-        self.command_line = value;
-        self
+    pub const fn mode(self, windows_target: bool) -> ProcessMode {
+        match self {
+            Self::Shard => ProcessMode::Shard,
+            Self::Auto if windows_target => ProcessMode::Shard,
+            Self::Auto | Self::Test => ProcessMode::Test,
+        }
     }
+}
 
-    #[must_use]
-    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
-        self.configured = value;
-        self
-    }
+/// `CARGO_VAL_PROCESS` / `--process`; the build default is supplied by the caller.
+pub const PROCESS: Layers<'static> = Layers::setting(
+    "CARGO_VAL_PROCESS",
+    [
+        b"cargo-val: --process must be auto, shard, or test\n",
+        b"cargo-val: CARGO_VAL_PROCESS must be auto, shard, or test\n",
+        b"cargo-val: the build default process setting is invalid\n",
+    ],
+);
 
-    /// Reads `CARGO_VAL_TARGET_DIR` from a conflaguration source.
-    #[must_use]
-    pub fn from_settings(
-        settings: &'value impl SettingsSource,
-        command_line: Option<&'value [u8]>,
-        default_mode: &'value str,
-    ) -> Self {
-        Self::builder(default_mode)
-            .command_line(command_line)
-            .configured(settings.get(TARGET_DIR_KEY))
-    }
-
-    /// Picks the highest-precedence supplied source and validates only that value.
+impl<'argument> HarnessRequest<'argument> {
+    /// The ignore mode a harness flag selected, else the `CARGO_VAL_IGNORED` setting, else skip.
     ///
     /// # Errors
     ///
-    /// Returns [`TargetDirError`] naming the source when its value is empty.
-    pub fn resolve(self) -> Result<(TargetDirMode<'value>, TargetDirSource), TargetDirError> {
-        let (text, source) = match (self.command_line, self.configured) {
-            (Some(text), _) => (text, TargetDirSource::CommandLine),
-            (None, Some(text)) => (text.as_bytes(), TargetDirSource::Configured),
-            (None, None) => (self.default_mode.as_bytes(), TargetDirSource::BuildDefault),
-        };
-        TargetDirMode::parse(text)
-            .map(|mode| (mode, source))
-            .ok_or(TargetDirError { source })
+    /// Returns [`SettingError`] when the configured value is not `skip`, `only`, or `include`.
+    pub fn ignore_mode(self, settings: &impl SettingsSource) -> Result<IgnoreMode, SettingError> {
+        match self.ignore {
+            Some(mode) => Ok(mode),
+            None => IGNORE
+                .from_settings(settings, None)
+                .resolve::<IgnoreMode>()
+                .map(|(mode, _)| mode),
+        }
     }
-}
 
-impl<'argument> HarnessRequest<'argument> {
     /// Accepts `--ignored`, `--include-ignored` (mutually exclusive, as in libtest) and `--test-threads N` / `--test-threads=N`; the last `--test-threads` wins.
     ///
     /// # Errors
@@ -625,118 +651,6 @@ fn positive(text: &str) -> Option<usize> {
     text.parse::<usize>().ok().filter(|count| *count >= 1)
 }
 
-const NO_TESTS_KEY: &str = "CARGO_VAL_NO_TESTS";
-
-/// What a run does when its selection matches no tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoTestsPolicy {
-    Fail,
-    Warn,
-    Pass,
-}
-
-impl NoTestsPolicy {
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "fail" => Some(Self::Fail),
-            "warn" => Some(Self::Warn),
-            "pass" => Some(Self::Pass),
-            _ => None,
-        }
-    }
-}
-
-/// Where the winning policy came from, highest precedence first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoTestsSource {
-    CommandLine,
-    Configured,
-    Default,
-}
-
-/// A refused policy value together with the source that supplied it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoTestsError {
-    pub source: NoTestsSource,
-}
-
-impl NoTestsError {
-    #[must_use]
-    pub const fn message(self) -> &'static [u8] {
-        match self.source {
-            NoTestsSource::CommandLine => b"cargo-val: --no-tests must be fail, warn, or pass\n",
-            NoTestsSource::Configured => {
-                b"cargo-val: CARGO_VAL_NO_TESTS must be fail, warn, or pass\n"
-            }
-            NoTestsSource::Default => b"cargo-val: the default no-tests policy is invalid\n",
-        }
-    }
-}
-
-/// The accepted policy and the source that won.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoTestsChoice {
-    pub policy: NoTestsPolicy,
-    pub source: NoTestsSource,
-}
-
-/// Every layer that can supply the policy, built from settings or in code with the same result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoTestsSources<'value> {
-    command_line: Option<&'value [u8]>,
-    configured: Option<&'value str>,
-}
-
-impl<'value> NoTestsSources<'value> {
-    #[must_use]
-    pub const fn builder() -> Self {
-        Self {
-            command_line: None,
-            configured: None,
-        }
-    }
-
-    #[must_use]
-    pub const fn command_line(mut self, value: Option<&'value [u8]>) -> Self {
-        self.command_line = value;
-        self
-    }
-
-    #[must_use]
-    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
-        self.configured = value;
-        self
-    }
-
-    /// Reads `CARGO_VAL_NO_TESTS` from a conflaguration source.
-    #[must_use]
-    pub fn from_settings(
-        settings: &'value impl SettingsSource,
-        command_line: Option<&'value [u8]>,
-    ) -> Self {
-        Self::builder()
-            .command_line(command_line)
-            .configured(settings.get(NO_TESTS_KEY))
-    }
-
-    /// Picks the highest-precedence supplied source and validates only that value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NoTestsError`] naming the winning source when its value is not `fail`, `warn`, or `pass`.
-    pub fn resolve(self) -> Result<NoTestsChoice, NoTestsError> {
-        let (source, text) = match (self.command_line, self.configured) {
-            (Some(bytes), _) => (NoTestsSource::CommandLine, core::str::from_utf8(bytes).ok()),
-            (None, Some(text)) => (NoTestsSource::Configured, Some(text)),
-            (None, None) => (NoTestsSource::Default, Some("fail")),
-        };
-        text.and_then(NoTestsPolicy::parse)
-            .map(|policy| NoTestsChoice { policy, source })
-            .ok_or(NoTestsError { source })
-    }
-}
-
-/// Resolves a shard child count written as a count (`8`) or a multiple of the core count (`0.5x`, `1x`, `2x`), at least 1.
 ///
 /// The multiple takes up to three decimals; anything else is refused.
 #[must_use]
@@ -787,197 +701,209 @@ mod shard_jobs_tests {
     }
 }
 
-const PROCESS_KEY: &str = "CARGO_VAL_PROCESS";
-
-/// How a test binary's selected tests are given to OS processes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessMode {
-    /// Contiguous groups of tests share one libtest child, so a binary launches about `jobs` children.
-    Shard,
-    /// One exact test per child.
-    Test,
-}
-
-/// What the user asked for: a forced mode, or `auto`, which lets the target OS decide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessSetting {
-    /// Shard on a Windows target, where process creation dominates; one test per child elsewhere.
-    Auto,
-    Shard,
-    Test,
-}
-
-impl ProcessSetting {
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "auto" => Some(Self::Auto),
-            "shard" => Some(Self::Shard),
-            "test" => Some(Self::Test),
-            _ => None,
-        }
-    }
-
-    /// The mode this setting runs as for a target; a forced setting ignores the target.
-    #[must_use]
-    pub const fn mode(self, windows_target: bool) -> ProcessMode {
-        match self {
-            Self::Shard => ProcessMode::Shard,
-            Self::Auto if windows_target => ProcessMode::Shard,
-            Self::Auto | Self::Test => ProcessMode::Test,
-        }
-    }
-}
-
-/// Where the winning process setting came from, highest precedence first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessSource {
-    CommandLine,
-    Configured,
-    BuildDefault,
-}
-
-/// A refused process setting together with the source that supplied it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessError {
-    pub source: ProcessSource,
-}
-
-impl ProcessError {
-    #[must_use]
-    pub const fn message(self) -> &'static [u8] {
-        match self.source {
-            ProcessSource::CommandLine => b"cargo-val: --process must be auto, shard, or test\n",
-            ProcessSource::Configured => b"cargo-val: CARGO_VAL_PROCESS must be auto, shard, or test\n",
-            ProcessSource::BuildDefault => b"cargo-val: the build default process setting is invalid\n",
-        }
-    }
-}
-
-/// The accepted setting and the source that won.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessChoice {
-    pub setting: ProcessSetting,
-    pub source: ProcessSource,
-}
-
-/// Every layer that can supply the process setting, built from settings or in code with the same result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessSources<'value> {
-    command_line: Option<&'value [u8]>,
-    configured: Option<&'value str>,
-    build_default: &'value str,
-}
-
-impl<'value> ProcessSources<'value> {
-    #[must_use]
-    pub const fn builder(build_default: &'value str) -> Self {
-        Self {
-            command_line: None,
-            configured: None,
-            build_default,
-        }
-    }
-
-    #[must_use]
-    pub const fn command_line(mut self, value: Option<&'value [u8]>) -> Self {
-        self.command_line = value;
-        self
-    }
-
-    #[must_use]
-    pub const fn configured(mut self, value: Option<&'value str>) -> Self {
-        self.configured = value;
-        self
-    }
-
-    /// Reads `CARGO_VAL_PROCESS` from a conflaguration source.
-    #[must_use]
-    pub fn from_settings(
-        settings: &'value impl SettingsSource,
-        command_line: Option<&'value [u8]>,
-        build_default: &'value str,
-    ) -> Self {
-        Self::builder(build_default)
-            .command_line(command_line)
-            .configured(settings.get(PROCESS_KEY))
-    }
-
-    /// Picks the highest-precedence supplied source and validates only that value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ProcessError`] naming the winning source when its value is not `auto`, `shard`, or `test`.
-    pub fn resolve(self) -> Result<ProcessChoice, ProcessError> {
-        let (source, text) = match (self.command_line, self.configured) {
-            (Some(bytes), _) => (ProcessSource::CommandLine, core::str::from_utf8(bytes).ok()),
-            (None, Some(text)) => (ProcessSource::Configured, Some(text)),
-            (None, None) => (ProcessSource::BuildDefault, Some(self.build_default)),
-        };
-        text.and_then(ProcessSetting::parse)
-            .map(|setting| ProcessChoice { setting, source })
-            .ok_or(ProcessError { source })
-    }
-}
-
 #[cfg(test)]
-mod process_tests {
+mod layers_tests {
     use super::*;
     use conflaguration::BorrowedSettings;
+    type Resolved<Mode> = Result<(Mode, Source), SettingError>;
 
-    const WINDOWS: bool = true;
-    const UNIX: bool = false;
+    fn refused(layers: Layers<'_>, source: Source) -> SettingError {
+        layers.refusal(source)
+    }
+
+    fn supplied_text(layers: Layers<'_>) -> Option<&[u8]> {
+        layers.supplied().map(|(_, text)| text)
+    }
 
     #[test]
-    fn precedence_is_command_line_then_environment_then_build_default() {
-        let table: [(ProcessSources<'_>, Result<ProcessChoice, ProcessError>); 6] = [
-            (ProcessSources::builder("auto"), Ok(ProcessChoice { setting: ProcessSetting::Auto, source: ProcessSource::BuildDefault })),
-            (ProcessSources::builder("test"), Ok(ProcessChoice { setting: ProcessSetting::Test, source: ProcessSource::BuildDefault })),
+    fn no_tests_precedence_table() {
+        let table: [(Layers<'_>, Resolved<NoTestsPolicy>); 6] = [
+            (NO_TESTS, Ok((NoTestsPolicy::Fail, Source::BuildDefault))),
+            (NO_TESTS.configured(Some("warn")), Ok((NoTestsPolicy::Warn, Source::Configured))),
+            (NO_TESTS.command_line(Some(b"pass")), Ok((NoTestsPolicy::Pass, Source::CommandLine))),
             (
-                ProcessSources::builder("auto").configured(Some("shard")),
-                Ok(ProcessChoice { setting: ProcessSetting::Shard, source: ProcessSource::Configured }),
+                NO_TESTS.command_line(Some(b"pass")).configured(Some("warn")),
+                Ok((NoTestsPolicy::Pass, Source::CommandLine)),
+            ),
+            (NO_TESTS.command_line(Some(b"ignore")), Err(refused(NO_TESTS, Source::CommandLine))),
+            (NO_TESTS.configured(Some("")), Err(refused(NO_TESTS, Source::Configured))),
+        ];
+        for (layers, expected) in table {
+            assert_eq!(layers.resolve::<NoTestsPolicy>(), expected, "{layers:?}");
+        }
+    }
+
+    #[test]
+    fn refusals_name_the_layer_that_supplied_the_value() {
+        assert_eq!(
+            NO_TESTS.command_line(Some(b"ignore")).resolve::<NoTestsPolicy>().map_err(SettingError::message),
+            Err(&b"cargo-val: --no-tests must be fail, warn, or pass\n"[..])
+        );
+        assert_eq!(
+            NO_TESTS.configured(Some("")).resolve::<NoTestsPolicy>().map_err(SettingError::message),
+            Err(&b"cargo-val: CARGO_VAL_NO_TESTS must be fail, warn, or pass\n"[..])
+        );
+        assert_eq!(
+            NO_TESTS.build_default(Some("maybe")).resolve::<NoTestsPolicy>().map_err(SettingError::message),
+            Err(&b"cargo-val: the default no-tests policy is invalid\n"[..])
+        );
+    }
+
+    #[test]
+    fn a_setting_with_no_layer_and_no_default_is_refused_as_a_build_default() {
+        let bare = TARGET_DIR.build_default(None);
+
+        assert_eq!(bare.resolve::<TargetDirMode<'_>>(), Err(refused(TARGET_DIR, Source::BuildDefault)));
+    }
+
+    #[test]
+    fn process_precedence_is_command_line_then_environment_then_build_default() {
+        let table: [(Layers<'_>, Resolved<ProcessSetting>); 6] = [
+            (PROCESS.build_default(Some("auto")), Ok((ProcessSetting::Auto, Source::BuildDefault))),
+            (PROCESS.build_default(Some("test")), Ok((ProcessSetting::Test, Source::BuildDefault))),
+            (
+                PROCESS.build_default(Some("auto")).configured(Some("shard")),
+                Ok((ProcessSetting::Shard, Source::Configured)),
             ),
             (
-                ProcessSources::builder("auto").configured(Some("shard")).command_line(Some(b"test")),
-                Ok(ProcessChoice { setting: ProcessSetting::Test, source: ProcessSource::CommandLine }),
+                PROCESS.build_default(Some("auto")).configured(Some("shard")).command_line(Some(b"test")),
+                Ok((ProcessSetting::Test, Source::CommandLine)),
             ),
             (
-                ProcessSources::builder("auto").configured(Some("batch")),
-                Err(ProcessError { source: ProcessSource::Configured }),
+                PROCESS.build_default(Some("auto")).configured(Some("batch")),
+                Err(refused(PROCESS, Source::Configured)),
             ),
             (
-                ProcessSources::builder("auto").command_line(Some(&[0xff, 0xfe])),
-                Err(ProcessError { source: ProcessSource::CommandLine }),
+                PROCESS.build_default(Some("auto")).command_line(Some(&[0xff, 0xfe])),
+                Err(refused(PROCESS, Source::CommandLine)),
             ),
         ];
-        for (sources, expected) in table {
-            assert_eq!(sources.resolve(), expected);
+        for (layers, expected) in table {
+            assert_eq!(layers.resolve::<ProcessSetting>(), expected, "{layers:?}");
         }
+    }
+
+    #[test]
+    fn target_dir_command_line_beats_setting_beats_build_default_and_each_variant_parses() {
+        let isolated = TARGET_DIR.build_default(Some("isolated"));
+        let table: [(Layers<'_>, Resolved<TargetDirMode<'_>>); 8] = [
+            (isolated, Ok((TargetDirMode::Isolated, Source::BuildDefault))),
+            (TARGET_DIR.build_default(Some("shared")), Ok((TargetDirMode::Shared, Source::BuildDefault))),
+            (isolated.configured(Some("shared")), Ok((TargetDirMode::Shared, Source::Configured))),
+            (
+                isolated.configured(Some("/var/cache/val")),
+                Ok((TargetDirMode::Path(b"/var/cache/val"), Source::Configured)),
+            ),
+            (
+                isolated.configured(Some("shared")).command_line(Some(b"target/own")),
+                Ok((TargetDirMode::Path(b"target/own"), Source::CommandLine)),
+            ),
+            (
+                isolated.configured(Some("/var/cache/val")).command_line(Some(b"isolated")),
+                Ok((TargetDirMode::Isolated, Source::CommandLine)),
+            ),
+            (isolated.configured(Some("")), Err(refused(TARGET_DIR, Source::Configured))),
+            (TARGET_DIR.build_default(Some("")), Err(refused(TARGET_DIR, Source::BuildDefault))),
+        ];
+        for (layers, expected) in table {
+            assert_eq!(layers.resolve::<TargetDirMode<'_>>(), expected, "{layers:?}");
+        }
+    }
+
+    #[test]
+    fn the_built_in_default_resolves_to_shared_from_the_build_default_source() {
+        let layers = TARGET_DIR.build_default(Some(crate::build_defaults::TARGET_DIR));
+
+        assert_eq!(layers.resolve::<TargetDirMode<'_>>(), Ok((TargetDirMode::Shared, Source::BuildDefault)));
     }
 
     #[test]
     fn auto_shards_on_a_windows_target_and_runs_one_test_per_child_on_unix() {
-        assert_eq!(ProcessSetting::Auto.mode(WINDOWS), ProcessMode::Shard);
-        assert_eq!(ProcessSetting::Auto.mode(UNIX), ProcessMode::Test);
+        assert_eq!(ProcessSetting::Auto.mode(true), ProcessMode::Shard);
+        assert_eq!(ProcessSetting::Auto.mode(false), ProcessMode::Test);
     }
 
     #[test]
     fn a_forced_setting_overrides_auto_on_every_target() {
-        for windows_target in [WINDOWS, UNIX] {
+        for windows_target in [true, false] {
             assert_eq!(ProcessSetting::Shard.mode(windows_target), ProcessMode::Shard);
             assert_eq!(ProcessSetting::Test.mode(windows_target), ProcessMode::Test);
         }
     }
 
     #[test]
-    fn settings_source_and_builder_resolve_the_same_choice() {
-        let pairs = [("CARGO_VAL_PROCESS", "shard")];
-        let source = BorrowedSettings::new(&pairs);
+    fn settings_and_builder_construct_the_same_layers_for_every_family() {
+        let pairs = [
+            ("CARGO_VAL_PROCESS", "shard"),
+            ("CARGO_VAL_NO_TESTS", "warn"),
+            ("CARGO_VAL_TARGET_DIR", "shared"),
+            ("CARGO_VAL_IGNORED", "include"),
+            ("CARGO_VAL_FILTERSET", "test(alpha)"),
+        ];
+        let settings = BorrowedSettings::new(&pairs);
+        let empty = BorrowedSettings::new(&[]);
 
-        let from_settings = ProcessSources::from_settings(&source, None, "auto").resolve();
-        let from_builder = ProcessSources::builder("auto").configured(Some("shard")).resolve();
+        assert_eq!(
+            PROCESS.build_default(Some("auto")).from_settings(&settings, None),
+            PROCESS.build_default(Some("auto")).configured(Some("shard"))
+        );
+        assert_eq!(NO_TESTS.from_settings(&settings, None), NO_TESTS.configured(Some("warn")));
+        assert_eq!(
+            TARGET_DIR.build_default(Some("isolated")).from_settings(&empty, Some(b"out")),
+            TARGET_DIR.build_default(Some("isolated")).command_line(Some(b"out"))
+        );
+        assert_eq!(IGNORE.from_settings(&settings, None), IGNORE.configured(Some("include")));
+        assert_eq!(FILTERSET.from_settings(&settings, None), FILTERSET.configured(Some("test(alpha)")));
+        assert_eq!(
+            PROCESS.build_default(Some("auto")).from_settings(&settings, None).resolve::<ProcessSetting>(),
+            Ok((ProcessSetting::Shard, Source::Configured))
+        );
+        assert_eq!(
+            NO_TESTS.from_settings(&settings, Some(b"pass")).resolve::<NoTestsPolicy>(),
+            Ok((NoTestsPolicy::Pass, Source::CommandLine))
+        );
+    }
 
-        assert_eq!(from_settings, from_builder);
-        assert_eq!(from_settings.map(|choice| choice.setting.mode(UNIX)), Ok(ProcessMode::Shard));
+    #[test]
+    fn harness_flags_select_the_ignore_mode_and_beat_the_setting() {
+        let include: [&[u8]; 1] = [b"--include-ignored"];
+        assert_eq!(
+            HarnessRequest::parse(&include).map(|request| request.ignore),
+            Ok(Some(IgnoreMode::Include))
+        );
+        let table: [(Layers<'_>, Resolved<IgnoreMode>); 4] = [
+            (IGNORE, Ok((IgnoreMode::Skip, Source::BuildDefault))),
+            (IGNORE.configured(Some("only")), Ok((IgnoreMode::Only, Source::Configured))),
+            (IGNORE.configured(Some("include")), Ok((IgnoreMode::Include, Source::Configured))),
+            (IGNORE.configured(Some("all")), Err(refused(IGNORE, Source::Configured))),
+        ];
+        for (layers, expected) in table {
+            assert_eq!(layers.resolve::<IgnoreMode>(), expected, "{layers:?}");
+        }
+    }
+
+    #[test]
+    fn a_harness_flag_beats_the_ignored_setting_and_the_setting_beats_skip() {
+        let settings = BorrowedSettings::new(&[("CARGO_VAL_IGNORED", "include")]);
+        let only = HarnessRequest::parse(&[&b"--ignored"[..]]).expect("--ignored is a supported harness flag");
+        let none = HarnessRequest::parse(&[]).expect("no harness arguments is valid");
+        let unset = BorrowedSettings::new(&[]);
+        let invalid = BorrowedSettings::new(&[("CARGO_VAL_IGNORED", "all")]);
+
+        assert_eq!(only.ignore_mode(&settings), Ok(IgnoreMode::Only));
+        assert_eq!(none.ignore_mode(&settings), Ok(IgnoreMode::Include));
+        assert_eq!(none.ignore_mode(&unset), Ok(IgnoreMode::Skip));
+        assert_eq!(none.ignore_mode(&invalid), Err(refused(IGNORE, Source::Configured)));
+    }
+
+    #[test]
+    fn filterset_command_line_wins_over_the_setting_and_nothing_supplied_is_none() {
+        let pairs = [("CARGO_VAL_FILTERSET", "test(alpha)")];
+        let settings = BorrowedSettings::new(&pairs);
+
+        assert_eq!(supplied_text(FILTERSET.from_settings(&settings, None)), Some(&b"test(alpha)"[..]));
+        assert_eq!(supplied_text(FILTERSET.from_settings(&settings, Some(b"all()"))), Some(&b"all()"[..]));
+        assert_eq!(supplied_text(FILTERSET), None);
     }
 }
 
@@ -1297,219 +1223,3 @@ mod fail_fast_tests {
     }
 }
 
-#[cfg(test)]
-mod no_tests_tests {
-    use super::*;
-    use conflaguration::BorrowedSettings;
-
-    fn chosen(policy: NoTestsPolicy, source: NoTestsSource) -> NoTestsChoice {
-        NoTestsChoice { policy, source }
-    }
-
-    #[test]
-    fn c68_no_tests_precedence_table() {
-        let table: [(NoTestsSources<'_>, Result<NoTestsChoice, NoTestsError>); 6] = [
-            (
-                NoTestsSources::builder(),
-                Ok(chosen(NoTestsPolicy::Fail, NoTestsSource::Default)),
-            ),
-            (
-                NoTestsSources::builder().configured(Some("warn")),
-                Ok(chosen(NoTestsPolicy::Warn, NoTestsSource::Configured)),
-            ),
-            (
-                NoTestsSources::builder().command_line(Some(b"pass")),
-                Ok(chosen(NoTestsPolicy::Pass, NoTestsSource::CommandLine)),
-            ),
-            (
-                NoTestsSources::builder()
-                    .command_line(Some(b"pass"))
-                    .configured(Some("warn")),
-                Ok(chosen(NoTestsPolicy::Pass, NoTestsSource::CommandLine)),
-            ),
-            (
-                NoTestsSources::builder().command_line(Some(b"ignore")),
-                Err(NoTestsError {
-                    source: NoTestsSource::CommandLine,
-                }),
-            ),
-            (
-                NoTestsSources::builder().configured(Some("")),
-                Err(NoTestsError {
-                    source: NoTestsSource::Configured,
-                }),
-            ),
-        ];
-
-        for (sources, expected) in table {
-            assert_eq!(sources.resolve(), expected, "{sources:?}");
-        }
-    }
-
-    #[test]
-    fn c68_settings_and_builder_construct_the_same_no_tests_policy() {
-        let pairs = [("CARGO_VAL_NO_TESTS", "warn")];
-        let settings = BorrowedSettings::new(&pairs);
-
-        let from_settings = NoTestsSources::from_settings(&settings, None);
-        let from_builder = NoTestsSources::builder().configured(Some("warn"));
-
-        assert_eq!(from_settings, from_builder);
-        assert_eq!(
-            from_settings.resolve(),
-            Ok(chosen(NoTestsPolicy::Warn, NoTestsSource::Configured))
-        );
-        assert_eq!(
-            NoTestsSources::from_settings(&settings, Some(b"pass")).resolve(),
-            Ok(chosen(NoTestsPolicy::Pass, NoTestsSource::CommandLine))
-        );
-    }
-}
-
-#[cfg(test)]
-mod ignore_and_filterset_tests {
-    use super::*;
-
-    type Resolved = Result<(IgnoreMode, IgnoreSource), IgnoreError>;
-    use conflaguration::BorrowedSettings;
-
-    #[test]
-    fn harness_flags_select_the_ignore_mode_and_beat_the_setting() {
-        let include: [&[u8]; 1] = [b"--include-ignored"];
-        assert_eq!(
-            HarnessRequest::parse(&include).map(|request| request.ignore),
-            Ok(Some(IgnoreMode::Include))
-        );
-        let table: [(IgnoreSources<'_>, Resolved); 5] = [
-            (IgnoreSources::builder(), Ok((IgnoreMode::Skip, IgnoreSource::Default))),
-            (
-                IgnoreSources::builder().configured(Some("only")),
-                Ok((IgnoreMode::Only, IgnoreSource::Configured)),
-            ),
-            (
-                IgnoreSources::builder().configured(Some("include")),
-                Ok((IgnoreMode::Include, IgnoreSource::Configured)),
-            ),
-            (
-                IgnoreSources::builder()
-                    .harness(Some(IgnoreMode::Only))
-                    .configured(Some("include")),
-                Ok((IgnoreMode::Only, IgnoreSource::HarnessArgument)),
-            ),
-            (IgnoreSources::builder().configured(Some("all")), Err(IgnoreError)),
-        ];
-        for (sources, expected) in table {
-            assert_eq!(sources.resolve(), expected, "{sources:?}");
-        }
-    }
-
-    #[test]
-    fn settings_and_builder_construct_the_same_ignore_mode_and_filterset() {
-        let pairs = [
-            ("CARGO_VAL_IGNORED", "include"),
-            ("CARGO_VAL_FILTERSET", "test(alpha)"),
-        ];
-        let settings = BorrowedSettings::new(&pairs);
-
-        assert_eq!(
-            IgnoreSources::from_settings(&settings, None),
-            IgnoreSources::builder().configured(Some("include"))
-        );
-        assert_eq!(
-            FiltersetSources::from_settings(&settings, None),
-            FiltersetSources::builder().configured(Some("test(alpha)"))
-        );
-        assert_eq!(
-            FiltersetSources::from_settings(&settings, None).resolve(),
-            Some(&b"test(alpha)"[..])
-        );
-        assert_eq!(
-            FiltersetSources::from_settings(&settings, Some(b"all()")).resolve(),
-            Some(&b"all()"[..])
-        );
-        assert_eq!(FiltersetSources::builder().resolve(), None);
-    }
-}
-
-#[cfg(test)]
-mod target_dir_tests {
-    use super::*;
-    use conflaguration::BorrowedSettings;
-
-    type Resolved<'value> = Result<(TargetDirMode<'value>, TargetDirSource), TargetDirError>;
-
-    #[test]
-    fn command_line_beats_setting_beats_build_default_and_each_variant_parses() {
-        let table: [(TargetDirSources<'_>, Resolved<'_>); 8] = [
-            (
-                TargetDirSources::builder("isolated"),
-                Ok((TargetDirMode::Isolated, TargetDirSource::BuildDefault)),
-            ),
-            (
-                TargetDirSources::builder("shared"),
-                Ok((TargetDirMode::Shared, TargetDirSource::BuildDefault)),
-            ),
-            (
-                TargetDirSources::builder("isolated").configured(Some("shared")),
-                Ok((TargetDirMode::Shared, TargetDirSource::Configured)),
-            ),
-            (
-                TargetDirSources::builder("isolated").configured(Some("/var/cache/val")),
-                Ok((TargetDirMode::Path(b"/var/cache/val"), TargetDirSource::Configured)),
-            ),
-            (
-                TargetDirSources::builder("isolated")
-                    .configured(Some("shared"))
-                    .command_line(Some(b"target/own")),
-                Ok((TargetDirMode::Path(b"target/own"), TargetDirSource::CommandLine)),
-            ),
-            (
-                TargetDirSources::builder("isolated")
-                    .configured(Some("/var/cache/val"))
-                    .command_line(Some(b"isolated")),
-                Ok((TargetDirMode::Isolated, TargetDirSource::CommandLine)),
-            ),
-            (
-                TargetDirSources::builder("isolated").configured(Some("")),
-                Err(TargetDirError { source: TargetDirSource::Configured }),
-            ),
-            (
-                TargetDirSources::builder("").command_line(None),
-                Err(TargetDirError { source: TargetDirSource::BuildDefault }),
-            ),
-        ];
-        for (sources, expected) in table {
-            assert_eq!(sources.resolve(), expected, "{sources:?}");
-        }
-    }
-
-    #[test]
-    fn the_built_in_default_resolves_to_shared_from_the_build_default_source() {
-        let defaults = crate::build_defaults::TARGET_DIR;
-
-        assert_eq!(
-            TargetDirSources::builder(defaults).resolve(),
-            Ok((TargetDirMode::Shared, TargetDirSource::BuildDefault))
-        );
-    }
-
-    #[test]
-    fn settings_and_builder_construct_the_same_target_dir_sources() {
-        let pairs = [("CARGO_VAL_TARGET_DIR", "shared")];
-        let settings = BorrowedSettings::new(&pairs);
-        let empty = BorrowedSettings::new(&[]);
-
-        assert_eq!(
-            TargetDirSources::from_settings(&settings, None, "isolated"),
-            TargetDirSources::builder("isolated").configured(Some("shared"))
-        );
-        assert_eq!(
-            TargetDirSources::from_settings(&empty, Some(b"out"), "isolated"),
-            TargetDirSources::builder("isolated").command_line(Some(b"out"))
-        );
-        assert_eq!(
-            TargetDirSources::from_settings(&settings, None, "isolated").resolve(),
-            Ok((TargetDirMode::Shared, TargetDirSource::Configured))
-        );
-    }
-}
