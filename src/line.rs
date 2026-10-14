@@ -5,6 +5,7 @@ const DECIMAL_DIGITS: [u8; 10] = *b"0123456789";
 pub struct Line<const CAPACITY: usize> {
     bytes: [u8; CAPACITY],
     length: usize,
+    lost: usize,
 }
 
 impl<const CAPACITY: usize> Line<CAPACITY> {
@@ -13,6 +14,7 @@ impl<const CAPACITY: usize> Line<CAPACITY> {
         Self {
             bytes: [0; CAPACITY],
             length: 0,
+            lost: 0,
         }
     }
 
@@ -21,10 +23,12 @@ impl<const CAPACITY: usize> Line<CAPACITY> {
         let taken = text.len().min(room);
         self.bytes[self.length..self.length + taken].copy_from_slice(&text[..taken]);
         self.length += taken;
+        self.lost += text.len() - taken;
     }
 
     pub fn clear(&mut self) {
         self.length = 0;
+        self.lost = 0;
     }
 
     pub fn number(&mut self, value: usize) {
@@ -42,6 +46,12 @@ impl<const CAPACITY: usize> Line<CAPACITY> {
         self.text(&digits[start..]);
     }
 
+    /// Bytes `text` offered past the capacity since the last `clear`; nonzero means the line was cut.
+    #[must_use]
+    pub const fn lost(&self) -> usize {
+        self.lost
+    }
+
     /// The assembled bytes.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
@@ -52,5 +62,33 @@ impl<const CAPACITY: usize> Line<CAPACITY> {
 impl<const CAPACITY: usize> Default for Line<CAPACITY> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Line;
+
+    #[test]
+    fn text_past_the_capacity_is_counted_as_lost_and_clear_forgets_it() {
+        let mut line = Line::<8>::new();
+
+        line.text(b"FAIL     cli_run");
+
+        assert_eq!(line.bytes(), b"FAIL    ");
+        assert_eq!(line.lost(), 8);
+        line.clear();
+        assert_eq!(line.lost(), 0);
+    }
+
+    #[test]
+    fn text_that_fits_loses_nothing() {
+        let mut line = Line::<8>::new();
+
+        line.text(b"PASS");
+        line.number(42);
+
+        assert_eq!(line.bytes(), b"PASS42");
+        assert_eq!(line.lost(), 0);
     }
 }
