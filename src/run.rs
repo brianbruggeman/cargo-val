@@ -410,6 +410,9 @@ fn handle(
             driver.cargo_chunk(lanes, range, 0, run, ledger)
         }
         Item::Out(KEY_LANE, range) => keys_chunk(lanes, range, run),
+        Item::Out(EDITOR_LANE, range) => run.editor_output(lanes, range.map_err(|_| RunError::Reactor)?),
+        Item::OutEnd(EDITOR_LANE) => run.editor_output_ended(lanes),
+        Item::Err(EDITOR_LANE, _) | Item::ErrEnd(EDITOR_LANE) => Ok(()),
         Item::Out(LISTING_LANE, range) => {
             let range = range.map_err(|_| RunError::ListingStream)?;
             driver.listing_chunk(lanes, range, 0, run, ledger, watches)
@@ -472,6 +475,7 @@ fn handle(
             #[cfg(windows)]
             run.refresh_width()?;
             keep_editor_running();
+            run.expire_probe();
             emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })?;
             flush_keys(run)
         }

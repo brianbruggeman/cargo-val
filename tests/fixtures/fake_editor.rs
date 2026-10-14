@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{Read, Write};
 
 unsafe extern "C" {
@@ -36,7 +35,7 @@ fn local_flags() -> Option<u64> {
 }
 
 fn record(log: &str) -> std::io::Result<()> {
-    let mut file = File::create(log)?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     for argument in std::env::args().skip(1) {
         writeln!(file, "arg={argument}")?;
     }
@@ -53,6 +52,13 @@ const SIGSTOP: i32 = 17;
 const SIGSTOP: i32 = 19;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--serverlist") {
+        while std::env::var_os("FAKE_EDITOR_SERVERLIST_HANG").is_some() {
+            std::thread::yield_now();
+        }
+        print!("{}", std::env::var("FAKE_EDITOR_SERVERLIST").unwrap_or_default());
+        return;
+    }
     let log = std::env::var("FAKE_EDITOR_LOG").expect("the test names a log file");
     record(&log).expect("the editor records what it saw");
     println!("fake-editor-ready");
@@ -65,6 +71,11 @@ fn main() {
         let _ = std::io::stdin().read(&mut byte);
     }
     let released = std::env::var_os("CARGO_VAL_FIXTURE_RELEASE_FILE").map(|release| std::path::PathBuf::from(release).with_extension("done"));
+    if let Some(hold) = std::env::var_os("FAKE_EDITOR_HOLD_FILE") {
+        while !std::path::Path::new(&hold).exists() {
+            std::thread::yield_now();
+        }
+    }
     if let Some(until) = released.filter(|_| std::env::var_os("FAKE_EDITOR_AWAIT_RUN").is_some()) {
         while !until.exists() {
             std::thread::yield_now();
