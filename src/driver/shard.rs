@@ -301,6 +301,9 @@ pub(super) fn observe(
     let mut settle = |event: DocEvent<'_>| -> Result<(), RunError> {
         match event {
             DocEvent::Result { name, outcome, stray } => {
+                if run.tripped(ledger) {
+                    return Ok(());
+                }
                 let located = run.shards.borrow().locate(shard, *expected, name);
                 let Some(Located { ordinal, next }) = located else {
                     return write_fd(2, b"cargo-val: a shard child reported a test that was not in its shard\n");
@@ -346,7 +349,7 @@ pub(super) fn observe(
             }
             DocEvent::Finished { passed, failed: failed_count, ignored } => {
                 let expected_counts = (streamed.0 + deferred.0, streamed.1 + deferred.1, streamed.2 + deferred.2);
-                if (passed, failed_count, ignored) != expected_counts {
+                if !run.tripped(ledger) && (passed, failed_count, ignored) != expected_counts {
                     write_fd(2, b"cargo-val: a shard child's test result line disagrees with the results it streamed\n")?;
                 }
             }
@@ -758,11 +761,42 @@ fn finish_rerun(
             Ok(())
         }
         (_, true) => warn_rerun(run, target, name, b"passed when re-run alone"),
-        (_, false) => {
-            warn_rerun(run, target, name, b"failed when re-run alone")?;
-            failure_output(run, target, name, output)
-        }
+        (_, false) => block_output(run, target, name, output),
     }
+}
+
+// the streamed path prints libtest's failure block in cargo-val's frame and says nothing about reproduction, so the rerun does the same
+fn block_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], output: &ChildOutput) -> Result<(), RunError> {
+    let (stdout, _) = output.captured();
+    let Some(body) = failure_body(stdout.0) else {
+        return failure_output(run, target, name, output);
+    };
+    let targets = run.targets.borrow();
+    let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
+    emit(run.render(), &Event::Captured { id, stdout: (body, stdout.1), stderr: (b"", false) })
+}
+
+// the lines between libtest's `---- <name> stdout ----` header and the `failures:` that closes the section, found by the parser that streams them
+fn failure_body(stdout: &[u8]) -> Option<&[u8]> {
+    let mut parser = DocParser::new();
+    let mut offset = 0;
+    let (mut start, mut end) = (None, 0);
+    while offset < stdout.len() {
+        let line = frame_line(&stdout[offset..]);
+        let next = offset + line.len();
+        let fed = parser.feed(line, |event| {
+            if let DocEvent::FailureLine(kept) = event {
+                match failure_block_name(kept) {
+                    Some(_) => _ = start.get_or_insert(next),
+                    None => end = next,
+                }
+            }
+            Ok::<(), RunError>(())
+        });
+        fed.ok()?;
+        offset = next;
+    }
+    start.map(|begin| &stdout[begin..end.max(begin)])
 }
 
 fn warn_rerun(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], what: &[u8]) -> Result<(), RunError> {

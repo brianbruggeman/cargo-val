@@ -479,10 +479,16 @@ async fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
     let full = format!("stdout: {}\nstderr: {}", run.stdout, run.stderr);
-    // a block that reaches the stream before the stop terminates the child prints in cargo-val's frame; one that does not is rerun and prints libtest's own frame inside it
-    let opened = run.stdout.find("------ stdout: cargo_val_shard_fixture suite::d_panics_on_request ------");
-    let message = run.stdout.find("requested shard failure in d");
-    assert!(opened.zip(message).is_some_and(|(open, message)| open < message), "{full}");
+    let frame = run.stdout.split("------ stdout: cargo_val_shard_fixture suite::d_panics_on_request ------\n").nth(1).and_then(|rest| rest.split_once("------ end stdout ------\n")).map(|(body, _)| body);
+    let body = frame.unwrap_or_default();
+    assert!(body.starts_with("\nthread 'suite::d_panics_on_request' ("), "{full}");
+    assert!(body.contains("panicked at src/lib.rs:40:13:\nrequested shard failure in d\n"), "{full}");
+    assert!(!run.stdout.contains("---- suite::d_panics_on_request stdout ----"), "libtest's raw header must not print: {full}");
+    assert!(!run.stdout.contains("running 1 test"), "{full}");
+    assert!(!run.stdout.contains("re-run alone"), "{full}");
+    assert!(run.stdout.contains("listed tests not run 1;"), "{full}");
+    let counts = plain_summary::summary(&run.stdout).expect("a SUMMARY line is printed");
+    assert_eq!([counts["passed"], counts["failed"], counts["ignored"], counts["not_run"]], [3, 1, 1, 1], "{full}");
 }
 
 #[proxima::test(timeout = "310s")]
