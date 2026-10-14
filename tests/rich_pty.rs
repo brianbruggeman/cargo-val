@@ -160,6 +160,14 @@ async fn run_with<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)]
 where
     Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
 {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    run_targeting(fixture, mode, environment, (tty_stdin, &target_run), drive).await
+}
+
+async fn run_targeting<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], (tty_stdin, target_run): (bool, &str), drive: Drive) -> (String, ExitStatus)
+where
+    Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
+{
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{mode}-{run}"));
     std::fs::create_dir_all(&directory).expect("the release directory is creatable");
@@ -168,7 +176,7 @@ where
     let keys = master.try_clone().expect("the master descriptor duplicates for writing keys");
     let probe = master.try_clone().expect("the master descriptor duplicates for the termios query");
     let stdin = if tty_stdin { Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")) } else { Stdio::piped() };
-    let mut child = spawn_on(&slave, stdin, fixture, mode, (&release, &run), environment);
+    let mut child = spawn_on(&slave, stdin, fixture, mode, (&release, target_run), environment);
     drop(child.stdin.take());
     drop(slave);
     let leader = child.id();
@@ -627,4 +635,30 @@ async fn a_lone_escape_in_a_post_run_sub_screen_returns_to_review_on_the_next_ti
     let receipt = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(&output)));
     let after_receipt = &output[receipt..];
     assert!(!after_receipt.contains(FRAME_START) && !after_receipt.contains(REVIEW_HEADER) && !after_receipt.contains(TIMELINE_HEADER), "frame bytes followed the receipt:\n{}", shown(after_receipt));
+}
+
+fn test_row_count(frame: &str) -> Option<String> {
+    let row = frame.lines().find(|line| line.starts_with(" test  "))?;
+    row.split_whitespace().find(|word| word.contains('/')).map(str::to_owned)
+}
+
+#[proxima::test]
+async fn a_second_run_opens_with_the_first_runs_test_count_as_an_estimate_and_ends_exact() {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let (first, first_status) = run_targeting("rich_pty", "rich", &NO_COLOR, (true, &target_run), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
+    let (second, second_status) = run_targeting("rich_pty", "rich", &NO_COLOR, (true, &target_run), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
+
+    assert!(first_status.success() && second_status.success(), "cargo-val exited {first_status} then {second_status}");
+    let first_frames = live_frames(&first);
+    let exact = test_row_count(first_frames.last().expect("the first run drew a frame")).expect("the first run's last frame has a test row");
+    let total = exact.split_once('/').expect("the count is done/total").1;
+    assert!(!total.starts_with('~'), "the first run's last frame is exact: {exact}");
+    let first_estimates: Vec<String> = first_frames.iter().filter_map(|frame| test_row_count(frame)).collect();
+    println!("first run counts: {first_estimates:?}");
+    let second_frames = live_frames(&second);
+    let estimates: Vec<String> = second_frames.iter().filter_map(|frame| test_row_count(frame)).collect();
+    let closing = test_row_count(second_frames.last().expect("the second run drew a frame")).expect("the second run's last frame has a test row");
+    println!("second run counts {estimates:?} closes {closing}");
+    assert!(estimates.iter().any(|count| count.ends_with(&format!("/~{total}"))), "no second-run frame showed the first run's count as an estimate: {estimates:?}");
+    assert!(closing.ends_with(&format!("/{total}")), "the second run's last frame is exact: {closing}");
 }

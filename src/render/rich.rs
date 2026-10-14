@@ -17,6 +17,7 @@ const DIM: &[u8] = b"\x1b[2m";
 const BOLD: &[u8] = b"\x1b[1m";
 const RESET: &[u8] = b"\x1b[0m";
 const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+const COUNT_COLUMNS: usize = 8;
 const BLOCK: &str = "\u{2588}";
 const EIGHTHS: [&str; 8] = ["", "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}"];
 const ELLIPSIS: &str = "\u{2026}";
@@ -186,9 +187,9 @@ impl<const RERUN: usize> State<'_, RERUN> {
     }
 
     fn estimate(&self) -> (usize, bool) {
-        match self.binaries_total {
-            Some(total) if self.listed_binaries >= total => (self.listed_tests, true),
-            Some(total) if self.listed_binaries != 0 => (self.listed_tests * total / self.listed_binaries, false),
+        match (self.binaries_total, self.previous) {
+            (Some(total), _) if self.listed_binaries >= total => (self.listed_tests, true),
+            (_, Some((_, tests))) => (tests as usize, false),
             _ => (self.listed_tests, false),
         }
     }
@@ -201,7 +202,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         let avail = usize::from(self.cols).saturating_sub(1);
         let word = if with_word { 6 } else { 0 };
         let note = if with_note { self.note_width() } else { 0 };
-        avail.saturating_sub(BAR_COLUMN + 1 + 8 + word + 2 + digits(self.failed_count()) + 7 + note)
+        avail.saturating_sub(BAR_COLUMN + 1 + COUNT_COLUMNS + word + 2 + digits(self.failed_count()) + 7 + note)
     }
 
     /// Narrowing order: the listed note goes first, then the word `tests`, then the bars shrink, then names ellipsise.
@@ -239,13 +240,13 @@ impl<const RERUN: usize> State<'_, RERUN> {
         }
         match *event {
             Event::Tick { .. } if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
-            Event::Begin { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
+            Event::Begin { .. } | Event::Previous { .. } | Event::Waiting { .. } => self.project_rich(self.color, frame),
             Event::Key(_) if matches!(self.mode, Mode::Running | Mode::QuitArmed) => self.project_rich(self.color, frame),
             Event::Captured { .. } | Event::Warned { .. } | Event::BuildFailed { .. } | Event::Interrupted { .. } | Event::Finished { .. } => {
                 self.erase_rich(frame);
                 self.project(event, frame)
             }
-            Event::Tick { .. } | Event::Previous { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Running { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
+            Event::Tick { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Running { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
         }
     }
 
@@ -387,17 +388,20 @@ impl<const RERUN: usize> State<'_, RERUN> {
         let live = if total == 0 || self.inflight_count == 0 { 0 } else { (self.inflight_count * bar_width).div_ceil(total).max(1) };
         bar(frame, color, bar_width, (settled, live), Tone::Green);
         frame.text(b" ");
-        padded(frame, self.done, 3);
-        frame.text(if exact { b"/" } else { b"/~" });
-        frame.number(total);
+        let mut count = Line::<48>::new();
+        count.number(self.done);
+        count.text(if exact { b"/" } else { b"/~" });
+        count.number(total);
+        spaces(frame, COUNT_COLUMNS.saturating_sub(columns(count.bytes())));
+        frame.text(count.bytes());
         if with_word {
             paint(frame, color, Tone::Dim, b" tests");
         }
         frame.text(b"  ");
-        let mut count = Line::<24>::new();
-        count.number(failed);
-        count.text(b" failed");
-        paint(frame, color, if failed == 0 { Tone::Dim } else { Tone::Red }, count.bytes());
+        let mut failures = Line::<24>::new();
+        failures.number(failed);
+        failures.text(b" failed");
+        paint(frame, color, if failed == 0 { Tone::Dim } else { Tone::Red }, failures.bytes());
         if with_note && !exact {
             let mut note = Line::<64>::new();
             note.text(b"  ~ ");
@@ -528,16 +532,22 @@ mod tests {
     const SHARD: (&[u8], &[u8]) = (b"shard_process", b"a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly");
     const PANIC: &[u8] = b"thread 'x' panicked at tests/sched_records.rs:55:9:\nassertion failed: left == right\n";
 
+    const PARTIAL: (usize, usize) = (12, 240);
+    const COMPLETE: (usize, usize) = (19, 383);
+
     fn midrun<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], inflight: &'storage mut [u8], cols: u16) -> State<'storage, 200> {
-        midrun_with(arena, ledger, inflight, cols, UNREAD)
+        midrun_with(arena, ledger, inflight, (cols, Some(380), PARTIAL), UNREAD)
     }
 
-    fn midrun_with<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], inflight: &'storage mut [u8], cols: u16, rows: ExcerptRows<'_>) -> State<'storage, 200> {
+    fn midrun_with<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], inflight: &'storage mut [u8], (cols, previous, (binaries, tests)): (u16, Option<u32>, (usize, usize)), rows: ExcerptRows<'_>) -> State<'storage, 200> {
         let mut state = State::<200>::new(arena, ledger).with_inflight(inflight);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
+        if let Some(tests) = previous {
+            state.apply(&Event::Previous { wall_ms: 258_230, tests });
+        }
         state.apply(&Event::Resize { cols });
         state.apply(&Event::Built { done: 19, total: Some(19) });
-        state.apply(&Event::Listed { binaries: 12, of: Some(19), tests: 240 });
+        state.apply(&Event::Listed { binaries, of: Some(19), tests });
         state.apply(&Event::Tick { now_ms: 1000 });
         for _ in 0..305 {
             state.apply(&Event::Settled { id: (b"filler", b"passes"), outcome: Outcome::Passed, at_ms: None, solo: false });
@@ -551,8 +561,12 @@ mod tests {
     }
 
     fn frame_at(cols: u16, color: bool) -> String {
+        frame_with((cols, Some(380), PARTIAL), color)
+    }
+
+    fn frame_with(scenario: (u16, Option<u32>, (usize, usize)), color: bool) -> String {
         let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
-        let mut state = midrun(&mut arena, &mut ledger, &mut inflight, cols);
+        let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, scenario, UNREAD);
         let mut frame = Line::<4096>::new();
         state.project_rich(color, &mut frame).expect("the frame holds one redraw");
         String::from_utf8(frame.bytes().to_vec()).expect("the frame is utf-8")
@@ -624,6 +638,52 @@ mod tests {
 \x20 39.0s /120s █░░░░░  shard_p\u{2026}promptly\n";
 
         assert_eq!(frame_at(40, false), expected);
+    }
+
+    fn test_row(frame: &str) -> &str {
+        frame.lines().find(|line| line.starts_with(" test  ")).expect("the frame has a test row")
+    }
+
+    #[test]
+    fn a_previous_run_and_a_partial_listing_show_the_previous_total_with_the_listed_note_at_eighty_columns() {
+        let row = " test  ████████████████████████▒░░░░░ 306/~380 tests  1 failed  ~ 12/19 listed";
+
+        assert_eq!(test_row(&frame_with((80, Some(380), PARTIAL), false)), row);
+    }
+
+    #[test]
+    fn a_previous_run_and_a_partial_listing_drop_the_note_but_keep_the_estimate_at_sixty_columns() {
+        let row = " test  ████████████████████████▒░░░░░ 306/~380  1 failed";
+
+        assert_eq!(test_row(&frame_with((60, Some(380), PARTIAL), false)), row);
+    }
+
+    #[test]
+    fn a_complete_listing_shows_the_exact_total_and_no_tilde_or_note_at_eighty_columns() {
+        let row = " test  ███████████████████████▉▒░░░░░  306/383 tests  1 failed";
+
+        assert_eq!(test_row(&frame_with((80, Some(380), COMPLETE), false)), row);
+    }
+
+    #[test]
+    fn a_complete_listing_shows_the_exact_total_at_sixty_columns() {
+        let row = " test  ███████████████████████▉▒░░░░░  306/383  1 failed";
+
+        assert_eq!(test_row(&frame_with((60, Some(380), COMPLETE), false)), row);
+    }
+
+    #[test]
+    fn no_previous_run_and_a_partial_listing_estimate_from_the_tests_listed_so_far_at_eighty_columns() {
+        let row = " test  █████████████████████████████▉ 306/~306 tests  1 failed  ~ 12/19 listed";
+
+        assert_eq!(test_row(&frame_with((80, None, PARTIAL), false)), row);
+    }
+
+    #[test]
+    fn no_previous_run_and_a_partial_listing_at_sixty_columns_drop_the_note() {
+        let row = " test  █████████████████████████████▉ 306/~306  1 failed";
+
+        assert_eq!(test_row(&frame_with((60, None, PARTIAL), false)), row);
     }
 
     #[test]
@@ -704,10 +764,27 @@ mod tests {
     }
 
     #[test]
+    fn begin_draws_a_live_frame_before_any_previous_run_or_listing_is_known() {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        let begin = Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 };
+        let mut frame = Line::<4096>::new();
+        state.apply(&begin);
+
+        state.project_live(&begin, &mut frame).expect("the frame holds one redraw");
+
+        let drawn = String::from_utf8_lossy(frame.bytes());
+        assert!(drawn.contains("0/~0"), "{drawn}");
+    }
+
+    #[test]
     fn ten_thousand_rich_frames_at_each_width_allocate_nothing() {
-        for cols in [80_u16, 120, 200] {
+        let scenarios = [(80_u16, Some(380), PARTIAL), (120, Some(380), PARTIAL), (200, Some(380), PARTIAL), (80, None, PARTIAL), (80, Some(380), COMPLETE), (60, None, COMPLETE)];
+        let mut total_frames = 0_usize;
+        for scenario in scenarios {
+            let cols = scenario.0;
             let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
-            let mut state = midrun(&mut arena, &mut ledger, &mut inflight, cols);
+            let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, scenario, UNREAD);
             let mut frame = Line::<16_384>::new();
             let mut frames = 0_usize;
 
@@ -717,6 +794,7 @@ mod tests {
                     state.apply(&Event::Tick { now_ms: 47_100 + round });
                     state.project_rich(round % 2 == 0, &mut frame).expect("the frame holds one redraw");
                     frames += 1;
+                    total_frames += 1;
                 }
             });
 
@@ -724,6 +802,7 @@ mod tests {
             assert_eq!(allocations, 0, "{cols} columns");
             assert!(frame.bytes().len() > 400, "the last frame at {cols} columns is a real frame");
         }
+        assert_eq!(total_frames, 60_000, "every scenario ran its 10k frames");
     }
 
     const SOURCE_ROWS: &[u8] = b"    52 |     let records = host_binary_records(&binary);\n    53 |     assert_eq!(records.len(), expected.len());\n    54 |     assert_eq!(records.flags(), expected.flags());\n>   55 |     assert_eq!(records.group(), expected.group());\n      |     ^^^^^^^^^ panicked here\n";
@@ -731,7 +810,7 @@ mod tests {
 
     fn pinned_frame(cols: u16, color: bool, rows: ExcerptRows<'_>) -> (String, u16) {
         let (mut arena, mut ledger, mut inflight) = ([0_u8; 2048], [0_u32; 8], [0_u8; 1024]);
-        let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, cols, rows);
+        let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, (cols, Some(380), PARTIAL), rows);
         let mut frame = Line::<4096>::new();
         state.project_rich(color, &mut frame).expect("the frame holds one redraw");
         (String::from_utf8(frame.bytes().to_vec()).expect("the frame is utf-8"), state.drawn_rows)
@@ -795,7 +874,7 @@ mod tests {
     fn ten_thousand_frames_with_excerpt_rows_at_each_width_allocate_nothing() {
         for cols in [80_u16, 40, 200] {
             let (mut arena, mut ledger, mut inflight) = ([0_u8; 2048], [0_u32; 8], [0_u8; 1024]);
-            let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, cols, Ok(SOURCE_ROWS));
+            let mut state = midrun_with(&mut arena, &mut ledger, &mut inflight, (cols, Some(380), PARTIAL), Ok(SOURCE_ROWS));
             let mut frame = Line::<16_384>::new();
             let mut frames = 0_usize;
 

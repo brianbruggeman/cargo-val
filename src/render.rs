@@ -1221,18 +1221,18 @@ mod tests {
     }
 
     #[test]
-    fn the_live_view_draws_nothing_for_the_previous_run() {
+    fn the_live_view_redraws_the_frame_with_the_previous_runs_test_count_as_the_estimate() {
         let mut arena = [0_u8; 64];
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
-        let mut frame = Line::<256>::new();
+        let mut frame = Line::<4096>::new();
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
         let previous = Event::Previous { wall_ms: 1, tests: 2 };
         state.apply(&previous);
 
         state.project_live(&previous, &mut frame).expect("the live view accepts the event");
 
-        assert_eq!(frame.bytes(), b"");
+        assert!(String::from_utf8_lossy(frame.bytes()).contains("  0/~2 tests"), "{}", String::from_utf8_lossy(frame.bytes()));
         assert_eq!(state.previous(), Some((1, 2)));
     }
 
