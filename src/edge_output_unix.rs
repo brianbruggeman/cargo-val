@@ -199,6 +199,16 @@ pub fn write(descriptor: i32, mut bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether `descriptor` is an interactive terminal: a character device that answers `isatty`, so a file, a pipe, or /dev/null is not.
+#[must_use]
+pub fn is_terminal(descriptor: i32) -> bool {
+    // safety: both calls take a plain integer and a pointer to a local; a bad descriptor reports an error.
+    let mut status: libc::stat = unsafe { core::mem::zeroed() };
+    let character_device = unsafe { libc::fstat(descriptor, &raw mut status) } == 0
+        && status.st_mode & libc::S_IFMT == libc::S_IFCHR;
+    character_device && unsafe { libc::isatty(descriptor) } == 1
+}
+
 fn file_mode(descriptor: &OwnedFd) -> io::Result<libc::mode_t> {
     let mut status: libc::stat = unsafe { core::mem::zeroed() };
     if unsafe { libc::fstat(descriptor.as_raw_fd(), &raw mut status) } != 0 {
@@ -286,7 +296,7 @@ mod tests {
     use proxima_primitives::pipe::UnpinPipe;
     use proxima_runtime::CoreId;
 
-    use super::{LINE_CAPACITY, OutputSink};
+    use super::{LINE_CAPACITY, OutputSink, is_terminal};
     use crate::edge_exit::fixture::in_single_threaded_process;
     use crate::line::Line;
     use crate::test_dir::tempdir;
@@ -500,6 +510,31 @@ mod tests {
             expected.extend_from_slice(b"second\n");
             assert_eq!(std::fs::read(&path).expect("file reads back"), expected);
         });
+    }
+
+    #[test]
+    fn only_a_terminal_counts_as_interactive_not_a_pipe_a_file_or_the_null_device() {
+        let (mut master, mut slave) = (-1, -1);
+        let status = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, 0, "openpty allocates a pair");
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let null = std::fs::File::open("/dev/null").expect("null device opens");
+
+        assert!(is_terminal(slave.as_raw_fd()), "a pty slave is a terminal");
+        assert!(!is_terminal(null.as_raw_fd()), "/dev/null is a character device but not a terminal");
+        assert!(!is_terminal(reader.as_raw_fd()) && !is_terminal(writer.as_raw_fd()), "a socket is not a terminal");
+        assert!(!is_terminal(-1), "a closed descriptor is not a terminal");
+        drop(master);
     }
 
     #[proxima::test]

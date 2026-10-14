@@ -33,6 +33,7 @@ enum Expectation {
     MaxFailValue,
     NoTestsValue,
     ProcessValue,
+    OutputValue,
     FiltersetValue,
     TargetDirValue,
 }
@@ -85,6 +86,7 @@ pub struct CliParser<'argument> {
     fail_fast: Option<FailFastArgument<'argument>>,
     no_tests: Option<&'argument [u8]>,
     process: Option<&'argument [u8]>,
+    output: Option<&'argument [u8]>,
     filterset: Option<&'argument [u8]>,
     target_dir: Option<&'argument [u8]>,
     doc: bool,
@@ -110,6 +112,7 @@ impl<'argument> CliParser<'argument> {
             fail_fast: None,
             no_tests: None,
             process: None,
+            output: None,
             filterset: None,
             target_dir: None,
             doc: false,
@@ -158,6 +161,7 @@ impl<'argument> CliParser<'argument> {
             b"--max-fail" => self.expectation = Expectation::MaxFailValue,
             b"--no-tests" => self.expectation = Expectation::NoTestsValue,
             b"--process" => self.expectation = Expectation::ProcessValue,
+            b"--output" => self.expectation = Expectation::OutputValue,
             b"--filterset" | b"-E" => self.begin_filterset(),
             b"--target-dir" => self.expectation = Expectation::TargetDirValue,
             b"--manifest-path" | b"-m" => {
@@ -183,6 +187,9 @@ impl<'argument> CliParser<'argument> {
             }
             value if value.starts_with(b"--process=") => {
                 self.process = Some(&value[b"--process=".len()..]);
+            }
+            value if value.starts_with(b"--output=") => {
+                self.output = Some(&value[b"--output=".len()..]);
             }
             value if value.starts_with(b"--no-tests=") => {
                 self.no_tests = Some(&value[b"--no-tests=".len()..]);
@@ -242,6 +249,10 @@ impl<'argument> CliParser<'argument> {
             }
             Expectation::ProcessValue => {
                 self.process = Some(argument);
+                true
+            }
+            Expectation::OutputValue => {
+                self.output = Some(argument);
                 true
             }
             Expectation::FiltersetValue => {
@@ -360,6 +371,16 @@ impl<'argument> CliParser<'argument> {
             Some(&[])
         } else {
             self.no_tests
+        }
+    }
+
+    /// The last `--output` value; one with no value reports an empty value.
+    #[must_use]
+    pub const fn output(&self) -> Option<&'argument [u8]> {
+        if matches!(self.expectation, Expectation::OutputValue) {
+            Some(&[])
+        } else {
+            self.output
         }
     }
 
@@ -756,5 +777,31 @@ mod tests {
         std::println!(
             "{{\"missing_trailing_value\":1,\"missing_before_option\":1,\"missing_before_separator\":1,\"duplicate_filters_rejected\":1,\"invalid_invocations_rejected\":{rejected_invocations}}}"
         );
+    }
+}
+
+#[cfg(test)]
+mod output_option_tests {
+    use super::CliParser;
+
+    fn parsed(arguments: &[&'static [u8]]) -> Option<&'static [u8]> {
+        let mut parser = CliParser::new();
+        for argument in arguments {
+            parser.push(argument);
+        }
+        parser.output()
+    }
+
+    #[test]
+    fn output_takes_a_separate_or_attached_value_and_the_last_one_wins() {
+        assert_eq!(parsed(&[b"val", b"--output", b"plain"]), Some(&b"plain"[..]));
+        assert_eq!(parsed(&[b"val", b"--output=rich"]), Some(&b"rich"[..]));
+        assert_eq!(parsed(&[b"val", b"--output=rich", b"--output", b"plain"]), Some(&b"plain"[..]));
+        assert_eq!(parsed(&[b"val"]), None);
+    }
+
+    #[test]
+    fn output_with_no_value_reports_an_empty_value_so_it_is_refused() {
+        assert_eq!(parsed(&[b"val", b"--output"]), Some(&b""[..]));
     }
 }
