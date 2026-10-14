@@ -11,6 +11,7 @@
 
 mod agent;
 
+use crate::failure_class::Exit;
 use crate::line::Line;
 
 /// A test id as two borrowed fields: the binary, then the test name.
@@ -49,7 +50,7 @@ pub enum Event<'a> {
     Listed { binaries: usize, tests: usize },
     Started { id: Identity<'a>, solo: bool },
     Settled { id: Identity<'a>, outcome: Outcome, millis: Option<u64>, solo: bool },
-    Captured { id: Identity<'a>, stdout: Stream<'a>, stderr: Stream<'a> },
+    Captured { id: Identity<'a>, stdout: Stream<'a>, stderr: Stream<'a>, exit: Exit },
     Warned { id: Identity<'a>, what: &'a [u8] },
     BlockOpened { id: Identity<'a> },
     BlockClosed,
@@ -179,7 +180,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Event::Listed { binaries, tests } => listed(frame, binaries, tests),
             Event::Started { id, solo } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, millis, solo } => self.settled(frame, id, outcome, millis, solo),
-            Event::Captured { id, stdout, stderr } => self.captured(frame, id, stdout, stderr),
+            Event::Captured { id, stdout, stderr, .. } => self.captured(frame, id, stdout, stderr),
             Event::Warned { id, what } => warned(frame, id, what),
             Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
             Event::BlockClosed => block_close(frame, STDOUT_STREAM),
@@ -448,6 +449,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::{Event, Identity, Mode, Outcome, State};
+    use crate::failure_class::Exit;
     use crate::line::Line;
     use crate::test_alloc::measure_allocations;
 
@@ -491,7 +493,7 @@ mod tests {
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true, why: None });
 
         let fail = settle(&mut state, FAILING, Outcome::Failed);
-        let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", false), stderr: (b"", false) };
+        let captured = Event::Captured { id: FAILING, stdout: (b"requested fixture failure", false), stderr: (b"", false), exit: Exit::Code(101) };
         let block = projected(&state, &captured);
 
         assert!(fail.ends_with("::error title=cargo val::cli_run::fixture::fails_when_requested failed\n"), "{fail}");
@@ -640,7 +642,7 @@ mod tests {
                 for event in [
                     Event::Started { id: PASSING, solo: false },
                     Event::Settled { id: FAILING, outcome, millis: Some(round), solo: false },
-                    Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", false), stderr: (b"", false) },
+                    Event::Captured { id: FAILING, stdout: (b"assertion failed: left == right", false), stderr: (b"", false), exit: Exit::Code(101) },
                     Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: round, manifest: Some(b"/w/Cargo.toml"), discovered: 0, filtered: 0, exit: 0 },
                 ] {
                     frame.clear();
@@ -665,7 +667,7 @@ mod tests {
         let capture = b"\nthread 't' panicked at src/lib.rs:12:13:\nrequested \x1b[31mfixture\x1b[0m failure\n";
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: Some(b"flag") });
         state.apply(&Event::Settled { id: FAILING, outcome: Outcome::Failed, millis: None, solo: false });
-        let block = Event::Captured { id: FAILING, stdout: (capture, false), stderr: (b"", false) };
+        let block = Event::Captured { id: FAILING, stdout: (capture, false), stderr: (b"", false), exit: Exit::Code(101) };
         let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 9, manifest: None, discovered: 2, filtered: 0, exit: 1 };
         let mut projections = 0_usize;
 

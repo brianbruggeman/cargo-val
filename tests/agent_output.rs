@@ -118,3 +118,35 @@ async fn the_environment_setting_selects_agent_and_names_itself() {
 
     assert!(text.lines().next().expect("a header").contains("output=agent why=env:CARGO_VAL_OUTPUT"), "{text}");
 }
+
+async fn failure_class_line(fixture_name: &str, test: &str, environment: &[(&str, &str)]) -> (Output, String) {
+    let filter = format!("test(={test})");
+    let output = run(fixture_name, environment, &["--output", "agent", "-E", &filter]).await;
+    let report = stdout_of(&output);
+    let lines: Vec<&str> = report.lines().collect();
+    let block = lines.iter().position(|line| line.starts_with("FAIL     ")).unwrap_or_else(|| panic!("a failure block:\n{report}"));
+    let classified = lines[block + 1].to_owned();
+    (output, classified)
+}
+
+#[cfg(unix)]
+#[proxima::test(timeout = "310s")]
+async fn a_segfault_and_an_abort_are_crashes_carrying_the_signal_the_child_died_of() {
+    for (test, signal) in [("failing::segfault_crash", 11), ("failing::abort_crash", 6)] {
+        for process in ["test", "shard"] {
+            let (output, classified) = failure_class_line("failure_class", test, &[("CARGO_VAL_PROCESS", process)]).await;
+
+            assert_eq!(output.status.code(), Some(1), "{test} {process}");
+            assert_eq!(classified, format!("         CRASH signal={signal}  location=absent:no_panic_site"), "{test} {process}");
+        }
+    }
+}
+
+#[proxima::test(timeout = "310s")]
+async fn a_proxima_test_harness_timeout_is_a_timeout_enforced_by_the_harness() {
+    let (output, classified) = failure_class_line("failure_harness", "failing::body_never_completes", &[("PROXIMA_TEST_TIMEOUT_MS", "200")]).await;
+
+    assert_eq!(output.status.code(), Some(1), "{classified}");
+    assert!(classified.starts_with("         TIMEOUT enforced_by=harness  "), "{classified}");
+    assert!(stdout_of(&output).contains("proxima::test: body did not complete within the timeout"), "the message line survives");
+}

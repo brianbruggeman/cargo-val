@@ -5,6 +5,7 @@
 
 use std::io::Write;
 
+use cargo_val::failure_class::Exit;
 use cargo_val::line::Line;
 use cargo_val::render::{Event, Identity, Mode, Outcome, State};
 use cargo_val::view_defaults::{FAILURES, NAME_BYTES, RERUN_BYTES};
@@ -37,7 +38,7 @@ fn run_with_failure() -> Result<(), String> {
     show(&mut state, Event::Started { id: PASSING, solo: false })?;
     show(&mut state, Event::Settled { id: PASSING, outcome: Outcome::Passed, millis: Some(3123), solo: false })?;
     show(&mut state, Event::Settled { id: FAILING, outcome: Outcome::Failed, millis: Some(71_660), solo: false })?;
-    show(&mut state, Event::Captured { id: FAILING, stdout: (b"", false), stderr: (b"body did not complete within the timeout", false) })?;
+    show(&mut state, Event::Captured { id: FAILING, stdout: (b"", false), stderr: (b"body did not complete within the timeout", false), exit: Exit::Code(101) })?;
     show(&mut state, Event::Warned { id: FAILING, what: b"solo rerun passed" })?;
     show(&mut state, finished(1))
 }
