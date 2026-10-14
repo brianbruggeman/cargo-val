@@ -647,7 +647,7 @@ fn test_row_count(frame: &str) -> Option<String> {
 }
 
 #[proxima::test]
-async fn a_second_run_opens_with_the_first_runs_test_count_as_an_estimate_and_ends_exact() {
+async fn a_second_run_shows_no_count_before_a_binary_is_known_and_ends_exact() {
     let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let (first, first_status) = run_targeting("rich_pty", "rich", &NO_COLOR, (true, &target_run), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
     let (second, second_status) = run_targeting("rich_pty", "rich", &NO_COLOR, (true, &target_run), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
@@ -663,7 +663,8 @@ async fn a_second_run_opens_with_the_first_runs_test_count_as_an_estimate_and_en
     let estimates: Vec<String> = second_frames.iter().filter_map(|frame| test_row_count(frame)).collect();
     let closing = test_row_count(second_frames.last().expect("the second run drew a frame")).expect("the second run's last frame has a test row");
     println!("second run counts {estimates:?} closes {closing}");
-    assert!(estimates.iter().any(|count| count.ends_with(&format!("/~{total}"))), "no second-run frame showed the first run's count as an estimate: {estimates:?}");
+    let rows: Vec<&str> = second_frames.iter().filter_map(|frame| frame.lines().find(|line| line.starts_with(" test  "))).collect();
+    assert!(rows.iter().all(|row| row.ends_with("searching for tests") || row.contains(&format!("/{total}"))), "a second-run frame showed a count before a binary was known: {rows:?}");
     assert!(closing.ends_with(&format!("/{total}")), "the second run's last frame is exact: {closing}");
 }
 

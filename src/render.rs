@@ -1405,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn the_live_view_redraws_the_frame_with_the_previous_runs_test_count_as_the_estimate() {
+    fn the_live_view_keeps_searching_for_tests_after_a_previous_run_until_a_binary_is_known() {
         let mut arena = [0_u8; 64];
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
@@ -1416,7 +1416,7 @@ mod tests {
 
         state.project_live(&previous, &mut frame).expect("the live view accepts the event");
 
-        assert!(String::from_utf8_lossy(frame.bytes()).contains("  0/~2 tests"), "{}", String::from_utf8_lossy(frame.bytes()));
+        assert!(String::from_utf8_lossy(frame.bytes()).contains(" searching for tests"), "{}", String::from_utf8_lossy(frame.bytes()));
         assert_eq!(state.previous(), Some((1, 2)));
     }
 
