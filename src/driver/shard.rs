@@ -439,6 +439,14 @@ pub(super) fn note_group(run: &ListingRun<'_>, watches: &mut Watches, slot: usiz
     }
 }
 
+// the first name of the shard that has not reported is the test this deadline names; an output-only rerun never announced a start, so it names none
+pub(super) fn first_running<'arena>(arena: &'arena ShardArena, watch: &ShardWatch) -> Option<&'arena [u8]> {
+    if watch.shard.rerun == Some(Rerun::OutputOnly) {
+        return None;
+    }
+    (0..watch.shard.count).find(|ordinal| !watch.reported.has(*ordinal)).and_then(|ordinal| arena.nth(watch.shard, ordinal))
+}
+
 /// Seals the arena once the active binary's listing has ended so its names carve into about `jobs` shards.
 pub(super) fn seal(run: &ListingRun<'_>) {
     if run.settings.process != ProcessMode::Shard {
@@ -617,7 +625,7 @@ impl CargoDriver<'_> {
             let (group, group_length) = group_of(run, shard);
             let watch = ShardWatch::new(shard, &group[..group_length]);
             let scope = run.session_scope(shard.rerun);
-            start_session(ledger, watches, lanes, slot, (Some(watch), scope))?;
+            start_session(ledger, watches, lanes, slot, (Some(watch), scope, run.settings))?;
             announce_starts(run, active.target, shard)?;
             moved = true;
         }
@@ -862,6 +870,9 @@ mod tests {
                 slot: slots.insert(0).expect("scratch table has a slot"),
                 process_id: 0,
                 scope: scope_for(None, (&root, &trip)),
+                started_ms: 0,
+                stalls: 0,
+                _gate: Signal::new().guard(),
                 output: ChildOutput::new(),
                 shard: None,
                 group: [0; GROUP_CAPACITY],
@@ -907,6 +918,8 @@ mod tests {
 mod pause_tests {
     use core::cell::{Cell, RefCell};
     use core::future::poll_fn;
+    use core::time::Duration;
+    use proxima_primitives::pipe::resilience::backoff::Backoff;
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -975,7 +988,7 @@ mod pause_tests {
             jobs: 1,
             max_fail: None,
             test_limit_ms: None,
-            heartbeat_ms: 10_000,
+            stall_backoff: Backoff::Constant(Duration::from_secs(10)),
             no_tests: NoTestsPolicy::Pass,
             process: ProcessMode::Shard,
             output: crate::config::OutputMode::Plain,
@@ -1026,6 +1039,9 @@ mod pause_tests {
             slot: scratch.insert(0).expect("scratch table has a slot"),
             process_id: 0,
             scope: Signal::new(),
+            started_ms: 0,
+            stalls: 0,
+            _gate: Signal::new().guard(),
             output: ChildOutput::new(),
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],

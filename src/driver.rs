@@ -27,15 +27,16 @@ use crate::filterset::{FilterError, Filterset, Prepared};
 use crate::ignored_set::{IgnoredSet, IgnoredSetFull};
 use crate::isolated_target::{BuildDirectories, ChildDirectory, LockKind, LockWatch};
 use crate::line::Line;
-use crate::render::{Event, Outcome, State, Stream};
+use crate::render::{Event, Mode, Outcome, State, Stream};
 use crate::view_defaults::{FAILURES, FRAME_BYTES, RERUN_BYTES};
 use crate::run::{
-    CARGO_LANE, DOC_LANE, JOB_BASE, LISTING_LANE, Lanes, attach, attach_session, collect_child, collect_libdir,
+    CARGO_LANE, DOC_LANE, JOB_BASE, LISTING_LANE, Lanes, arm_milestone, attach, attach_session, collect_child, collect_libdir,
     observe_cargo, observe_doc,
 };
 use crate::metadata_scan::{BinCounts, MetadataFacts, MetadataScan};
 use prime::os::readiness::Readiness;
-use proxima_core::signal::Signal;
+use proxima_core::signal::{Signal, SignalGuard};
+use proxima_primitives::pipe::resilience::backoff::Backoff;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
 use std::sync::OnceLock;
@@ -374,6 +375,10 @@ pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: u32,
     scope: Signal,
+    started_ms: u64,
+    stalls: u32,
+    // held only for its drop: the watch ending fires the lane's milestone gate
+    _gate: SignalGuard,
     output: ChildOutput,
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
@@ -518,7 +523,7 @@ struct Settings {
     color: bool,
     exit_with_parent: ExitWithParent,
     test_limit_ms: Option<u32>,
-    heartbeat_ms: u64,
+    stall_backoff: Backoff,
 }
 
 const SETTING_KEYS: [&str; 18] = [
@@ -531,7 +536,7 @@ const SETTING_KEYS: [&str; 18] = [
     "CARGO_VAL_OUTPUT",
     "CARGO_VAL_EXIT_WITH_PARENT",
     "CARGO_VAL_TEST_TIMEOUT",
-    "CARGO_VAL_HEARTBEAT_SECS",
+    "CARGO_VAL_STALL_BACKOFF",
     "CI",
     "TERM",
     "CARGO_VAL_COLOR",
@@ -629,7 +634,7 @@ fn runtime_settings(
         color,
         exit_with_parent,
         test_limit_ms: TEST_TIMEOUT.from_settings(&source, parser.test_timeout()).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
-        heartbeat_ms: crate::config::heartbeat_millis(&source, parser.heartbeat()).map_err(RunError::Setting)?,
+        stall_backoff: crate::config::stall_backoff(&source, parser.stall_backoff()).map_err(RunError::Setting)?,
     })
 }
 
@@ -672,7 +677,7 @@ fn start_session(
     watches: &mut Watches,
     lanes: &Lanes,
     slot: SessionSlotId,
-    (shard, scope): (Option<ShardWatch>, Signal),
+    (shard, scope, settings): (Option<ShardWatch>, Signal, &Settings),
 ) -> Result<(), RunError> {
     let child = ledger
         .sessions()
@@ -683,10 +688,16 @@ fn start_session(
     track(process_id)?;
     attach_session(&lanes[JOB_BASE + slot.index()], child)?;
     *lanes[JOB_BASE + slot.index()].4.borrow_mut() = Some(SignalSource::new(&scope));
+    let gate = scope.child().guard();
+    *lanes[JOB_BASE + slot.index()].5.borrow_mut() = Some(SignalSource::new(gate.signal()));
+    arm_milestone(&lanes[JOB_BASE + slot.index()], settings.stall_backoff.base_delay(0));
     watches[slot.index()] = Some(TestWatch {
         slot,
         process_id,
         scope,
+        started_ms: monotonic_millis(),
+        stalls: 0,
+        _gate: gate,
         output: ChildOutput::new(),
         shard,
         group: [0; GROUP_CAPACITY],
@@ -817,6 +828,38 @@ pub(crate) fn session_exited(
     };
     let step = deliver(ledger, event, run.reporting(), watch)?;
     settled(run, ledger, watches, index, step).map(|_| ())
+}
+
+/// Names the test a lane's deadline fired for with its age, then re-arms the lane after the backoff's next delay.
+///
+/// # Errors
+///
+/// Returns [`RunError`] when the session is unknown or the render queue refuses the line.
+#[inline(never)]
+pub(crate) fn session_milestone(
+    run: &ListingRun<'_>,
+    ledger: &Ledger<'_>,
+    watches: &mut Watches,
+    lanes: &Lanes,
+    index: usize,
+) -> Result<(), RunError> {
+    let Some(watch) = watches[index].as_mut() else {
+        return Ok(());
+    };
+    watch.stalls = watch.stalls.saturating_add(1);
+    arm_milestone(&lanes[JOB_BASE + index], run.settings.stall_backoff.base_delay(watch.stalls));
+    let age_ms = monotonic_millis().saturating_sub(watch.started_ms);
+    let session = ledger.sessions().get(watch.slot).ok_or(RunError::Outcome)?;
+    let arena = run.shards.borrow();
+    let name = match watch.shard.as_ref() {
+        Some(shard_watch) => shard::first_running(&arena, shard_watch),
+        None => Some(session.name_bytes()),
+    };
+    let Some(name) = name else {
+        return Ok(());
+    };
+    let targets = run.targets.borrow();
+    emit(run.render(), &Event::Milestone { id: (targets.id(session.target()), name), age_ms, limit_ms: run.settings.test_limit_ms })
 }
 
 pub(crate) fn session_cancelled(ledger: &Ledger<'_>, watches: &mut Watches, index: usize) {
@@ -1297,7 +1340,7 @@ fn launch_listed(
         run.ready.set(Some(slot));
     }
     run.targets.borrow_mut().tally(target, Tally::Launched);
-    start_session(ledger, watches, scan.lanes, slot, (None, run.session_scope(None)))?;
+    start_session(ledger, watches, scan.lanes, slot, (None, run.session_scope(None), run.settings))?;
     let targets = run.targets.borrow();
     let id = (targets.id(target), intent.test_name().as_bytes());
     emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
@@ -1366,6 +1409,12 @@ impl<'run> DocObservation<'run> {
 impl<'run> ListingRun<'run> {
     pub(crate) fn render(&self) -> &'run Render<'run> {
         self.docs.render
+    }
+
+    /// Whether the 250 ms tick is wanted: only a live rich display with a test in flight has a clock or an age column to redraw.
+    pub(crate) fn tick_wanted(&self) -> bool {
+        let (mode, state, _) = self.render();
+        matches!(mode, OutputMode::Rich) && state.borrow().mode() == Mode::Running && state.borrow().inflight_len() != 0
     }
 
     fn reporting(&self) -> Reporting<'_, 'run> {
@@ -2563,7 +2612,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let mut storage = run_storage(settings.process);
     let storage = &mut storage;
     let (cargo_storage, (libdir_bytes, inherited), (sessions, watches), (shard_names, sched_bytes, picked), (name_arena, ledger_slots, frame_line, inflight_slots)) = storage;
-    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color)), RefCell::new(frame_line));
+    let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_color(settings.color)), RefCell::new(frame_line));
     emit_begin(&render, &settings, &environment, started_millis)?;
     if settings.output == OutputMode::Rich {
         begin_rich(&render)?;
@@ -3668,8 +3717,10 @@ mod tests {
 #[cfg(all(test, unix))]
 mod listing_allocation_tests {
     use core::cell::{Cell, RefCell};
+    use core::time::Duration;
 
     use proxima_core::signal::Signal;
+    use proxima_primitives::pipe::resilience::backoff::Backoff;
 
     use super::{DocObservation, ENVIRONMENT_CAPACITY, LISTING_SLOTS, ListingRun, PendingListing, Settings, TargetTable, spawn_listing};
     use crate::edge_spawn::held_launch_storage;
@@ -3713,7 +3764,7 @@ mod listing_allocation_tests {
             color: false,
             exit_with_parent: crate::config::ExitWithParent::Off,
             test_limit_ms: None,
-            heartbeat_ms: 10_000,
+            stall_backoff: Backoff::Constant(Duration::from_secs(10)),
         };
         let signals = SignalPipe::install().expect("signal pipe installs once in the unit test process");
         let mut arena = [0_u8; 64];

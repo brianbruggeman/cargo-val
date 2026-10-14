@@ -102,7 +102,11 @@ struct ViewDefaults {
     #[setting(default = 65536)]
     inflight_bytes: usize,
     #[setting(default = 10)]
-    heartbeat_secs: usize,
+    stall_initial_secs: usize,
+    #[setting(default = 2)]
+    stall_factor: usize,
+    #[setting(default = 300)]
+    stall_max_secs: usize,
     #[setting(default = 250)]
     tick_ms: usize,
     #[setting(default = 7)]
@@ -122,11 +126,11 @@ impl Validate for ViewDefaults {
         if self.name_bytes == 0 {
             errors.push(ValidationMessage::new("name_bytes", "must be greater than zero"));
         }
-        if self.heartbeat_secs == 0 {
-            errors.push(ValidationMessage::new("heartbeat_secs", "must be greater than zero"));
+        if self.stall_initial_secs == 0 || self.stall_factor == 0 || self.stall_factor > 64 || self.stall_max_secs < self.stall_initial_secs {
+            errors.push(ValidationMessage::new("stall_initial_secs", "must be nonzero, with stall_factor from 1 to 64 and stall_max_secs no less than stall_initial_secs"));
         }
-        if self.tick_ms == 0 || self.tick_ms > self.heartbeat_secs * 1000 {
-            errors.push(ValidationMessage::new("tick_ms", "must be nonzero and no longer than the heartbeat"));
+        if self.tick_ms == 0 {
+            errors.push(ValidationMessage::new("tick_ms", "must be greater than zero"));
         }
         if self.bar_columns < 10 || self.inflight_rows == 0 || self.reason_bytes == 0 {
             errors.push(ValidationMessage::new("bar_columns", "must be at least 10, with nonzero inflight_rows and reason_bytes"));

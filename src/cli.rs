@@ -33,7 +33,7 @@ enum Expectation {
     MaxFailValue,
     NoTestsValue,
     TestTimeoutValue,
-    HeartbeatValue,
+    StallBackoffValue,
     ProcessValue,
     OutputValue,
     FiltersetValue,
@@ -88,7 +88,7 @@ pub struct CliParser<'argument> {
     fail_fast: Option<FailFastArgument<'argument>>,
     no_tests: Option<&'argument [u8]>,
     test_timeout: Option<&'argument [u8]>,
-    heartbeat: Option<&'argument [u8]>,
+    stall_backoff: Option<&'argument [u8]>,
     process: Option<&'argument [u8]>,
     output: Option<&'argument [u8]>,
     exit_with_parent: Option<&'static [u8]>,
@@ -117,7 +117,7 @@ impl<'argument> CliParser<'argument> {
             fail_fast: None,
             no_tests: None,
             test_timeout: None,
-            heartbeat: None,
+            stall_backoff: None,
             process: None,
             output: None,
             exit_with_parent: None,
@@ -170,7 +170,7 @@ impl<'argument> CliParser<'argument> {
             b"--max-fail" => self.expectation = Expectation::MaxFailValue,
             b"--no-tests" => self.expectation = Expectation::NoTestsValue,
             b"--test-timeout" => self.expectation = Expectation::TestTimeoutValue,
-            b"--heartbeat" => self.expectation = Expectation::HeartbeatValue,
+            b"--stall-backoff" => self.expectation = Expectation::StallBackoffValue,
             b"--process" => self.expectation = Expectation::ProcessValue,
             b"--output" => self.expectation = Expectation::OutputValue,
             b"--filterset" | b"-E" => self.begin_filterset(),
@@ -235,7 +235,7 @@ impl<'argument> CliParser<'argument> {
             b"--process" => self.process = Some(value),
             b"--output" => self.output = Some(value),
             b"--test-timeout" => self.test_timeout = Some(value),
-            b"--heartbeat" => self.heartbeat = Some(value),
+            b"--stall-backoff" => self.stall_backoff = Some(value),
             b"--no-tests" => self.no_tests = Some(value),
             b"--max-fail" => self.fail_fast = Some(FailFastArgument::MaxFail(value)),
             _ => return false,
@@ -268,8 +268,8 @@ impl<'argument> CliParser<'argument> {
                 self.test_timeout = Some(argument);
                 true
             }
-            Expectation::HeartbeatValue => {
-                self.heartbeat = Some(argument);
+            Expectation::StallBackoffValue => {
+                self.stall_backoff = Some(argument);
                 true
             }
             Expectation::ProcessValue => {
@@ -409,13 +409,13 @@ impl<'argument> CliParser<'argument> {
         }
     }
 
-    /// The last `--heartbeat` value; one with no value reports an empty value.
+    /// The last `--stall-backoff` value; one with no value reports an empty value.
     #[must_use]
-    pub const fn heartbeat(&self) -> Option<&'argument [u8]> {
-        if matches!(self.expectation, Expectation::HeartbeatValue) {
+    pub const fn stall_backoff(&self) -> Option<&'argument [u8]> {
+        if matches!(self.expectation, Expectation::StallBackoffValue) {
             Some(&[])
         } else {
-            self.heartbeat
+            self.stall_backoff
         }
     }
 
@@ -684,20 +684,20 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn test_timeout_and_heartbeat_take_a_value_in_either_form_and_are_not_forwarded() {
+    async fn test_timeout_and_stall_backoff_take_a_value_in_either_form_and_are_not_forwarded() {
         let mut parser = CliParser::new();
-        for argument in [b"--test-timeout".as_slice(), b"120", b"--heartbeat=2", b"filter"] {
+        for argument in [b"--test-timeout".as_slice(), b"120", b"--stall-backoff=exp:2s,2,1m", b"filter"] {
             parser.push(argument);
         }
 
         assert_eq!(parser.test_timeout(), Some(&b"120"[..]));
-        assert_eq!(parser.heartbeat(), Some(&b"2"[..]));
+        assert_eq!(parser.stall_backoff(), Some(&b"exp:2s,2,1m"[..]));
         assert_eq!(parser.cargo_arguments(), &[] as &[&[u8]]);
         assert_eq!(parser.filter(), Some(&b"filter"[..]));
 
         let mut dangling = CliParser::new();
-        dangling.push(b"--heartbeat");
-        assert_eq!(dangling.heartbeat(), Some(&b""[..]));
+        dangling.push(b"--stall-backoff");
+        assert_eq!(dangling.stall_backoff(), Some(&b""[..]));
     }
 
     #[proxima::test]
