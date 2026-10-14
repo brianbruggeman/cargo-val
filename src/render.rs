@@ -14,6 +14,9 @@ use crate::line::Line;
 /// A test id as two borrowed fields: the binary, then the test name.
 pub type Identity<'a> = (&'a [u8], &'a [u8]);
 
+/// One captured stream: its bytes, and whether the driver's buffer cut it short.
+pub type Stream<'a> = (&'a [u8], bool);
+
 const LABEL_WIDTH: usize = 9;
 const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
@@ -30,9 +33,9 @@ pub enum Outcome {
 
 /// The screen the run is in. Plain uses exactly these four; review, timeline and the rest join with the rich projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode<'a> {
+pub enum Mode {
     Running,
-    BuildError { diagnostic: &'a [u8] },
+    BuildError,
     Interrupted { signal: u8 },
     Done { wall_ms: u64 },
 }
@@ -44,19 +47,21 @@ pub enum Event<'a> {
     Listed { binaries: usize, tests: usize },
     Started { id: Identity<'a>, solo: bool },
     Settled { id: Identity<'a>, outcome: Outcome, millis: Option<u64>, solo: bool },
-    Captured { id: Identity<'a>, stdout: (&'a [u8], bool), stderr: (&'a [u8], bool) },
+    Captured { id: Identity<'a>, stdout: Stream<'a>, stderr: Stream<'a> },
     Warned { id: Identity<'a>, what: &'a [u8] },
+    BlockOpened { id: Identity<'a> },
+    BlockClosed,
     BuildFailed { diagnostic: &'a [u8] },
     Interrupted { signal: u8 },
     Finished { passed: usize, failed: usize, ignored: usize, not_run: usize, wall_ms: u64, manifest: Option<&'a [u8]> },
 }
 
-impl<'a> Mode<'a> {
+impl Mode {
     /// The transition table: every (mode, event) pair is named, so a new mode or event is a compile error here.
     #[must_use]
-    pub const fn next(self, event: &Event<'a>) -> Self {
+    pub const fn next(self, event: &Event<'_>) -> Self {
         match (self, event) {
-            (Self::Running, Event::BuildFailed { diagnostic }) => Self::BuildError { diagnostic },
+            (Self::Running, Event::BuildFailed { .. }) => Self::BuildError,
             (Self::Running, Event::Interrupted { signal }) => Self::Interrupted { signal: *signal },
             (Self::Running, Event::Finished { failed: 0, wall_ms, .. }) => Self::Done { wall_ms: *wall_ms },
             (
@@ -67,61 +72,92 @@ impl<'a> Mode<'a> {
                 | Event::Settled { .. }
                 | Event::Captured { .. }
                 | Event::Warned { .. }
+                | Event::BlockOpened { .. }
+                | Event::BlockClosed
                 | Event::Finished { .. },
             ) => Self::Running,
-            (Self::BuildError { .. } | Self::Interrupted { .. } | Self::Done { .. }, _) => self,
+            (Self::BuildError | Self::Interrupted { .. } | Self::Done { .. }, _) => self,
         }
     }
 }
 
-/// The render state: the screen, the projection inputs, and the failure ledger as borrowed ids.
+/// The render state: the screen, the projection inputs, and the failure ledger as offsets into a caller-owned name arena.
+///
+/// A failure's binary and name are copied once, on its settle event, into `arena` as `binary NUL name NUL`; the ledger
+/// holds the record's start offset. The arena is the caller's storage for the whole run, so nothing in the state borrows
+/// from an event, and a full arena counts the failure instead of storing it.
 #[derive(Debug)]
-pub struct State<'a, const FAILURES: usize, const RERUN: usize> {
-    mode: Mode<'a>,
+pub struct State<'storage, const FAILURES: usize, const RERUN: usize> {
+    mode: Mode,
     github: bool,
-    failures: [Identity<'a>; FAILURES],
+    arena: &'storage mut [u8],
+    used: usize,
+    failures: [u32; FAILURES],
     stored: usize,
     unstored: usize,
 }
 
-impl<'a, const FAILURES: usize, const RERUN: usize> State<'a, FAILURES, RERUN> {
+impl<'storage, const FAILURES: usize, const RERUN: usize> State<'storage, FAILURES, RERUN> {
     #[must_use]
-    pub const fn new() -> Self {
-        Self { mode: Mode::Running, github: false, failures: [(&[], &[]); FAILURES], stored: 0, unstored: 0 }
+    pub const fn new(arena: &'storage mut [u8]) -> Self {
+        Self { mode: Mode::Running, github: false, arena, used: 0, failures: [0; FAILURES], stored: 0, unstored: 0 }
     }
 
     #[must_use]
-    pub const fn mode(&self) -> Mode<'a> {
+    pub const fn mode(&self) -> Mode {
         self.mode
     }
 
-    #[must_use]
-    pub fn failures(&self) -> &[Identity<'a>] {
-        &self.failures[..self.stored]
+    /// The ledger as borrowed views into the arena, in settle order.
+    pub fn failures(&self) -> impl Iterator<Item = Identity<'_>> {
+        self.failures[..self.stored].iter().map(|offset| self.resolve(*offset))
     }
 
-    /// Failures that arrived after the ledger was full; the closing block says how many.
+    /// Failures that arrived after the ledger or the name arena was full; the closing block says how many.
     #[must_use]
     pub const fn unstored(&self) -> usize {
         self.unstored
     }
 
-    pub fn apply(&mut self, event: &Event<'a>) {
+    pub fn apply(&mut self, event: &Event<'_>) {
         self.mode = self.mode.next(event);
         match *event {
-            Event::Begin { github, .. } => *self = Self { github, ..Self::new() },
+            Event::Begin { github, .. } => self.begin(github),
             Event::Settled { id, outcome: Outcome::Failed, .. } => self.record(id),
             _ => {}
         }
     }
 
-    fn record(&mut self, id: Identity<'a>) {
-        if self.stored < FAILURES {
-            self.failures[self.stored] = id;
-            self.stored += 1;
-        } else {
-            self.unstored += 1;
+    fn begin(&mut self, github: bool) {
+        self.mode = Mode::Running;
+        self.github = github;
+        self.used = 0;
+        self.stored = 0;
+        self.unstored = 0;
+    }
+
+    fn record(&mut self, (binary, name): Identity<'_>) {
+        let end = self.used + binary.len() + name.len() + 2;
+        let offset = u32::try_from(self.used);
+        match offset {
+            Ok(offset) if self.stored < FAILURES && end <= self.arena.len() => {
+                let (binary_end, name_end) = (self.used + binary.len(), end - 1);
+                self.arena[self.used..binary_end].copy_from_slice(binary);
+                self.arena[binary_end] = 0;
+                self.arena[binary_end + 1..name_end].copy_from_slice(name);
+                self.arena[name_end] = 0;
+                self.used = end;
+                self.failures[self.stored] = offset;
+                self.stored += 1;
+            }
+            _ => self.unstored += 1,
         }
+    }
+
+    fn resolve(&self, offset: u32) -> Identity<'_> {
+        let record = &self.arena[offset as usize..self.used];
+        let mut fields = record.split(|byte| *byte == 0);
+        (fields.next().unwrap_or(&[]), fields.next().unwrap_or(&[]))
     }
 
     /// Appends the lines `event` warrants, given the state after `apply`. Err carries the bytes the frame could not hold.
@@ -137,6 +173,8 @@ impl<'a, const FAILURES: usize, const RERUN: usize> State<'a, FAILURES, RERUN> {
             Event::Settled { id, outcome, millis, solo } => self.settled(frame, id, outcome, millis, solo),
             Event::Captured { id, stdout, stderr } => self.captured(frame, id, stdout, stderr),
             Event::Warned { id, what } => warned(frame, id, what),
+            Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
+            Event::BlockClosed => block_close(frame, STDOUT_STREAM),
             Event::BuildFailed { diagnostic } => text_line(frame, b"BUILD", b"failed  ", diagnostic),
             Event::Interrupted { signal } => interrupted(frame, signal),
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest } => {
@@ -211,7 +249,7 @@ impl<'a, const FAILURES: usize, const RERUN: usize> State<'a, FAILURES, RERUN> {
         for (target, name) in self.failures() {
             label(frame, b"FAILED");
             frame.text(target);
-            frame.text(b"  ");
+            frame.text(b" ");
             frame.text(name);
             frame.text(b"\n");
         }
@@ -237,7 +275,7 @@ impl<'a, const FAILURES: usize, const RERUN: usize> State<'a, FAILURES, RERUN> {
             frame.text(b"'");
         }
         frame.text(b" --no-fail-fast -E '");
-        for (position, (target, name)) in self.failures()[..included].iter().enumerate() {
+        for (position, (target, name)) in self.failures().take(included).enumerate() {
             if position != 0 {
                 frame.text(FILTER_JOIN);
             }
@@ -270,12 +308,6 @@ impl<'a, const FAILURES: usize, const RERUN: usize> State<'a, FAILURES, RERUN> {
             included += 1;
         }
         included
-    }
-}
-
-impl<const FAILURES: usize, const RERUN: usize> Default for State<'_, FAILURES, RERUN> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -358,10 +390,7 @@ fn interrupted<const FRAME: usize>(frame: &mut Line<FRAME>, signal: u8) {
     frame.text(b"\n");
 }
 
-fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, truncated): (&[u8], bool)) {
-    if bytes.is_empty() {
-        return;
-    }
+fn block_open<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8]) {
     frame.text(b"------ ");
     frame.text(name);
     frame.text(b": ");
@@ -369,6 +398,19 @@ fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &
     frame.text(b" ");
     frame.text(id.1);
     frame.text(b" ------\n");
+}
+
+fn block_close<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8]) {
+    frame.text(b"------ end ");
+    frame.text(name);
+    frame.text(b" ------\n");
+}
+
+fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, truncated): (&[u8], bool)) {
+    if bytes.is_empty() {
+        return;
+    }
+    block_open(frame, id, name);
     frame.text(bytes);
     if bytes.last() != Some(&b'\n') {
         frame.text(b"\n");
@@ -376,14 +418,13 @@ fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &
     if truncated {
         frame.text(b"[output truncated]\n");
     }
-    frame.text(b"------ end ");
-    frame.text(name);
-    frame.text(b" ------\n");
+    block_close(frame, name);
 }
 
 #[cfg(test)]
 mod tests {
     use std::string::String;
+    use std::vec::Vec;
 
     use super::{Event, Identity, Mode, Outcome, State};
     use crate::line::Line;
@@ -392,15 +433,18 @@ mod tests {
     const FAILING: Identity<'static> = (b"cli_run", b"fixture::fails_when_requested");
     const PASSING: Identity<'static> = (b"cli_run", b"fixture::passes");
 
-    type Small = State<'static, 2, 200>;
+    type Small<'storage> = State<'storage, 2, 200>;
 
-    fn projected<const FAILURES: usize, const RERUN: usize>(state: &State<'static, FAILURES, RERUN>, event: &Event<'static>) -> String {
+    fn projected<const FAILURES: usize, const RERUN: usize>(
+        state: &State<'_, FAILURES, RERUN>,
+        event: &Event<'_>,
+    ) -> String {
         let mut frame = Line::<4096>::new();
         state.project(event, &mut frame).expect("the frame holds one event");
         String::from_utf8(frame.bytes().to_vec()).expect("plain output is utf-8")
     }
 
-    fn settle(state: &mut Small, id: Identity<'static>, outcome: Outcome) -> String {
+    fn settle(state: &mut Small<'_>, id: Identity<'static>, outcome: Outcome) -> String {
         let event = Event::Settled { id, outcome, millis: Some(3123), solo: false };
         state.apply(&event);
         projected(state, &event)
@@ -408,17 +452,19 @@ mod tests {
 
     #[test]
     fn a_settled_failure_projects_its_fail_line_and_joins_the_ledger() {
-        let mut state = Small::new();
+        let mut arena = [0_u8; 512];
+        let mut state = Small::new(&mut arena);
 
         let line = settle(&mut state, FAILING, Outcome::Failed);
 
         assert_eq!(line, "FAIL     cli_run  fixture::fails_when_requested  3.123s\n");
-        assert_eq!(state.failures(), &[FAILING]);
+        assert_eq!(state.failures().collect::<Vec<_>>(), [FAILING]);
     }
 
     #[test]
     fn github_adds_the_error_annotation_after_the_fail_line_and_wraps_captured_output_in_a_group() {
-        let mut state = Small::new();
+        let mut arena = [0_u8; 512];
+        let mut state = Small::new(&mut arena);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: true });
 
         let fail = settle(&mut state, FAILING, Outcome::Failed);
@@ -434,7 +480,8 @@ mod tests {
 
     #[test]
     fn the_closing_block_lists_every_failure_and_one_command_that_reruns_them() {
-        let mut state = Small::new();
+        let mut arena = [0_u8; 512];
+        let mut state = Small::new(&mut arena);
         settle(&mut state, PASSING, Outcome::Passed);
         settle(&mut state, FAILING, Outcome::Failed);
         let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 8400, manifest: Some(b"/w/Cargo.toml") };
@@ -445,7 +492,7 @@ mod tests {
         assert_eq!(
             block,
             "SUMMARY  passed=1 failed=1 ignored=0 not_run=0  wall=8.400s\n\
-             FAILED   cli_run  fixture::fails_when_requested\n\
+             FAILED   cli_run fixture::fails_when_requested\n\
              RERUN    cargo val --manifest-path '/w/Cargo.toml' --no-fail-fast -E '(binary(=cli_run) & test(=fixture::fails_when_requested))'\n"
         );
         assert_eq!(state.mode(), Mode::Running, "failures keep the run on screen");
@@ -453,7 +500,8 @@ mod tests {
 
     #[test]
     fn failures_past_the_ledger_are_counted_and_named_in_the_closing_block() {
-        let mut state = Small::new();
+        let mut arena = [0_u8; 512];
+        let mut state = Small::new(&mut arena);
         let names: [Identity<'static>; 4] = [(b"a", b"one"), (b"a", b"two"), (b"a", b"three"), (b"a", b"four")];
         for id in names {
             settle(&mut state, id, Outcome::Failed);
@@ -468,8 +516,26 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_whose_names_do_not_fit_the_arena_is_counted_not_stored() {
+        let mut arena = [0_u8; 40];
+        let mut state = State::<8, 200>::new(&mut arena);
+        let long: Identity<'static> = (b"cli_run", b"fixture::a_test_name_longer_than_the_arena_has_room_for");
+
+        settle_any(&mut state, FAILING);
+        settle_any(&mut state, long);
+
+        assert_eq!(state.failures().collect::<Vec<_>>(), [FAILING]);
+        assert_eq!(state.unstored(), 1);
+    }
+
+    fn settle_any<const FAILURES: usize>(state: &mut State<'_, FAILURES, 200>, id: Identity<'_>) {
+        state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: None, solo: false });
+    }
+
+    #[test]
     fn a_rerun_command_that_outgrows_its_budget_says_how_many_failures_it_left_out() {
-        let mut state = State::<'static, 4, 40>::new();
+        let mut arena = [0_u8; 256];
+        let mut state = State::<4, 40>::new(&mut arena);
         for id in [(&b"a"[..], &b"one"[..]), (b"a", b"two"), (b"a", b"three")] {
             state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: None, solo: false });
         }
@@ -483,7 +549,8 @@ mod tests {
 
     #[test]
     fn a_frame_too_small_for_the_event_reports_the_bytes_it_cut() {
-        let state = Small::new();
+        let mut arena = [0_u8; 64];
+        let state = Small::new(&mut arena);
         let mut frame = Line::<16>::new();
 
         let result = state.project(&Event::Started { id: FAILING, solo: false }, &mut frame);
@@ -495,13 +562,13 @@ mod tests {
     fn every_mode_event_pair_lands_where_the_transition_table_says() {
         let finished = |failed| Event::Finished { passed: 1, failed, ignored: 0, not_run: 0, wall_ms: 5, manifest: None };
         let rows = [
-            (Mode::Running, Event::BuildFailed { diagnostic: b"E0308" }, Mode::BuildError { diagnostic: b"E0308" }),
+            (Mode::Running, Event::BuildFailed { diagnostic: b"E0308" }, Mode::BuildError),
             (Mode::Running, Event::Interrupted { signal: 2 }, Mode::Interrupted { signal: 2 }),
             (Mode::Running, finished(0), Mode::Done { wall_ms: 5 }),
             (Mode::Running, finished(1), Mode::Running),
             (Mode::Running, Event::Started { id: PASSING, solo: false }, Mode::Running),
             (Mode::Done { wall_ms: 5 }, Event::Interrupted { signal: 2 }, Mode::Done { wall_ms: 5 }),
-            (Mode::BuildError { diagnostic: b"E0308" }, finished(0), Mode::BuildError { diagnostic: b"E0308" }),
+            (Mode::BuildError, finished(0), Mode::BuildError),
             (Mode::Interrupted { signal: 15 }, Event::Started { id: PASSING, solo: false }, Mode::Interrupted { signal: 15 }),
         ];
 
@@ -512,12 +579,15 @@ mod tests {
 
     #[test]
     fn no_projection_contains_an_escape_byte() {
-        let mut state = Small::new();
+        let mut arena = [0_u8; 512];
+        let mut state = Small::new(&mut arena);
         let events = [
             Event::Begin { version: b"0.1.0", shard: true, jobs: 8, github: true },
             Event::Listed { binaries: 19, tests: 383 },
             Event::Started { id: FAILING, solo: true },
             Event::Warned { id: FAILING, what: b"rerun failed to start" },
+            Event::BlockOpened { id: FAILING },
+            Event::BlockClosed,
             Event::Interrupted { signal: 2 },
         ];
 
@@ -529,7 +599,8 @@ mod tests {
 
     #[test]
     fn a_hundred_thousand_events_update_and_project_with_zero_allocations() {
-        let mut state = State::<'static, 64, 8192>::new();
+        let mut arena = [0_u8; 4096];
+        let mut state = State::<64, 8192>::new(&mut arena);
         let mut frame = Line::<32_768>::new();
         let mut events_applied = 0_usize;
 
@@ -553,5 +624,30 @@ mod tests {
         assert_eq!(events_applied, 100_000, "the loop ran every event, so a zero is not an empty loop");
         assert_eq!(allocations, 0);
         assert!(state.unstored() > 0, "the ledger overflowed during the loop, so the overflow path was measured too");
+    }
+
+    #[test]
+    fn ten_thousand_closing_frames_project_with_zero_allocations() {
+        let mut arena = [0_u8; 4096];
+        let mut state = State::<64, 8192>::new(&mut arena);
+        let mut frame = Line::<32_768>::new();
+        let mut frames = 0_usize;
+        for ordinal in 0..64_u64 {
+            let id = (&b"sched_records"[..], &b"the_host_binary_format_yields_every_declared_record"[..]);
+            state.apply(&Event::Settled { id, outcome: Outcome::Failed, millis: Some(ordinal), solo: false });
+        }
+        let finished = Event::Finished { passed: 9, failed: 64, ignored: 0, not_run: 0, wall_ms: 258_235, manifest: Some(b"/w/Cargo.toml") };
+
+        let ((), allocations) = measure_allocations(|| {
+            for _ in 0..10_000 {
+                frame.clear();
+                state.project(&finished, &mut frame).expect("the frame holds the closing block");
+                frames += 1;
+            }
+        });
+
+        assert_eq!(frames, 10_000, "the loop ran every frame, so a zero is not an empty loop");
+        assert_eq!(allocations, 0);
+        assert!(frame.bytes().starts_with(b"SUMMARY  passed=9 failed=64"), "the last frame is the closing block");
     }
 }

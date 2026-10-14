@@ -84,6 +84,7 @@ fn fixture_command(
 ) -> Command {
     let mut command = Command::new(CARGO_VAL);
     command
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(fixture_manifest(fixture))
         .args(arguments)
@@ -500,6 +501,7 @@ async fn c68_short_manifest_path_is_forwarded_and_not_taken_as_the_filter() {
     let manifest = manifest.to_str().expect("fixture path is utf-8");
     let mut command = Command::new(CARGO_VAL);
     command
+        .env("CARGO_VAL_OUTPUT", "rich")
         .args(["-m", manifest, "--no-fail-fast"])
         .env("NO_COLOR", "1")
         .env("CARGO_TARGET_DIR", target_directory().join("c68-fixture"));

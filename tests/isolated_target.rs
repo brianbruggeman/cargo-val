@@ -115,6 +115,7 @@ fn fixture_manifest() -> PathBuf {
 fn cargo_val(scratch: &Path, shared_target: &Path, arguments: &[&str]) -> Command {
     let mut command = Command::new(CARGO_VAL);
     command
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(fixture_manifest())
         .args(arguments)

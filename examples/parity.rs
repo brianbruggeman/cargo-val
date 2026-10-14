@@ -44,7 +44,9 @@ fn compare() -> Result<(), String> {
 }
 
 fn observe(binary: &Path, target: &Path) -> Result<(), String> {
-    let val_output = run(Command::new(binary), target)?;
+    let mut val_command = Command::new(binary);
+    val_command.env("CARGO_VAL_OUTPUT", "rich");
+    let val_output = run(val_command, target)?;
     let mut cargo = Command::new("cargo");
     cargo.args(["test", "--locked", "--color", "never"]);
     let test_output = run(cargo, target)?;
@@ -64,16 +66,17 @@ fn observe(binary: &Path, target: &Path) -> Result<(), String> {
 
 fn run(mut command: Command, target: &Path) -> Result<String, String> {
     let (mut reader, writer) = pipe().map_err(|error| format!("pipe: {error}"))?;
-    let status = command
+    let mut child = command
         .args(["--manifest-path", FIXTURE, "--target-dir"])
         .arg(target)
         .stdout(writer.try_clone().map_err(|error| format!("pipe clone: {error}"))?)
         .stderr(writer)
-        .status()
+        .spawn()
         .map_err(|error| format!("spawn: {error}"))?;
     drop(command);
     let mut text = String::new();
     reader.read_to_string(&mut text).map_err(|error| format!("read: {error}"))?;
+    let status = child.wait().map_err(|error| format!("wait: {error}"))?;
     if status.success() {
         return Ok(text);
     }

@@ -117,6 +117,7 @@ fn spawn_cargo_val(directory: &Path, fixture: &str, stdout: PipeWriter) -> Child
         .join("Cargo.toml");
     let stderr = fs::File::create(directory.join("stderr.log")).expect("stderr log is creatable");
     Command::new(CARGO_VAL)
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)
         .env_remove("RUST_TEST_THREADS")

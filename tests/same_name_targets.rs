@@ -44,6 +44,7 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
 
     let mut command = Command::new(CARGO_VAL);
     command
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)
         .env_remove("RUST_TEST_THREADS")

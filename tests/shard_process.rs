@@ -76,6 +76,7 @@ async fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment
     let log = directory.join("pids.log");
     let output: Output = fixture_output(
         Command::new(CARGO_VAL)
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -548,6 +549,7 @@ async fn interrupt_ends_blocked_child(process: &str, label: &str) {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shard/Cargo.toml");
     let mut command = Command::new(CARGO_VAL);
     command
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)
         .args(["--process", process, "--no-fail-fast"])

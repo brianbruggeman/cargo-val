@@ -88,6 +88,7 @@ fn start(label: &str, fixture: &str, arguments: &[&str], block_variable: &str) -
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/{fixture}/Cargo.toml"));
     let child = Command::new(CARGO_VAL)
+        .env("CARGO_VAL_OUTPUT", "rich")
         .arg("--manifest-path")
         .arg(manifest)
         .args(arguments)

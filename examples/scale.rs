@@ -232,6 +232,9 @@ fn build_command(arm: Arm, context: &Context) -> Command {
     if let Some(children) = arm.children(context.jobs) {
         command.env("CARGO_VAL_JOBS", children.to_string());
     }
+    if !matches!(arm, Arm::Test | Arm::Nextest) {
+        command.env("CARGO_VAL_OUTPUT", "rich");
+    }
     command.current_dir(&context.fixture).env_remove("CARGO_TARGET_DIR");
     command
 }

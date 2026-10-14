@@ -67,6 +67,13 @@ Output mode, highest precedence first (default: auto):
 auto is rich only when standard output is an interactive terminal (a console on Windows)
 and CI is unset or empty and TERM is not dumb; a pipe, a file, CI, or a dumb terminal gets
 plain. plain never emits ANSI escapes. NO_COLOR suppresses color in every mode.
+Plain output is append-only, one line per event, labels padded to nine columns:
+  START/PASS/FAIL/IGNORED  <binary id>  <test>  [<secs>s]  [(solo rerun)]
+  a failure's captured streams follow its FAIL line between "------ stdout: <id> <test> ------"
+  and "------ end stdout ------" (stderr likewise), then at the end: the total: line,
+  SUMMARY passed=P failed=F ignored=I not_run=N wall=S, one FAILED line per failure, and
+  RERUN, a cargo val command that reruns only the failures. GITHUB_ACTIONS=true also wraps
+  each block in ::group::/::endgroup:: and prints one ::error annotation per failure.
 
 Ignored tests: `#[ignore]`d tests are listed per test binary with `--list --ignored`, are
 not launched by default, and are reported IGNORED and counted separately. CARGO_VAL_IGNORED
