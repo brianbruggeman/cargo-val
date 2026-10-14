@@ -6,7 +6,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::num::NonZeroI32;
-use std::process::{ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(target_os = "linux")]
@@ -861,7 +862,7 @@ async fn interrupt_during_rerun(master: &ChildStream, mut keys: File, (scratch, 
     let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
     keys.write_all(b"R").expect("the rerun key is writable");
     let pid_file = scratch.join("hang.pid");
-    let (running, _) = drain::drain_until(master, |_| pid_file.exists()).await;
+    let (running, _) = drain::drain_until(master, |_| std::fs::read_to_string(&pid_file).is_ok_and(|text| !text.trim().is_empty())).await;
     output.extend_from_slice(&running);
     let pid: i32 = std::fs::read_to_string(&pid_file).expect("the blocked rerun wrote its pid").trim().parse().expect("the pid parses");
     assert!(process_alive(pid), "the blocked rerun is alive before the interrupt");
@@ -1128,5 +1129,325 @@ async fn a_failing_run_with_stdin_piped_never_asks_for_mouse_reporting_or_the_cu
     assert!(!output.contains("\x1b[?1000") && !output.contains("\x1b[?1002") && !output.contains("\x1b[?1006"), "a mouse mode sequence was written:\n{}", shown(&output));
     assert!(!output.contains(CURSOR_QUERY), "the cursor position was queried:\n{}", shown(&output));
     assert!(!output.contains(REVIEW_HEADER), "review needs a tty on stdin:\n{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
+
+const EDITOR_READY: &str = "fake-editor-ready";
+const FAKE_EDITOR_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_editor.rs");
+
+fn compiled_fake_editor() -> &'static Path {
+    static COMPILED: OnceLock<PathBuf> = OnceLock::new();
+    COMPILED.get_or_init(|| {
+        let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("fake-editor-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the fake editor directory is creatable");
+        let output = directory.join("fake_editor");
+        let status = Command::new("rustc").args(["--edition", "2024", FAKE_EDITOR_SOURCE, "-o"]).arg(&output).status().expect("rustc is on PATH");
+        assert!(status.success(), "the fake editor compiles: {status}");
+        output
+    })
+}
+
+fn fake_editor_named(name: &str) -> PathBuf {
+    let directory = compiled_fake_editor().parent().expect("the compiled editor has a directory").join(format!("as-{name}"));
+    std::fs::create_dir_all(&directory).expect("the named editor directory is creatable");
+    let named = directory.join(name);
+    if !named.exists() {
+        std::fs::hard_link(compiled_fake_editor(), &named).expect("the fake editor is linked under the editor's name");
+    }
+    named
+}
+
+fn editor_log() -> PathBuf {
+    let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("editor-log-{run}"));
+    std::fs::create_dir_all(&directory).expect("the log directory is creatable");
+    directory.join("recorded")
+}
+
+fn recorded(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log).unwrap_or_else(|error| panic!("the fake editor recorded nothing at {}: {error}", log.display())).lines().map(str::to_owned).collect()
+}
+
+fn recorded_arguments(lines: &[String]) -> Vec<&str> {
+    lines.iter().filter_map(|line| line.strip_prefix("arg=")).collect()
+}
+
+fn redrawn_after_editor(bytes: &[u8], footer: &str) -> bool {
+    let text = without_sgr(&String::from_utf8_lossy(bytes));
+    text.find(EDITOR_READY).is_some_and(|at| text[at..].contains(REVIEW_HEADER) && text[at..].contains(footer))
+}
+
+async fn open_editor_then_quit(master: &ChildStream, mut keys: File, (interrupt, footer): (bool, &str)) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(b"e").expect("the editor key is writable");
+    let mut seen = Vec::new();
+    if interrupt {
+        let (running, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(EDITOR_READY)).await;
+        seen.extend_from_slice(&running);
+        keys.write_all(&[0x03]).expect("the interrupt byte is writable");
+    }
+    let (edited, _) = drain::drain_until(master, |bytes| redrawn_after_editor(&[seen.as_slice(), bytes].concat(), footer)).await;
+    output.extend_from_slice(&seen);
+    output.extend_from_slice(&edited);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn edit_failure(editor: &Path, extra: &[(&str, &str)], mode: (bool, &str)) -> (String, ExitStatus, PathBuf) {
+    let log = editor_log();
+    let visual = editor.display().to_string();
+    let mut environment = vec![("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8"))];
+    environment.extend_from_slice(extra);
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| open_editor_then_quit(master, keys, mode).await).await;
+    (output, status, log)
+}
+
+fn failure_site() -> String {
+    let directory = fixture_manifest("rich_pty_fail").parent().expect("the manifest has a directory").display().to_string();
+    format!("{directory}/src/lib.rs")
+}
+
+fn assert_review_resumed_and_quit(output: &str, status: ExitStatus) {
+    let ready = output.find(EDITOR_READY).unwrap_or_else(|| panic!("the editor never ran:\n{}", shown(output)));
+    assert!(output[..ready].matches(REVIEW_HEADER).count() >= 1, "review was drawn before the editor:\n{}", shown(output));
+    assert!(output[ready..].matches(REVIEW_HEADER).count() >= 1, "review was not redrawn after the editor:\n{}", shown(output));
+    assert!(output[..ready].contains(SHOW_CURSOR), "the cursor was not shown for the editor:\n{}", shown(output));
+    assert!(output[ready..].contains("SUMMARY"), "q q did not print the receipt after the editor:\n{}", shown(output));
+    assert_eq!(status.code(), Some(1), "q q exits with the run's code: {status}\n{}", shown(output));
+}
+
+#[proxima::test]
+async fn e_in_review_runs_a_code_editor_with_dash_g_file_line_col_in_cooked_mode_as_the_foreground_group() {
+    let (output, status, log) = edit_failure(&fake_editor_named("code"), &[], (false, "")).await;
+
+    let lines = recorded(&log);
+    println!("recorded by the fake code editor:\n{}", lines.join("\n"));
+    assert_eq!(recorded_arguments(&lines), ["-g", format!("{}:11:9", failure_site()).as_str()]);
+    assert!(lines.contains(&"canonical=true".to_owned()), "the editor must see a cooked terminal: {lines:?}");
+    assert!(lines.contains(&"echo=true".to_owned()), "the editor must see echo on: {lines:?}");
+    assert!(lines.contains(&"foreground=true".to_owned()), "the editor must own the terminal's foreground group: {lines:?}");
+    assert_review_resumed_and_quit(&output, status);
+}
+
+#[proxima::test]
+async fn e_in_review_runs_a_vim_editor_with_plus_line_then_the_file() {
+    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[], (false, "")).await;
+
+    let lines = recorded(&log);
+    println!("recorded by the fake vim editor:\n{}", lines.join("\n"));
+    assert_eq!(recorded_arguments(&lines), ["+11", failure_site().as_str()]);
+    assert_review_resumed_and_quit(&output, status);
+}
+
+#[proxima::test]
+async fn an_editor_exiting_three_shows_one_footer_line_and_review_continues_to_the_receipt() {
+    let (output, status, _) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_EXIT", "3")], (false, "editor exited with status 3")).await;
+
+    assert_review_resumed_and_quit(&output, status);
+    assert!(output.contains("editor exited with status 3"), "{}", shown(&output));
+}
+
+#[proxima::test]
+async fn an_editor_that_cannot_start_shows_a_not_found_footer_line_and_review_continues() {
+    let missing = PathBuf::from("/nonexistent/vim");
+    let environment = [("NO_COLOR", "1"), ("VISUAL", missing.to_str().expect("UTF-8 path"))];
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, mut keys, _release, _leader| {
+        let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+        keys.write_all(b"e").expect("the editor key is writable");
+        let (after, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("editor not found")).await;
+        output.extend_from_slice(&after);
+        keys.write_all(b"qq").expect("the quit keys are writable");
+        let (rest, _) = drain::drain_until(master, |_| false).await;
+        output.extend_from_slice(&rest);
+        String::from_utf8_lossy(&output).into_owned()
+    })
+    .await;
+
+    assert!(output.contains(&format!("editor not found: {}", missing.display())), "{}", shown(&output));
+    assert!(output.matches(REVIEW_HEADER).count() >= 2, "review was not redrawn after the failed spawn:\n{}", shown(&output));
+    assert!(output.contains("SUMMARY"), "{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "a missing editor is never an error exit: {status}");
+}
+
+#[proxima::test]
+async fn ctrl_c_while_the_editor_runs_goes_to_the_editor_and_review_continues() {
+    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_WAIT", "1")], (true, "editor exited with status 130")).await;
+
+    assert!(recorded(&log).contains(&"foreground=true".to_owned()));
+    assert!(!output.contains("INTERRUPTED"), "cargo-val must not take the editor's Ctrl-C:\n{}", shown(&output));
+    assert!(output.contains("editor exited with status 130"), "the editor, not cargo-val, took SIGINT:\n{}", shown(&output));
+    assert_review_resumed_and_quit(&output, status);
+}
+
+#[proxima::test]
+async fn e_on_a_failure_with_no_location_spawns_nothing() {
+    let log = editor_log();
+    let visual = fake_editor_named("vim").display().to_string();
+    let environment = [("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("UTF-8 path"))];
+    let (output, status) = run_driven("rich_pty_crash", "rich", &environment, async |master, mut keys, _release, _leader| {
+        let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+        keys.write_all(b"eqq").expect("the keys are writable");
+        let (rest, _) = drain::drain_until(master, |_| false).await;
+        output.extend_from_slice(&rest);
+        String::from_utf8_lossy(&output).into_owned()
+    })
+    .await;
+
+    assert!(!log.exists(), "no editor may start for a failure with no location");
+    assert!(!output.contains(EDITOR_READY), "{}", shown(&output));
+    assert!(output.contains("SUMMARY"), "{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "{status}");
+}
+
+const EDITOR_DONE: &str = "fake-editor-done";
+
+async fn open_editor_mid_run(master: &ChildStream, mut keys: File, release: PathBuf, finished_text: &str) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| {
+        let screen = without_sgr(&String::from_utf8_lossy(bytes));
+        live_frames(&screen).iter().any(|frame| settled_count(frame).is_some_and(|settled| settled >= 2))
+    }).await;
+    keys.write_all(b"f").expect("the review key is writable");
+    let (review, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    output.extend_from_slice(&review);
+    keys.write_all(b"e").expect("the editor key is writable");
+    let (running, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(EDITOR_READY)).await;
+    output.extend_from_slice(&running);
+    File::create(release).expect("the release file is creatable");
+    let (finished, _) = drain::drain_until(master, |bytes| {
+        let screen = without_sgr(&String::from_utf8_lossy(&[output.as_slice(), bytes].concat()));
+        screen.find(EDITOR_DONE).is_some_and(|done| screen[done..].contains(finished_text))
+    }).await;
+    output.extend_from_slice(&finished);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[proxima::test]
+async fn e_mid_run_opens_the_editor_while_the_run_finishes_beneath_it_and_review_shows_the_finished_state() {
+    let log = editor_log();
+    let visual = fake_editor_named("vim").display().to_string();
+    let environment = [
+        ("NO_COLOR", "1"),
+        ("VISUAL", visual.as_str()),
+        ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")),
+        ("FAKE_EDITOR_AWAIT_RUN", "1"),
+        ("CARGO_VAL_FIXTURE_FAIL", "1"),
+        ("CARGO_VAL_FIXTURE_FLOOD", "1"),
+        ("CARGO_VAL_FIXTURE_HELD_FAIL", "1"),
+    ];
+    let (output, status) = run_driven("rich_pty", "rich", &environment, async |master, keys, release, _leader| open_editor_mid_run(master, keys, release, "2 failed  2 passed").await).await;
+
+    let screen = without_sgr(&output);
+    let (ready, done) = (screen.find(EDITOR_READY).expect("the editor ran"), screen.find(EDITOR_DONE).expect("the editor saw the run finish while it was open"));
+    assert!(recorded(&log).contains(&"foreground=true".to_owned()), "the editor owned the terminal");
+    assert!(!screen[ready..done].contains(REVIEW_HEADER), "nothing was drawn while the editor owned the terminal:\n{}", shown(&screen[ready..done]));
+    assert!(screen[done..].contains(REVIEW_HEADER), "review was not redrawn after the editor:\n{}", shown(&screen));
+    let held = "tests::held_until_released";
+    let (row, listed) = (screen[done..].find(held).expect("the failure that settled under the editor is in the redrawn review"), screen[done..].find("FAILED   cargo_val_rich_pty_fixture tests::held_until_released").expect("the receipt lists the held failure"));
+    assert!(row < listed, "the review row precedes the receipt line:\n{}", shown(&screen[done..]));
+    assert_eq!(screen[done..].matches("FAILED   cargo_val_rich_pty_fixture tests::held_until_released").count(), 1, "the receipt lists the held failure once:\n{}", shown(&screen[done..]));
+    assert!(screen[done..].contains("SUMMARY  passed=2 failed=2"), "q q did not print the finished run's receipt:\n{}", shown(&screen[done..]));
+    assert_eq!(status.code(), Some(1), "{status}\n{}", shown(&screen));
+}
+
+fn recorded_group(lines: &[String]) -> i32 {
+    lines.iter().find_map(|line| line.strip_prefix("pgid=")).expect("the editor recorded its group").parse().expect("the group id parses")
+}
+
+fn group_gone(group: i32) -> bool {
+    unsafe { libc::kill(-group, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
+}
+
+async fn terminate_while_editing(master: &ChildStream, mut keys: File, leader: u32) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+    keys.write_all(b"e").expect("the editor key is writable");
+    let (running, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(EDITOR_READY)).await;
+    output.extend_from_slice(&running);
+    assert_eq!(unsafe { libc::kill(leader.cast_signed(), libc::SIGTERM) }, 0, "SIGTERM reaches cargo-val");
+    let (interrupted, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("INTERRUPTED  signal=15")).await;
+    output.extend_from_slice(&interrupted);
+    let foreground = unsafe { libc::tcgetpgrp(keys.as_raw_fd()) };
+    assert_eq!(foreground, leader.cast_signed(), "the terminal's foreground group is cargo-val's again once it reports the interrupt");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[proxima::test]
+async fn sigterm_while_the_editor_is_open_restores_the_terminal_and_exits_143() {
+    let log = editor_log();
+    let visual = fake_editor_named("vim").display().to_string();
+    let environment = [("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_WAIT", "1"), ("FAKE_EDITOR_STOP_ONCE", "1")];
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, leader| terminate_while_editing(master, keys, leader).await).await;
+
+    let screen = without_sgr(&output);
+    let ready = screen.find(EDITOR_READY).expect("the editor ran");
+    assert_eq!(status.code(), Some(143), "a terminated cargo-val exits 143: {status}\n{}", shown(&screen));
+    assert!(screen[ready..].contains("INTERRUPTED  signal=15"), "the interrupted block names the signal:\n{}", shown(&screen[ready..]));
+    assert!(screen.ends_with(SHOW_CURSOR), "the cursor is the last thing shown:\n{}", shown(&screen));
+    let group = recorded_group(&recorded(&log));
+    let started = std::time::Instant::now();
+    while !group_gone(group) {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "the editor's group {group} outlived cargo-val");
+        std::thread::yield_now();
+    }
+}
+
+#[proxima::test]
+async fn an_editor_that_stops_itself_is_continued_within_a_tick_and_the_run_still_finishes() {
+    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_STOP_ONCE", "1"), ("FAKE_EDITOR_EXIT", "3")], (false, "editor exited with status 3")).await;
+
+    assert!(recorded(&log).contains(&"foreground=true".to_owned()));
+    assert!(output.contains(EDITOR_DONE), "the editor ran on past its own stop:\n{}", shown(&output));
+    assert_review_resumed_and_quit(&output, status);
+}
+
+#[proxima::test]
+async fn the_cursor_is_hidden_again_only_after_the_editor_exits() {
+    let (output, status, _) = edit_failure(&fake_editor_named("vim"), &[], (false, "")).await;
+
+    let (ready, done) = (output.find(EDITOR_READY).expect("the editor ran"), output.find(EDITOR_DONE).expect("the editor finished"));
+    assert!(!output[ready..done].contains(FRAME_START), "nothing hid the cursor while the editor owned the terminal:\n{}", shown(&output[ready..done]));
+    assert!(output[done..].contains(FRAME_START), "the cursor was not hidden again after the editor exited:\n{}", shown(&output[done..]));
+    assert_review_resumed_and_quit(&output, status);
+}
+
+const MOUSE_OFF: &str = "\x1b[?1000l";
+const MOUSE_ON: &str = "\x1b[?1000h";
+
+#[proxima::test]
+async fn mouse_reporting_is_off_before_the_editor_starts_and_on_again_after_it_exits() {
+    let (output, status, _) = edit_failure(&fake_editor_named("code"), &[], (false, "")).await;
+
+    let (ready, done) = (output.find(EDITOR_READY).expect("the editor ran"), output.find(EDITOR_DONE).expect("the editor finished"));
+    let (on_before, off_before) = (output[..ready].rfind(MOUSE_ON), output[..ready].rfind(MOUSE_OFF));
+    assert!(on_before.is_some(), "review turned mouse reporting on first:\n{}", shown(&output[..ready]));
+    assert!(off_before > on_before, "reporting was switched off before the editor was ready:\n{}", shown(&output[..ready]));
+    assert!(!output[ready..done].contains(MOUSE_ON), "reporting stayed off while the editor owned the terminal");
+    assert!(output[done..].contains(MOUSE_ON), "the next review frame turned reporting on again:\n{}", shown(&output[done..]));
+    assert_review_resumed_and_quit(&output, status);
+}
+
+async fn edit_mid_run(extra: &[(&str, &str)], finished_text: &str) -> (String, ExitStatus) {
+    let log = editor_log();
+    let visual = fake_editor_named("vim").display().to_string();
+    let mut environment = vec![("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_AWAIT_RUN", "1")];
+    environment.extend_from_slice(extra);
+    run_driven("rich_pty", "rich", &environment, async |master, keys, release, _leader| open_editor_mid_run(master, keys, release, finished_text).await).await
+}
+
+#[proxima::test]
+async fn an_editor_opened_mid_run_that_exits_three_shows_the_footer_notice_in_the_first_review_frame_after_it() {
+    let extra = [("FAKE_EDITOR_EXIT", "3"), ("CARGO_VAL_FIXTURE_FAIL", "1"), ("CARGO_VAL_FIXTURE_FLOOD", "1"), ("CARGO_VAL_FIXTURE_HELD_FAIL", "1")];
+    let (output, status) = edit_mid_run(&extra, "2 failed  2 passed").await;
+
+    let screen = without_sgr(&output);
+    let done = screen.find(EDITOR_DONE).expect("the editor finished");
+    let first_frame = screen[done..].split(REVIEW_HEADER).nth(1).unwrap_or_else(|| panic!("no review frame after the editor:\n{}", shown(&screen)));
+    assert!(first_frame.contains("editor exited with status 3: "), "the notice is missing from the first frame after the editor:\n{}", shown(first_frame));
     assert_eq!(status.code(), Some(1), "{status}");
 }

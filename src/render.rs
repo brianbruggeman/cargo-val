@@ -113,6 +113,8 @@ pub enum Event<'a> {
     Running { id: Identity<'a>, group: u32, age_ms: u64 },
     Exited { code: u8 },
     Key(Key),
+    /// A one-line message the review footer shows until the next key; the driver emits it when an action it ran needs to tell the user.
+    Notice { what: &'a [u8] },
     /// What retrying a failure alone concluded, or why it was not tried.
     Retried { id: Identity<'a>, verdict: Verdict },
     /// How a failure's rerun stands: running, passed, or idle again after it failed.
@@ -150,6 +152,7 @@ impl Mode {
             | Event::Tick { .. }
             | Event::Retried { .. }
             | Event::Reran { .. }
+            | Event::Notice { .. }
             | Event::Finished { .. } => self.clamped(open, lines),
         }
     }
@@ -503,6 +506,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                     self.skipped += 1;
                 }
             }
+            Event::Notice { what } => self.keep_notice(what),
             Event::Tick { now_ms } => self.beat(now_ms),
             Event::Warned { what, .. } => {
                 self.warnings += 1;
@@ -964,7 +968,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
-            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } => {}
+            Event::Built { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Notice { .. } => {}
             Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),

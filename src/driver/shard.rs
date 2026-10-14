@@ -946,6 +946,7 @@ mod pause_tests {
     use core::future::poll_fn;
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::vec::Vec;
 
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
@@ -1011,6 +1012,7 @@ mod pause_tests {
             ignore: IgnoreMode::Include,
             filterset: None,
             link_template: None,
+            editor: std::vec::Vec::new(),
             jobs: 1,
             max_fail: None,
             test_limit_ms: None,
@@ -1059,6 +1061,8 @@ mod pause_tests {
             sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
+            editing: RefCell::new(None),
+            editor_program: RefCell::new(Vec::new()),
             trip: root.child(),
             root,
         }

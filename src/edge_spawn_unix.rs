@@ -504,6 +504,105 @@ mod spawn {
         launch(program, arguments, environment, overrides, directory, true)
     }
 
+    /// Spawns `program` as the foreground process group of the terminal on `terminal` and returns its process id; its exit is read from an exit source, never waited for here.
+    ///
+    /// The child inherits standard input, output and error, leads a new process group, and gets default signal dispositions and an empty signal mask.
+    /// `tcsetpgrp` hands it the terminal, so `Ctrl-C` is delivered to the child's group and never to this process; [`reclaim_terminal`] takes the terminal back.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `posix_spawnp` code when the program cannot start (`ENOENT` for a missing editor), or `EINVAL` for launch data holding a NUL.
+    pub fn spawn_foreground(
+        program: &[u8],
+        arguments: &[&[u8]],
+        environment: &[&[u8]],
+        directory: Option<&[u8]>,
+        terminal: c_int,
+    ) -> Result<u32, SpawnError> {
+        let storage = Arguments::lower(Launch {
+            program,
+            arguments,
+            names: &[],
+            trailing: &[],
+            inherited: environment,
+            overrides: &[],
+            directory,
+        })?;
+        let lowered = storage.lowered();
+        let (executable, current_directory) = (lowered.program()?, lowered.directory()?);
+        let (argv, envp) = (lowered.argv(), lowered.envp());
+        let mut actions = FileActions::new()?;
+        let mut attributes = SpawnAttributes::new(true)?;
+        attributes.reset_signals()?;
+        #[cfg(target_os = "macos")]
+        for descriptor in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            add_action(unsafe { posix_spawn_file_actions_addinherit_np(actions.raw(), descriptor) })?;
+        }
+        if let Some(current_directory) = current_directory {
+            add_action(unsafe {
+                libc::posix_spawn_file_actions_addchdir_np(actions.raw(), current_directory.as_ptr())
+            })?;
+        }
+        let mut process_id = 0;
+        let result = unsafe {
+            libc::posix_spawnp(
+                &raw mut process_id,
+                executable.as_ptr(),
+                actions.raw(),
+                attributes.raw(),
+                argv.as_ptr().cast::<*mut c_char>(),
+                envp.as_ptr().cast::<*mut c_char>(),
+            )
+        };
+        if result != 0 {
+            return Err(SpawnError { os_code: result });
+        }
+        hand_terminal(terminal, process_id);
+        unsafe { libc::kill(-process_id, libc::SIGCONT) };
+        Ok(process_id.cast_unsigned())
+    }
+
+    /// Gives the terminal on `terminal` back to this process's group once the foreground child has gone.
+    pub fn reclaim_terminal(terminal: c_int) {
+        hand_terminal(terminal, unsafe { libc::getpgrp() });
+    }
+
+    /// Hangs up the child's whole process group, the signal a terminal sends when it goes away, then continues it.
+    ///
+    /// A job-control-stopped group holds a pending SIGHUP undelivered, so the SIGCONT is what lets it act.
+    pub fn hang_up(group: u32) {
+        unsafe { libc::kill(-group.cast_signed(), libc::SIGHUP) };
+        unsafe { libc::kill(-group.cast_signed(), libc::SIGCONT) };
+    }
+
+    /// Continues the child's group if it stopped since the last call.
+    ///
+    /// A stop is read without blocking and consumed, so one stop is continued once. The exit source reports only exits, so this replaces the stop handling a blocking wait would do:
+    /// an early read before the child was foreground, or its own job-control stop, leaves it stopped with no shell to resume it.
+    pub fn continue_stopped(group: u32) {
+        let mut report: libc::siginfo_t = unsafe { core::mem::zeroed() };
+        let waited = unsafe { libc::waitid(libc::P_PID, libc::id_t::from(group), &raw mut report, libc::WSTOPPED | libc::WNOHANG) };
+        #[cfg(target_os = "macos")]
+        let reported = report.si_pid;
+        #[cfg(target_os = "linux")]
+        let reported = unsafe { report.si_pid() };
+        if waited == 0 && reported != 0 {
+            unsafe { libc::kill(-group.cast_signed(), libc::SIGCONT) };
+        }
+    }
+
+    // a background process group that calls tcsetpgrp is stopped by SIGTTOU unless it ignores it, and the hand-back runs after the editor's group left the foreground
+    fn hand_terminal(terminal: c_int, group: libc::pid_t) {
+        let mut ignore: libc::sigaction = unsafe { core::mem::zeroed() };
+        ignore.sa_sigaction = libc::SIG_IGN;
+        let mut previous: libc::sigaction = unsafe { core::mem::zeroed() };
+        if unsafe { libc::sigaction(libc::SIGTTOU, &raw const ignore, &raw mut previous) } != 0 {
+            return;
+        }
+        unsafe { libc::tcsetpgrp(terminal, group) };
+        unsafe { libc::sigaction(libc::SIGTTOU, &raw const previous, core::ptr::null_mut()) };
+    }
+
     fn launch(
         program: &[u8],
         arguments: &[&[u8]],
@@ -770,6 +869,25 @@ mod spawn {
 
         fn raw(&mut self) -> *const libc::posix_spawnattr_t {
             &raw const self.0
+        }
+
+        // a child inherits this process's blocked signals and ignored dispositions; an editor must start with neither
+        fn reset_signals(&mut self) -> Result<(), SpawnError> {
+            let mut blocked: libc::sigset_t = unsafe { core::mem::zeroed() };
+            let mut defaulted: libc::sigset_t = unsafe { core::mem::zeroed() };
+            unsafe {
+                libc::sigemptyset(&raw mut blocked);
+                libc::sigfillset(&raw mut defaulted);
+                libc::sigdelset(&raw mut defaulted, libc::SIGKILL);
+                libc::sigdelset(&raw mut defaulted, libc::SIGSTOP);
+            }
+            add_action(unsafe { libc::posix_spawnattr_setsigmask(&raw mut self.0, &raw const blocked) })?;
+            add_action(unsafe { libc::posix_spawnattr_setsigdefault(&raw mut self.0, &raw const defaulted) })?;
+            let mut flags: libc::c_short = 0;
+            add_action(unsafe { libc::posix_spawnattr_getflags(&raw const self.0, &raw mut flags) })?;
+            let wanted = libc::c_int::from(libc::POSIX_SPAWN_SETSIGMASK) | libc::c_int::from(libc::POSIX_SPAWN_SETSIGDEF);
+            let flags = libc::c_short::try_from(libc::c_int::from(flags) | wanted).map_err(|_| SpawnError { os_code: libc::EINVAL })?;
+            add_action(unsafe { libc::posix_spawnattr_setflags(&raw mut self.0, flags) })
         }
     }
 

@@ -24,7 +24,7 @@ use crate::edge_store::Store;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, emit, keys_raw, monotonic_millis, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, editor_running, emit, keep_editor_running, keys_raw, monotonic_millis, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
@@ -35,7 +35,8 @@ pub(crate) const CARGO_LANE: usize = 0;
 pub(crate) const LISTING_LANE: usize = 1;
 pub(crate) const DOC_LANE: usize = 2;
 pub(crate) const KEY_LANE: usize = 3;
-pub(crate) const JOB_BASE: usize = 4;
+pub(crate) const EDITOR_LANE: usize = 4;
+pub(crate) const JOB_BASE: usize = 5;
 const LANES: usize = JOB_BASE + LIVE_CAPACITY;
 const TICK_MS: u64 = crate::view_defaults::TICK_MS as u64;
 const ARMS: usize = LANES * 3 + 4;
@@ -288,6 +289,22 @@ fn edge<'edge>(
     }
 }
 
+// the editor owns the terminal, so the queue is not drained and a full one stops every producing lane unread; only the editor's exit, the signals and the tick are polled: the exit lets the queue drain, and the tick is what continues a stopped editor
+fn step_unproducing(
+    lanes: &Lanes,
+    port: Option<(&RefCell<Readiness>, &SignalSource, &SignalPipe)>,
+    beat: Option<&Beat>,
+    context: &mut Context<'_>,
+) -> Poll<Result<Item, Exhausted>> {
+    [EDITOR_LANE * 3 + 2, ARMS - 1, ARMS - 2, ARMS - 3, ARMS - 4]
+        .into_iter()
+        .find_map(|index| match step(&edge(lanes, port, beat, index), context) {
+            ready @ Poll::Ready(Ok(_)) => Some(ready),
+            Poll::Ready(Err(Exhausted)) | Poll::Pending => None,
+        })
+        .unwrap_or(Poll::Pending)
+}
+
 /// Awaits every lane's streams and exit, and the old port when `port` is given, until `on_item` breaks.
 /// Returns how many polls parked on the reactor.
 ///
@@ -310,7 +327,8 @@ pub(crate) async fn pump(
     loop {
         let mut drained = Ok(());
         let polled = poll_fn(|context| {
-            if let Poll::Ready(Err(error)) = sinks.poll_drain(context) {
+            let editing = editor_running();
+            if !editing && let Poll::Ready(Err(error)) = sinks.poll_drain(context) {
                 drained = Err(error);
                 return Poll::Ready(Err(Exhausted));
             }
@@ -318,6 +336,8 @@ pub(crate) async fn pump(
                 Poll::Ready(Ok(Item::Signal(Ok(()))))
             } else if status_queue::has_room() {
                 step(&merged, context)
+            } else if editing {
+                step_unproducing(lanes, port, beat, context)
             } else {
                 Poll::Pending
             };
@@ -433,6 +453,7 @@ fn handle(
             driver.listing_exited(exit_code(status)?);
             Ok(())
         }
+        Item::Exit(EDITOR_LANE, status) => run.editor_exited(lanes, status),
         Item::Exit(lane, status) => {
             session_exited(run, ledger, watches, lane - JOB_BASE, session_exit_code(status)?)
         }
@@ -450,6 +471,7 @@ fn handle(
         Item::Tick => {
             #[cfg(windows)]
             run.refresh_width()?;
+            keep_editor_running();
             emit(run.render(), &Event::Tick { now_ms: monotonic_millis() })?;
             flush_keys(run)
         }
@@ -701,27 +723,37 @@ pub(crate) async fn observe_cargo(
     attach_keys(&lanes[KEY_LANE])?;
     let signal = RefCell::new(run.signal_gate()?);
     let interrupt = run.interrupt_source();
-    let beat = Beat::new(None);
-    pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&beat), |item| {
-        if matches!(item, Item::Out(CARGO_LANE, _) | Item::OutEnd(CARGO_LANE) | Item::Exit(CARGO_LANE, _)) {
-            run.start_doc(&lanes, launch_doc)?;
-        }
-        handle(item, &lanes, driver, run, ledger, watches)?;
-        driver.resume(&lanes, run, ledger, watches)?;
-        run.with_doc(|doc, observation| resume_doc(&lanes, doc, observation))?;
-        resume_sessions(&lanes, run, ledger, watches)?;
-        lanes[CARGO_LANE].3.set(driver.cargo_open());
-        lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
-        Ok(if driver.finished(run, ledger) {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
+    loop {
+        let beat = Beat::new(None);
+        pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&beat), |item| {
+            if matches!(item, Item::Out(CARGO_LANE, _) | Item::OutEnd(CARGO_LANE) | Item::Exit(CARGO_LANE, _)) {
+                run.start_doc(&lanes, launch_doc)?;
+            }
+            handle(item, &lanes, driver, run, ledger, watches)?;
+            driver.resume(&lanes, run, ledger, watches)?;
+            run.with_doc(|doc, observation| resume_doc(&lanes, doc, observation))?;
+            resume_sessions(&lanes, run, ledger, watches)?;
+            lanes[CARGO_LANE].3.set(driver.cargo_open());
+            lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
+            Ok(if run.edit_pending() || (driver.finished(run, ledger) && !editor_running()) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            })
         })
-    })
-    .await?;
+        .await?;
+        if !run.launch_editor(&lanes)? {
+            break;
+        }
+    }
     if run.open_review()? {
-        let review_beat = Beat::new(None);
-        pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&review_beat), |item| review_item(item, (&lanes, run), (driver, ledger, watches))).await?;
+        loop {
+            let review_beat = Beat::new(None);
+            pump(&lanes, Some((&signal, &interrupt, run.signals())), Some(&review_beat), |item| review_item(item, (&lanes, run), (driver, ledger, watches))).await?;
+            if !run.launch_editor(&lanes)? {
+                break;
+            }
+        }
     }
     Ok(())
 }
@@ -753,7 +785,7 @@ fn review_item(
         driver.launch_reruns(lanes, run, ledger, watches)?;
     }
     let draining = watches.iter().any(Option::is_some);
-    Ok(if leaving && !draining { ControlFlow::Break(()) } else { ControlFlow::Continue(()) })
+    Ok(if run.edit_pending() || (leaving && !draining) { ControlFlow::Break(()) } else { ControlFlow::Continue(()) })
 }
 
 /// The whole run as one prime root: argument parsing, setup, the awaited cargo child, and the delegated remainder.

@@ -250,10 +250,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         if self.shows_screen() {
             return self.project_screen(event, frame);
         }
-        if self.mouse_on() {
-            self.mouse = Some(false);
-            self.origin = 0;
-            self.hover = false;
+        if self.pause_mouse() {
             frame.text(review::MOUSE_OFF);
         }
         match *event {
@@ -264,8 +261,19 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 self.erase_rich(frame);
                 self.project(event, frame)
             }
-            Event::Tick { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
+            Event::Tick { .. } | Event::Key(_) | Event::Notice { .. } | Event::Retried { .. } | Event::Reran { .. } | Event::Exited { .. } | Event::Listed { .. } | Event::Built { .. } | Event::Resize { .. } | Event::Started { .. } | Event::Settled { .. } | Event::BlockOpened { .. } | Event::BlockClosed => Ok(()),
         }
+    }
+
+    /// Marks mouse reporting off while the terminal belongs to something else; the next review frame turns it on again. Returns whether it was on, so the caller writes the disable sequence.
+    pub const fn pause_mouse(&mut self) -> bool {
+        let was_on = self.mouse_on();
+        if was_on {
+            self.mouse = Some(false);
+            self.origin = 0;
+            self.hover = false;
+        }
+        was_on
     }
 
     const fn shows_screen(&self) -> bool {
@@ -275,7 +283,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
     /// While a review screen owns the terminal, input and ledger events redraw it and everything else waits for the close.
     fn project_screen<const FRAME: usize>(&mut self, event: &Event<'_>, frame: &mut Line<FRAME>) -> Result<(), usize> {
         match *event {
-            Event::Key(_) | Event::Tick { .. } | Event::Reran { .. } | Event::Retried { .. } | Event::Resize { .. } => self.project_review(frame),
+            Event::Key(_) | Event::Tick { .. } | Event::Reran { .. } | Event::Retried { .. } | Event::Resize { .. } | Event::Notice { .. } => self.project_review(frame),
             Event::Interrupted { .. } | Event::BuildFailed { .. } => {
                 self.erase_rich(frame);
                 self.project(event, frame)
