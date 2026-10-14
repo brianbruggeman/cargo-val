@@ -1021,6 +1021,7 @@ mod pause_tests {
             output: crate::config::OutputMode::Plain,
             output_why: "flag",
             color: false,
+            mouse: None,
             exit_with_parent: crate::config::ExitWithParent::Off,
         }
     }

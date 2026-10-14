@@ -543,13 +543,14 @@ struct Settings {
     output: OutputMode,
     output_why: &'static str,
     color: bool,
+    mouse: Option<bool>,
     exit_with_parent: ExitWithParent,
     test_limit_ms: Option<u32>,
     heartbeat_ms: u64,
     source_root: PathBuf,
 }
 
-const SETTING_KEYS: [&str; 26] = [
+const SETTING_KEYS: [&str; 27] = [
     "RUST_TEST_THREADS",
     "CARGO_VAL_JOBS",
     "CARGO_VAL_MAX_FAIL",
@@ -563,6 +564,7 @@ const SETTING_KEYS: [&str; 26] = [
     "CI",
     "TERM",
     "CARGO_VAL_COLOR",
+    "CARGO_VAL_MOUSE",
     "NO_COLOR",
     "CARGO_VAL_IGNORED",
     "CARGO_VAL_FILTERSET",
@@ -633,6 +635,7 @@ fn runtime_settings(
         .0;
     let color = output == OutputMode::Rich
         && resolve_color(&source, crate::build_defaults::COLOR).map_err(|_| RunError::Settings)?;
+    let mouse = (output == OutputMode::Rich).then(|| resolve_mouse(&source)).transpose()?;
     let ignore = harness.ignore_mode(&source).map_err(RunError::Setting)?;
     let filterset = FILTERSET
         .from_settings(&source, parser.filterset())
@@ -673,6 +676,7 @@ fn runtime_settings(
         output,
         output_why,
         color,
+        mouse,
         exit_with_parent,
         test_limit_ms: TEST_TIMEOUT.from_settings(&source, parser.test_timeout()).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
         heartbeat_ms: crate::config::heartbeat_millis(&source, parser.heartbeat()).map_err(RunError::Setting)?,
@@ -1031,7 +1035,9 @@ pub(crate) fn emit(render: &Render<'_>, event: &Event<'_>) -> Result<(), RunErro
             if matches!(event, Event::Begin { .. }) {
                 CURSOR_HIDDEN.store(true, Ordering::SeqCst);
             }
-            state.project_live(event, frame)
+            let projected = state.project_live(event, frame);
+            MOUSE_REPORTING.store(state.mouse_on(), Ordering::SeqCst);
+            projected
         }
     };
     flush(frame, projected)
@@ -1072,6 +1078,9 @@ pub(crate) fn emit_live(render: &Render<'_>, event: &Event<'_>) -> Result<(), Ru
 /// Set once the live frame hides the cursor; [`restore_cursor`] shows it again exactly once on any exit path.
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 
+/// Set while a review frame has asked the terminal to report the mouse; [`restore_cursor`] turns reporting off on any exit path the queued disable never reached.
+static MOUSE_REPORTING: AtomicBool = AtomicBool::new(false);
+
 /// Set once the terminal is in key-at-a-time mode and a key lane reads it; [`restore_cursor`] puts the mode back.
 static KEYS_RAW: AtomicBool = AtomicBool::new(false);
 
@@ -1085,6 +1094,9 @@ const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 /// Shows the cursor if the live frame hid it, writing directly: the fallback for the panic hook and for exits that never reached the queued close.
 /// The normal close queues its show-cursor through `close_cursor` so it lands behind the erase and the closing block, never ahead of them.
 pub fn restore_cursor() {
+    if MOUSE_REPORTING.swap(false, Ordering::SeqCst) {
+        let _ = crate::edge_output::write(1, crate::render::review::MOUSE_OFF);
+    }
     if KEYS_RAW.swap(false, Ordering::SeqCst) {
         crate::edge_output::leave_raw_mode(0);
     }
@@ -2958,13 +2970,14 @@ fn persist_last_run(location: Option<&Path>, wall_ms: u64, outcome: &Result<RunS
     }
 }
 
-fn begin_rich(render: &Render<'_>) -> Result<(), RunError> {
+fn begin_rich(render: &Render<'_>, mouse: bool) -> Result<(), RunError> {
     if !crate::edge_output::enable_virtual_terminal(1) {
         return Err(RunError::Settings);
     }
     if crate::edge_output::is_terminal(0) && crate::edge_output::enter_raw_mode(0) {
         KEYS_RAW.store(true, Ordering::SeqCst);
     }
+    render.1.borrow_mut().set_mouse(mouse && keys_raw());
     emit(render, &Event::Resize { cols: crate::edge_output::columns(1).unwrap_or(80) })
 }
 
@@ -2993,7 +3006,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     let render: Render<'_> = (settings.output, RefCell::new(RenderState::new(name_arena, ledger_slots).with_inflight(inflight_slots).with_timeline(timeline_slots).with_heartbeat_ms(settings.heartbeat_ms).with_color(settings.color).with_links(link_template.as_bytes(), link_directory.as_bytes())), RefCell::new(frame_line));
     emit_begin(&render, &settings, &environment, started_millis)?;
     if settings.output == OutputMode::Rich {
-        begin_rich(&render)?;
+        begin_rich(&render, settings.mouse == Some(true))?;
     }
     let inherited_count = environment
         .collect(inherited)
@@ -3361,6 +3374,15 @@ fn start_libdir_queries(
         .transpose()
         .map_err(|_| RunError::RustcLibdir)?;
     Ok((host_query, target_query))
+}
+
+fn resolve_mouse(source: &BorrowedSettings<'_>) -> Result<bool, RunError> {
+    match source.get("CARGO_VAL_MOUSE") {
+        None => Ok(crate::build_defaults::MOUSE),
+        Some("true" | "on" | "1") => Ok(true),
+        Some("false" | "off" | "0") => Ok(false),
+        Some(_) => Err(RunError::Settings),
+    }
 }
 
 fn utf8_variable<'environment>(
@@ -4059,6 +4081,25 @@ mod tests {
         })
     }
 
+
+    fn mouse_under(value: Option<&str>) -> Result<bool, RunError> {
+        let pairs = [("CARGO_VAL_MOUSE", value.unwrap_or(""))];
+        let supplied = &pairs[..usize::from(value.is_some())];
+        super::resolve_mouse(&conflaguration::BorrowedSettings::new(supplied))
+    }
+
+    #[proxima::test]
+    async fn the_mouse_setting_defaults_to_on_and_accepts_the_boolean_spellings_of_the_other_switches() {
+        assert!(mouse_under(None).expect("unset resolves to the build default"));
+        for (text, expected) in [("true", true), ("on", true), ("1", true), ("false", false), ("off", false), ("0", false)] {
+            assert_eq!(mouse_under(Some(text)).expect("a boolean spelling resolves"), expected, "CARGO_VAL_MOUSE={text}");
+        }
+    }
+
+    #[proxima::test]
+    async fn a_mouse_setting_that_is_not_a_boolean_is_refused_instead_of_read_as_off() {
+        assert!(matches!(mouse_under(Some("sometimes")), Err(RunError::Settings)));
+    }
     #[proxima::test]
     async fn the_editor_url_environment_layer_is_the_rich_link_template_over_a_derived_editor() {
         let resolved = link_template_under(&[("CARGO_VAL_EDITOR_URL", Some("idea://open?file={file}&line={line}")), ("VISUAL", Some("code"))]);
@@ -4327,6 +4368,7 @@ mod listing_allocation_tests {
             output: crate::config::OutputMode::Rich,
             output_why: "flag",
             color: false,
+            mouse: None,
             exit_with_parent: crate::config::ExitWithParent::Off,
             test_limit_ms: None,
             heartbeat_ms: 10_000,
@@ -4435,6 +4477,7 @@ mod doc_trip_tests {
 #[cfg(all(test, unix))]
 mod close_sequence_tests {
     use core::cell::RefCell;
+    use core::sync::atomic::Ordering;
     use core::future::poll_fn;
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -4443,7 +4486,7 @@ mod close_sequence_tests {
     use prime::os::core_shard::run_on_this_thread;
     use proxima_runtime::CoreId;
 
-    use super::{FRAME_BYTES, Render, RenderState, close_cursor, emit, erase_frame};
+    use super::{FRAME_BYTES, MOUSE_REPORTING, Render, RenderState, close_cursor, emit, erase_frame, restore_cursor};
     use crate::config::OutputMode;
     use crate::edge_exit::fixture::in_single_threaded_process;
     use crate::line::Line;
@@ -4534,6 +4577,34 @@ mod close_sequence_tests {
             let with_late_tick = close_after_a_drawn_frame(true);
 
             assert_eq!(with_late_tick, closed, "a late tick adds no bytes after the cursor returned:\n{:?}", std::string::String::from_utf8_lossy(&with_late_tick));
+        });
+    }
+
+    fn restored_output(mouse_reporting: bool) -> Vec<u8> {
+        let (reader, writer) = pipe_pair();
+        let saved_stdout = unsafe { libc::fcntl(STDOUT, libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(saved_stdout >= 0, "stdout is duplicated for restore");
+        assert!(unsafe { libc::dup2(writer.as_raw_fd(), STDOUT) } >= 0, "stdout points at the pipe");
+        MOUSE_REPORTING.store(mouse_reporting, Ordering::SeqCst);
+        restore_cursor();
+        unsafe {
+            libc::dup2(saved_stdout, STDOUT);
+            libc::close(saved_stdout);
+        }
+        drop(writer);
+        let mut delivered = Vec::new();
+        std::fs::File::from(reader).read_to_end(&mut delivered).expect("the pipe reads to its end");
+        delivered
+    }
+
+    #[proxima::test]
+    async fn restore_cursor_writes_mouse_off_exactly_when_the_reporting_flag_is_set() {
+        in_single_threaded_process(|| {
+            let reporting = restored_output(true);
+            let quiet = restored_output(false);
+
+            assert_eq!(reporting, crate::render::review::MOUSE_OFF, "a set flag writes the disable sequence once:\n{:?}", std::string::String::from_utf8_lossy(&reporting));
+            assert!(quiet.is_empty(), "a clear flag writes nothing:\n{:?}", std::string::String::from_utf8_lossy(&quiet));
         });
     }
 }

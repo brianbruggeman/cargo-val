@@ -14,6 +14,8 @@ struct BuildDefaults {
     shard_jobs: String,
     #[setting(default = true)]
     color: bool,
+    #[setting(default = true)]
+    mouse: bool,
     #[setting(default = "shared")]
     target_dir: String,
     #[setting(default = "auto")]

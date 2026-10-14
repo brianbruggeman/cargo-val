@@ -957,3 +957,155 @@ async fn a_rerun_that_fails_with_a_new_message_shows_that_message_in_the_detail_
     assert!(after.contains("rerun 1"), "the header names the attempt:\n{}", shown(after));
     assert_eq!(status.code(), Some(1), "{status}");
 }
+
+const MOUSE_ENABLE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_DISABLE: &str = "\x1b[?1000l\x1b[?1002l\x1b[?1006l";
+const CURSOR_QUERY: &str = "\x1b[6n";
+const TERMINAL_ROW_UNDER_FRAME: usize = 100;
+
+fn last_screen(text: &str) -> Option<Vec<String>> {
+    let segment = text[text.rfind(REVIEW_HEADER)?..].split('\x1b').next()?.replace('\r', "");
+    let lines: Vec<String> = segment.strip_suffix('\n')?.split('\n').map(str::to_owned).collect();
+    let footer = lines.last()?;
+    (footer.contains("q quit") || footer.contains("any key cancels")).then_some(lines)
+}
+
+async fn until_screen(master: &ChildStream, output: &mut Vec<u8>, accept: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let start = output.len();
+    let (more, _) = drain::drain_until(master, |bytes| last_screen(&String::from_utf8_lossy(bytes)).is_some_and(|lines| accept(&lines))).await;
+    output.extend_from_slice(&more);
+    last_screen(&String::from_utf8_lossy(&output[start..])).unwrap_or_else(|| panic!("no accepted review screen was drawn:\n{}", shown(&String::from_utf8_lossy(&output[start..]))))
+}
+
+fn list_rows(lines: &[String]) -> Vec<usize> {
+    lines.iter().enumerate().take_while(|(_, line)| !line.starts_with(" \u{2500}")).filter(|(_, line)| line.starts_with("\u{203a}ASSERT") || line.starts_with(" ASSERT")).map(|(index, _)| index).collect()
+}
+
+fn selected_row(lines: &[String]) -> Option<usize> {
+    list_rows(lines).into_iter().find(|index| lines[*index].starts_with('\u{203a}'))
+}
+
+fn sgr_mouse(button: u8, column: usize, row: usize, press: bool) -> String {
+    format!("\x1b[<{button};{column};{row}{}", if press { 'M' } else { 'm' })
+}
+
+fn answer_cursor_query(keys: &mut File, screen_rows: usize) -> usize {
+    keys.write_all(format!("\x1b[{TERMINAL_ROW_UNDER_FRAME};1R").as_bytes()).expect("the cursor reply is writable");
+    TERMINAL_ROW_UNDER_FRAME - screen_rows
+}
+
+fn click(keys: &mut File, column: usize, row: usize) {
+    let report = format!("{}{}", sgr_mouse(0, column, row, true), sgr_mouse(0, column, row, false));
+    keys.write_all(report.as_bytes()).expect("the click is writable");
+}
+
+async fn click_wheel_and_quit(master: &ChildStream, mut keys: File) -> String {
+    let mut output = Vec::new();
+    let first = until_screen(master, &mut output, |lines| list_rows(lines).len() == 2).await;
+    let rows = list_rows(&first);
+    assert_eq!(selected_row(&first), Some(rows[0]), "review opens on the first row:\n{}", first.join("\n"));
+    println!("before the click:\n{}", shown(&first.join("\n")));
+
+    let origin = answer_cursor_query(&mut keys, first.len());
+    click(&mut keys, 3, origin + rows[1]);
+    let clicked = until_screen(master, &mut output, |lines| selected_row(lines) == Some(rows[1])).await;
+    println!("after the click on row {}:\n{}", rows[1], shown(&clicked.join("\n")));
+    assert_ne!(clicked[rows[1] + 1..], first[rows[1] + 1..], "the detail below the list followed the selection");
+
+    let origin = answer_cursor_query(&mut keys, clicked.len());
+    keys.write_all(sgr_mouse(64, 3, origin + rows[0], true).as_bytes()).expect("the wheel is writable");
+    let wheeled = until_screen(master, &mut output, |lines| selected_row(lines) == Some(rows[0])).await;
+    println!("after wheel up over the list:\n{}", shown(&wheeled.join("\n")));
+
+    let origin = answer_cursor_query(&mut keys, wheeled.len());
+    let footer_at = wheeled.len() - 1;
+    let quit_column = wheeled[footer_at].find("q quit").expect("the footer offers q quit") + 1;
+    click(&mut keys, quit_column, origin + footer_at);
+    let armed = until_screen(master, &mut output, |lines| lines.last().is_some_and(|footer| footer.contains("any key cancels"))).await;
+    assert_eq!(armed.len(), wheeled.len(), "arming keeps the frame the same height, so the same click lands again");
+    click(&mut keys, quit_column, origin + footer_at);
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[proxima::test]
+async fn review_enables_mouse_reporting_and_clicks_and_the_wheel_move_the_selection_and_two_clicks_on_q_quit_leave_with_the_receipt() {
+    let (output, status) = run_driven("rich_pty_fail_pair", "rich", &NO_COLOR, async |master, keys, _release, _leader| click_wheel_and_quit(master, keys).await).await;
+
+    let enabled = output.find(MOUSE_ENABLE).unwrap_or_else(|| panic!("review never enabled mouse reporting:\n{}", shown(&output)));
+    assert_eq!(output.matches(MOUSE_ENABLE).count(), 1, "reporting is enabled once, not per frame");
+    assert!(!live_frames(&output[..enabled]).is_empty(), "live frames were drawn before review");
+    assert!(!output[..enabled].contains(REVIEW_HEADER) && !output[..enabled].contains("?1000"), "the live run asked for no mouse reporting:\n{}", shown(&output[..enabled]));
+    assert!(output[enabled..].contains(CURSOR_QUERY), "review asks the terminal where the frame is");
+    let disabled = output.rfind(MOUSE_DISABLE).unwrap_or_else(|| panic!("reporting was never turned off:\n{}", shown(&output)));
+    let receipt = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(&output)));
+    let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(&output)));
+    assert_eq!(status.code(), Some(1), "two clicks on q quit exit like q q: {status}");
+    assert!(enabled < disabled && disabled < receipt && receipt < shown_cursor, "order: enable {enabled}, disable {disabled}, receipt {receipt}, cursor {shown_cursor}");
+    assert!(output.ends_with(SHOW_CURSOR), "the last bytes of the run show the cursor:\n{}", shown(&output));
+}
+
+#[proxima::test]
+async fn with_the_mouse_setting_off_review_never_enables_reporting_and_keys_still_quit() {
+    let (output, status) = run_driven("rich_pty_fail", "rich", &[("NO_COLOR", "1"), ("CARGO_VAL_MOUSE", "false")], async |master, keys, _release, _leader| quit_from_review(master, keys).await).await;
+
+    assert!(output.contains(REVIEW_HEADER), "review was drawn:\n{}", shown(&output));
+    assert!(!output.contains("\x1b[?1000") && !output.contains("\x1b[?1002") && !output.contains("\x1b[?1006"), "no mouse mode sequence was written:\n{}", shown(&output));
+    assert!(!output.contains(CURSOR_QUERY), "no cursor query without reporting:\n{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "q q still exits: {status}");
+    assert!(output.contains("SUMMARY"), "the receipt printed:\n{}", shown(&output));
+}
+
+const MOUSE_REPORTING_ON: &str = "\x1b[?1000h";
+const MOUSE_REPORTING_OFF: &str = "\x1b[?1000l";
+
+async fn leave_review(master: &ChildStream, mut keys: File, leader: u32, signal: Option<libc::c_int>) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(MOUSE_ENABLE)).await;
+    match signal {
+        None => keys.write_all(b"c").expect("the interrupt key is writable"),
+        Some(signal) => {
+            let pid = libc::pid_t::try_from(leader).expect("a pid fits pid_t");
+            assert_eq!(unsafe { libc::kill(pid, signal) }, 0, "the signal reaches cargo-val's pid alone");
+        }
+    }
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+async fn left_review_with(signal: Option<libc::c_int>, code: i32) {
+    let (output, status) = run_driven("rich_pty_fail_pair", "rich", &NO_COLOR, async |master, keys, _release, leader| leave_review(master, keys, leader, signal).await).await;
+
+    let enabled = output.rfind(MOUSE_REPORTING_ON).unwrap_or_else(|| panic!("review never enabled mouse reporting:\n{}", shown(&output)));
+    let disabled = output.rfind(MOUSE_REPORTING_OFF).unwrap_or_else(|| panic!("reporting was never turned off:\n{}", shown(&output)));
+    let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(&output)));
+    assert_eq!(status.code(), Some(code), "{status}\n{}", shown(&output));
+    assert!(enabled < disabled && disabled < shown_cursor, "order: enable {enabled}, disable {disabled}, cursor {shown_cursor}\n{}", shown(&output));
+}
+
+#[proxima::test]
+async fn pressing_c_in_review_turns_mouse_reporting_off_before_the_cursor_shows_and_exits_130() {
+    left_review_with(None, 130).await;
+}
+
+#[proxima::test]
+async fn sigint_during_review_turns_mouse_reporting_off_before_the_cursor_shows_and_exits_130() {
+    left_review_with(Some(libc::SIGINT), 130).await;
+}
+
+#[proxima::test]
+async fn sigterm_during_review_turns_mouse_reporting_off_before_the_cursor_shows_and_exits_143() {
+    left_review_with(Some(libc::SIGTERM), 143).await;
+}
+
+#[proxima::test]
+async fn a_failing_run_with_stdin_piped_never_asks_for_mouse_reporting_or_the_cursor_position() {
+    let (output, status) = run_with("rich_pty_fail_pair", "rich", &NO_COLOR, false, async |master, _keys, _release, _leader| read_plain(master).await).await;
+
+    assert!(!live_frames(&output).is_empty(), "rich frames were drawn, so the absence below is not an empty run:\n{}", shown(&output));
+    assert!(!output.contains("\x1b[?1000") && !output.contains("\x1b[?1002") && !output.contains("\x1b[?1006"), "a mouse mode sequence was written:\n{}", shown(&output));
+    assert!(!output.contains(CURSOR_QUERY), "the cursor position was queried:\n{}", shown(&output));
+    assert!(!output.contains(REVIEW_HEADER), "review needs a tty on stdin:\n{}", shown(&output));
+    assert_eq!(status.code(), Some(1), "{status}");
+}

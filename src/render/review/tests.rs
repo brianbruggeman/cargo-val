@@ -4,7 +4,7 @@ use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
-use super::{Action, Detail, Key, Rerun, Verdict};
+use super::{Action, CARRY, CURSOR_QUERY, Detail, Key, MOUSE_OFF, MOUSE_ON, Rerun, Verdict};
 use crate::failure_class::{Class, Enforcer, Exit, Location};
 use crate::line::Line;
 use crate::render::{Event, ExcerptRows, Identity, Mode, Outcome, State, UNREAD, excerpt};
@@ -509,7 +509,7 @@ fn ten_thousand_decodes_lane_chunks_projections_and_details_allocate_nothing() {
     let pressed = [Key::Char(b'j'), Key::Char(b'k'), Key::Char(b'q'), Key::Esc, Key::Down, Key::Up, Key::Enter, Key::Char(b'j'), Key::Char(b'r'), Key::Enter];
     let reads: [&[u8]; 5] = [b"\x1b", b"[A", b"\x1b", b"q", b"j\x1b[B"];
     let (mut frames, mut events, mut decodes, mut keys_seen, mut projections, mut details, mut detail_bytes) = (0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
-    let mut carry = 0_u8;
+    let mut carry = [0; CARRY];
 
     let ((), allocations) = measure_allocations(|| {
         for round in 0..10_000_usize {
@@ -548,7 +548,7 @@ fn ten_thousand_decodes_lane_chunks_projections_and_details_allocate_nothing() {
     assert!(frame.bytes().len() > 200, "the last projection is a drawn screen");
 }
 
-fn decoded(carry: &mut u8, bytes: &[u8], keys: &mut Vec<Key>) {
+fn decoded(carry: &mut [u8; CARRY], bytes: &[u8], keys: &mut Vec<Key>) {
     Key::decode(carry, bytes, |key| {
         keys.push(key);
         Ok::<(), ()>(())
@@ -557,7 +557,7 @@ fn decoded(carry: &mut u8, bytes: &[u8], keys: &mut Vec<Key>) {
 }
 
 fn read_in_two(bytes: &[u8], at: usize) -> Vec<Key> {
-    let (mut carry, mut keys) = (0_u8, Vec::new());
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
     decoded(&mut carry, &bytes[..at], &mut keys);
     decoded(&mut carry, &bytes[at..], &mut keys);
     Key::flush(&mut carry, |key| {
@@ -602,28 +602,28 @@ fn every_key_of_the_spec_table_decodes_the_same_split_at_every_byte_boundary() {
 
 #[test]
 fn an_escape_alone_then_bracket_a_in_the_next_read_is_one_up_and_no_esc() {
-    let (mut carry, mut keys) = (0_u8, Vec::new());
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
     decoded(&mut carry, b"\x1b", &mut keys);
-    assert_eq!((keys.len(), carry), (0, 0x1b), "a lone escape is held, not decided");
+    assert_eq!((keys.len(), carry[0]), (0, 0x1b), "a lone escape is held, not decided");
     decoded(&mut carry, b"[A", &mut keys);
-    assert_eq!((keys, carry), (vec![Key::Up], 0));
+    assert_eq!((keys, carry), (vec![Key::Up], [0; CARRY]));
 }
 
 #[test]
 fn an_escape_followed_by_q_is_esc_then_q_and_a_held_escape_is_esc_on_the_next_tick() {
-    let (mut carry, mut keys) = (0_u8, Vec::new());
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
     decoded(&mut carry, b"\x1b", &mut keys);
     decoded(&mut carry, b"q", &mut keys);
     assert_eq!(keys, vec![Key::Esc, Key::Char(b'q')]);
 
-    let (mut carry, mut keys) = (0_u8, Vec::new());
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
     decoded(&mut carry, b"\x1b", &mut keys);
     Key::flush(&mut carry, |key| {
         keys.push(key);
         Ok::<(), ()>(())
     })
     .expect("collecting keys cannot fail");
-    assert_eq!((keys, carry), (vec![Key::Esc], 0), "the tick resolves the held escape");
+    assert_eq!((keys, carry), (vec![Key::Esc], [0; CARRY]), "the tick resolves the held escape");
 }
 
 #[test]
@@ -633,7 +633,7 @@ fn a_three_byte_utf8_character_split_across_reads_decodes_to_no_keys() {
     for at in 0..=euro.len() {
         assert_eq!(read_in_two(euro, at), Vec::<Key>::new(), "euro split at {at}");
     }
-    let (mut carry, mut keys) = (0_u8, Vec::new());
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
     decoded(&mut carry, &euro[..2], &mut keys);
     decoded(&mut carry, &[&euro[2..], b"j"].concat(), &mut keys);
     assert_eq!(keys, vec![Key::Char(b'j')], "the key after the split character still decodes");
@@ -641,7 +641,7 @@ fn a_three_byte_utf8_character_split_across_reads_decodes_to_no_keys() {
 
 #[test]
 fn a_sink_error_stops_the_decode_and_is_returned() {
-    let mut carry = 0_u8;
+    let mut carry = [0; CARRY];
     let mut seen = 0;
     let outcome = Key::decode(&mut carry, b"jkl", |_| {
         seen += 1;
@@ -1014,4 +1014,334 @@ fn the_closing_block_counts_a_failure_that_passed_alone_as_flaky_and_lists_the_r
     assert_eq!(text.lines().filter(|line| line.starts_with("FAILED")).count(), 1, "{text}");
     assert!(text.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly")), "{text}");
     assert!(!text.contains("a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly'"), "the flaky test leaves the rerun command: {text}");
+}
+
+const POINTER_TABLE: [(&[u8], &[Key]); 12] = [
+    (b"\x1b[<0;12;5M", &[Key::Pointer { button: 0, x: 12, y: 5, press: true }]),
+    (b"\x1b[<0;12;5m", &[Key::Pointer { button: 0, x: 12, y: 5, press: false }]),
+    (b"\x1b[<64;40;9M", &[Key::Pointer { button: 64, x: 40, y: 9, press: true }]),
+    (b"\x1b[<65;40;9M", &[Key::Pointer { button: 65, x: 40, y: 9, press: true }]),
+    (b"\x1b[<32;13;5M\x1b[<32;14;5M", &[Key::Pointer { button: 32, x: 13, y: 5, press: true }, Key::Pointer { button: 32, x: 14, y: 5, press: true }]),
+    (b"\x1b[<0;120;45Mj", &[Key::Pointer { button: 0, x: 120, y: 45, press: true }, Key::Char(b'j')]),
+    (b"\x1b[24;1R", &[Key::Cursor { row: 24 }]),
+    (b"\x1b[Mqqqj", &[Key::Char(b'j')]),
+    (b"\x1b[M\x1b\x1b\x1bj", &[Key::Char(b'j')]),
+    (b"\x1b[<0;1234567890123456789;1Mj", &[Key::Char(b'j')]),
+    (b"\x1b[<0;1;;1Mj", &[Key::Char(b'j')]),
+    (b"\x1b[<99999;1;1Mj", &[Key::Char(b'j')]),
+];
+
+#[test]
+fn sgr_mouse_reports_and_cursor_replies_decode_the_same_split_at_every_byte_boundary() {
+    let mut splits = 0;
+    for (bytes, expected) in POINTER_TABLE {
+        for at in 0..=bytes.len() {
+            assert_eq!(read_in_two(bytes, at), expected, "read {bytes:?} split at {at}");
+            splits += 1;
+        }
+    }
+    assert_eq!(splits, POINTER_TABLE.iter().map(|(bytes, _)| bytes.len() + 1).sum::<usize>(), "every boundary of every row ran");
+    assert_eq!(splits, 163, "the pointer table has 163 split points");
+}
+
+#[test]
+fn a_mouse_report_dribbled_one_byte_per_read_is_one_pointer_and_leaves_the_carry_clear() {
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
+    for byte in b"\x1b[<65;80;24M" {
+        decoded(&mut carry, &[*byte], &mut keys);
+    }
+    assert_eq!((keys, carry), (vec![Key::Pointer { button: 65, x: 80, y: 24, press: true }], [0; CARRY]));
+}
+
+#[test]
+fn legacy_x10_mouse_bytes_never_reach_the_key_table_even_when_they_spell_quit() {
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
+    decoded(&mut carry, b"\x1b[Mq", &mut keys);
+    decoded(&mut carry, b"qq", &mut keys);
+    assert_eq!((keys.len(), carry), (0, [0; CARRY]), "the three payload bytes were swallowed across reads");
+}
+
+const ORIGIN_ROW: u16 = 7;
+
+fn live_frame(state: &Review<'_>, width: usize) -> String {
+    let mut frame = Line::<8192>::new();
+    state.screen(|id| state.detail(id), width, false, &mut frame).expect("the frame holds one review screen");
+    String::from_utf8(frame.bytes().to_vec()).expect("a review frame is utf-8")
+}
+
+fn redraw(state: &mut Review<'_>, width: usize) -> Vec<String> {
+    let mut frame = Line::<8192>::new();
+    state.project_live(&Event::Tick { now_ms: CLOCK_MS }, &mut frame).expect("the frame holds a review projection");
+    let rows = u16::try_from(live_frame(state, width).matches('\n').count()).expect("a review frame has few rows");
+    state.apply(&Event::Key(Key::Cursor { row: ORIGIN_ROW + rows }));
+    live_frame(state, width).lines().map(String::from).collect()
+}
+
+fn pointed<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], width: usize) -> (Review<'storage>, Vec<String>) {
+    let mut state = scenario("list", arena, ledger);
+    state.set_mouse(true);
+    state.apply(&Event::Resize { cols: u16::try_from(width).expect("a terminal width fits u16") });
+    let lines = redraw(&mut state, width);
+    (state, lines)
+}
+
+fn cell(lines: &[String], needle: &str, from_bottom: bool) -> (u16, u16) {
+    let found = if from_bottom { lines.iter().rposition(|line| line.contains(needle)) } else { lines.iter().position(|line| line.contains(needle)) };
+    let index = found.unwrap_or_else(|| panic!("no line shows {needle:?} in {lines:#?}"));
+    let column = lines[index][..lines[index].find(needle).expect("the line shows it")].chars().count();
+    (u16::try_from(column).expect("columns fit u16") + 1, ORIGIN_ROW + u16::try_from(index).expect("rows fit u16"))
+}
+
+fn press(at: (u16, u16)) -> Key {
+    Key::Pointer { button: 0, x: at.0, y: at.1, press: true }
+}
+
+fn wheel(at: (u16, u16), down: bool) -> Key {
+    Key::Pointer { button: 64 + u8::from(down), x: at.0, y: at.1, press: true }
+}
+
+fn selected_of(state: &Review<'_>) -> Mode {
+    state.mode()
+}
+
+#[test]
+fn a_click_on_a_failure_row_selects_it_and_a_second_click_on_it_opens_the_detail_at_80_and_40_columns() {
+    for width in [80, 40] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (mut state, lines) = pointed(&mut arena, &mut ledger, width);
+        let shard_row = cell(&lines, "PANIC", false);
+        assert_eq!(selected_of(&state), Mode::Review { selected: 0, armed: false, top: None });
+
+        state.apply(&Event::Key(press(shard_row)));
+        assert_eq!(selected_of(&state), Mode::Review { selected: 1, armed: false, top: None }, "{width}: the first press selects the row");
+
+        redraw(&mut state, width);
+        state.apply(&Event::Key(press(shard_row)));
+        assert_eq!(selected_of(&state), Mode::Review { selected: 1, armed: false, top: Some(0) }, "{width}: a press on the selected row opens the detail like Enter");
+    }
+}
+
+#[test]
+fn a_click_on_a_footer_hint_performs_the_action_of_its_key_at_80_and_40_columns() {
+    for width in [80, 40] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (state, lines) = pointed(&mut arena, &mut ledger, width);
+        let rerun = state.action(press(cell(&lines, "r rerun", true)), detail);
+        let all = state.action(press(cell(&lines, "R all", true)), detail);
+        let edit = state.action(press(cell(&lines, "e edit", true)), detail);
+        assert_eq!(rerun, Action::RerunOne { id: SCHED }, "{width}: r rerun");
+        assert_eq!(all, Action::RerunFailed, "{width}: R rerun all");
+        assert_eq!(edit, Action::OpenEditor { file: b"tests/sched_records.rs", line: 55 }, "{width}: e opens");
+
+        let mut timeline = state;
+        timeline.apply(&Event::Key(press(cell(&lines, "s timeline", true))));
+        assert_eq!(timeline.mode(), Mode::Timeline { back: Some(0) }, "{width}: s timeline");
+    }
+}
+
+#[test]
+fn quit_needs_two_clicks_on_the_footer_and_a_click_elsewhere_cancels_the_first() {
+    for width in [80, 40] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (mut state, lines) = pointed(&mut arena, &mut ledger, width);
+        let quit = press(cell(&lines, "q quit", true));
+
+        assert_eq!(state.action(quit, detail), Action::None, "{width}: the first click only arms");
+        state.apply(&Event::Key(quit));
+        assert_eq!(state.mode(), Mode::Review { selected: 0, armed: true, top: None });
+        let armed_lines = redraw(&mut state, width);
+        let confirm = press(cell(&armed_lines, "q again", true));
+        assert_eq!(state.action(confirm, detail), Action::Quit, "{width}: the second click confirms");
+        state.apply(&Event::Key(confirm));
+        assert_eq!(state.mode(), Mode::Receipt);
+
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (mut state, lines) = pointed(&mut arena, &mut ledger, width);
+        state.apply(&Event::Key(press(cell(&lines, "q quit", true))));
+        redraw(&mut state, width);
+        state.apply(&Event::Key(press(cell(&lines, "TIMEOUT", false))));
+        assert_eq!(state.mode(), Mode::Review { selected: 0, armed: false, top: None }, "{width}: a click off the footer cancels");
+    }
+}
+
+#[test]
+fn clicks_outside_every_target_and_before_the_terminal_reports_its_row_change_nothing() {
+    for width in [80, 40] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (mut state, lines) = pointed(&mut arena, &mut ledger, width);
+        let before = state.mode();
+        let outside = [
+            press((1, ORIGIN_ROW)),
+            press((1, ORIGIN_ROW + 1)),
+            press(cell(&lines, "failed", false)),
+            press((1, ORIGIN_ROW + u16::try_from(lines.len()).expect("rows fit u16"))),
+            press((1, ORIGIN_ROW - 1)),
+            Key::Pointer { button: 2, x: 3, y: ORIGIN_ROW + 4, press: true },
+            Key::Pointer { button: 0, x: 3, y: ORIGIN_ROW + 4, press: false },
+            Key::Pointer { button: 32, x: 3, y: ORIGIN_ROW + 4, press: true },
+        ];
+        for key in outside {
+            assert_eq!(state.action(key, detail), Action::None, "{width}: {key:?}");
+            state.apply(&Event::Key(key));
+            assert_eq!(state.mode(), before, "{width}: {key:?} changed the screen");
+        }
+
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let mut unreported = scenario("list", &mut arena, &mut ledger);
+        unreported.set_mouse(true);
+        unreported.apply(&Event::Key(press(cell(&lines, "PANIC", false))));
+        assert_eq!(unreported.mode(), before, "{width}: without a reported frame origin no click lands");
+    }
+}
+
+#[test]
+fn the_wheel_moves_the_selection_over_the_list_and_scrolls_the_output_window_over_the_detail() {
+    for width in [80, 40] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (mut state, lines) = pointed(&mut arena, &mut ledger, width);
+        state.apply(&Event::Key(wheel(cell(&lines, "TIMEOUT", false), true)));
+        assert_eq!(state.mode(), Mode::Review { selected: 1, armed: false, top: None }, "{width}: wheel down over the list");
+        state.apply(&Event::Key(wheel(cell(&lines, "TIMEOUT", false), false)));
+        assert_eq!(state.mode(), Mode::Review { selected: 0, armed: false, top: None }, "{width}: wheel up over the list");
+
+        state.apply(&Event::Key(press(cell(&lines, "PANIC", false))));
+        let lines = redraw(&mut state, width);
+        state.apply(&Event::Key(wheel(cell(&lines, "test output", false), true)));
+        assert_eq!(state.mode(), Mode::Review { selected: 1, armed: false, top: Some(1) }, "{width}: wheel down over the detail scrolls one output line");
+        let lines = redraw(&mut state, width);
+        state.apply(&Event::Key(wheel(cell(&lines, "test output", false), false)));
+        assert_eq!(state.mode(), Mode::Review { selected: 1, armed: false, top: Some(0) }, "{width}: wheel up over the detail scrolls back");
+        let lines = redraw(&mut state, width);
+        state.apply(&Event::Key(wheel(cell(&lines, "PANIC", false), true)));
+        assert_eq!(state.mode(), Mode::Review { selected: 1, armed: false, top: None }, "{width}: wheel over the list while scrolling hands the keys back to the list");
+    }
+}
+
+#[test]
+fn the_pointer_over_a_file_line_shows_the_modifier_hint_in_the_footer_and_leaving_it_clears_the_hint() {
+    let modifier = if cfg!(target_os = "macos") { "cmd+click" } else { "ctrl+click" };
+    for width in [80, 40] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (mut state, lines) = pointed(&mut arena, &mut ledger, width);
+        state.apply(&Event::Key(press(cell(&lines, "PANIC", false))));
+        let lines = redraw(&mut state, width);
+        let (column, row) = cell(&lines, "tests/shard_process.rs:575", false);
+
+        state.apply(&Event::Key(Key::Pointer { button: 32, x: column + 3, y: row, press: true }));
+        assert!(live_frame(&state, width).lines().last().expect("a footer").contains(&std::format!("{modifier} opens in editor")), "{width}: hovering the location shows the hint");
+
+        state.apply(&Event::Key(Key::Pointer { button: 32, x: 1, y: ORIGIN_ROW + 1, press: true }));
+        assert!(!live_frame(&state, width).contains(modifier), "{width}: leaving the location clears the hint");
+    }
+}
+
+#[test]
+fn review_frames_enable_mouse_reporting_once_and_the_frame_after_leaving_disables_it() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let (mut state, _) = pointed(&mut arena, &mut ledger, 80);
+    let mut frame = Line::<8192>::new();
+    state.project_live(&Event::Key(Key::Char(b'j')), &mut frame).expect("a review projection");
+    assert!(!frame.bytes().windows(MOUSE_ON.len()).any(|window| window == MOUSE_ON), "reporting is already on, so later frames do not repeat it");
+    assert!(state.mouse_on());
+
+    for key in [Key::Char(b'q'), Key::Char(b'q')] {
+        frame.clear();
+        state.apply(&Event::Key(key));
+        state.project_live(&Event::Key(key), &mut frame).expect("a projection");
+    }
+    assert_eq!(state.mode(), Mode::Receipt);
+    assert!(frame.bytes().starts_with(MOUSE_OFF), "leaving review disables reporting before anything else is written");
+    assert!(!state.mouse_on());
+}
+
+#[test]
+fn the_first_review_frame_carries_the_enable_sequence_and_the_cursor_query_and_a_disabled_setting_carries_neither() {
+    for (mouse, expected) in [(true, 1), (false, 0)] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let mut state = scenario("list", &mut arena, &mut ledger);
+        state.set_mouse(mouse);
+        let mut frame = Line::<8192>::new();
+        state.project_live(&Event::Tick { now_ms: CLOCK_MS }, &mut frame).expect("a review projection");
+        let bytes = frame.bytes();
+        let count = |needle: &[u8]| bytes.windows(needle.len()).filter(|window| *window == needle).count();
+        assert_eq!((count(MOUSE_ON), count(b"\x1b[6n")), (expected, expected), "mouse={mouse}");
+        assert_eq!(count(b"\x1b[?1000h"), expected);
+    }
+}
+
+#[test]
+fn ten_thousand_pointer_events_hits_and_mouse_frames_allocate_nothing() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let (mut state, lines) = pointed(&mut arena, &mut ledger, 80);
+    let targets = [cell(&lines, "TIMEOUT", false), cell(&lines, "PANIC", false), cell(&lines, "r rerun", true), cell(&lines, "test output", false), cell(&lines, "j/k move", true)];
+    let reads: [&[u8]; 6] = [b"\x1b[<0;12", b";9M", b"\x1b[<65;4", b"0;12M", b"\x1b[<32;3;9", b"M"];
+    let mut frame = Line::<8192>::new();
+    let mut carry = [0; CARRY];
+    let (mut pointers, mut hits, mut frames, mut actions) = (0_usize, 0_usize, 0_usize, 0_usize);
+
+    let ((), allocations) = measure_allocations(|| {
+        for round in 0..10_000_usize {
+            let target = targets[round % targets.len()];
+            let pointer = if round % 3 == 0 { wheel(target, round % 2 == 0) } else { press(target) };
+            actions += usize::from(state.action(pointer, detail) != Action::Interrupt);
+            state.apply(&Event::Key(pointer));
+            hits += 1;
+
+            _ = Key::decode(&mut carry, reads[round % reads.len()], |key| {
+                pointers += usize::from(matches!(key, Key::Pointer { .. }));
+                state.apply(&Event::Key(key));
+                Ok::<(), ()>(())
+            });
+
+            frame.clear();
+            state.project_live(&Event::Tick { now_ms: CLOCK_MS + round as u64 }, &mut frame).expect("the frame holds a review projection");
+            state.apply(&Event::Key(Key::Cursor { row: ORIGIN_ROW + 40 }));
+            frames += 1;
+        }
+    });
+
+    assert_eq!((hits, frames, actions), (10_000, 10_000, 10_000), "every loop ran, so a zero is not an empty loop");
+    assert_eq!(pointers, 5_000, "three split pointers decode per six reads, so 10k rounds decode 5k through the carry");
+    assert_eq!(allocations, 0);
+    assert!(frame.bytes().len() > 200, "the last projection is a drawn screen");
+}
+
+#[test]
+fn a_wheel_event_with_no_frame_origin_changes_nothing_at_80_and_40_columns() {
+    for width in [80, 40] {
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let (_, lines) = pointed(&mut arena, &mut ledger, width);
+        let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+        let mut unreported = scenario("list", &mut arena, &mut ledger);
+        unreported.set_mouse(true);
+        let before = unreported.mode();
+
+        for down in [true, false] {
+            let key = wheel(cell(&lines, "PANIC", false), down);
+            assert_eq!(unreported.action(key, detail), Action::None, "{width}: wheel down={down}");
+            unreported.apply(&Event::Key(key));
+            assert_eq!(unreported.mode(), before, "{width}: wheel down={down} moved the screen without a frame origin");
+        }
+    }
+}
+
+#[test]
+fn a_cursor_reply_is_taken_only_while_a_position_query_is_outstanding() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let mut state = scenario("list", &mut arena, &mut ledger);
+    state.set_mouse(true);
+    state.apply(&Event::Resize { cols: 80 });
+    let stray = Key::Cursor { row: 1 };
+    state.apply(&Event::Key(stray));
+    let mut frame = Line::<8192>::new();
+    state.project_live(&Event::Tick { now_ms: CLOCK_MS }, &mut frame).expect("the frame holds a review projection");
+    assert!(frame.bytes().ends_with(CURSOR_QUERY), "the frame asked where the cursor is");
+    assert_eq!(state.frame_line(ORIGIN_ROW), None, "a Shift+F3 reply before any query left the origin unset");
+
+    let rows = u16::try_from(live_frame(&state, 80).matches('\n').count()).expect("a review frame has few rows");
+    state.apply(&Event::Key(Key::Cursor { row: ORIGIN_ROW + rows }));
+    assert_eq!(state.frame_line(ORIGIN_ROW), Some(0), "the reply to the query sets the origin");
+
+    state.apply(&Event::Key(stray));
+    assert_eq!(state.frame_line(ORIGIN_ROW), Some(0), "a second reply with no query outstanding is dropped");
 }

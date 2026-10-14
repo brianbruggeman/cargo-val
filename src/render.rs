@@ -266,7 +266,10 @@ pub struct State<'storage, const RERUN: usize> {
     passed: usize,
     skipped: usize,
     warnings: usize,
-    key_carry: u8,
+    key_carry: [u8; review::CARRY],
+    mouse: Option<bool>,
+    hover: bool,
+    origin: u16,
     link_template: &'storage [u8],
     link_directory: &'storage [u8],
 }
@@ -322,7 +325,10 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             passed: 0,
             skipped: 0,
             warnings: 0,
-            key_carry: 0,
+            key_carry: [0; review::CARRY],
+            mouse: None,
+            hover: false,
+            origin: 0,
             link_template: &[],
             link_directory: &[],
         }
@@ -376,12 +382,23 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
 
     /// The key decoder's memory between terminal reads; see [`Key::decode`].
     #[must_use]
-    pub const fn key_carry(&self) -> u8 {
+    pub const fn key_carry(&self) -> [u8; review::CARRY] {
         self.key_carry
     }
 
-    pub const fn set_key_carry(&mut self, carry: u8) {
+    pub const fn set_key_carry(&mut self, carry: [u8; review::CARRY]) {
         self.key_carry = carry;
+    }
+
+    /// Whether the review screens ask the terminal to report the mouse; the driver passes false for the setting or a terminal that cannot be read. Held as `None` (never), `Some(false)` (wanted, off now) or `Some(true)` (on now).
+    pub const fn set_mouse(&mut self, mouse: bool) {
+        self.mouse = if mouse { Some(false) } else { None };
+    }
+
+    /// Whether the last frame turned mouse reporting on and nothing has turned it off since.
+    #[must_use]
+    pub const fn mouse_on(&self) -> bool {
+        matches!(self.mouse, Some(true))
     }
 
     /// The ledger as borrowed views into the arena, in settle order.
@@ -425,10 +442,22 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     }
 
     pub fn apply(&mut self, event: &Event<'_>) {
+        // the frame zeroes the origin when it writes the query, so zero with reporting on is exactly an outstanding query
+        if matches!(event, Event::Key(Key::Cursor { .. })) && !(self.mouse_on() && self.origin == 0) {
+            return;
+        }
         let armed_before = self.mode.is_armed();
         if let Event::Tick { now_ms } = *event {
             self.now_ms = now_ms;
         }
+        let resolved;
+        let event = if let Event::Key(key) = *event {
+            resolved = Event::Key(self.pointer(key));
+            self.touched(key);
+            &resolved
+        } else {
+            event
+        };
         let (open, lines) = self.extent();
         self.mode = self.mode.next(event, open, lines);
         if self.mode.is_armed() && !armed_before {
@@ -487,6 +516,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
                     _ = self.edit(id, entry::note_attempt);
                 }
             }
+            Event::Key(Key::Pointer { .. } | Key::Cursor { .. }) => {}
             Event::Key(key) => {
                 self.notice_len = 0;
                 self.start_reruns(key);

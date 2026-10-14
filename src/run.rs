@@ -26,7 +26,7 @@ use crate::driver::{
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
-use crate::render::review::Key;
+use crate::render::review::{CARRY, Key};
 use crate::status_queue::{self, Capture, Sinks};
 
 pub(crate) const CARGO_LANE: usize = 0;
@@ -478,7 +478,7 @@ fn flush_keys(run: &ListingRun<'_>) -> Result<(), RunError> {
 }
 
 // the borrow is released before `run.key` runs, because applying a key borrows the state again
-fn with_key_carry(run: &ListingRun<'_>, decode: impl FnOnce(&mut u8) -> Result<(), RunError>) -> Result<(), RunError> {
+fn with_key_carry(run: &ListingRun<'_>, decode: impl FnOnce(&mut [u8; CARRY]) -> Result<(), RunError>) -> Result<(), RunError> {
     let mut carry = run.render().1.borrow().key_carry();
     let outcome = decode(&mut carry);
     run.render().1.borrow_mut().set_key_carry(carry);
