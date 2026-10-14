@@ -19,12 +19,17 @@ use std::path::Path;
 use std::time::Duration;
 
 mod common;
+#[cfg(unix)]
+#[path = "common/exit_wait.rs"]
+mod exit_wait;
 #[path = "common/binary.rs"]
 mod binary;
 
 use common::fixture_output;
 #[cfg(unix)]
 use common::{ChildStream, drain, drain_until};
+#[cfg(unix)]
+use exit_wait::until_exit;
 #[cfg(unix)]
 use futures::future::join3;
 #[cfg(unix)]
@@ -567,7 +572,8 @@ async fn interrupt_ends_blocked_child(process: &str, label: &str) {
         .env("CARGO_TARGET_DIR", &interrupt_target);
     let (shard_pid, signalled, exit, stderr) = supervised(&mut command, DEADLINE * 2, async |leader, stdout, stderr, exit| {
         let cargo_val = libc::pid_t::try_from(leader).expect("pid fits pid_t");
-        let (reported, _) = drain_until(&ready_stream, |bytes| bytes.contains(&b'\n')).await;
+        let reporting = drain_until(&ready_stream, |bytes| bytes.contains(&b'\n'));
+        let (reported, _) = until_exit(reporting, "the shard child never reported its pid", exit, &[("stdout", stdout), ("stderr", stderr)]).await;
         let shard_pid = String::from_utf8_lossy(&reported).trim().parse::<libc::pid_t>().ok();
         let signalled = shard_pid.map(|_| unsafe { libc::kill(cargo_val, libc::SIGINT) });
         let ((_, _), (stderr, _), exit) = join3(drain(stdout), drain(stderr), exit.call(())).await;

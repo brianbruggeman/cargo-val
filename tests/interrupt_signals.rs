@@ -11,6 +11,9 @@ use std::process::{Child, Stdio};
 #[path = "common/fifo.rs"]
 mod fifo;
 
+#[path = "common/exit_wait.rs"]
+mod exit_wait;
+
 #[path = "common/binary.rs"]
 mod binary;
 
@@ -20,6 +23,8 @@ mod group;
 mod wait;
 
 use cargo_val::edge_stream_unix::ChildStream;
+use exit_wait::{ExitSource, until_exit};
+use core::num::NonZeroI32;
 
 const SIGINT_STATUS: i32 = 130;
 const SIGTERM_STATUS: i32 = 143;
@@ -139,9 +144,11 @@ macro_rules! interrupt {
     ($label:expr, $fixture:expr, $arguments:expr, $block_variable:expr, $signal:expr, $expected_status:expr) => {{
         let label: &str = $label;
         let (mut fixture, ready) = start(label, $fixture, $arguments, $block_variable);
-        let line = fifo::first_line(&ready, "the blocked process never reached the rendezvous").await;
-        fixture.holder = line.trim().parse().expect("the blocked process wrote its pid");
         let cargo_val = libc::pid_t::try_from(fixture.child.id()).expect("pid fits pid_t");
+        let exit = ExitSource::new(NonZeroI32::new(cargo_val).expect("a spawned pid is nonzero"));
+        let what = "the blocked process never reached the rendezvous";
+        let line = until_exit(fifo::first_line(&ready, what), what, &exit, &[]).await;
+        fixture.holder = line.trim().parse().expect("the blocked process wrote its pid");
         assert!(alive(fixture.holder), "the blocked process is alive before the signal");
 
         assert_eq!(unsafe { libc::kill(cargo_val, $signal) }, 0);
