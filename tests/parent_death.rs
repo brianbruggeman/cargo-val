@@ -335,3 +335,23 @@ fn signalling_a_group_whose_only_member_is_an_unreaped_zombie_is_not_a_failure()
     assert_eq!(interrupted, Ok(()), "SIGINT to a zombie-only group");
     assert_eq!(killed, Ok(()), "SIGKILL to a zombie-only group");
 }
+
+#[test]
+fn the_thread_count_check_sees_a_thread_the_process_spawned() {
+    let own_pid = libc::pid_t::try_from(std::process::id()).expect("a pid fits pid_t");
+    let baseline = thread_count(own_pid);
+    let (started, started_receiver) = std::sync::mpsc::channel();
+    let (release, release_receiver) = std::sync::mpsc::channel::<()>();
+    let extra = std::thread::spawn(move || {
+        started.send(()).expect("the test is waiting for the start signal");
+        let _ = release_receiver.recv();
+    });
+    started_receiver.recv().expect("the extra thread reports it is running");
+
+    let with_extra = thread_count(own_pid);
+    release.send(()).expect("the extra thread is still waiting");
+    extra.join().expect("the extra thread exits cleanly");
+
+    assert_eq!(with_extra, baseline + 1, "the count the watcher-thread assertion relies on rises by one for one extra thread");
+    assert_ne!(with_extra, PRIME_ROOT_THREADS, "a process with an extra thread fails the single-root-thread assertion");
+}

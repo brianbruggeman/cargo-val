@@ -1,9 +1,11 @@
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::pin::Pin;
-use core::task::{Context, Poll, ready};
+use core::task::{Context, Poll, Waker, ready};
+use core::time::Duration;
 use std::io;
 
+use proxima_core::time::timeout;
 use proxima_primitives::pipe::{BoundedQueue, EnqueueOutcome, FailMode, UnpinPipe};
 
 use crate::build_defaults::STATUS_QUEUE_BYTES;
@@ -29,6 +31,9 @@ const UNGATED_BYTES: usize = if LANE_CHUNK > CAPTURE_PAIR { LANE_CHUNK } else { 
 const WRITES_PER_ITEM: usize = 16;
 // every unbounded writer is gated per event, so one item queues at most one lane chunk or capture pair ungated, plus the event the gate admitted.
 const ITEM_RECORDS: usize = (UNGATED_BYTES + EVENT_RESERVE).div_ceil(RECORD_BYTES) + WRITES_PER_ITEM;
+
+// the longest the run waits on a reader that stopped reading before it abandons the queue: a hung reader must not hang the process.
+const FLUSH_BOUND: Duration = Duration::from_secs(2);
 
 const _: () = assert!(SLOTS >= ITEM_RECORDS, "status queue must hold one item");
 
@@ -69,6 +74,7 @@ struct Queue {
     tail: RefCell<Option<Record>>,
     capturing: Cell<bool>,
     deferred: Cell<bool>,
+    abandoned: Cell<usize>,
 }
 
 std::thread_local! {
@@ -78,6 +84,7 @@ std::thread_local! {
         tail: RefCell::new(None),
         capturing: Cell::new(false),
         deferred: Cell::new(false),
+        abandoned: Cell::new(0),
     };
 }
 
@@ -103,10 +110,9 @@ fn next_record(queue: &Queue) -> Option<Record> {
 }
 
 /// Scope inside which [`write`] queues instead of writing; the whole run holds one, the pump drains through [`Sinks`] after every
-/// item, and [`flush`] drains what the setup and summary reports queued between pumps.
+/// item, and [`flush_bounded`] drains what the setup and summary reports queued between pumps.
 ///
-/// Only a caller with no scope (no prime reactor yet) uses the synchronous [`edge_output::write`]; the banner and help paths in
-/// `main` never reach this module, and a refused append (unreachable under the per-event gates) is its one fallback.
+/// A caller with no scope, or an append the queue refuses, gets an error: nothing here ever falls back to a blocking write.
 pub(crate) struct Capture {
     previous: bool,
 }
@@ -118,15 +124,30 @@ impl Capture {
     }
 }
 
-// a run that ends in an error never reaches `flush`; its queued lines go out synchronously here, after the reactor has stopped mattering
+// `flush_bounded` already ran on every exit path; what is still queued here was abandoned, so it is counted and reported, never written blocking.
 impl Drop for Capture {
     fn drop(&mut self) {
         QUEUE.with(|queue| queue.capturing.set(self.previous));
         if !self.previous {
-            while let Some(record) = QUEUE.with(next_record) {
-                let _ = edge_output::write(i32::from(record.descriptor), &record.bytes[..record.length]);
-            }
+            let queued = core::iter::from_fn(|| QUEUE.with(next_record)).count();
+            let abandoned = QUEUE.with(|queue| queue.abandoned.replace(0));
+            notify_abandoned(queued + abandoned);
         }
+    }
+}
+
+// one nonblocking attempt: a full descriptor parks the sink, the line is dropped with it, and EAGAIN costs nothing but this notice
+fn notify_abandoned(records: usize) {
+    if records == 0 {
+        return;
+    }
+    let mut line = Line::<RECORD_BYTES>::new();
+    line.text(b"cargo-val: abandoned ");
+    line.number(records);
+    line.text(b" status records: the output reader stopped reading\n");
+    if let Ok(sink) = edge_output::standard(2) {
+        let mut call = UnpinPipe::call(&sink, line);
+        let _ = Pin::new(&mut call).poll(&mut Context::from_waker(Waker::noop()));
     }
 }
 
@@ -154,20 +175,49 @@ pub(crate) fn resume_due() -> bool {
     })
 }
 
-/// Delivers every queued record through the readiness-gated sinks, parking on the writable gate instead of blocking the thread.
-pub(crate) async fn flush() -> Result<(), RunError> {
-    let mut sinks = Sinks::new();
-    poll_fn(|context| sinks.poll_drain(context)).await
-}
-
-pub(crate) fn write(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
-    if QUEUE.with(|queue| queue.capturing.get() && append(queue, descriptor, bytes)) {
+/// Delivers the queue through the readiness-gated sinks for at most `FLUSH_BOUND`. A reader that leaves it unread abandons the
+/// remainder: the abandonment is counted for the closing [`Capture`] to report, and the run goes on instead of parking on the gate.
+///
+/// # Errors
+/// Returns the sink's failure to write; the failed line counts as abandoned too.
+pub(crate) async fn drain_bounded(sinks: &mut Sinks) -> Result<(), RunError> {
+    if QUEUE.with(|queue| queue.abandoned.get()) > 0 {
         return Ok(());
     }
-    edge_output::write(descriptor, bytes).map_err(|_| RunError::Reactor)
+    let delivered = timeout(FLUSH_BOUND, poll_fn(|context| sinks.poll_drain(context))).await;
+    match delivered {
+        Ok(Ok(())) => Ok(()),
+        // the line a sink was mid-way through is gone with the sink, so it counts with the unqueued records
+        Ok(Err(error)) => {
+            abandon();
+            Err(error)
+        }
+        Err(_) => {
+            abandon();
+            Ok(())
+        }
+    }
 }
 
-// the per-event gates make a refusal unreachable; the caller then writes synchronously rather than lose the bytes
+fn abandon() {
+    QUEUE.with(|queue| queue.abandoned.set(queue.abandoned.get() + 1));
+}
+
+/// The last drain of a run, on every exit path; a failure to write is already counted as abandoned and is not the run's error.
+pub(crate) async fn flush_bounded() {
+    let _ = drain_bounded(&mut Sinks::new()).await;
+}
+
+/// Queues `bytes` for descriptor 1 or 2.
+///
+/// # Errors
+/// [`RunError::Reactor`] when no [`Capture`] scope is open or the queue refuses the append; the refusal is counted by the queue's
+/// drop counter and ends the run through the caller's `?`, so no output is silently lost and nothing writes blocking.
+pub(crate) fn write(descriptor: i32, bytes: &[u8]) -> Result<(), RunError> {
+    let appended = QUEUE.with(|queue| queue.capturing.get() && append(queue, descriptor, bytes));
+    if appended { Ok(()) } else { Err(RunError::Reactor) }
+}
+
 fn append(queue: &Queue, descriptor: i32, bytes: &[u8]) -> bool {
     let Ok(tag) = u8::try_from(descriptor) else {
         return false;

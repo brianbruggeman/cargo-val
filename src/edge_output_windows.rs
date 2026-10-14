@@ -284,7 +284,7 @@ pub fn standard(descriptor: i32) -> io::Result<OutputSink> {
 
 /// Writes all of `bytes` to standard output (`1`) or standard error (`2`), blocking until Windows takes them.
 ///
-/// The synchronous twin of [`OutputSink`] for callers with no reactor: pre-runtime errors in `main`, and the error-exit drain of `status_queue::Capture`. A console takes
+/// The synchronous twin of [`OutputSink`] for callers with no reactor: callers with no reactor, such as pre-runtime errors in `main`; the run never uses it. A console takes
 /// `WriteConsoleW`, which is synchronous by nature; anything else takes `WriteFile`.
 ///
 /// # Errors

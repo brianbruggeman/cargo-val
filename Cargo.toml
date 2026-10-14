@@ -44,7 +44,7 @@ conflaguration = { version = "2.0.0", default-features = false, features = ["der
 memchr = { version = "2.8.3", default-features = false }
 prime = { package = "proxima-prime", version = "0.1.0", default-features = false, features = ["std", "runtime-prime-executor", "runtime-prime-reactor", "runtime-prime-inbox-alloc", "runtime-prime-timer"], optional = true }
 proxima-codec = { version = "0.1.0", default-features = false, optional = true }
-proxima-core = { version = "0.1.0", default-features = false, features = ["io-async"], optional = true }
+proxima-core = { version = "0.1.0", default-features = false, features = ["io-async", "time-driver-prime-wheel"], optional = true }
 proxima-primitives = { version = "0.1.0", default-features = false, optional = true }
 proxima-runtime = { version = "0.1.0", default-features = false, optional = true }
 tree-sitter = { version = "=0.27.0", optional = true }
