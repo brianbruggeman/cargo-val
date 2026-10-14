@@ -9,9 +9,13 @@ pub struct Pty {
     pub slave: OwnedFd,
 }
 
-// a ChildStream parks on WouldBlock, so a blocking master would stall the whole reactor thread until the child next writes
 pub fn open_pty() -> Pty {
-    let mut size = libc::winsize { ws_row: ROWS, ws_col: COLUMNS, ws_xpixel: 0, ws_ypixel: 0 };
+    open_pty_at(COLUMNS)
+}
+
+// a ChildStream parks on WouldBlock, so a blocking master would stall the whole reactor thread until the child next writes
+pub fn open_pty_at(columns: u16) -> Pty {
+    let mut size = libc::winsize { ws_row: ROWS, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
     let (mut master, mut slave) = (0, 0);
     let opened = unsafe { libc::openpty(&raw mut master, &raw mut slave, core::ptr::null_mut(), core::ptr::null_mut(), &raw mut size) };
     assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
