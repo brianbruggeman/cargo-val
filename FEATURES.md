@@ -8,6 +8,7 @@ Status: **built** (in tree, uncommitted) · **designed** · **queued** · **late
 - **built** — shard mode: tests run in shared processes per binary
 - **built** — settle-or-solo: a shard settles a test only from a clean same-line libtest result; every other name is re-run alone and that solo run decides
 - **built** — `--process auto|shard|test`: auto = shard on Windows, per-test elsewhere
+- **built** — `--output auto|rich|plain` / `CARGO_VAL_OUTPUT`: auto is rich only on an interactive terminal outside CI (`CI` non-empty or `TERM=dumb` give plain); `NO_COLOR` suppresses ANSI in every mode
 - **built** — serial / group / process records honored in both modes
 - **built** — interrupt (Ctrl-C / SIGTERM) kills children in both modes
 - **queued** — shard binaries in parallel

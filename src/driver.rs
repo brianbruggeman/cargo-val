@@ -14,7 +14,7 @@ use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
     FILTERSET, FailFastError, FailFastSources, HarnessFault, HarnessRequest, IgnoreMode, NO_TESTS, NoTestsPolicy,
-    PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
+    OUTPUT, OutputMode, OutputSetting, PROCESS, ProcessMode, ProcessSetting, SettingError, TARGET_DIR, TargetDirMode, ThreadSources, ThreadsError,
     ThreadsFault, ThreadsSource,
 };
 use crate::discover_listing::{
@@ -500,6 +500,8 @@ fn parse_result_line(line: &[u8]) -> Option<(usize, usize, usize)> {
     };
     Some((counted(" passed")?, counted(" failed")?, counted(" ignored")?))
 }
+const STDOUT: i32 = 1;
+
 
 struct Settings {
     bin_gate: bool,
@@ -518,7 +520,7 @@ fn runtime_settings(
     harness: &HarnessRequest<'_>,
     parser: &CliParser<'_>,
 ) -> Result<Settings, RunError> {
-    let mut pairs = [("", ""); 12];
+    let mut pairs = [("", ""); 16];
     let mut count = 0;
     for key in [
         "RUST_TEST_THREADS",
@@ -527,6 +529,10 @@ fn runtime_settings(
         "CARGO_VAL_FAIL_FAST",
         "CARGO_VAL_NO_TESTS",
         "CARGO_VAL_PROCESS",
+        "CARGO_VAL_OUTPUT",
+        "CI",
+        "TERM",
+        "GITHUB_ACTIONS",
         "CARGO_VAL_COLOR",
         "NO_COLOR",
         "CARGO_VAL_IGNORED",
@@ -550,7 +556,7 @@ fn runtime_settings(
         .map_err(RunError::Setting)?
         .0
         .mode(cfg!(windows));
-    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
+    let output = resolve_output(&source, parser)?;    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
     let default_jobs = match process {
         ProcessMode::Shard => {
             let cores = std::thread::available_parallelism().map_or(1, core::num::NonZero::get);
@@ -576,8 +582,8 @@ fn runtime_settings(
         .resolve::<NoTestsPolicy>()
         .map_err(RunError::Setting)?
         .0;
-    let color =
-        resolve_color(&source, crate::build_defaults::COLOR).map_err(|_| RunError::Settings)?;
+    let color = output == OutputMode::Rich
+        && resolve_color(&source, crate::build_defaults::COLOR).map_err(|_| RunError::Settings)?;
     let ignore = harness.ignore_mode(&source).map_err(RunError::Setting)?;
     let filterset = FILTERSET
         .from_settings(&source, parser.filterset())
@@ -2472,6 +2478,18 @@ async fn start_children(
         gate,
         lock_watch,
     })
+}
+
+fn resolve_output(
+    source: &BorrowedSettings<'_>,
+    parser: &CliParser<'_>,
+) -> Result<OutputMode, RunError> {
+    OUTPUT
+        .build_default(Some(crate::build_defaults::OUTPUT))
+        .from_settings(source, parser.output())
+        .resolve::<OutputSetting>()
+        .map(|(setting, _)| setting.mode(crate::edge_output::is_terminal(STDOUT), source))
+        .map_err(RunError::Setting)
 }
 
 fn resolve_target_dir<'value>(

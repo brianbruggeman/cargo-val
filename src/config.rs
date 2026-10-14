@@ -357,6 +357,61 @@ pub const PROCESS: Layers<'static> = Layers::setting(
     ],
 );
 
+/// How progress and results are written: a redrawing display for people, or append-only lines for logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    Rich,
+    /// One complete line per event, never redrawn, never colored; what a CI log or a pipe reads back.
+    Plain,
+}
+
+/// What the user asked for: a forced mode, or `auto`, which lets the terminal and the CI environment decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputSetting {
+    Auto,
+    Rich,
+    Plain,
+}
+
+impl TryFrom<&[u8]> for OutputSetting {
+    type Error = ();
+
+    fn try_from(text: &[u8]) -> Result<Self, ()> {
+        match text {
+            b"auto" => Ok(Self::Auto),
+            b"rich" => Ok(Self::Rich),
+            b"plain" => Ok(Self::Plain),
+            _ => Err(()),
+        }
+    }
+}
+
+impl OutputSetting {
+    /// The mode this setting runs as; a forced setting ignores the terminal, `auto` is rich only on an interactive terminal outside CI.
+    ///
+    /// `environment` supplies `CI` (any non-empty value) and `TERM` (`dumb`); `terminal` is whether standard output is interactive.
+    #[must_use]
+    pub fn mode(self, terminal: bool, environment: &impl SettingsSource) -> OutputMode {
+        let in_ci = environment.get("CI").is_some_and(|value| !value.is_empty());
+        let dumb = environment.get("TERM") == Some("dumb");
+        match self {
+            Self::Auto if terminal && !in_ci && !dumb => OutputMode::Rich,
+            Self::Auto | Self::Plain => OutputMode::Plain,
+            Self::Rich => OutputMode::Rich,
+        }
+    }
+}
+
+/// `CARGO_VAL_OUTPUT` / `--output`; the build default is supplied by the caller.
+pub const OUTPUT: Layers<'static> = Layers::setting(
+    "CARGO_VAL_OUTPUT",
+    [
+        b"cargo-val: --output must be auto, rich, or plain\n",
+        b"cargo-val: CARGO_VAL_OUTPUT must be auto, rich, or plain\n",
+        b"cargo-val: the build default output setting is invalid\n",
+    ],
+);
+
 impl<'argument> HarnessRequest<'argument> {
     /// The ignore mode a harness flag selected, else the `CARGO_VAL_IGNORED` setting, else skip.
     ///
@@ -705,7 +760,11 @@ mod shard_jobs_tests {
 mod layers_tests {
     use super::*;
     use conflaguration::BorrowedSettings;
+
     type Resolved<Mode> = Result<(Mode, Source), SettingError>;
+    type AutoRow = (bool, &'static [(&'static str, &'static str)], OutputMode);
+    const TERMINAL: bool = true;
+    const PIPE: bool = false;
 
     fn refused(layers: Layers<'_>, source: Source) -> SettingError {
         layers.refusal(source)
@@ -815,6 +874,70 @@ mod layers_tests {
         let layers = TARGET_DIR.build_default(Some(crate::build_defaults::TARGET_DIR));
 
         assert_eq!(layers.resolve::<TargetDirMode<'_>>(), Ok((TargetDirMode::Shared, Source::BuildDefault)));
+    }
+
+    #[test]
+    fn output_precedence_is_command_line_then_environment_then_build_default() {
+        let auto = OUTPUT.build_default(Some("auto"));
+        let table: [(Layers<'_>, Resolved<OutputSetting>); 6] = [
+            (auto, Ok((OutputSetting::Auto, Source::BuildDefault))),
+            (OUTPUT.build_default(Some("plain")), Ok((OutputSetting::Plain, Source::BuildDefault))),
+            (auto.configured(Some("rich")), Ok((OutputSetting::Rich, Source::Configured))),
+            (
+                auto.configured(Some("rich")).command_line(Some(b"plain")),
+                Ok((OutputSetting::Plain, Source::CommandLine)),
+            ),
+            (auto.configured(Some("fancy")), Err(refused(OUTPUT, Source::Configured))),
+            (auto.command_line(Some(&[0xff, 0xfe])), Err(refused(OUTPUT, Source::CommandLine))),
+        ];
+        for (layers, expected) in table {
+            assert_eq!(layers.resolve::<OutputSetting>(), expected, "{layers:?}");
+        }
+    }
+
+    #[test]
+    fn auto_resolves_from_the_terminal_and_the_ci_environment() {
+        let table: [AutoRow; 9] = [
+            (TERMINAL, &[], OutputMode::Rich),
+            (TERMINAL, &[("TERM", "xterm-256color")], OutputMode::Rich),
+            (PIPE, &[], OutputMode::Plain),
+            (TERMINAL, &[("CI", "true")], OutputMode::Plain),
+            (TERMINAL, &[("CI", "")], OutputMode::Rich),
+            (TERMINAL, &[("TERM", "dumb")], OutputMode::Plain),
+            (PIPE, &[("TERM", "xterm-256color")], OutputMode::Plain),
+            (TERMINAL, &[("GITHUB_ACTIONS", "true")], OutputMode::Rich),
+            (PIPE, &[("CI", "1"), ("TERM", "dumb")], OutputMode::Plain),
+        ];
+        for (terminal, pairs, expected) in table {
+            let environment = BorrowedSettings::new(pairs);
+            assert_eq!(OutputSetting::Auto.mode(terminal, &environment), expected, "terminal={terminal} {pairs:?}");
+        }
+    }
+
+    #[test]
+    fn a_forced_output_setting_ignores_the_terminal_and_the_environment() {
+        let ci = [("CI", "true"), ("TERM", "dumb")];
+        let environment = BorrowedSettings::new(&ci);
+        for terminal in [TERMINAL, PIPE] {
+            assert_eq!(OutputSetting::Rich.mode(terminal, &environment), OutputMode::Rich);
+            assert_eq!(OutputSetting::Plain.mode(terminal, &environment), OutputMode::Plain);
+        }
+    }
+
+    #[test]
+    fn output_settings_and_builder_resolve_the_same_choice() {
+        let pairs = [("CARGO_VAL_OUTPUT", "plain")];
+        let source = BorrowedSettings::new(&pairs);
+        let auto = OUTPUT.build_default(Some("auto"));
+
+        let from_settings = auto.from_settings(&source, None);
+        let from_builder = auto.configured(Some("plain"));
+
+        assert_eq!(from_settings, from_builder);
+        assert_eq!(
+            from_settings.resolve::<OutputSetting>().map(|(setting, _)| setting.mode(TERMINAL, &source)),
+            Ok(OutputMode::Plain)
+        );
     }
 
     #[test]
