@@ -12,18 +12,6 @@ const THEME: &str = "dracula";
 const FONT_SIZE: &str = "16";
 const MAX_GIF_BYTES: u64 = 2 * 1024 * 1024;
 
-// recorder dwell times: a viewer needs to read each screen before the next key changes it
-const HOLD_LIVE_RUN_MS: u64 = 0;
-const HOLD_REVIEW_LIST_MS: u64 = 2000;
-const HOLD_AFTER_J_MS: u64 = 1200;
-const HOLD_AFTER_K_MS: u64 = 1200;
-const HOLD_DETAIL_MS: u64 = 3000;
-const HOLD_BACK_TO_LIST_MS: u64 = 0;
-const HOLD_RERUN_RUNNING_MS: u64 = 0;
-const HOLD_RERUN_RESULT_MS: u64 = 2000;
-const HOLD_CONFIRM_QUIT_MS: u64 = 1000;
-const HOLD_RECEIPT_MS: u64 = 3000;
-
 fn main() -> ExitCode {
     let driving = env::args_os()
         .nth(1)
@@ -238,11 +226,17 @@ mod terminal {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{
-        HOLD_AFTER_J_MS, HOLD_AFTER_K_MS, HOLD_BACK_TO_LIST_MS, HOLD_CONFIRM_QUIT_MS,
-        HOLD_DETAIL_MS, HOLD_LIVE_RUN_MS, HOLD_RECEIPT_MS, HOLD_RERUN_RESULT_MS,
-        HOLD_RERUN_RUNNING_MS, HOLD_REVIEW_LIST_MS,
-    };
+    // recorder dwell times: a viewer needs to read each screen before the next key changes it
+    const HOLD_LIVE_RUN_MS: u64 = 0;
+    const HOLD_REVIEW_LIST_MS: u64 = 2000;
+    const HOLD_AFTER_J_MS: u64 = 1200;
+    const HOLD_AFTER_K_MS: u64 = 1200;
+    const HOLD_DETAIL_MS: u64 = 3000;
+    const HOLD_BACK_TO_LIST_MS: u64 = 0;
+    const HOLD_RERUN_RUNNING_MS: u64 = 0;
+    const HOLD_RERUN_RESULT_MS: u64 = 2000;
+    const HOLD_CONFIRM_QUIT_MS: u64 = 1000;
+    const HOLD_RECEIPT_MS: u64 = 3000;
 
     // each step names the screen text that must be drawn, how long it stays on screen, then the keys typed; an empty key list only waits for the screen
     const KEYS: [(&str, u64, &[u8]); 10] = [
