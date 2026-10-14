@@ -1,11 +1,14 @@
+mod common;
 #[path = "common/failure_fixture.rs"]
 mod failure_fixture;
+#[path = "common/failure_fixture_async.rs"]
+mod failure_fixture_async;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use cargo_val::failure_class::{Class, Exit, classify};
-use failure_fixture::{build, run};
+use failure_fixture_async::{build, run};
 
 const PARSES: usize = 100_000;
 
@@ -41,11 +44,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 }
 
-#[test]
-fn a_hundred_thousand_parses_of_real_captures_allocate_nothing() {
-    let executable = build("failure_class");
+#[proxima::test(timeout = "310s")]
+async fn a_hundred_thousand_parses_of_real_captures_allocate_nothing() {
+    let executable = build("failure_class").await;
     let names = ["assert_eq_mismatch", "plain_panic", "registry_panic_under_user_call"];
-    let runs: Vec<_> = names.iter().map(|name| run(&executable, &format!("failing::{name}"), &[])).collect();
+    let mut runs = Vec::with_capacity(names.len());
+    for name in names {
+        runs.push(run(&executable, &format!("failing::{name}"), &[]).await);
+    }
     assert!(runs.iter().all(|captured| captured.exit != Exit::Code(0)), "fixture tests must fail");
     let captures: Vec<Vec<u8>> = runs.into_iter().map(|captured| captured.stdout).collect();
 

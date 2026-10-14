@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Output};
 
 use cargo_val::failure_class::Exit;
 
@@ -15,15 +15,18 @@ fn target_directory(name: &str) -> PathBuf {
         .join(name)
 }
 
-pub fn build(fixture: &str) -> PathBuf {
+pub fn build_command(fixture: &str) -> Command {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml");
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .args(["test", "--lib", "--locked", "--no-run", "--message-format=json", "--manifest-path"])
         .arg(&manifest)
         .arg("--target-dir")
-        .arg(target_directory(fixture))
-        .output()
-        .expect("cargo builds the failure fixture");
+        .arg(target_directory(fixture));
+    command
+}
+
+pub fn executable_of(output: &Output) -> PathBuf {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -35,13 +38,16 @@ pub fn build(fixture: &str) -> PathBuf {
         .expect("cargo reports the fixture test executable")
 }
 
-pub fn run(executable: &Path, test: &str, envs: &[(&str, &str)]) -> Captured {
-    let output = Command::new(executable)
+pub fn run_command(executable: &Path, test: &str, envs: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(executable);
+    command
         .args(["--exact", test, "--test-threads=1"])
         .env("RUST_BACKTRACE", "1")
-        .envs(envs.iter().copied())
-        .output()
-        .expect("the fixture test executable launches");
+        .envs(envs.iter().copied());
+    command
+}
+
+pub fn captured_of(output: Output) -> Captured {
     Captured { stdout: output.stdout, exit: exit_of(output.status) }
 }
 

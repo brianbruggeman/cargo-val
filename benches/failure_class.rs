@@ -1,5 +1,7 @@
 #[path = "../tests/common/failure_fixture.rs"]
 mod failure_fixture;
+#[path = "../tests/common/failure_fixture_sync.rs"]
+mod failure_fixture_sync;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -8,7 +10,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use cargo_val::failure_class::{Exit, classify};
-use failure_fixture::{Captured, build, run};
+use failure_fixture::Captured;
+use failure_fixture_sync::{build, run};
 
 const ROUNDS: u32 = 5;
 const PARSES_PER_ROUND: u32 = 20_000;
