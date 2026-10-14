@@ -182,6 +182,7 @@ pub enum RunError {
     CargoFailed,
     CargoRefused,
     Interrupted(i32),
+    Cancelled,
     ListingFailed,
     DeclaredCapacity,
 }
@@ -226,6 +227,7 @@ impl RunError {
             Self::CargoFailed => b"cargo-val: cargo test build failed\n",
             Self::CargoRefused => b"cargo-val: cargo refused the invocation before building; its error is above\n",
             Self::ListingFailed => b"cargo-val: libtest listing failed\n",
+            Self::Cancelled => b"cargo-val: a session was cancelled by its scope\n",
             Self::DeclaredCapacity => {
                 b"cargo-val: declared test scheduling records exceed the build's capacity; raise CARGO_VAL_BUILD_SCHED_RECORD_BYTES\n"
             }
@@ -369,7 +371,7 @@ impl RunSummary {
 pub(crate) struct TestWatch {
     slot: SessionSlotId,
     process_id: u32,
-    scope: Signal,
+    cancelled: bool,
     output: ChildOutput,
     shard: Option<ShardWatch>,
     group: [u8; GROUP_CAPACITY],
@@ -377,6 +379,11 @@ pub(crate) struct TestWatch {
 }
 
 impl TestWatch {
+    // a session its scope ended has no verdict of its own, so its exit status is replaced by the cancellation
+    fn exit(&self, code: i32) -> Result<i32, RunError> {
+        if self.cancelled { Err(RunError::Cancelled) } else { Ok(code) }
+    }
+
     fn in_group(&self, group: &[u8]) -> bool {
         self.group_length != 0 && &self.group[..self.group_length] == group
     }
@@ -673,10 +680,11 @@ fn start_session(
     let process_id = child.process_id();
     track(process_id)?;
     attach_session(&lanes[JOB_BASE + slot.index()], child)?;
+    *lanes[JOB_BASE + slot.index()].4.borrow_mut() = Some(SignalSource::new(&scope));
     watches[slot.index()] = Some(TestWatch {
         slot,
         process_id,
-        scope,
+        cancelled: false,
         output: ChildOutput::new(),
         shard,
         group: [0; GROUP_CAPACITY],
@@ -719,7 +727,7 @@ pub(crate) fn session_output(
         };
         let step = deliver(ledger, event, run.reporting(), watch)?;
         if shard_tripped {
-            shard::stop_all(run, ledger, watches);
+            run.stop_sent.set(true);
         }
         if settled(run, ledger, watches, index, step)? {
             return Ok(());
@@ -758,7 +766,7 @@ pub(crate) fn session_resume(
         shard::stall(watch, window, offset + observed.consumed);
     }
     if observed.stop {
-        shard::stop_all(run, ledger, watches);
+        run.stop_sent.set(true);
     }
     Ok(watches[index].as_ref().is_none_or(|watch| !shard::stalled(watch)))
 }
@@ -794,32 +802,30 @@ pub(crate) fn session_exited(
         return Ok(());
     };
     release_child(watch.process_id);
-    let stopped = run.stop_sent.get() && code == shard::STOP_STATUS;
-    let never_started = run.withdrawn_ready.get() == Some(watch.slot);
-    if run.settings.process == ProcessMode::Test && (stopped || never_started) {
-        return withdraw_terminated(run, ledger, watches, index);
+    let (slot, exit) = (watch.slot, watch.exit(code));
+    let never_started = run.withdrawn_ready.get() == Some(slot);
+    if run.settings.process == ProcessMode::Test && (exit == Err(RunError::Cancelled) || never_started) {
+        let target = ledger.sessions().get(slot).map(RunningChild::target);
+        watches[index] = None;
+        ledger.retire(slot).ok_or(RunError::Outcome)?;
+        return shard::withdraw_solo(run, ledger, target);
     }
     let event = HostEvent::Exit {
-        slot: watch.slot,
+        slot,
         status: code,
     };
     let step = deliver(ledger, event, run.reporting(), watch)?;
     settled(run, ledger, watches, index, step).map(|_| ())
 }
 
-// a child cargo-val killed on interrupt has no verdict of its own, so it leaves the ledger uncounted and its name is withdrawn once
-fn withdraw_terminated(
-    run: &ListingRun<'_>,
-    ledger: &mut Ledger<'_>,
-    watches: &mut Watches,
-    index: usize,
-) -> Result<(), RunError> {
-    let Some(watch) = watches[index].take() else {
-        return Ok(());
+pub(crate) fn session_cancelled(ledger: &Ledger<'_>, watches: &mut Watches, index: usize) {
+    let Some(watch) = watches[index].as_mut() else {
+        return;
     };
-    let target = ledger.sessions().get(watch.slot).map(RunningChild::target);
-    ledger.retire(watch.slot).ok_or(RunError::Outcome)?;
-    shard::withdraw_solo(run, ledger, target)
+    watch.cancelled = true;
+    if let Some(session) = ledger.sessions().get(watch.slot) {
+        session.child().terminate();
+    }
 }
 
 // an exact child retires with its one outcome; a shard child's tests were counted as they streamed, so the shard module settles its exit
@@ -1409,9 +1415,9 @@ impl ListingRun<'_> {
     }
 
     // a forwarded signal only reaches children that honor it, so a per-test child that ignores it is terminated here
-    pub(crate) fn interrupt_sessions(&self, ledger: &Ledger<'_>, watches: &Watches) {
+    pub(crate) fn interrupt_sessions(&self) {
         if self.settings.process == ProcessMode::Test && self.interrupted() && !self.stop_sent.get() {
-            shard::stop_all(self, ledger, watches);
+            self.stop_sent.set(true);
         }
     }
 

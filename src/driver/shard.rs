@@ -12,10 +12,6 @@ use core::ops::Range;
 use crate::build_defaults::SHARD_COMMAND_UNITS;
 use crate::discover_listing::{DocEvent, DocOutcome, DocParser};
 use crate::edge_signal::release_child;
-#[cfg(unix)]
-use crate::edge_spawn::STOP_SIGNAL;
-#[cfg(not(unix))]
-use crate::edge_spawn::STATUS_CONTROL_C_EXIT;
 use crate::run::Lanes;
 use crate::runner::LibtestVerdict;
 use crate::sched_file::{Loaded, load};
@@ -27,11 +23,6 @@ use crate::stop::Observation;
 pub(super) const FAILURE_CAPACITY: usize = 16384;
 const FIXED_UNITS: usize = 3 + "--exact ".len();
 const GROUP_CAPACITY: usize = crate::sched_binary::GROUP_CAPACITY;
-// the status a child ends with when cargo-val terminated it: SIGKILL on unix, the exit code TerminateProcess sets elsewhere
-#[cfg(unix)]
-pub(super) const STOP_STATUS: i32 = -STOP_SIGNAL;
-#[cfg(not(unix))]
-pub(super) const STOP_STATUS: i32 = STATUS_CONTROL_C_EXIT.cast_signed();
 
 /// Per-child state for a shard: which of its names reported, the libtest report parser, and the failure blocks it has streamed.
 pub(super) struct ShardWatch {
@@ -194,18 +185,6 @@ pub(super) fn withdraw_solo(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, targe
         run.policy.borrow_mut().listed_test_skipped();
     }
     Ok(())
-}
-
-// a failed test past --max-fail ends every shard, but an output-only rerun is spared: it is the only place a tripping test's block is printed
-// an interrupt ends everything, since nothing else will be read
-pub(super) fn stop_all(run: &ListingRun<'_>, ledger: &Ledger<'_>, watches: &Watches) {
-    run.stop_sent.set(true);
-    watches
-        .iter()
-        .flatten()
-        .filter(|watch| watch.scope.is_fired())
-        .filter_map(|watch| ledger.sessions().get(watch.slot))
-        .for_each(|session| session.child().terminate());
 }
 
 /// What one pass over a lane piece did: whether the stop policy tripped, and how many bytes the framer consumed before it paused.
@@ -579,7 +558,7 @@ impl CargoDriver<'_> {
             }
         }
         if run.interrupted() {
-            stop_all(run, ledger, watches);
+            run.stop_sent.set(true);
             let dropped = run.shards.borrow_mut().discard_everything() + run.specials.borrow_mut().discard();
             withdraw_unlaunched(run, ledger, active.target, dropped)?;
             return Ok(dropped > 0);
@@ -676,7 +655,7 @@ pub(super) fn finish(
     };
     shard_watch.flush_failures(run.render())?;
     if shard_watch.shard.rerun.is_some() {
-        finish_rerun(run, ledger, watches, target, (&shard_watch, &watch.output), status)?;
+        finish_rerun(run, ledger, target, (&shard_watch, &watch.output), watch.exit(status))?;
         ledger.retire(watch.slot);
         run.shards.borrow_mut().finished(shard_watch.shard);
         return Ok(());
@@ -689,7 +668,7 @@ pub(super) fn finish(
         }
         settle_stopped(run, ledger, target, &shard_watch)?;
     } else {
-        queue_solo_reruns(run, ledger, watches, &mut run.shards.borrow_mut(), &shard_watch)?;
+        queue_solo_reruns(run, ledger, &mut run.shards.borrow_mut(), &shard_watch)?;
     }
     ledger.retire(watch.slot);
     run.shards.borrow_mut().finished(shard_watch.shard);
@@ -712,27 +691,26 @@ fn settle_stopped(run: &ListingRun<'_>, ledger: &mut Ledger<'_>, target: Option<
 }
 
 // a deciding solo that cargo-val itself ended, by interrupt or by a fail-fast stop, reports nothing about its test
-fn withdrawn_solo(interrupted: bool, stop_sent: bool, rerun: Option<Rerun>, status: i32) -> bool {
-    matches!(rerun, Some(Rerun::Decides { .. })) && (interrupted || (stop_sent && status == STOP_STATUS))
+fn withdrawn_solo(interrupted: bool, exit: Result<i32, RunError>, rerun: Option<Rerun>) -> bool {
+    matches!(rerun, Some(Rerun::Decides { .. })) && (interrupted || exit == Err(RunError::Cancelled))
 }
 
 // a rerun child's exit is its verdict when the rerun decides; otherwise it only shows the output of a failure
 fn finish_rerun(
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
-    watches: &Watches,
     target: Option<usize>,
     (shard_watch, output): (&ShardWatch, &ChildOutput),
-    status: i32,
+    exit: Result<i32, RunError>,
 ) -> Result<(), RunError> {
     let shard = shard_watch.shard;
     let arena = run.shards.borrow();
     let name = arena.nth(shard, 0).unwrap_or(b"");
-    if withdrawn_solo(run.interrupted(), run.stop_sent.get(), shard.rerun, status) {
+    if withdrawn_solo(run.interrupted(), exit, shard.rerun) {
         return withdraw_solo(run, ledger, target);
     }
     let solo = true;
-    match (shard.rerun, status == 0) {
+    match (shard.rerun, exit == Ok(0)) {
         (Some(Rerun::Decides { after_shard_failure }), true) => {
             if after_shard_failure {
                 warn_rerun(run, target, name, b"failed in a shared process, passed alone")?;
@@ -748,7 +726,7 @@ fn finish_rerun(
             count_reported(run, ledger, target, name, (TerminalOutcome::Failed, Tally::Failed), solo)?;
             failure_output(run, target, name, output)?;
             if run.tripped(ledger) {
-                stop_all(run, ledger, watches);
+                run.stop_sent.set(true);
             }
             Ok(())
         }
@@ -808,7 +786,6 @@ fn failure_output(run: &ListingRun<'_>, target: Option<usize>, name: &[u8], outp
 fn queue_solo_reruns(
     run: &ListingRun<'_>,
     ledger: &mut Ledger<'_>,
-    watches: &Watches,
     arena: &mut ShardArena<'_>,
     shard_watch: &ShardWatch,
 ) -> Result<(), RunError> {
@@ -819,7 +796,7 @@ fn queue_solo_reruns(
         .for_each(|ordinal| _ = owed.mark(ordinal));
     arena.owe_reruns(shard, (owed, shard_watch.failed), true).map_err(|_| RunError::Outcome)?;
     if run.tripped(ledger) {
-        stop_all(run, ledger, watches);
+        run.stop_sent.set(true);
     }
     Ok(())
 }
@@ -878,32 +855,31 @@ mod tests {
 
         #[proxima::test]
         async fn deciding_solos_are_killed_on_fail_fast() {
-            assert!(!withdrawn_solo(false, true, DECIDING, 0));
+            assert!(!withdrawn_solo(false, Ok(0), DECIDING));
         }
 
         #[proxima::test]
         async fn interrupted_deciding_solo_is_withdrawn_for_any_status() {
-            assert!(withdrawn_solo(true, false, DECIDING, 0));
-            assert!(withdrawn_solo(true, false, DECIDING, 1));
-            assert!(withdrawn_solo(true, false, DECIDING, STOP_STATUS));
+            assert!(withdrawn_solo(true, Ok(0), DECIDING));
+            assert!(withdrawn_solo(true, Ok(1), DECIDING));
+            assert!(withdrawn_solo(true, Err(RunError::Cancelled), DECIDING));
         }
 
         #[proxima::test]
-        async fn fail_fast_stop_status_withdraws_deciding_solo() {
-            assert!(withdrawn_solo(false, true, DECIDING, STOP_STATUS));
+        async fn cancelled_deciding_solo_is_withdrawn() {
+            assert!(withdrawn_solo(false, Err(RunError::Cancelled), DECIDING));
         }
 
         #[proxima::test]
         async fn natural_exit_of_deciding_solo_is_not_withdrawn() {
-            assert!(!withdrawn_solo(false, false, DECIDING, 0));
-            assert!(!withdrawn_solo(false, false, DECIDING, 1));
-            assert!(!withdrawn_solo(false, true, DECIDING, 1));
+            assert!(!withdrawn_solo(false, Ok(0), DECIDING));
+            assert!(!withdrawn_solo(false, Ok(1), DECIDING));
         }
 
         #[proxima::test]
         async fn output_solo_is_never_withdrawn_by_the_decision() {
-            assert!(!withdrawn_solo(true, true, OUTPUT, STOP_STATUS));
-            assert!(!withdrawn_solo(false, true, OUTPUT, STOP_STATUS));
+            assert!(!withdrawn_solo(true, Err(RunError::Cancelled), OUTPUT));
+            assert!(!withdrawn_solo(false, Err(RunError::Cancelled), OUTPUT));
         }
     }
 }
@@ -1032,7 +1008,7 @@ mod pause_tests {
         TestWatch {
             slot: scratch.insert(0).expect("scratch table has a slot"),
             process_id: 0,
-            scope: run.trip.child(),
+            cancelled: false,
             output: ChildOutput::new(),
             shard: Some(ShardWatch::new(shard, b"")),
             group: [0; GROUP_CAPACITY],
