@@ -79,7 +79,8 @@ const IDENTITY_CAPACITY: usize = 128;
 pub(crate) const NAME_CAPACITY: usize = 1024;
 const ENV_CAPACITY: usize = 1024;
 const PATH_CAPACITY: usize = 4096;
-const SCRATCH_CAPACITY: usize = 16384;
+const SCRATCH_CAPACITY: usize = 131_072;
+const DIAGNOSTIC_CAPACITY: usize = 1_048_576;
 const LINKED_CAPACITY: usize = 32768;
 const BUILD_SCRIPT_CAPACITY: usize = 65536;
 const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
@@ -212,8 +213,7 @@ impl RunError {
             Self::ListingStream => b"cargo-val: libtest listing could not be parsed\n",
             Self::Launch(_) => b"cargo-val: exact test launch failed\n",
             Self::Outcome => b"cargo-val: child completion failed\n",
-            Self::CargoFailed => b"cargo-val: cargo test build failed\n",
-            Self::ListingFailed => b"cargo-val: libtest listing failed\n",
+            Self::CargoFailed => b"cargo-val: cargo test build failed\n",            Self::ListingFailed => b"cargo-val: libtest listing failed\n",
             Self::DeclaredCapacity => {
                 b"cargo-val: declared test scheduling records exceed the build's capacity; raise CARGO_VAL_BUILD_SCHED_RECORD_BYTES\n"
             }
@@ -333,7 +333,6 @@ pub struct RunSummary {
 
 /// Exit status when the selection ran no tests and the policy is `fail`.
 pub const NO_TESTS_EXIT_CODE: i32 = 4;
-
 impl RunSummary {
     /// 1 when any test failed, `NO_TESTS_EXIT_CODE` when nothing ran under the `fail` policy, else 0.
     #[must_use]
@@ -1386,6 +1385,7 @@ fn validated_harness<'argument>(
 
 fn spawn_cargo(
     parser: &CliParser<'_>,
+    color: bool,
     environment: &[&[u8]],
     directory: Option<&ChildDirectory>,
 ) -> Result<Child, RunError> {
@@ -1396,13 +1396,19 @@ fn spawn_cargo(
     let mut arguments: Vec<&[u8]> = Vec::from([
         b"test".as_slice(),
         b"--no-run".as_slice(),
-        b"--message-format=json".as_slice(),
+        if color {
+            b"--message-format=json-diagnostic-rendered-ansi".as_slice()
+        } else {
+            b"--message-format=json".as_slice()
+        },
     ]);
     if let Some(directory) = directory {
         arguments.push(directory.argument());
     }
     arguments.extend_from_slice(forwarded);
-    spawn(b"cargo", &arguments, environment, &[], None).map_err(|_| RunError::Spawn)
+    // cargo's stderr is a pipe, so its own colour choice follows CARGO_TERM_COLOR from the caller's environment, not ours
+    let term_color: &[u8] = if color { b"CARGO_TERM_COLOR=always" } else { b"CARGO_TERM_COLOR=never" };
+    spawn(b"cargo", &arguments, environment, &[term_color], None).map_err(|_| RunError::Spawn)
 }
 
 const METADATA_VALUE_FLAGS: [&[u8]; 4] = [b"--manifest-path", b"-m", b"--config", b"-Z"];
@@ -1479,6 +1485,18 @@ pub(crate) struct CargoDriver<'buffer> {
     parked: ParkedArtifacts,
     dropped: usize,
     lock_watch: LockWatch,
+    diagnostics: Vec<u8>,
+}
+
+fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
+    let kept = match level {
+        "error" => true,
+        "warning" => held.len() < DIAGNOSTIC_CAPACITY,
+        _ => false,
+    };
+    if kept {
+        held.extend_from_slice(rendered.as_bytes());
+    }
 }
 
 fn gate_debug(enabled: bool, describe: impl FnOnce(&mut Line<1024>)) {
@@ -1744,6 +1762,7 @@ impl CargoDriver<'_> {
                     self.reason = b"bin-built";
                     self.release_parked(run, ledger, lanes)?;
                 }
+                CargoSourceStep::Diagnostic { level, rendered } => keep_diagnostic(&mut self.diagnostics, level, rendered),
                 CargoSourceStep::BuildFinished { success } => {
                     let (event, reason): (&[u8], &'static [u8]) = if success {
                         (b" build-finished success=true", b"build-succeeded")
@@ -1752,6 +1771,7 @@ impl CargoDriver<'_> {
                     };
                     debug_build_end(run.settings.debug, event, self.parked.len());
                     self.discovery.build_finished(success);
+                    self.report_diagnostics(success)?;
                     self.finishing = true;
                     self.reason = reason;
                     self.release_parked(run, ledger, lanes)?;
@@ -1771,6 +1791,7 @@ impl CargoDriver<'_> {
                 | CargoSourceStep::Ignored => {}
                 CargoSourceStep::Eof => {
                     self.discovery.stdout_eof();
+                    self.report_diagnostics(false)?;
                     debug_build_end(run.settings.debug, b" stdout-eof", self.parked.len());
                     self.finishing = true;
                     self.reason = b"stdout-eof";
@@ -1806,6 +1827,18 @@ impl CargoDriver<'_> {
 
     pub(crate) fn cargo_out_ended(&mut self) {
         self.cargo_eof = true;
+    }
+
+    fn report_diagnostics(&mut self, success: bool) -> Result<(), RunError> {
+        let held = core::mem::take(&mut self.diagnostics);
+        if success || held.is_empty() {
+            return Ok(());
+        }
+        write_fd(2, &held)?;
+        if held.len() >= DIAGNOSTIC_CAPACITY {
+            write_fd(2, b"cargo-val: compiler diagnostics were truncated\n")?;
+        }
+        Ok(())
     }
 
     pub(crate) fn forward_stderr(&mut self, bytes: &[u8]) -> Result<(), RunError> {
@@ -2271,6 +2304,7 @@ fn new_driver(
         parked: ParkedArtifacts::new(),
         dropped: 0,
         lock_watch,
+        diagnostics: Vec::new(),
     }))
 }
 
@@ -2325,7 +2359,7 @@ async fn start_children(
         facts = read_metadata(child).await;
     }
     let directories = build_directories(target_mode, facts.as_deref())?;
-    let cargo = spawn_cargo(parser, environment, directories.as_ref().map(|chosen| &chosen.test))?;
+    let cargo = spawn_cargo(parser, settings.color, environment, directories.as_ref().map(|chosen| &chosen.test))?;
     track(cargo.process_id())?;
     let mut doc_tests = match parser.doc_selection() {
         DocSelection::Excluded | DocSelection::Only => None,
