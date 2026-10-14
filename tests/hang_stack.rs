@@ -15,6 +15,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use cargo_val::stack_frames::{Class, Frame, frames};
 
 mod common;
+#[path = "common/exit_wait.rs"]
+mod exit_wait;
 #[path = "common/fifo.rs"]
 mod fifo;
 #[path = "common/supervise.rs"]
@@ -23,6 +25,7 @@ mod supervise;
 mod test_alloc;
 
 use common::{FIXTURE_DEADLINE, fixture_output};
+use exit_wait::{ExitSource, until_exit};
 use supervise::supervised;
 
 const WORKSPACE: [&str; 1] = ["cargo_val_blocked_fixture"];
@@ -98,8 +101,9 @@ async fn blocked_command() -> (Command, ChildStream, ChildStream) {
     (command, ready, held)
 }
 
-async fn blocked_pid(ready: &ChildStream) -> u32 {
-    let line = fifo::first_line(ready, "the fixture never reached the rendezvous").await;
+async fn blocked_pid(ready: &ChildStream, exit: &ExitSource, stdout: &ChildStream, stderr: &ChildStream) -> u32 {
+    let what = "the fixture never reached the rendezvous";
+    let line = until_exit(fifo::first_line(ready, what), what, exit, &[("stdout", stdout), ("stderr", stderr)]).await;
     line.trim().parse().expect("the fixture wrote its pid")
 }
 
@@ -134,8 +138,8 @@ fn sleeps_by_the_kernels_account(task: &Path) -> bool {
 async fn macos_sample_of_a_real_blocked_child_finds_the_user_frame_at_its_file_and_line() {
     let (mut command, ready, held) = blocked_command().await;
 
-    supervised(&mut command, FIXTURE_DEADLINE, async |_, _, _, _| {
-        let pid = blocked_pid(&ready).await;
+    supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+        let pid = blocked_pid(&ready, exit, stdout, stderr).await;
         let mut buffer = vec![0_u8; 32 * 1024];
 
         let (outcome, allocations) = test_alloc::measure_allocations(|| capture(pid, &mut buffer));
@@ -166,8 +170,8 @@ async fn linux_proc_of_a_real_blocked_child_yields_a_kernel_frame_per_thread_or_
 
     let (mut command, ready, held) = blocked_command().await;
 
-    supervised(&mut command, FIXTURE_DEADLINE, async |_, _, _, _| {
-        let pid = blocked_pid(&ready).await;
+    supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+        let pid = blocked_pid(&ready, exit, stdout, stderr).await;
         until_every_thread_is_named_asleep(pid);
         let mut buffer = vec![0_u8; 32 * 1024];
 

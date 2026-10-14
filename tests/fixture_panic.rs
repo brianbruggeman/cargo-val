@@ -8,11 +8,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use cargo_val::edge_stream_unix::ChildStream;
 use futures::FutureExt;
 
 mod common;
+#[path = "common/exit_wait.rs"]
+mod exit_wait;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -21,13 +24,15 @@ mod fifo;
 mod supervise;
 
 use common::{FIXTURE_DEADLINE, fixture_output};
+use exit_wait::until_exit;
 use supervise::supervised;
 
 const CALLER_PANIC: &str = "the caller panics while the blocked test is running";
 
-fn probe_directory() -> PathBuf {
+fn probe_directory(label: &str) -> PathBuf {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("fixture-panic")
+        .join(label)
         .join(std::process::id().to_string());
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).expect("probe directory is creatable under the target tmpdir");
@@ -88,15 +93,16 @@ fn group_gone(group: libc::pid_t) -> bool {
 async fn a_panicking_supervised_test_still_kills_its_group() {
     let warm = fixture_output(&mut blocked_test_command(None)).await;
     assert_eq!(warm.status.code(), Some(0), "the fixture builds and its unblocked test passes");
-    let directory = probe_directory();
+    let directory = probe_directory("supervised-panic");
     let ready = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
     let held = ChildStream::new(OwnedFd::from(open_reader(&directory.join("held"))));
     let mut command = blocked_test_command(Some(&directory));
     let mut leader: libc::pid_t = 0;
     let mut blocked: libc::pid_t = 0;
-    let unwound = AssertUnwindSafe(supervised(&mut command, FIXTURE_DEADLINE, async |leader_pid, _, _, _| {
+    let unwound = AssertUnwindSafe(supervised(&mut command, FIXTURE_DEADLINE, async |leader_pid, stdout, stderr, exit| {
         leader = libc::pid_t::try_from(leader_pid).expect("a pid fits pid_t");
-        let text = fifo::first_line(&ready, "the blocked test never reported it was blocked").await;
+        let what = "the blocked test never reported it was blocked";
+        let text = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", stdout), ("stderr", stderr)]).await;
         blocked = text.trim().parse().unwrap_or_else(|error| panic!("the ready fifo carries one pid, got {text:?}: {error}"));
         panic!("{CALLER_PANIC}");
     }))
@@ -111,4 +117,50 @@ async fn a_panicking_supervised_test_still_kills_its_group() {
     assert!(group_gone(blocked), "the blocked test's process group survived the unwind");
     assert!(gone(leader), "the group leader (pid {leader}) survived the unwind");
     assert!(group_gone(leader), "the leader's process group survived the unwind");
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_default()
+}
+
+#[proxima::test(timeout = "60s")]
+async fn a_child_that_exits_before_writing_ready_fails_promptly_naming_its_status_and_output() {
+    let directory = probe_directory("ready-wait");
+    let ready = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "echo said-this-first; echo and-this-to-stderr >&2; exit 7"]);
+    let started = Instant::now();
+
+    let unwound = AssertUnwindSafe(supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+        let what = "the child never wrote its pid";
+        until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", stdout), ("stderr", stderr)]).await
+    }))
+    .catch_unwind()
+    .await;
+
+    let message = panic_text(&*unwound.expect_err("a child that never writes ready must fail the wait"));
+    assert!(started.elapsed() < Duration::from_secs(5), "took {:?}: {message}", started.elapsed());
+    assert!(message.contains("exit status: 7"), "{message}");
+    assert!(message.contains("said-this-first"), "{message}");
+    assert!(message.contains("and-this-to-stderr"), "{message}");
+}
+
+#[proxima::test(timeout = "60s")]
+async fn a_line_the_child_writes_is_returned_while_it_keeps_running() {
+    let directory = probe_directory("ready-wait");
+    let ready = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "echo 4242 > \"$READY\"; exec sleep 600"]).env("READY", directory.join("ready"));
+
+    let line = supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+        let what = "the child never wrote its pid";
+        until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", stdout), ("stderr", stderr)]).await
+    })
+    .await;
+
+    assert_eq!(line.trim(), "4242");
 }

@@ -19,6 +19,8 @@ use futures::FutureExt;
 use proxima_core::time::timeout;
 
 mod common;
+#[path = "common/exit_wait.rs"]
+mod exit_wait;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -27,6 +29,7 @@ mod fifo;
 mod supervise;
 
 use common::{FIXTURE_DEADLINE, drain, drain_until, fixture_output};
+use exit_wait::{ExitSource, until_exit};
 use binary::EXIT_WITH_PARENT;
 use supervise::supervised;
 
@@ -142,8 +145,9 @@ async fn warm_fixture(arguments: &str, label: &str) {
     assert_eq!(warm.status.code(), Some(0), "the fixture builds and its unblocked test passes");
 }
 
-async fn armed_pid(announcements: &ChildStream, cargo_val: &Cell<libc::pid_t>) {
-    let (text, fault) = drain_until(announcements, |bytes| bytes.windows(ARMED.len()).any(|window| window == ARMED.as_bytes()) && bytes.ends_with(b"\n")).await;
+async fn armed_pid(announcements: &ChildStream, cargo_val: &Cell<libc::pid_t>, exit: &ExitSource, lifeline: &ChildStream) {
+    let settled = drain_until(announcements, |bytes| bytes.windows(ARMED.len()).any(|window| window == ARMED.as_bytes()) && bytes.ends_with(b"\n"));
+    let (text, fault) = until_exit(settled, "the intermediary never armed", exit, &[("stdout", announcements), ("stderr", lifeline)]).await;
     assert!(fault.is_none(), "the intermediary's stdout failed: {fault:?}");
     let text = String::from_utf8_lossy(&text);
     let line = text.lines().find_map(|line| line.strip_prefix(ARMED)).unwrap_or_else(|| panic!("the intermediary ended before it armed:\n{text}"));
@@ -198,10 +202,11 @@ async fn a_run_waiting_on_a_blocked_test_exits_and_kills_it_when_its_parent_is_s
     command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory);
 
     let cargo_val = Cell::new(0);
-    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, _| {
+    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
         reaping_on_panic(&cargo_val, async {
-            armed_pid(announcements, &cargo_val).await;
-            let line = fifo::first_line(&ready, "the blocked test never reported it was blocked").await;
+            armed_pid(announcements, &cargo_val, exit, lifeline).await;
+            let what = "the blocked test never reported it was blocked";
+            let line = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", announcements), ("stderr", lifeline)]).await;
             let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
             assert_eq!(unsafe { libc::kill(blocked, 0) }, 0, "the blocked test is alive while its parent is");
 
@@ -221,9 +226,9 @@ async fn a_run_blocked_writing_to_an_unread_terminal_exits_when_its_parent_is_si
     let mut command = intermediary_command(PTY, &arguments, PTY);
 
     let cargo_val = Cell::new(0);
-    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, _| {
+    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
         reaping_on_panic(&cargo_val, async {
-            armed_pid(announcements, &cargo_val).await;
+            armed_pid(announcements, &cargo_val, exit, lifeline).await;
 
             kill_intermediary(leader);
 
@@ -246,10 +251,11 @@ async fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finis
     command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory).env(STDOUT_FILE, &stdout_file);
 
     let cargo_val = Cell::new(0);
-    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, _| {
+    supervised(&mut command, FIXTURE_DEADLINE, async |leader, announcements, lifeline, exit| {
         reaping_on_panic(&cargo_val, async {
-            armed_pid(announcements, &cargo_val).await;
-            let line = fifo::first_line(&ready, "the blocked test never reported it was blocked").await;
+            armed_pid(announcements, &cargo_val, exit, lifeline).await;
+            let what = "the blocked test never reported it was blocked";
+            let line = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", announcements), ("stderr", lifeline)]).await;
             let blocked: libc::pid_t = line.trim().parse().expect("the ready fifo carries one pid");
 
             kill_intermediary(leader);
