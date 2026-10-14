@@ -195,28 +195,43 @@ impl<const RERUN: usize> State<'_, RERUN> {
         }
     }
 
-    fn binaries_known(&self) -> bool {
-        self.listed_binaries > 0 || self.binaries_total.is_some_and(|total| total > 0)
+    // a count of tests is shown only once some binary is listed and it holds tests, so `~0` is never printed
+    fn tests_known(&self) -> bool {
+        let (estimate, exact) = self.estimate();
+        self.listed_binaries > 0 && (exact || estimate > 0 || self.done > 0)
     }
 
     fn note_width(&self) -> usize {
         4 + digits(self.listed_binaries) + digits(self.binaries_total.unwrap_or(0)) + 7
     }
 
+    fn searching_label(&self) -> Line<48> {
+        let mut label = Line::<48>::new();
+        match self.binaries_total.filter(|total| *total > 0) {
+            Some(total) => {
+                label.text(b"searching ");
+                label.number(total);
+                label.text(if total == 1 { b" test binary" } else { b" test binaries" });
+            }
+            None => label.text(SEARCHING),
+        }
+        label
+    }
+
     fn searching_room(&self) -> usize {
-        usize::from(self.cols).saturating_sub(1 + BAR_COLUMN + 1 + SEARCHING.len())
+        usize::from(self.cols).saturating_sub(1 + BAR_COLUMN + 1 + self.searching_label().bytes().len())
     }
 
     fn room_for_bar(&self, (with_note, with_word): (bool, bool)) -> usize {
         let avail = usize::from(self.cols).saturating_sub(1);
         let word = if with_word { 6 } else { 0 };
-        let note = if with_note && self.binaries_known() { self.note_width() } else { 0 };
+        let note = if with_note && self.tests_known() { self.note_width() } else { 0 };
         avail.saturating_sub(BAR_COLUMN + 1 + COUNT_COLUMNS + word + 2 + digits(self.failed_count()) + 7 + note)
     }
 
     /// Narrowing order: the listed note goes first, then the word `tests`, then the bars shrink, then names ellipsise.
     fn layout(&self) -> (usize, bool, bool) {
-        if !self.binaries_known() {
+        if !self.tests_known() {
             return (self.searching_room().clamp(BAR_MIN, BAR_COLUMNS), false, false);
         }
         let options = [(true, true), (false, true), (false, false)];
@@ -422,10 +437,10 @@ impl<const RERUN: usize> State<'_, RERUN> {
         let settled = (passed * bar_width * 8).checked_div(total).unwrap_or(0);
         let live = if total == 0 || self.inflight_count == 0 { 0 } else { (self.inflight_count * bar_width).div_ceil(total).max(1) };
         bar(frame, color, bar_width, (settled, live), Tone::Green);
-        if !self.binaries_known() {
+        if !self.tests_known() {
             if self.searching_room() >= BAR_MIN {
                 frame.text(b" ");
-                paint(frame, color, Tone::Dim, SEARCHING);
+                paint(frame, color, Tone::Dim, self.searching_label().bytes());
             }
             frame.text(b"\n");
             return;
@@ -445,7 +460,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
         failures.number(failed);
         failures.text(b" failed");
         paint(frame, color, if failed == 0 { Tone::Dim } else { Tone::Red }, failures.bytes());
-        if with_note && !exact && self.binaries_known() {
+        if with_note && !exact && self.tests_known() {
             let mut note = Line::<64>::new();
             note.text(b"  ~ ");
             note.number(self.listed_binaries);
@@ -482,7 +497,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
     fn idle_row<const FRAME: usize>(&self, color: bool, frame: &mut Line<FRAME>) {
         let mut row = Line::<96>::new();
         match self.binaries_total {
-            Some(total) if self.listed_binaries < total => {
+            Some(total) if self.listed_binaries > 0 && self.listed_binaries < total => {
                 row.text(b"   building ");
                 row.number(self.listed_binaries);
                 row.text(b"/");
@@ -860,6 +875,69 @@ mod tests {
     #[test]
     fn no_binaries_at_forty_columns_shrink_the_bar_and_keep_the_phrase_whole() {
         assert_eq!(predata_row(40, None), " test  ░░░░░░░░░░░░ searching for tests");
+    }
+
+    fn listing_frame(cols: u16, previous: Option<u32>, (binaries, of, tests): (usize, usize, usize)) -> String {
+        let (mut arena, mut ledger, mut inflight) = ([0_u8; 1024], [0_u32; 8], [0_u8; 1024]);
+        let mut state = State::<200>::new(&mut arena, &mut ledger).with_inflight(&mut inflight);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why: None, json: false, at_ms: 0 });
+        if let Some(count) = previous {
+            state.apply(&Event::Previous { wall_ms: 258_230, tests: count });
+        }
+        state.apply(&Event::Resize { cols });
+        state.apply(&Event::Listed { binaries, of: Some(of), tests });
+        state.apply(&Event::Tick { now_ms: 1200 });
+        let mut frame = Line::<4096>::new();
+        state.project_rich(false, &mut frame).expect("the frame holds one redraw");
+        String::from_utf8_lossy(frame.bytes()).into_owned()
+    }
+
+    #[test]
+    fn nineteen_binaries_known_up_front_read_searching_nineteen_test_binaries() {
+        let drawn = listing_frame(80, None, (0, 19, 0));
+
+        assert_eq!(test_row(&drawn), format!(" test  {} searching 19 test binaries", "░".repeat(30)));
+    }
+
+    #[test]
+    fn one_binary_known_up_front_reads_in_the_singular() {
+        let drawn = listing_frame(80, None, (0, 1, 0));
+
+        assert_eq!(test_row(&drawn), format!(" test  {} searching 1 test binary", "░".repeat(30)));
+    }
+
+    #[test]
+    fn three_hundred_twenty_two_binaries_with_none_listed_and_no_previous_run_print_no_zero_estimate() {
+        let drawn = listing_frame(190, None, (0, 322, 0));
+
+        assert_eq!(test_row(&drawn), format!(" test  {} searching 322 test binaries", "░".repeat(30)));
+        assert!(!drawn.contains("~0"), "{drawn}");
+        assert!(!drawn.contains("building 0/322"), "{drawn}");
+        assert!(drawn.contains("waiting for the first test binary"), "{drawn}");
+    }
+
+    #[test]
+    fn a_previous_run_does_not_bring_the_count_back_before_the_first_binary_is_listed() {
+        let drawn = listing_frame(190, Some(383), (0, 322, 0));
+
+        assert_eq!(test_row(&drawn), format!(" test  {} searching 322 test binaries", "░".repeat(30)));
+    }
+
+    #[test]
+    fn listed_binaries_that_hold_no_tests_yet_keep_the_searching_row_with_the_same_total() {
+        let drawn = listing_frame(190, None, (2, 322, 0));
+
+        assert_eq!(test_row(&drawn), format!(" test  {} searching 322 test binaries", "░".repeat(30)));
+        assert!(drawn.contains("building 2/322 test binaries"), "{drawn}");
+    }
+
+    #[test]
+    fn once_tests_are_listed_with_no_previous_run_the_estimate_is_the_listed_count_and_the_note_keeps_the_same_total() {
+        let drawn = listing_frame(190, None, (4, 322, 57));
+        let row = test_row(&drawn);
+
+        assert!(row.contains(" 0/~57 tests  0 failed  ~ 4/322 listed"), "{row}");
+        assert!(!row.contains("~0"), "{row}");
     }
 
     #[test]
