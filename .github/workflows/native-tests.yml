@@ -31,6 +31,16 @@ jobs:
             integration_test_floor: 345
             integration_test_args: "--test-threads=1"
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_VAL_TEST_FIXTURE_DEADLINE: "420"
+      CARGO_VAL_TEST_SYNC_DEADLINE: "420"
+      CARGO_VAL_TEST_FIFO_DEADLINE: "420"
+      CARGO_VAL_TEST_WAIT_LINE_DEADLINE: "420"
+      CARGO_VAL_TEST_INTERRUPT_GRACE: "90"
+      CARGO_VAL_TEST_GONE_DEADLINE: "90"
+      CARGO_VAL_TEST_TASKKILL_DEADLINE: "60"
+      CARGO_VAL_TEST_HELP_DEADLINE: "60"
+      CARGO_VAL_TEST_BOUNDED_WAIT: "10"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

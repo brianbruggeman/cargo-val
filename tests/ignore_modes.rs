@@ -1,14 +1,16 @@
 use std::path::PathBuf;
-use std::time::Duration;
 
 mod common;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
 
 use cargo_val::render::Outcome;
-use common::{fixture_output, output_within};
+use common::output_within;
+use fixture::fixture_output;
 
 #[cfg(unix)]
 #[path = "common/supervise.rs"]
@@ -16,7 +18,6 @@ mod supervise;
 
 
 // the help screen is printed by the already-built binary with no build and no wait; 30 s stays inside the 60 s body timeout
-const HELP_DEADLINE: Duration = Duration::from_secs(30);
 
 struct Run {
     status: Option<i32>,
@@ -320,7 +321,8 @@ mod bin_gate_hold {
     use proxima_primitives::pipe::Pipe;
 
     use super::{Run, TEST_NAME, manifest, target_directory};
-    use crate::common::{ChildStream, FIXTURE_DEADLINE, drain, drain_until};
+    use crate::common::{ChildStream, drain, drain_until};
+    use crate::fixture::fixture_deadline;
     use crate::supervise::supervised;
 
     const FIFO_HELD_UNITS: usize = 2;
@@ -370,7 +372,7 @@ mod bin_gate_hold {
     }
 
     pub async fn cold_run(label: &str, environment: &[(&str, &str)], release: Release) -> Run {
-        cold_run_within(label, environment, release, FIXTURE_DEADLINE).await
+        cold_run_within(label, environment, release, fixture_deadline()).await
     }
 
     pub async fn cold_run_within(label: &str, environment: &[(&str, &str)], release: Release, deadline: Duration) -> Run {
@@ -465,13 +467,13 @@ async fn a_run_whose_bin_fails_before_any_hold_ends_on_its_own_exit_within_secon
         "unreadable-hold",
         &[("CARGO_VAL_BIN_GATE_HOLD", "/nonexistent/bin-hold")],
         bin_gate_hold::Release::AfterTestArtifactLinks,
-        Duration::from_secs(30),
+        fixture::fixture_deadline(),
     ).await;
     let context = format!("{}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(3), "{context}");
     assert!(result.stderr.contains("cargo test build failed"), "{context}");
-    assert!(started.elapsed() < Duration::from_secs(30), "the run took {:?}: {context}", started.elapsed());
+    assert!(started.elapsed() < core::time::Duration::from_secs(30), "the run took {:?}: {context}", started.elapsed());
 }
 
 #[cfg(unix)]
@@ -489,7 +491,7 @@ async fn the_same_fixture_fails_with_the_bin_gate_off() {
 
 #[proxima::test]
 async fn help_prints_the_banner_file_and_documents_the_new_options() {
-    let output = output_within(binary::command().arg("--help"), HELP_DEADLINE).await.unwrap_or_else(|failure| panic!("{failure}"));
+    let output = output_within(binary::command().arg("--help"), common::settings::bound("HELP_DEADLINE"), "HELP_DEADLINE").await.unwrap_or_else(|failure| panic!("{failure}"));
     let banner = include_str!("fixtures/help-banner.txt");
 
     assert_eq!(output.status.code(), Some(0));

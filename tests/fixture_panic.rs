@@ -16,6 +16,8 @@ use futures::FutureExt;
 mod common;
 #[path = "common/exit_wait.rs"]
 mod exit_wait;
+#[path = "common/fixture.rs"]
+mod fixture;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fifo.rs"]
@@ -23,7 +25,7 @@ mod fifo;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{FIXTURE_DEADLINE, fixture_output};
+use fixture::{fixture_deadline, fixture_output};
 use exit_wait::until_exit;
 use supervise::supervised;
 
@@ -99,7 +101,7 @@ async fn a_panicking_supervised_test_still_kills_its_group() {
     let mut command = blocked_test_command(Some(&directory));
     let mut leader: libc::pid_t = 0;
     let mut blocked: libc::pid_t = 0;
-    let unwound = AssertUnwindSafe(supervised(&mut command, FIXTURE_DEADLINE, async |leader_pid, stdout, stderr, exit| {
+    let unwound = AssertUnwindSafe(supervised(&mut command, fixture_deadline(), async |leader_pid, stdout, stderr, exit| {
         leader = libc::pid_t::try_from(leader_pid).expect("a pid fits pid_t");
         let what = "the blocked test never reported it was blocked";
         let text = until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", stdout), ("stderr", stderr)]).await;
@@ -135,7 +137,7 @@ async fn a_child_that_exits_before_writing_ready_fails_promptly_naming_its_statu
     command.args(["-c", "echo said-this-first; echo and-this-to-stderr >&2; exit 7"]);
     let started = Instant::now();
 
-    let unwound = AssertUnwindSafe(supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+    let unwound = AssertUnwindSafe(supervised(&mut command, fixture_deadline(), async |_, stdout, stderr, exit| {
         let what = "the child never wrote its pid";
         until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", stdout), ("stderr", stderr)]).await
     }))
@@ -156,7 +158,7 @@ async fn a_line_the_child_writes_is_returned_while_it_keeps_running() {
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "echo 4242 > \"$READY\"; exec sleep 600"]).env("READY", directory.join("ready"));
 
-    let line = supervised(&mut command, FIXTURE_DEADLINE, async |_, stdout, stderr, exit| {
+    let line = supervised(&mut command, fixture_deadline(), async |_, stdout, stderr, exit| {
         let what = "the child never wrote its pid";
         until_exit(fifo::first_line(&ready, what), what, exit, &[("stdout", stdout), ("stderr", stderr)]).await
     })

@@ -12,13 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
-#[path = "../tests/common/group.rs"]
-mod group;
-#[path = "../tests/common/output.rs"]
-mod output;
+#[path = "../tests/common/mod.rs"]
+mod common;
+#[path = "../tests/common/block_on.rs"]
+mod block_on;
 
 const PLANTED: usize = 8;
-const ARM_DEADLINE: Duration = Duration::from_secs(3600);
+fn arm_deadline() -> Duration {
+    common::settings::bound("EXAMPLE_DEADLINE")
+}
 const ARMS: [Arm; 7] = [
     Arm::Test,
     Arm::Nextest,
@@ -200,7 +202,7 @@ fn build(context: &Context) -> Result<(), String> {
         .arg(&context.target)
         .current_dir(&context.fixture)
         .env_remove("CARGO_TARGET_DIR");
-    let output = output::output_bounded(&mut build, ARM_DEADLINE)?;
+    let output = block_on::output_blocking(build, arm_deadline(), "EXAMPLE_DEADLINE")?;
     if output.status.success() {
         return Ok(());
     }
@@ -210,7 +212,7 @@ fn build(context: &Context) -> Result<(), String> {
 fn nextest_available() -> bool {
     let mut probe = Command::new("cargo");
     probe.args(["nextest", "--version"]);
-    output::output_bounded(&mut probe, group::SYNC_DEADLINE).is_ok_and(|output| output.status.success())
+    block_on::output_blocking(probe, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE").is_ok_and(|output| output.status.success())
 }
 
 fn build_command(arm: Arm, context: &Context) -> Command {
@@ -249,9 +251,9 @@ fn build_command(arm: Arm, context: &Context) -> Command {
 }
 
 fn run_arm(arm: Arm, context: &Context) -> Result<Observation, String> {
-    let mut command = build_command(arm, context);
+    let command = build_command(arm, context);
     let start = Instant::now();
-    let output = output::output_bounded(&mut command, ARM_DEADLINE).map_err(|failure| format!("{}: {failure}", arm.label()))?;
+    let output = block_on::output_blocking(command, arm_deadline(), "EXAMPLE_DEADLINE").map_err(|failure| format!("{}: {failure}", arm.label()))?;
     let wall = start.elapsed();
     let text = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     Ok(Observation { wall, status: output.status.code(), outcomes: parse(arm, &text) })

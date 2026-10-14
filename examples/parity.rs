@@ -3,12 +3,13 @@
 //! Build the binary first: `cargo build --release --bin cargo-val`, then `cargo run --release --example parity`.
 
 use std::collections::BTreeMap;
-use std::io::{Read, pipe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-#[path = "../tests/common/group.rs"]
-mod group;
+#[path = "../tests/common/mod.rs"]
+mod common;
+#[path = "../tests/common/block_on.rs"]
+mod block_on;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/workspace/Cargo.toml");
 const LIBRARY: &str = "lib";
@@ -70,30 +71,13 @@ fn observe(binary: &Path, target: &Path) -> Result<(), String> {
 }
 
 fn run(mut command: Command, target: &Path) -> Result<String, String> {
-    let (mut reader, writer) = pipe().map_err(|error| format!("pipe: {error}"))?;
-    group::lead_group(&mut command);
-    let mut child = command
-        .args(["--manifest-path", FIXTURE, "--target-dir"])
-        .arg(target)
-        .stdout(writer.try_clone().map_err(|error| format!("pipe clone: {error}"))?)
-        .stderr(writer)
-        .spawn()
-        .map_err(|error| format!("spawn: {error}"))?;
-    drop(command);
-    let (cancel, fired) = group::watchdog(child.id(), group::SYNC_DEADLINE);
-    let mut text = String::new();
-    let read = reader.read_to_string(&mut text);
-    let waited = child.wait();
-    drop(cancel);
-    if fired.join().unwrap_or(false) {
-        return Err(format!("outlived {:?} and its process group was killed: {text}", group::SYNC_DEADLINE));
-    }
-    read.map_err(|error| format!("read: {error}"))?;
-    let status = waited.map_err(|error| format!("wait: {error}"))?;
-    if status.success() {
+    command.args(["--manifest-path", FIXTURE, "--target-dir"]).arg(target);
+    let output = block_on::output_blocking(command, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE")?;
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if output.status.success() {
         return Ok(text);
     }
-    Err(format!("exit {status}: {text}"))
+    Err(format!("exit {}: {text}", output.status))
 }
 
 fn strip_escapes(line: &str) -> String {
