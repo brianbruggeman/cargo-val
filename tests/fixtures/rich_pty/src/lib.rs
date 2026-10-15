@@ -67,7 +67,7 @@ mod tests {
     }
 
     // a pipe holds far less than this, so the write finishes only if the reader keeps draining
-    fn flood_after_release(release: &Path) {
+    fn flood_after_release(_release: &Path) {
         const FLOOD_BYTES: usize = 256 * 1024;
         if std::env::var_os("CARGO_VAL_FIXTURE_FLOOD").is_none() {
             return;
