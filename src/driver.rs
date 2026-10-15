@@ -569,14 +569,22 @@ fn runtime_settings(
         }
     }
     let source = BorrowedSettings::new(&pairs[..count]);
+    settings_from(&source, harness, parser)
+}
+
+fn settings_from(
+    source: &BorrowedSettings<'_>,
+    harness: &HarnessRequest<'_>,
+    parser: &CliParser<'_>,
+) -> Result<Settings, RunError> {
     let process = PROCESS
         .build_default(Some(crate::build_defaults::PROCESS))
-        .from_settings(&source, parser.process())
+        .from_settings(source, parser.process())
         .resolve::<ProcessSetting>()
         .map_err(RunError::Setting)?
         .0
         .mode(cfg!(windows));
-    let (output, output_why) = resolve_output(&source, parser)?;
+    let (output, output_why) = resolve_output(source, parser)?;
     if parser.timeline() && output.is_agent_like() {
         return Err(RunError::Timeline);
     }    // a shard child holds many tests, so shard mode keeps about twice as many children as cores in flight
@@ -592,25 +600,25 @@ fn runtime_settings(
         }
         ProcessMode::Test => crate::build_defaults::JOBS,
     };
-    let jobs = ThreadSources::from_settings(&source, harness.test_threads, default_jobs)
+    let jobs = ThreadSources::from_settings(source, harness.test_threads, default_jobs)
         .resolve(LIVE_CAPACITY)
         .map_err(RunError::TestThreads)?
         .value;
-    let max_fail = FailFastSources::from_settings(&source, parser.fail_fast())
+    let max_fail = FailFastSources::from_settings(source, parser.fail_fast())
         .resolve()
         .map_err(RunError::FailFast)?
         .max_fail;
     let no_tests = NO_TESTS
-        .from_settings(&source, parser.no_tests())
+        .from_settings(source, parser.no_tests())
         .resolve::<NoTestsPolicy>()
         .map_err(RunError::Setting)?
         .0;
     let color = output == OutputMode::Rich
-        && resolve_color(&source, crate::build_defaults::COLOR).map_err(|_| RunError::Settings)?;
-    let mouse = (output == OutputMode::Rich).then(|| resolve_mouse(&source)).transpose()?;
-    let ignore = harness.ignore_mode(&source).map_err(RunError::Setting)?;
+        && resolve_color(source, crate::build_defaults::COLOR).map_err(|_| RunError::Settings)?;
+    let mouse = (output == OutputMode::Rich).then(|| resolve_mouse(source)).transpose()?;
+    let ignore = harness.ignore_mode(source).map_err(RunError::Setting)?;
     let filterset = FILTERSET
-        .from_settings(&source, parser.filterset())
+        .from_settings(source, parser.filterset())
         .supplied()
         .map(|(_, text)| {
             Filterset::parse(text).map_err(|error| {
@@ -620,7 +628,7 @@ fn runtime_settings(
         })
         .transpose()?;
     let editor_url = crate::hyperlink::EDITOR_URL
-        .from_settings(&source, None)
+        .from_settings(source, None)
         .supplied()
         .map(|(_, text)| core::str::from_utf8(text).map(String::from).map_err(|_| RunError::Settings))
         .transpose()?;
@@ -634,14 +642,14 @@ fn runtime_settings(
         Some("debug") => true,
         Some(_) => return Err(RunError::Settings),
     };
-    let exit_with_parent = resolve_exit_with_parent(&source, parser)?;
+    let exit_with_parent = resolve_exit_with_parent(source, parser)?;
     QUIT_LOG.store(debug, Ordering::Relaxed);
     Ok(Settings {
         bin_gate,
         debug,
         ignore,
         filterset,
-        link_template: links_enabled(output, color, true).then(|| String::from_utf8_lossy(editor_template(editor_url.as_deref(), &source)).into_owned()),
+        link_template: links_enabled(output, color, true).then(|| String::from_utf8_lossy(editor_template(editor_url.as_deref(), source)).into_owned()),
         editor: crate::editor_launch::editor_command(source.get("VISUAL"), source.get("EDITOR")),
         probe_ms: source.get("CARGO_VAL_EDITOR_PROBE_MS").map(|text| text.parse::<u64>().map_err(|_| RunError::Settings)).transpose()?.unwrap_or(crate::editor_launch::PROBE_DEADLINE_MS),
         jobs,
@@ -653,8 +661,8 @@ fn runtime_settings(
         color,
         mouse,
         exit_with_parent,
-        test_limit_ms: TEST_TIMEOUT.from_settings(&source, parser.test_timeout()).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
-        heartbeat_ms: crate::config::heartbeat_millis(&source, parser.heartbeat()).map_err(RunError::Setting)?,
+        test_limit_ms: TEST_TIMEOUT.from_settings(source, parser.test_timeout()).resolve::<TestTimeout>().map_err(RunError::Setting)?.0.limit_ms(),
+        heartbeat_ms: crate::config::heartbeat_millis(source, parser.heartbeat()).map_err(RunError::Setting)?,
         source_root: manifest_directory(parser.manifest_path()),
     })
 }
@@ -4815,7 +4823,8 @@ fn interrupted(signals: &SignalPipe) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ERROR_LINE_CAPACITY, Environment, ErrorLine, LaunchCause, Located, OutcomeError, OutputMode, RunError, RunSummary, admit_diagnostic, is_failure_restatement, is_status_line, last_run, last_run_record, persist_last_run, runtime_settings, validated_harness, whole_lines_len};
+    use super::{ERROR_LINE_CAPACITY, ErrorLine, LaunchCause, Located, OutcomeError, OutputMode, RunError, RunSummary, admit_diagnostic, is_failure_restatement, is_status_line, last_run, last_run_record, persist_last_run, settings_from, validated_harness, whole_lines_len};
+    use conflaguration::BorrowedSettings;
     use std::collections::HashSet;
     use std::string::String;
     use std::vec::Vec;
@@ -4881,15 +4890,11 @@ mod tests {
     const RICH_WITH_COLOUR: [(&str, Option<&str>); 3] = [("CARGO_VAL_OUTPUT", Some("rich")), ("CARGO_VAL_COLOR", Some("true")), ("NO_COLOR", None)];
 
     fn link_template_under(extra: &[(&str, Option<&str>)]) -> Option<String> {
-        let pairs: Vec<(&str, Option<&str>)> = RICH_WITH_COLOUR.iter().chain(extra).copied().collect();
-        temp_env::with_vars(pairs, || {
-            let parser = CliParser::new();
-            let harness = validated_harness(&parser).expect("an empty command line is a valid harness request");
-            let environment = unsafe { Environment::current() };
-            runtime_settings(&environment, &harness, &parser).expect("settings resolve from the process environment").link_template
-        })
+        let pairs: Vec<(&str, &str)> = RICH_WITH_COLOUR.iter().chain(extra).filter_map(|(key, value)| value.map(|text| (*key, text))).collect();
+        let parser = CliParser::new();
+        let harness = validated_harness(&parser).expect("an empty command line is a valid harness request");
+        settings_from(&BorrowedSettings::new(&pairs), &harness, &parser).expect("settings resolve from the supplied pairs").link_template
     }
-
 
     fn mouse_under(value: Option<&str>) -> Result<bool, RunError> {
         let pairs = [("CARGO_VAL_MOUSE", value.unwrap_or(""))];
@@ -4925,12 +4930,10 @@ mod tests {
 
     #[proxima::test]
     async fn plain_and_uncoloured_runs_resolve_no_link_template() {
-        let plain = temp_env::with_vars([("CARGO_VAL_OUTPUT", Some("plain")), ("VISUAL", Some("code"))], || {
-            let parser = CliParser::new();
-            let harness = validated_harness(&parser).expect("an empty command line is a valid harness request");
-            let environment = unsafe { Environment::current() };
-            runtime_settings(&environment, &harness, &parser).expect("settings resolve").link_template
-        });
+        let parser = CliParser::new();
+        let harness = validated_harness(&parser).expect("an empty command line is a valid harness request");
+        let pairs = [("CARGO_VAL_OUTPUT", "plain"), ("VISUAL", "code")];
+        let plain = settings_from(&BorrowedSettings::new(&pairs), &harness, &parser).expect("settings resolve").link_template;
 
         assert_eq!(plain, None);
         assert_eq!(link_template_under(&[("NO_COLOR", Some("1")), ("VISUAL", Some("code"))]), None);
