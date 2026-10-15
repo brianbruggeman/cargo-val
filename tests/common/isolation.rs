@@ -11,7 +11,7 @@ const LINKED_ENTRIES: [&str; 4] = ["registry", "git", "config.toml", "config"];
 
 /// A fresh run's `CARGO_TARGET_DIR` (first) and `CARGO_HOME` (second), for a builder chain that takes `.envs(..)`; the target is `environment(label)[0].1` for a test that reads the run store or last-run record under it.
 ///
-/// The run directory is named `label`, the pid and the first free run number, claimed by `create_dir` so two threads of one process never take the same one. Its CARGO_HOME is private, so `.package-cache` and its lock are too, and its registry and git caches are links to the ambient ones so nothing is downloaded.
+/// The run directory is named `label`, the pid and the first free run number, claimed by `create_dir` so two threads of one process never take the same one. Its `CARGO_HOME` is private, so `.package-cache` and its lock are too, and its registry and git caches are links to the ambient ones so nothing is downloaded.
 pub fn environment(label: &str) -> [(&'static str, PathBuf); 2] {
     let parent = layout::runs_directory();
     fs::create_dir_all(&parent).unwrap_or_else(|error| panic!("{} is not creatable: {error}", parent.display()));
