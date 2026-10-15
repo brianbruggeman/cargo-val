@@ -23,6 +23,12 @@ use proxima_primitives::pipe::Pipe;
 mod binary;
 #[path = "common/drain.rs"]
 mod drain;
+#[path = "common/lead.rs"]
+mod lead;
+#[path = "common/lock_holder.rs"]
+mod lock_holder;
+#[path = "common/wait.rs"]
+mod wait;
 #[path = "common/group.rs"]
 mod group;
 #[path = "common/pty.rs"]
@@ -1926,4 +1932,37 @@ async fn with_stdin_piped_the_live_frame_shows_no_key_row_and_no_review_hint() {
     assert!(frames.len() >= 2, "{} live frames drawn", frames.len());
     assert!(!screen.contains("q cancel") && !screen.contains("f review") && !screen.contains("s timeline"), "keys are not live, so no key hint is shown:\n{}", shown(&screen));
     assert_eq!(status.code(), Some(1), "the failing run exits 1: {status}");
+}
+
+#[proxima::test(timeout = "310s")]
+async fn a_held_build_lock_shows_in_the_state_row_and_writes_nothing_above_the_frame() {
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-lock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("scratch directory is creatable");
+    let target_run = format!("held-{}", std::process::id());
+    let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-rich_pty-{target_run}"));
+    let mut holder = lock_holder::hold_build_lock(&scratch, &shared);
+    let cargo_home = scratch.join("cargo-home");
+    let environment = [("NO_COLOR", "1"), ("CARGO_VAL_TARGET_DIR", "shared"), ("CARGO_HOME", cargo_home.to_str().expect("utf-8 path"))];
+
+    let (output, status) = run_targeting("rich_pty", "rich", &environment, (true, &target_run), async |master, _keys, release, _leader| {
+        let (mut seen, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("waiting for cargo's")).await;
+        assert!(holder.still_building(), "the lock was held while the frame showed the wait");
+        holder.release().await;
+        let (released, _) = drain::drain_until(master, |bytes| live_frames(&without_sgr(&String::from_utf8_lossy(bytes))).iter().any(|frame| released_frame(frame))).await;
+        File::create(&release).expect("the release file is creatable");
+        let (rest, _) = drain::drain_until(master, |_| false).await;
+        seen.extend_from_slice(&released);
+        seen.extend_from_slice(&rest);
+        String::from_utf8_lossy(&seen).into_owned()
+    })
+    .await;
+
+    assert!(status.success(), "cargo-val exited {status}");
+    assert!(output.contains("waiting for cargo's"), "no frame showed the wait:\n{}", shown(&output));
+    for scrollback in ["cargo-val: waiting for", "Blocking waiting for file lock"] {
+        assert!(!output.contains(scrollback), "`{scrollback}` was written above the frame:\n{}", shown(&output));
+    }
+    assert_frames_replace_the_last(&output, usize::from(pty::COLUMNS));
+    let _ = std::fs::remove_dir_all(&scratch);
 }
