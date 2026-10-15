@@ -43,7 +43,9 @@ fn record(log: &str) -> std::io::Result<()> {
     writeln!(file, "canonical={}", flags.is_some_and(|flags| flags & ICANON != 0))?;
     writeln!(file, "echo={}", flags.is_some_and(|flags| flags & ECHO != 0))?;
     writeln!(file, "pgid={}", unsafe { getpgrp() })?;
-    writeln!(file, "foreground={}", unsafe { tcgetpgrp(0) == getpgrp() })
+    let (terminal, group) = unsafe { (tcgetpgrp(0), getpgrp()) };
+    writeln!(file, "terminal={terminal}")?;
+    writeln!(file, "foreground={}", terminal == group)
 }
 
 #[cfg(target_os = "macos")]
