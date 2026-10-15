@@ -217,6 +217,7 @@ where
 {
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-release-{fixture}-{mode}-{run}"));
+    let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the release directory is creatable");
     let release = directory.join("release");
     let Pty { master, slave } = open_pty_at(columns);
@@ -1039,6 +1040,7 @@ async fn with_visual_code_the_rich_build_error_location_line_is_an_osc8_link_to_
 
 fn rerun_scratch(label: &str) -> PathBuf {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-rerun-{label}-{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the rerun scratch directory is creatable");
     directory
 }
@@ -1453,6 +1455,7 @@ fn fake_editor_named(name: &str) -> PathBuf {
 fn editor_log() -> PathBuf {
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("editor-log-{run}"));
+    let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the log directory is creatable");
     directory.join("recorded")
 }
