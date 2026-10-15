@@ -992,7 +992,26 @@ fn is_status_line(line: &[u8]) -> bool {
     })
 }
 
-// a rich run shows cargo's progress in the frame, so status lines are consumed; anything else erases the frame and prints
+std::thread_local! {
+    // a rich run writes nothing above its frame, so cargo's own warnings wait here for the closing block
+    static HELD_WARNINGS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+fn hold_warnings(bytes: &[u8]) {
+    HELD_WARNINGS.with(|held| held.borrow_mut().extend_from_slice(bytes));
+}
+
+// prints what a rich run held, once, after the frame is gone and before the closing block
+fn release_warnings(render: &Render<'_>) -> Result<(), RunError> {
+    let held = HELD_WARNINGS.with(|held| core::mem::take(&mut *held.borrow_mut()));
+    if held.is_empty() {
+        return Ok(());
+    }
+    erase_live(render)?;
+    write_fd(2, &held)
+}
+
+// a rich run shows cargo's progress in the frame, so status lines are consumed; anything else is held for the closing block
 fn summarize_status_lines(bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
     let mut rest = bytes;
     while !rest.is_empty() {
@@ -1000,8 +1019,7 @@ fn summarize_status_lines(bytes: &[u8], render: &Render<'_>) -> Result<(), RunEr
         let (line, after) = rest.split_at(length);
         rest = after;
         if !is_status_line(line) {
-            erase_live(render)?;
-            write_fd(2, line)?;
+            hold_warnings(line);
             continue;
         }
         if let Some(at) = memchr::memmem::find(line, LOCK_WAIT) {
@@ -2601,6 +2619,15 @@ fn count_error(errors: &mut u16, level: &str, run: &ListingRun<'_>) -> Result<()
     emit_live(run.render(), &Event::Failing { errors: *errors })
 }
 
+// the review's warnings count: one per distinct compiler warning, shown nowhere else until the closing block
+fn count_warning(level: &str, rendered: &str, run: &ListingRun<'_>) -> Result<(), RunError> {
+    if level != "warning" {
+        return Ok(());
+    }
+    let headline = rendered.lines().next().unwrap_or_default();
+    emit_live(run.render(), &Event::Warned { id: (&b"build"[..], headline.as_bytes()), what: b"compiler warning" })
+}
+
 fn keep_reported(held: &mut Vec<u8>, (settings, root): (&Settings, &Path), (level, rendered): (&str, &str), span: Option<(&str, u32, u32, u32, Option<&str>)>) {
     if level == "error" && settings.output == OutputMode::Rich {
         keep_rich_error(held, settings, root, rendered, span);
@@ -3052,6 +3079,7 @@ impl CargoDriver<'_> {
                     if admit_diagnostic(&mut self.seen_diagnostics, self.output.is_agent_like(), (level, rendered), position) {
                         keep_reported(&mut self.diagnostics, (run.settings, &self.workspace_root), (level, rendered), span);
                         count_error(&mut self.errors, level, run)?;
+                        count_warning(level, rendered, run)?;
                     }
                 }
                 CargoSourceStep::BuildFinished { success } => self.build_finished(success, (run, ledger, lanes))?,
@@ -3110,6 +3138,9 @@ impl CargoDriver<'_> {
 
     fn report_diagnostics(&mut self, success: bool, render: &Render<'_>) -> Result<(), RunError> {
         let held = core::mem::take(&mut self.diagnostics);
+        if success && self.output == OutputMode::Rich {
+            hold_warnings(&held);
+        }
         if !success && !held.is_empty() {
             erase_live(render)?;
             write_fd(2, &held)?;
@@ -4690,6 +4721,7 @@ fn emit_finished(
     not_run: usize,
     (started_millis, manifest, exit): (u64, Option<&[u8]>, i32),
 ) -> Result<(), RunError> {
+    release_warnings(render)?;
     emit(
         render,
         &Event::Finished {

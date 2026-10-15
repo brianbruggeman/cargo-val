@@ -1993,6 +1993,31 @@ mod tests {
         assert!(state.unstored() > 0, "the ledger overflowed during the loop, so the overflow path was measured too");
     }
 
+    #[test]
+    fn ten_thousand_compiler_warnings_count_and_redraw_the_live_frame_with_zero_allocations() {
+        let mut arena = [0_u8; 4096];
+        let mut ledger = [0_u32; 8];
+        let mut state = State::<8192>::new(&mut arena, &mut ledger);
+        let mut frame = Line::<32_768>::new();
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
+        let mut written = 0_usize;
+
+        let ((), allocations) = measure_allocations(|| {
+            for round in 0..10_000_u64 {
+                for event in [Event::Warned { id: (&b"build"[..], &b"warning: unused variable: `unused_scale`"[..]), what: b"compiler warning" }, Event::Tick { now_ms: round }] {
+                    frame.clear();
+                    state.apply(&event);
+                    state.project_live(&event, &mut frame).expect("the live view accepts the event");
+                    written += frame.bytes().len();
+                }
+            }
+        });
+
+        assert!(written > 0, "the ticks drew frames, so a zero is not an empty loop");
+        assert_eq!(allocations, 0);
+        assert_eq!(state.warnings, 10_000, "every warning was counted");
+    }
+
     fn failing_run<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32]) -> State<'storage, 8192> {
         let mut state = State::<8192>::new(arena, ledger);
         state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 2, github: false, why: None, json: false, at_ms: 0 });
