@@ -1911,8 +1911,8 @@ impl ListingRun<'_> {
             self.signals.raise_interrupt();
         } else if leaving {
             self.signals.stop_children();
-            let doc = self.interrupt_doc_tests();
-            quit_step(b"children-stopped", usize::from(doc == DocAtTrip::InterruptedBeforeExecuting));
+            self.stop_doc_tests();
+            quit_step(b"children-stopped", 0);
         }
         emit(self.render(), &Event::Key(key))?;
         if leaving {
@@ -2219,6 +2219,14 @@ impl ListingRun<'_> {
             .get()
             .is_some_and(|slot| ledger.sessions().get(slot).is_some());
         ledger.sessions().len() - usize::from(frozen)
+    }
+
+    fn stop_doc_tests(&self) {
+        if let Ok(mut doc) = self.doc.try_borrow_mut()
+            && let Some(doc) = doc.as_mut()
+        {
+            doc.stop_for_quit();
+        }
     }
 
     fn interrupt_doc_tests(&self) -> DocAtTrip {
@@ -4004,8 +4012,7 @@ fn finish_run(
     build_reported: bool,
 ) -> Result<RunSummary, RunError> {
     let cargo_failed = cargo_exit_code.is_some_and(|code| code != 0);
-    let quit_stopped_cargo = cargo_failed && run.root.is_fired();
-    let stopped = interrupted(run.signals).err().or_else(|| quit_stopped_cargo.then_some(RunError::Interrupted(QUIT_SIGNAL)));
+    let stopped = interrupted(run.signals).err().or_else(|| (cargo_failed && run.root.is_fired()).then_some(RunError::Interrupted(QUIT_SIGNAL)));
     if let Some(error) = stopped {
         agent_exit(run, error.exit_code())?;
         close_interrupted(parser, run, error.exit_code())?;
@@ -4286,6 +4293,14 @@ impl DocRun {
         self.stderr_bytes[self.stderr_length..self.stderr_length + taken]
             .copy_from_slice(&bytes[..taken]);
         self.stderr_length += taken;
+    }
+
+    // a fail-fast trip leaves executing doc tests to finish, but a quit ends them: the run is being cancelled, not reported
+    fn stop_for_quit(&mut self) {
+        if self.exit_code.is_none() {
+            interrupt_group(self.process_id);
+            self.phase = DocPhase::Interrupted;
+        }
     }
 
     fn state_for_trip(&mut self) -> DocAtTrip {
