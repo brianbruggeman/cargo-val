@@ -28,6 +28,9 @@ static WRITE_END: AtomicI32 = AtomicI32::new(-1);
 // every live child this process spawned: a pid, or a negated pgid for a child that leads its own group; 0 means free, RESERVED means a spawn is about to fill it
 static TARGETS: [AtomicI32; TARGET_CAPACITY] = [const { AtomicI32::new(0) }; TARGET_CAPACITY];
 
+// the signal a slot's child takes in place of the one a walk sends, or 0 for the walked signal: an editor ends on a hangup, because an interrupt is a key to it
+static STOPS: [AtomicI32; TARGET_CAPACITY] = [const { AtomicI32::new(0) }; TARGET_CAPACITY];
+
 /// A self-pipe whose read end a prime gate watches and whose write end the handler feeds.
 pub struct SignalPipe {
     read_end: c_int,
@@ -74,6 +77,25 @@ pub fn track_group(target: u32) -> Result<(), c_int> {
     track(-target.cast_signed())
 }
 
+/// Makes every later signal walk reach the process group a child leads with a hangup instead of the walked signal, filling a slot [`reserve_slot`] claimed.
+///
+/// # Errors
+///
+/// Returns `EINVAL` when no slot was reserved for the group.
+pub fn track_group_hangup(target: u32) -> Result<(), c_int> {
+    TARGETS
+        .iter()
+        .zip(&STOPS)
+        .any(|(slot, stop)| {
+            slot.load(Ordering::SeqCst) == RESERVED && {
+                stop.store(libc::SIGHUP, Ordering::SeqCst);
+                slot.compare_exchange(RESERVED, -target.cast_signed(), Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            }
+        })
+        .then_some(())
+        .ok_or(libc::EINVAL)
+}
+
 /// Stops forwarding to the child with process id `target`; call it as soon as the child is reaped so a recycled pid is never signalled.
 pub fn release_child(target: u32) {
     release(target.cast_signed());
@@ -95,7 +117,13 @@ fn track(target: libc::pid_t) -> Result<(), c_int> {
 }
 
 fn release(target: libc::pid_t) {
-    replace(target, 0);
+    TARGETS.iter().zip(&STOPS).any(|(slot, stop)| {
+        let released = slot.compare_exchange(target, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok();
+        if released {
+            stop.store(0, Ordering::SeqCst);
+        }
+        released
+    });
 }
 
 fn replace(from: libc::pid_t, to: libc::pid_t) -> bool {
@@ -262,10 +290,16 @@ impl SignalPipe {
 pub fn signal_children(signal: c_int) {
     TARGETS
         .iter()
-        .map(|target| target.load(Ordering::SeqCst))
-        .filter(|target| !matches!(*target, 0 | RESERVED))
-        .for_each(|target| {
-            unsafe { libc::kill(target, signal) };
+        .zip(&STOPS)
+        .map(|(target, stop)| (target.load(Ordering::SeqCst), stop.load(Ordering::SeqCst)))
+        .filter(|(target, _)| !matches!(*target, 0 | RESERVED))
+        .for_each(|(target, stop)| {
+            if stop == 0 || signal == libc::SIGKILL {
+                unsafe { libc::kill(target, signal) };
+            } else {
+                unsafe { libc::kill(target, stop) };
+                unsafe { libc::kill(target, libc::SIGCONT) };
+            }
         });
 }
 
