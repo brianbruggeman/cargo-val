@@ -1197,8 +1197,10 @@ pub(crate) fn keep_editor_running() {
 fn abandon_editor() {
     EDITOR_RESERVED.store(false, Ordering::SeqCst);
     let group = EDITOR_GROUP.swap(0, Ordering::SeqCst);
+    quit_step(b"editor-abandon", group as usize);
     if group != 0 {
         crate::editor_launch::abandon(group);
+        quit_step(b"editor-reclaimed", usize::try_from(crate::editor_launch::foreground_group()).unwrap_or(usize::MAX));
     }
 }
 
@@ -1357,6 +1359,7 @@ fn deliver<'bytes>(
             let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
             if let Some(started) = watch.rerun {
                 let millis = monotonic_millis().saturating_sub(started);
+                quit_step(&[b"rerun-settled ".as_slice(), &report[..name_length.saturating_sub(1)]].concat(), usize::from(outcome == TerminalOutcome::Passed));
                 let rerun = if outcome == TerminalOutcome::Passed { Standing::Passed { millis } } else { Standing::Failed { millis } };
                 if outcome == TerminalOutcome::Failed {
                     reporting.run.emit_failure(id, watch.streams.as_ref(), watch.status.map_or(Exit::Code(1), Exit::from_status))?;
@@ -2862,6 +2865,7 @@ impl CargoDriver<'_> {
         let state = run.render().1.borrow();
         let wanted: Vec<(Vec<u8>, Vec<u8>)> = state.rerunning().map(|(binary, name)| (binary.to_vec(), name.to_vec())).collect();
         drop(state);
+        quit_step(b"rerun-wanted", wanted.len());
         for (binary, name) in &wanted {
             let id = (binary.as_slice(), name.as_slice());
             if ledger.sessions().len() >= run.settings.jobs {
@@ -2894,7 +2898,9 @@ impl CargoDriver<'_> {
         let name = core::str::from_utf8(id.1).map_err(|_| RunError::Arguments)?;
         let scan = ListingScan { run, lanes, executable: artifact.executable, target, environment: &*environment, layout: &layout };
         let intent = ExactTestIntent::new(ExecutablePath::Borrowed(artifact.executable), name);
-        spawn_exact(&scan, ledger, watches, intent, Some(monotonic_millis())).map(|_| ())
+        let spawned = spawn_exact(&scan, ledger, watches, intent, Some(monotonic_millis())).map(|_| ());
+        quit_step(&[b"rerun-spawned ".as_slice(), id.1].concat(), usize::from(spawned.is_ok()));
+        spawned
     }
 
     pub(crate) fn finished(&self, run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
