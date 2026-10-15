@@ -314,9 +314,14 @@ pub fn columns(descriptor: i32) -> Option<u16> {
     filled.then(|| u16::try_from(width).ok()).flatten().filter(|columns| *columns != 0)
 }
 
-/// Turns on virtual-terminal processing so `WriteConsoleW` interprets escape sequences; `false` when the console refuses, and then no sequence may be written.
+/// Turns on virtual-terminal processing so `WriteConsoleW` interprets escape sequences; `false` when a console refuses, and then no sequence may be written.
+///
+/// A pipe or file has no console to configure and carries the escape bytes as they are, so it reports `true` like a unix terminal.
 #[must_use]
 pub fn enable_virtual_terminal(descriptor: i32) -> bool {
+    if !is_terminal(descriptor) {
+        return true;
+    }
     let Some(handle) = console_handle(descriptor) else {
         return false;
     };
