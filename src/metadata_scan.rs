@@ -498,7 +498,7 @@ impl<'a> MetadataScan<'a> {
         let named = |long: &[u8], kind: u8| kinds & kind != 0 && option_values(arguments, long, b"").any(|value| value == name);
         let by_kind = |flag: &[u8], mask: u8| tested && kinds & mask != 0 && has_flag(arguments, flag);
         by_kind(b"--lib", LIB)
-            || by_kind(b"--bins", BIN)
+            || (kinds & BIN != 0 && has_flag(arguments, b"--bins"))
             || by_kind(b"--tests", u8::MAX)
             || by_kind(b"--all-targets", u8::MAX)
             || by_kind(b"--examples", EXAMPLE)
@@ -989,5 +989,40 @@ mod tests {
     async fn a_wrong_expected_artifact_count_is_not_matched_by_the_prediction() {
         assert_ne!(predicted(&[]), Some(BUILD_ETA_DEFAULT.lines().count() - 1));
         assert_ne!(predicted(&[b"--workspace"]), Some(BUILD_ETA_DEFAULT.lines().count()));
+    }
+
+    const BUILD_ETA_LIB: &str = include_str!("../tests/fixtures/build_eta_artifacts_lib.txt");
+    const BUILD_ETA_BINS: &str = include_str!("../tests/fixtures/build_eta_artifacts_bins.txt");
+    const BUILD_ETA_TEST: &str = include_str!("../tests/fixtures/build_eta_artifacts_test.txt");
+    const BUILD_ETA_ROUTE_LIB_BINS: &str = include_str!("../tests/fixtures/build_eta_artifacts_route_lib_bins.txt");
+
+    #[proxima::test]
+    async fn each_forwarded_target_selector_predicts_the_artifacts_cargo_listed_for_it() {
+        let table: [(&str, &[&[u8]], &str); 4] = [
+            ("--lib", &[b"--lib"], BUILD_ETA_LIB),
+            ("--bins", &[b"--bins"], BUILD_ETA_BINS),
+            ("--test end_to_end", &[b"--test", b"end_to_end"], BUILD_ETA_TEST),
+            ("-p eta_route --lib --bins", &[b"-p", b"eta_route", b"--lib", b"--bins"], BUILD_ETA_ROUTE_LIB_BINS),
+        ];
+        for (label, arguments, listed) in table {
+            assert_eq!(predicted(arguments), Some(listed.lines().count()), "selection {label}");
+        }
+    }
+
+    const DEMO_ARTIFACTS: &str = include_str!("../tests/fixtures/demo_artifacts.txt");
+
+    #[proxima::test]
+    async fn the_demo_gap_is_nineteen_units_cargo_compiled_twice_less_three_resolve_nodes_it_never_built() {
+        let mut seen = std::collections::HashSet::new();
+        let repeated = DEMO_ARTIFACTS.lines().filter(|line| !seen.insert(line.split(" features=").next().unwrap_or(line))).count();
+        let mut scan = Box::new(MetadataScan::new());
+        for chunk in DEMO_METADATA.as_bytes().chunks(65_536) {
+            scan.feed(chunk).expect("document fits");
+        }
+        let predicted_units = scan.finish().bins.predicted_units().expect("the demo has a resolve graph");
+
+        assert_eq!(DEMO_ARTIFACTS.lines().count(), 328);
+        assert_eq!(repeated, 19);
+        assert_eq!(predicted_units + repeated - 3, DEMO_ARTIFACTS.lines().count());
     }
 }
