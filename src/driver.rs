@@ -902,6 +902,13 @@ fn announce_lock_wait(watch: &mut LockWatch, bytes: &[u8], render: &Render<'_>) 
     let Some(kind) = watch.observe(bytes) else {
         return Ok(());
     };
+    if render.0 == OutputMode::Rich {
+        let lock = match kind {
+            LockKind::PackageCache => &b"package cache"[..],
+            LockKind::BuildDirectory | LockKind::Other => watch.which(),
+        };
+        return emit(render, &Event::Waiting { lock });
+    }
     let mut line = Line::<LOCK_LINE_CAPACITY>::new();
     line.text(b"cargo-val: waiting for ");
     match kind {
@@ -920,7 +927,6 @@ fn announce_lock_wait(watch: &mut LockWatch, bytes: &[u8], render: &Render<'_>) 
         }
     }
     line.text(b"\n");
-    erase_live(render)?;
     write_fd(2, line.bytes())
 }
 
@@ -1575,6 +1581,8 @@ pub(crate) struct DocObservation<'run> {
     ignored: Cell<usize>,
     blocks: Cell<usize>,
     empty_blocks: Cell<usize>,
+    failure_lines: RefCell<Vec<u8>>,
+    first_failed: RefCell<Vec<u8>>,
 }
 
 impl<'run> DocObservation<'run> {
@@ -1586,6 +1594,8 @@ impl<'run> DocObservation<'run> {
             ignored: Cell::new(0),
             blocks: Cell::new(0),
             empty_blocks: Cell::new(0),
+            failure_lines: RefCell::new(Vec::new()),
+            first_failed: RefCell::new(Vec::new()),
         }
     }
 
@@ -3582,7 +3592,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
             root,
     });
     let mut launch_doc = doc_wanted.then_some(|| {
-        let mut doc = spawn_doc_tests(parser, (settings.ignore, settings.output), inherited, directories.as_ref().map(|chosen| &chosen.doc), &render)?;
+        let mut doc = spawn_doc_tests(parser, (settings.ignore, settings.output), inherited, directories.as_ref().map(|chosen| &chosen.doc))?;
         if directories.is_none() {
             doc.lock_watch.set_directory(&shared_directory);
         }
@@ -4110,7 +4120,6 @@ fn spawn_doc_tests(
     (ignore, output): (IgnoreMode, OutputMode),
     environment: &[&[u8]],
     directory: Option<&ChildDirectory>,
-    render: &Render<'_>,
 ) -> Result<Box<DocRun>, RunError> {
     let mut arguments: Vec<&[u8]> = Vec::from([b"test".as_slice(), b"--doc".as_slice()]);
     if let Some(directory) = directory {
@@ -4150,8 +4159,7 @@ fn spawn_doc_tests(
     })?;
     let process_id = child.process_id();
     track_leader(process_id)?;
-    if child.lower_priority().is_err() {
-        erase_live(render)?;
+    if child.lower_priority().is_err() && output != OutputMode::Rich {
         write_fd(2, b"cargo-val: could not lower the doc test priority\n")?;
     }
     let mut lock_watch = LockWatch::new();
@@ -4259,11 +4267,28 @@ impl DocRun {
         if implicit && contains(stderr, NO_LIBRARY_MESSAGE) {
             return Ok(DocFinish::NoLibrary);
         }
-        if !stderr.is_empty() {
-            erase_live(render)?;
+        if render.0 != OutputMode::Rich {
+            write_fd(2, stderr)?;
         }
-        write_fd(2, stderr)?;
         Ok(DocFinish::Ran)
+    }
+
+    // a rich run keeps the doc cargo's output as a failure the review and the closing block show, never scrollback
+    fn keep_for_review(&self, observation: &DocObservation<'_>) -> Result<(), RunError> {
+        let stderr = &self.stderr_bytes[..self.stderr_length];
+        let lines = observation.failure_lines.borrow();
+        if stderr.is_empty() && lines.is_empty() {
+            return Ok(());
+        }
+        let mut name = observation.first_failed.borrow().clone();
+        if name.is_empty() {
+            name.extend_from_slice(b"doc tests");
+            let id = (&b"doc-tests"[..], name.as_slice());
+            emit(observation.render, &Event::Settled { id, outcome: Outcome::Failed, at_ms: None, solo: false })?;
+        }
+        let id = (&b"doc-tests"[..], name.as_slice());
+        let exit = Exit::Code(self.exit_code.unwrap_or(1));
+        emit(observation.render, &Event::Captured { id, stdout: (lines.as_slice(), 0), stderr: (stderr, 0), exit, excerpt: Err(b"") })
     }
 }
 
@@ -4292,8 +4317,13 @@ fn record_doc_event(
             Ok(())
         }
         DocEvent::Result { name, outcome, .. } => report_doc_result(name, outcome, observation),
+        DocEvent::FailureLine(line) if observation.render.0 == OutputMode::Rich => {
+            let mut kept = observation.failure_lines.borrow_mut();
+            kept.extend_from_slice(line);
+            kept.push(b'\n');
+            Ok(())
+        }
         DocEvent::FailureLine(line) => {
-            erase_live(observation.render)?;
             write_fd(2, line)?;
             write_fd(2, b"\n")
         }
@@ -4312,6 +4342,9 @@ fn report_doc_result(
         DocOutcome::Ignored => (TerminalOutcome::Ignored, &observation.ignored),
     };
     counter.set(counter.get() + 1);
+    if outcome == DocOutcome::Failed && observation.first_failed.borrow().is_empty() {
+        observation.first_failed.borrow_mut().extend_from_slice(name);
+    }
     let id = (&b"doc-tests"[..], name);
     emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false })
 }
@@ -4350,6 +4383,9 @@ fn close_doc_tests(
     observation: &DocObservation<'_>,
 ) -> Result<DocTotals, RunError> {
     let finish = doc.conclude(implicit, observation.render)?;
+    if finish == DocFinish::Ran && observation.render.0 == OutputMode::Rich && (doc.exit_code != Some(0) || observation.failed.get() != 0) {
+        doc.keep_for_review(observation)?;
+    }
     let failed = observation.failed.get();
     if finish == DocFinish::Ran && doc.exit_code != Some(0) && failed == 0 {
         return Err(RunError::DocTests);
@@ -4538,7 +4574,6 @@ async fn run_doc_only<'run>(
         (settings.ignore, settings.output),
         environment,
         directories.as_ref().map(|chosen| &chosen.doc),
-        render,
     )?;
     if directories.is_none()
         && let Some(shared) = facts.as_deref().and_then(MetadataFacts::target_directory)
