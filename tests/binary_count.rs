@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::process::Output;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fixture.rs"]
@@ -10,10 +12,6 @@ mod fixture;
 use fixture::fixture_output;
 
 const NOTHING: &str = "no_test_carries_this_name";
-
-fn target_directory(name: &str) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from).join(name)
-}
 
 async fn run(manifest: &str, flags: &[&str], target: &str) -> Output {
     let mut command = binary::command();
@@ -31,7 +29,7 @@ async fn run(manifest: &str, flags: &[&str], target: &str) -> Output {
         .env_remove("CARGO_VAL_IGNORED")
         .env("CARGO_VAL_LOG", "debug")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory(target));
+        .envs(isolation::environment(target));
     fixture_output(&mut command).await
 }
 

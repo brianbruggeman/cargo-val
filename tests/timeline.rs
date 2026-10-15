@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::process::Output;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -19,11 +21,11 @@ fn manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
 }
 
-async fn run(environment: &[(&str, &str)], arguments: &[&str]) -> Output {
-    run_fixture("cli_run", environment, arguments).await
+async fn run(isolated: &[(&str, PathBuf); 2], environment: &[(&str, &str)], arguments: &[&str]) -> Output {
+    run_fixture(isolated, "cli_run", environment, arguments).await
 }
 
-async fn run_fixture(fixture: &str, environment: &[(&str, &str)], arguments: &[&str]) -> Output {
+async fn run_fixture(isolated: &[(&str, PathBuf); 2], fixture: &str, environment: &[(&str, &str)], arguments: &[&str]) -> Output {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -39,7 +41,7 @@ async fn run_fixture(fixture: &str, environment: &[(&str, &str)], arguments: &[&
         .env_remove("CARGO_VAL_COLOR")
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("timeline-fixture-target"))
+        .envs(isolated.clone())
         .envs(environment.iter().copied());
     fixture_output(&mut command).await
 }
@@ -103,7 +105,7 @@ fn summary_line_index(text: &str) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn a_green_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time() {
-    let output = run(&[], &["--output", "plain", "--timeline"]).await;
+    let output = run(&isolation::environment("timeline"), &[], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(0), "{text}");
@@ -115,7 +117,7 @@ async fn a_green_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time(
 
 #[proxima::test(timeout = "310s")]
 async fn a_failing_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time() {
-    let output = run(&[("CARGO_VAL_C52D_FAIL", "1"), ("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
+    let output = run(&isolation::environment("timeline"), &[("CARGO_VAL_C52D_FAIL", "1"), ("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(1), "{text}");
@@ -127,7 +129,7 @@ async fn a_failing_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_tim
 #[proxima::test(timeout = "310s")]
 async fn timeline_with_agent_or_json_output_is_an_invocation_error_that_runs_nothing() {
     for mode in ["agent", "json"] {
-        let output = run(&[], &["--output", mode, "--timeline"]).await;
+        let output = run(&isolation::environment("timeline"), &[], &["--output", mode, "--timeline"]).await;
 
         assert_eq!(output.status.code(), Some(2), "{mode}");
         assert!(String::from_utf8_lossy(&output.stderr).contains(REFUSAL), "{mode}: {}", String::from_utf8_lossy(&output.stderr));
@@ -137,7 +139,7 @@ async fn timeline_with_agent_or_json_output_is_an_invocation_error_that_runs_not
 
 #[proxima::test(timeout = "310s")]
 async fn a_no_color_plain_run_draws_the_timeline_with_no_escape_byte_and_no_stipple() {
-    let output = run(&[("NO_COLOR", "1")], &["--output", "plain", "--timeline"]).await;
+    let output = run(&isolation::environment("timeline"), &[("NO_COLOR", "1")], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert!(text.contains("where the time went"), "{text}");
@@ -147,8 +149,10 @@ async fn a_no_color_plain_run_draws_the_timeline_with_no_escape_byte_and_no_stip
 
 #[proxima::test(timeout = "310s")]
 async fn a_no_color_rich_run_with_a_failure_draws_the_plot_the_colour_run_draws_once_its_sgr_is_stripped() {
-    let uncoloured = run(&[("NO_COLOR", "1"), ("CARGO_VAL_C52D_FAIL", "1")], &["--output", "rich", "--timeline"]).await;
-    let coloured = run(&[("CARGO_VAL_COLOR", "true"), ("CARGO_VAL_C52D_FAIL", "1")], &["--output", "rich", "--timeline"]).await;
+    let isolated = isolation::environment("timeline-pair");
+    run(&isolated, &[("CARGO_VAL_C52D_FAIL", "1")], &["--output", "plain"]).await;
+    let uncoloured = run(&isolated, &[("NO_COLOR", "1"), ("CARGO_VAL_C52D_FAIL", "1")], &["--output", "rich", "--timeline"]).await;
+    let coloured = run(&isolated, &[("CARGO_VAL_COLOR", "true"), ("CARGO_VAL_C52D_FAIL", "1")], &["--output", "rich", "--timeline"]).await;
     let (uncoloured_text, coloured_text) = (stdout_of(&uncoloured), strip_sgr(&stdout_of(&coloured)));
 
     assert_eq!(uncoloured.status.code(), Some(1), "{uncoloured_text}");
@@ -164,7 +168,7 @@ async fn a_no_color_rich_run_with_a_failure_draws_the_plot_the_colour_run_draws_
 
 #[proxima::test(timeout = "310s")]
 async fn a_no_color_rich_run_prints_the_timeline_after_the_receipt_with_no_colour_and_no_stipple() {
-    let output = run(&[("NO_COLOR", "1"), ("CARGO_VAL_C52D_FAIL", "1")], &["--output", "rich", "--timeline"]).await;
+    let output = run(&isolation::environment("timeline"), &[("NO_COLOR", "1"), ("CARGO_VAL_C52D_FAIL", "1")], &["--output", "rich", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(colour_sequences(&output.stdout), 0, "NO_COLOR suppresses every SGR sequence");
@@ -199,7 +203,7 @@ fn peak_busy(sentence: &str) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn one_job_with_an_ignored_test_and_two_normal_tests_never_has_two_busy_at_once() {
-    let output = run(&[("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
+    let output = run(&isolation::environment("timeline"), &[("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(0), "{text}");
@@ -209,7 +213,7 @@ async fn one_job_with_an_ignored_test_and_two_normal_tests_never_has_two_busy_at
 
 #[proxima::test(timeout = "310s")]
 async fn two_jobs_with_four_tests_never_have_three_busy_at_once() {
-    let output = run_fixture("jobs_bound", &[("CARGO_VAL_JOBS", "2"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
+    let output = run_fixture(&isolation::environment("timeline-jobs"), "jobs_bound", &[("CARGO_VAL_JOBS", "2"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(0), "{text}");

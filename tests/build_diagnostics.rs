@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -14,13 +16,6 @@ struct Run {
     status: Option<i32>,
     stderr: Vec<u8>,
     text: String,
-}
-
-fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
-        PathBuf::from,
-    )
 }
 
 fn manifest() -> PathBuf {
@@ -41,7 +36,7 @@ async fn run_with(arguments: &[&str]) -> Run {
         .env("NO_COLOR", "1")
         .env("CARGO_TERM_COLOR", "always")
         .env_remove("CARGO_VAL_COLOR")
-        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-fixture"));
+        .envs(isolation::environment("build-diagnostics"));
     let output = fixture_output(&mut command).await;
     Run {
         status: output.status.code(),
@@ -115,7 +110,7 @@ async fn coloured_diagnostics_carry_sgr_bytes_and_cargos_restating_summary_is_go
         .env_remove("NO_COLOR")
         .env("CARGO_VAL_COLOR", "true")
         .env("CARGO_VAL_OUTPUT", "rich")
-        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-coloured-fixture"));
+        .envs(isolation::environment("build-diagnostics"));
     let output = fixture_output(&mut command).await;
     let text = String::from_utf8_lossy(&output.stderr);
 
@@ -186,7 +181,7 @@ async fn plain_and_agent_build_error_output_is_byte_identical_to_the_committed_c
         .env("NO_COLOR", "1")
         .env("VISUAL", "code")
         .env("CARGO_TERM_COLOR", "always")
-        .env("CARGO_TARGET_DIR", target_directory().join(format!("build-diagnostics-golden-{mode}")));
+        .envs(isolation::environment("build-diagnostics"));
 
     let output = fixture_output(&mut command).await;
 
@@ -224,7 +219,7 @@ async fn a_span_outside_the_workspace_shows_rustcs_diagnostic_with_no_excerpt_an
         .env_remove("CI")
         .env_remove("CARGO_VAL_COLOR")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-outside-fixture"));
+        .envs(isolation::environment("build-diagnostics"));
 
     let output = fixture_output(&mut command).await;
 
@@ -256,7 +251,7 @@ async fn a_failing_member_below_the_workspace_root_shows_its_excerpt_with_the_la
         .env_remove("CI")
         .env_remove("CARGO_VAL_COLOR")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-nested-fixture"));
+        .envs(isolation::environment("build-diagnostics"));
 
     let output = fixture_output(&mut command).await;
 
@@ -283,7 +278,7 @@ async fn an_error_in_both_the_lib_and_the_lib_test_target_prints_one_diagnostic_
         .env_remove("CI")
         .env_remove("CARGO_VAL_COLOR")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join(format!("build-diagnostics-dedupe-{mode}")));
+        .envs(isolation::environment("build-diagnostics"));
 
     let output = fixture_output(&mut command).await;
 
