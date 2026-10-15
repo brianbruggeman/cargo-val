@@ -8,6 +8,8 @@ use std::process::{Command, Output};
 use memchr::memmem;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -18,11 +20,7 @@ use fixture::fixture_output;
 const MEBIBYTE: usize = 1_048_576;
 const STDERR_HEADER: &str = "---- stderr ----\n";
 
-fn target_directory(label: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("output-views-{label}"))
-}
-
-fn command(label: &str, mode: &str, bytes: usize) -> Command {
+fn command(environment: &[(&str, PathBuf); 2], mode: &str, bytes: usize) -> Command {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -39,7 +37,7 @@ fn command(label: &str, mode: &str, bytes: usize) -> Command {
         .env("CARGO_VAL_OUTPUT", mode)
         .env("CARGO_VAL_C52D_FAIL", "1")
         .env("CARGO_VAL_VIEWS_BYTES", bytes.to_string())
-        .env("CARGO_TARGET_DIR", target_directory(label));
+        .envs(environment.clone());
     command
 }
 
@@ -53,8 +51,8 @@ fn digest(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-fn read_only_run_directory(label: &str) {
-    let run = target_directory(label).join("cargo-val").join("run");
+fn read_only_run_directory(environment: &[(&str, PathBuf); 2]) {
+    let run = environment[0].1.clone().join("cargo-val").join("run");
     let _ = std::fs::remove_dir_all(&run);
     std::fs::create_dir_all(&run).expect("run directory is creatable");
     let mut permissions = std::fs::metadata(&run).expect("run directory exists").permissions();
@@ -62,8 +60,8 @@ fn read_only_run_directory(label: &str) {
     std::fs::set_permissions(&run, permissions).expect("run directory becomes read-only");
 }
 
-fn writable_again(label: &str) {
-    let run = target_directory(label).join("cargo-val").join("run");
+fn writable_again(environment: &[(&str, PathBuf); 2]) {
+    let run = environment[0].1.clone().join("cargo-val").join("run");
     if let Ok(metadata) = std::fs::metadata(&run) {
         let mut permissions = metadata.permissions();
         permissions.set_mode(0o755);
@@ -79,7 +77,7 @@ fn number_after(text: &str, marker: &str) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn plain_output_prints_every_byte_of_both_streams_of_a_failure_from_the_run_store() {
-    let output: Output = fixture_output(&mut command("full", "plain", 2 * MEBIBYTE)).await;
+    let output: Output = fixture_output(&mut command(&isolation::environment("output-views-full"), "plain", 2 * MEBIBYTE)).await;
 
     let expected = pattern(2 * MEBIBYTE);
     let header = memmem::find(&output.stdout, STDERR_HEADER.as_bytes()).expect("the stderr header is printed");
@@ -93,11 +91,12 @@ async fn plain_output_prints_every_byte_of_both_streams_of_a_failure_from_the_ru
 
 #[proxima::test(timeout = "310s")]
 async fn an_unwritable_run_store_degrades_to_the_resident_tail_and_counts_what_it_dropped() {
-    read_only_run_directory("memory");
+    let environment = isolation::environment("output-views-memory");
+    read_only_run_directory(&environment);
 
-    let output = fixture_output(&mut command("memory", "plain", MEBIBYTE)).await;
+    let output = fixture_output(&mut command(&environment, "plain", MEBIBYTE)).await;
 
-    writable_again("memory");
+    writable_again(&environment);
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     let opened = text.find(STDERR_HEADER).expect("the stderr header is printed") + STDERR_HEADER.len();
     let dropped = number_after(&text[opened..], "[output truncated: ");
@@ -111,7 +110,7 @@ async fn an_unwritable_run_store_degrades_to_the_resident_tail_and_counts_what_i
 
 #[proxima::test(timeout = "310s")]
 async fn agent_output_for_a_one_mebibyte_failure_is_the_pinpoint_alone_with_no_raw_output_block() {
-    let output = fixture_output(&mut command("agent", "agent", MEBIBYTE)).await;
+    let output = fixture_output(&mut command(&isolation::environment("output-views-agent"), "agent", MEBIBYTE)).await;
 
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(text.contains("requested fixture failure"), "the parsed message is kept:\n{text}");
@@ -121,7 +120,7 @@ async fn agent_output_for_a_one_mebibyte_failure_is_the_pinpoint_alone_with_no_r
 
 #[proxima::test(timeout = "310s")]
 async fn a_panic_site_in_stdout_survives_a_one_mebibyte_stderr_storm_with_its_excerpt() {
-    let output = fixture_output(&mut command("storm", "agent", MEBIBYTE)).await;
+    let output = fixture_output(&mut command(&isolation::environment("output-views-storm"), "agent", MEBIBYTE)).await;
 
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(text.contains("PANIC   src/lib.rs:12:13") || text.contains("src/lib.rs:12:13"), "the site is kept:\n{}", &text[..text.len().min(2000)]);

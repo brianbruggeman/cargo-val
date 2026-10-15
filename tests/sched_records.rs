@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use cargo_val::build_defaults::SCHED_RECORD_BYTES;
@@ -6,6 +6,8 @@ use cargo_val::sched_binary::{Absent, RECORD_BYTES, decode};
 use cargo_val::sched_file::{Loaded, load};
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -15,17 +17,11 @@ use fixture::fixture_output;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sched/Cargo.toml");
 
-fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
-        .join("sched-fixture")
-}
-
 async fn built_test_binary() -> String {
     let output = fixture_output(
         Command::new("cargo")
-            .args(["test", "--lib", "--no-run", "--message-format=json", "--manifest-path", FIXTURE, "--target-dir"])
-            .arg(target_directory()),
+            .args(["test", "--lib", "--no-run", "--message-format=json", "--manifest-path", FIXTURE])
+            .envs(isolation::environment("sched-fixture")),
     )
     .await;
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

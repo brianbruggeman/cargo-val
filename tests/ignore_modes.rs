@@ -3,6 +3,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -54,13 +56,6 @@ impl Run {
     }
 }
 
-fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
-        PathBuf::from,
-    )
-}
-
 fn manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -84,7 +79,7 @@ async fn run(manifest_path: &std::path::Path, arguments: &[&str], environment: &
         .env_remove("CARGO_VAL_FAIL_FAST")
         .env_remove("CARGO_VAL_MAX_FAIL")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join("ignore-modes-fixture"));
+        .envs(isolation::environment("ignore-modes"));
     for (key, value) in environment {
         command.env(key, value);
     }
@@ -310,7 +305,10 @@ mod bin_gate_hold {
     use futures::future::join3;
     use proxima_primitives::pipe::Pipe;
 
-    use super::{Run, TEST_NAME, manifest, target_directory};
+    use std::path::PathBuf;
+
+    use super::{Run, TEST_NAME, manifest};
+    use crate::isolation;
     use crate::common::{ChildStream, drain, drain_until};
     use crate::fixture::fixture_deadline;
     use crate::supervise::supervised;
@@ -364,7 +362,7 @@ mod bin_gate_hold {
 
     // the fixture has no dependencies, so a private CARGO_HOME costs nothing and takes it off the package-cache lock every other cargo on the box takes
     // RUSTC_WRAPPER closes the cargo pipes a rustc inherits when cargo forks it between pipe() and CLOEXEC; left open, the rustc held on the fifo keeps a sibling's EOF from arriving and cargo never sees the bin artifact
-    pub fn command(target: &Path, fifo: &Path, wrapper: &Path) -> Command {
+    pub fn command(environment: &[(&str, PathBuf); 2], fifo: &Path, wrapper: &Path) -> Command {
         let mut command = crate::binary::command();
         command
             .env("CARGO_VAL_OUTPUT", "plain")
@@ -373,8 +371,7 @@ mod bin_gate_hold {
             .env_remove("CARGO_VAL_BIN_GATE")
             .env("NO_COLOR", "1")
             .env("CARGO_VAL_LOG", "debug")
-            .env("CARGO_TARGET_DIR", target)
-            .env("CARGO_HOME", target.join("cargo-home"))
+            .envs(environment.clone())
             .env("CARGO_VAL_TARGET_DIR", "shared")
             .env("CARGO_VAL_BIN_GATE_HOLD", fifo)
             .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS.to_string())
@@ -391,13 +388,13 @@ mod bin_gate_hold {
     }
 
     pub async fn cold_run_within(label: &str, environment: &[(&str, &str)], release: Release, deadline: Duration) -> Run {
-        let target = target_directory().join(format!("bin-gate-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&target);
+        let isolated = isolation::environment(&format!("bin-gate-{label}"));
+        let target = isolated[0].1.clone();
         std::fs::create_dir_all(&target).expect("target directory is creatable");
         let fifo = target.join("bin-hold");
         make_fifo(&fifo);
-        let wrapper = crate::fd_scrub::built();
-        let mut command = command(&target, &fifo, &wrapper);
+        let wrapper = crate::fd_scrub::built().await;
+        let mut command = command(&isolated, &fifo, &wrapper);
         for (key, value) in environment {
             command.env(key, value);
         }
@@ -422,13 +419,13 @@ mod bin_gate_hold {
 #[cfg(unix)]
 #[test]
 fn the_bin_gate_fixture_builds_with_a_private_cargo_home_and_target_dir() {
-    let target = Path::new("/scratch/bin-gate-on-4242");
-    let command = bin_gate_hold::command(target, &target.join("bin-hold"), Path::new("/scratch/fd-scrub-rustc"));
+    let environment = [("CARGO_TARGET_DIR", PathBuf::from("/scratch/bin-gate-on-4242/target")), ("CARGO_HOME", PathBuf::from("/scratch/bin-gate-on-4242/home"))];
+    let command = bin_gate_hold::command(&environment, Path::new("/scratch/bin-gate-on-4242/bin-hold"), Path::new("/scratch/fd-scrub-rustc"));
 
     let variable = |name: &str| command.get_envs().find(|(key, _)| *key == name).and_then(|(_, value)| value).map(Path::new);
 
-    assert_eq!(variable("CARGO_TARGET_DIR"), Some(target));
-    assert_eq!(variable("CARGO_HOME"), Some(target.join("cargo-home").as_path()));
+    assert_eq!(variable("CARGO_TARGET_DIR"), Some(environment[0].1.as_path()));
+    assert_eq!(variable("CARGO_HOME"), Some(environment[1].1.as_path()));
 }
 
 #[cfg(unix)]
@@ -593,29 +590,29 @@ mod fd_scrub {
     use std::process::Command;
     use std::sync::OnceLock;
 
-    use super::{manifest, target_directory};
+    use super::{fixture_output, manifest};
+    use crate::isolation;
 
     const JOBSERVER_PAIR_FLAG: &str = "--jobserver-auth";
 
-    // one build per test process into a pid-named target dir: a second cargo uplifting the same bin removes and relinks it, which a concurrent exec of the first sees as ENOENT; get_or_init blocks the other threads of this process until the build is done
-    pub fn built() -> PathBuf {
+    // one build per test process is not shared: each caller builds into its own isolated target, because a second cargo uplifting the same bin removes and relinks it, which a concurrent exec of the first sees as ENOENT
+    pub async fn built() -> PathBuf {
         static HELPER: OnceLock<PathBuf> = OnceLock::new();
-        HELPER
-            .get_or_init(|| {
-                let target = target_directory().join(format!("fd-scrub-rustc-{}", std::process::id()));
-                let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-                    .args(["build", "--locked", "--offline", "--manifest-path"])
-                    .arg(manifest("fd_scrub_rustc"))
-                    .env("CARGO_TARGET_DIR", &target)
-                    .env_remove("RUSTC_WRAPPER")
-                    .env_remove("MAKEFLAGS")
-                    .env_remove("CARGO_MAKEFLAGS")
-                    .output()
-                    .expect("cargo runs to build the fd_scrub_rustc fixture");
-                assert!(output.status.success(), "building the fd_scrub_rustc fixture: {}", String::from_utf8_lossy(&output.stderr));
-                target.join("debug/fd_scrub_rustc")
-            })
-            .clone()
+        if let Some(program) = HELPER.get() {
+            return program.clone();
+        }
+        let environment = isolation::environment("fd-scrub-rustc");
+        let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        build
+            .args(["build", "--locked", "--offline", "--manifest-path"])
+            .arg(manifest("fd_scrub_rustc"))
+            .envs(environment.clone())
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("MAKEFLAGS")
+            .env_remove("CARGO_MAKEFLAGS");
+        let output = fixture_output(&mut build).await;
+        assert!(output.status.success(), "building the fd_scrub_rustc fixture: {}", String::from_utf8_lossy(&output.stderr));
+        HELPER.get_or_init(|| environment[0].1.join("debug/fd_scrub_rustc")).clone()
     }
 
     // pipes made with pipe(2) and no fcntl carry no CLOEXEC, the state cargo's rustc children hold between pipe() and the flag being set
@@ -642,7 +639,7 @@ mod fd_scrub {
 
     #[proxima::test(timeout = "310s")]
     async fn an_unscrubbed_child_inherits_every_pipe_made_without_cloexec() {
-        let program = built();
+        let program = built().await;
         let [extra_read, extra_write] = leaked_pipe();
 
         let listed = listed_fds(&program, false, None);
@@ -652,7 +649,7 @@ mod fd_scrub {
 
     #[proxima::test(timeout = "310s")]
     async fn the_scrub_drops_the_leaked_pipe_and_keeps_both_jobserver_fds_named_in_cargo_makeflags() {
-        let program = built();
+        let program = built().await;
         let [extra_read, extra_write] = leaked_pipe();
         let [jobserver_read, jobserver_write] = leaked_pipe();
         let flags = format!("-j {JOBSERVER_PAIR_FLAG}={jobserver_read},{jobserver_write}");
@@ -665,7 +662,7 @@ mod fd_scrub {
 
     #[proxima::test(timeout = "310s")]
     async fn the_scrub_leaves_only_stdio_without_jobserver_flags_or_with_the_fifo_form() {
-        let program = built();
+        let program = built().await;
         let [_, _] = leaked_pipe();
         let cases: [Option<String>; 2] = [None, Some("-j --jobserver-auth=fifo:/tmp/GMfifo1234".to_owned())];
 
