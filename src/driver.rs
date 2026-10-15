@@ -3160,7 +3160,7 @@ impl CargoDriver<'_> {
 
     fn report_diagnostics(&mut self, success: bool, render: &Render<'_>) -> Result<(), RunError> {
         let held = core::mem::take(&mut self.diagnostics);
-        if success && self.output == OutputMode::Rich {
+        if success {
             hold_warnings(render, &held);
         }
         if !success && !held.is_empty() {
