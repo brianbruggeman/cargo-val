@@ -1,0 +1,10 @@
+[package]
+name = "fd_scrub_rustc"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "fd_scrub_rustc"
+path = "src/main.rs"
+
+[dependencies]

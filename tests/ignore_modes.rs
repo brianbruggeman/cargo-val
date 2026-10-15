@@ -377,7 +377,7 @@ mod bin_gate_hold {
 
     // the fixture has no dependencies, so a private CARGO_HOME costs nothing and takes it off the package-cache lock every other cargo on the box takes
     // RUSTC_WRAPPER closes the cargo pipes a rustc inherits when cargo forks it between pipe() and CLOEXEC; left open, the rustc held on the fifo keeps a sibling's EOF from arriving and cargo never sees the bin artifact
-    pub fn command(target: &Path, fifo: &Path) -> Command {
+    pub fn command(target: &Path, fifo: &Path, wrapper: &Path) -> Command {
         let mut command = crate::binary::command();
         command
             .env("CARGO_VAL_OUTPUT", "plain")
@@ -391,7 +391,7 @@ mod bin_gate_hold {
             .env("CARGO_VAL_TARGET_DIR", "shared")
             .env("CARGO_VAL_BIN_GATE_HOLD", fifo)
             .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS.to_string())
-            .env("RUSTC_WRAPPER", env!("CARGO_BIN_EXE_fd_scrub_rustc"))
+            .env("RUSTC_WRAPPER", wrapper)
             .env_remove("RUSTC_WORKSPACE_WRAPPER")
             .env_remove("MAKEFLAGS")
             .env_remove("CARGO_MAKEFLAGS")
@@ -409,7 +409,8 @@ mod bin_gate_hold {
         std::fs::create_dir_all(&target).expect("target directory is creatable");
         let fifo = target.join("bin-hold");
         make_fifo(&fifo);
-        let mut command = command(&target, &fifo);
+        let wrapper = crate::fd_scrub::built().await;
+        let mut command = command(&target, &fifo, &wrapper);
         for (key, value) in environment {
             command.env(key, value);
         }
@@ -435,7 +436,7 @@ mod bin_gate_hold {
 #[test]
 fn the_bin_gate_fixture_builds_with_a_private_cargo_home_and_target_dir() {
     let target = Path::new("/scratch/bin-gate-on-4242");
-    let command = bin_gate_hold::command(target, &target.join("bin-hold"));
+    let command = bin_gate_hold::command(target, &target.join("bin-hold"), Path::new("/scratch/fd-scrub-rustc"));
 
     let variable = |name: &str| command.get_envs().find(|(key, _)| *key == name).and_then(|(_, value)| value).map(Path::new);
 
@@ -596,4 +597,96 @@ async fn gate_debug_lines_for_park_then_failed_build_then_drop_are_byte_exact() 
         "{}",
         result.stderr
     );
+}
+
+#[cfg(unix)]
+mod fd_scrub {
+    use std::os::fd::RawFd;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    use super::{manifest, target_directory};
+    use crate::fixture::fixture_output;
+
+    const JOBSERVER_PAIR_FLAG: &str = "--jobserver-auth";
+
+    // built into the test's private target dir; concurrent builds of it serialise on cargo's own build lock and the later ones find it fresh
+    pub async fn built() -> PathBuf {
+        static HELPER: OnceLock<PathBuf> = OnceLock::new();
+        if let Some(path) = HELPER.get() {
+            return path.clone();
+        }
+        let target = target_directory().join("fd-scrub-rustc");
+        let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        command
+            .args(["build", "--locked", "--offline", "--manifest-path"])
+            .arg(manifest("fd_scrub_rustc"))
+            .env("CARGO_TARGET_DIR", &target)
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("MAKEFLAGS")
+            .env_remove("CARGO_MAKEFLAGS");
+        let output = fixture_output(&mut command).await;
+        assert!(output.status.success(), "building the fd_scrub_rustc fixture: {}", String::from_utf8_lossy(&output.stderr));
+        let path = target.join("debug/fd_scrub_rustc");
+        HELPER.get_or_init(|| path).clone()
+    }
+
+    // pipes made with pipe(2) and no fcntl carry no CLOEXEC, the state cargo's rustc children hold between pipe() and the flag being set
+    fn leaked_pipe() -> [RawFd; 2] {
+        let mut descriptors = [0; 2];
+        let made = unsafe { libc::pipe(descriptors.as_mut_ptr()) };
+        assert_eq!(made, 0, "pipe: {}", std::io::Error::last_os_error());
+        descriptors
+    }
+
+    fn listed_fds(program: &std::path::Path, scrubbed: bool, makeflags: Option<String>) -> Vec<RawFd> {
+        let mut command = Command::new(program);
+        if scrubbed {
+            command.arg(program);
+        }
+        command.arg("--list-fds").env_remove("MAKEFLAGS").env_remove("CARGO_MAKEFLAGS");
+        if let Some(flags) = makeflags {
+            command.env("CARGO_MAKEFLAGS", flags);
+        }
+        let output = command.output().expect("the fd_scrub_rustc fixture runs");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).lines().map(|line| line.parse().expect("one fd number per line")).collect()
+    }
+
+    #[proxima::test(timeout = "310s")]
+    async fn an_unscrubbed_child_inherits_every_pipe_made_without_cloexec() {
+        let program = built().await;
+        let [extra_read, extra_write] = leaked_pipe();
+
+        let listed = listed_fds(&program, false, None);
+
+        assert!(listed.contains(&extra_read) && listed.contains(&extra_write), "{listed:?}: the control must see the leaked pipe or the scrub proof below proves nothing");
+    }
+
+    #[proxima::test(timeout = "310s")]
+    async fn the_scrub_drops_the_leaked_pipe_and_keeps_both_jobserver_fds_named_in_cargo_makeflags() {
+        let program = built().await;
+        let [extra_read, extra_write] = leaked_pipe();
+        let [jobserver_read, jobserver_write] = leaked_pipe();
+        let flags = format!("-j {JOBSERVER_PAIR_FLAG}={jobserver_read},{jobserver_write}");
+
+        let listed = listed_fds(&program, true, Some(flags));
+
+        assert!(!listed.contains(&extra_read) && !listed.contains(&extra_write), "leaked pipe {extra_read},{extra_write} survived in {listed:?}");
+        assert_eq!(listed, [0, 1, 2, jobserver_read, jobserver_write]);
+    }
+
+    #[proxima::test(timeout = "310s")]
+    async fn the_scrub_leaves_only_stdio_without_jobserver_flags_or_with_the_fifo_form() {
+        let program = built().await;
+        let [_, _] = leaked_pipe();
+        let cases: [Option<String>; 2] = [None, Some("-j --jobserver-auth=fifo:/tmp/GMfifo1234".to_owned())];
+
+        for flags in cases {
+            let listed = listed_fds(&program, true, flags.clone());
+
+            assert_eq!(listed, [0, 1, 2], "flags {flags:?}");
+        }
+    }
 }
