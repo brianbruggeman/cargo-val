@@ -1,8 +1,12 @@
 use core::time::Duration;
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+pub mod lock_report {
+    include!("lock_report.rs");
+}
 
 static REPORTS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 
@@ -13,12 +17,12 @@ const REPORT_TAIL: usize = 64 * 1024;
 /// `command` supplies the `CARGO_HOME` and `CARGO_TARGET_DIR` the child ran with; without one the test's own environment is read.
 pub fn persist_deadline_report(deadline: Duration, leader: Option<u32>, command: Option<&Command>, stdout: &[u8], stderr: &[u8]) -> (String, String) {
     let group = leader.map_or_else(|| "  no child: the deadline bounded a stream".to_string(), group_processes);
-    let locks = lock_report(command);
+    let locks = lock_report::lock_holders(command);
     let snapshot = format!("process group at the deadline:\n{group}\nlock holders at the deadline:\n{locks}");
     let name = current_test_name();
     let report = format!(
         "test: {name}\ndeadline: {deadline:?}\nuptime: {}\n{snapshot}\nsccache --show-stats:\n{}\nstdout (last {REPORT_TAIL} bytes):\n{}\nstderr (last {REPORT_TAIL} bytes):\n{}\n",
-        capture("uptime", [] as [&str; 0]).trim(),
+        lock_report::capture("uptime", [] as [&str; 0]).trim(),
         sccache_stats(),
         tail(stdout),
         tail(stderr),
@@ -85,58 +89,3 @@ fn group_processes(leader: u32) -> String {
     }
 }
 
-// a fixture compile that waits on cargo's build-directory lock or the package-cache lock looks identical to a stuck rustc until the holder is named; the holder is usually another worktree's cargo
-fn lock_report(command: Option<&Command>) -> String {
-    let held = lock_files(command)
-        .into_iter()
-        .filter(|file| file.exists())
-        .map(|file| format!("{}:\n{}", file.display(), holders_of(&file)))
-        .collect::<Vec<_>>();
-    format!("{}\nsccache servers:\n{}", held.join("\n"), sccache_servers())
-}
-
-fn command_variable(command: Option<&Command>, name: &str) -> Option<OsString> {
-    match command.and_then(|command| command.get_envs().find(|(key, _)| *key == name)) {
-        Some((_, value)) => value.map(OsString::from),
-        None => std::env::var_os(name),
-    }
-}
-
-fn lock_files(command: Option<&Command>) -> Vec<PathBuf> {
-    let cargo_home = command_variable(command, "CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| command_variable(command, "HOME").map(|home| PathBuf::from(home).join(".cargo")));
-    let package_cache = cargo_home.into_iter().flat_map(|home| [home.join(".package-cache"), home.join(".package-cache-mutate")]);
-    let build_directory = command_variable(command, "CARGO_TARGET_DIR").into_iter().flat_map(|target| {
-        let target = PathBuf::from(target);
-        [target.join(".cargo-lock"), target.join("debug/.cargo-lock"), target.join("debug/.cargo-build-lock"), target.join("debug/.cargo-artifact-lock")]
-    });
-    build_directory.chain(package_cache).collect()
-}
-
-fn holders_of(file: &Path) -> String {
-    let listing = capture("lsof", [OsStr::new("-Fp"), OsStr::new("--"), file.as_os_str()]);
-    let holders = listing.lines().filter_map(|line| line.strip_prefix('p')).map(holder_line).collect::<Vec<_>>();
-    if holders.is_empty() { "  no holder".to_string() } else { holders.join("\n") }
-}
-
-fn holder_line(pid: &str) -> String {
-    let directory = capture("lsof", ["-a", "-d", "cwd", "-Fn", "-p", pid]);
-    let cwd = directory.lines().find_map(|line| line.strip_prefix('n')).unwrap_or("unknown");
-    let argv = capture("ps", ["-o", "args=", "-p", pid]);
-    format!("  pid {pid} cwd {cwd} argv {}", argv.trim())
-}
-
-fn sccache_servers() -> String {
-    let listing = capture("ps", ["-axo", "pid,ppid,etime,command"]);
-    let servers = listing.lines().filter(|line| line.contains("sccache") && !line.contains("rustc")).collect::<Vec<_>>();
-    if servers.is_empty() { "  none".to_string() } else { servers.join("\n") }
-}
-
-// lsof exits 1 when nothing holds the file, so only stdout is read; a program that cannot run is reported in place of its output
-fn capture<Argument: AsRef<OsStr>>(program: &str, arguments: impl IntoIterator<Item = Argument>) -> String {
-    match Command::new(program).args(arguments).output() {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Err(error) => format!("{program} did not run: {error}"),
-    }
-}
