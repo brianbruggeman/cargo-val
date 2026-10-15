@@ -111,11 +111,11 @@ async fn a_green_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time(
 
 #[proxima::test(timeout = "310s")]
 async fn a_failing_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time() {
-    let output = run(&[("CARGO_VAL_C52D_FAIL", "1"), ("CARGO_VAL_JOBS", "1")], &["--output", "plain", "--timeline"]).await;
+    let output = run(&[("CARGO_VAL_C52D_FAIL", "1"), ("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(1), "{text}");
-    assert_eq!(takeaway_of(&text), "At most 1 of 1 jobs were busy at once (at <seconds>). Slowest test <seconds>.", "one job runs one test at a time, so the run never exceeds the tail limit and names its slowest test:\n{text}");
+    assert_eq!(takeaway_of(&text), "At most 1 of 1 jobs were busy at once (at <seconds>). Slowest test <seconds>.", "one job in test-process mode runs one test at a time, so the run never exceeds the tail limit and names its slowest test:\n{text}");
     assert!(!text.contains("After 0.000s"), "a tail that begins at zero is no tail:\n{text}");
     assert_eq!(axis_end(&text), summary_wall(&text), "{text}");
 }
