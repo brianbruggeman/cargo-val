@@ -3,14 +3,18 @@
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::OnceLock;
-use std::time::Instant;
+use core::pin::pin;
+use std::time::{Duration, Instant};
+
+use proxima_core::time::timeout;
 
 #[path = "common/fifo.rs"]
 mod fifo;
@@ -57,7 +61,9 @@ impl Drop for Fixture {
             if let Some(group) = self.group {
                 libc::kill(-group, libc::SIGKILL);
             }
-            libc::kill(self.holder, libc::SIGKILL);
+            if self.holder > 0 {
+                libc::kill(self.holder, libc::SIGKILL);
+            }
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -252,6 +258,9 @@ struct Observed {
 
 type Launch = (&'static str, &'static str, usize);
 
+// shorter than the 310s the test attribute allows, so a stuck wait reports its stamps instead of the harness reporting only that the body timed out
+const RUN_BUDGET: Duration = Duration::from_secs(280);
+
 const TEST_PROCESSES: Launch = ("test", "--test-threads=2", IN_FLIGHT);
 const ONE_SHARD_AT_A_TIME: Launch = ("shard", "--test-threads=1", 1);
 
@@ -271,63 +280,68 @@ async fn announced_holders(ready: &ChildStream, wanted: usize) -> Vec<libc::pid_
 }
 
 // the groups are read before the signal because a killed holder has no group left to ask about
-async fn interrupt_once_in_flight(label: &str, fixture: &mut Fixture, ready: &ChildStream, (wanted, streams): (usize, &[(&str, &ChildStream)])) -> BTreeSet<libc::pid_t> {
+async fn interrupt_once_in_flight(run: (&str, &RefCell<Vec<String>>), fixture: &mut Fixture, ready: &ChildStream, (wanted, streams): (usize, &[(&str, &ChildStream)])) -> BTreeSet<libc::pid_t> {
     let cargo_val = libc::pid_t::try_from(fixture.child.id()).expect("pid fits pid_t");
     let exit = ExitSource::new(NonZeroI32::new(cargo_val).expect("a spawned pid is nonzero"));
-    stamp(label, "ready_fifo_pids", "enter");
+    stamp(run, "ready_fifo_pids", "enter");
     let holders = until_exit(announced_holders(ready, wanted), "the blocked tests never all reached the rendezvous", &exit, streams).await;
-    stamp(label, "ready_fifo_pids", "exit");
+    stamp(run, "ready_fifo_pids", "exit");
     let groups = holders.iter().map(|holder| unsafe { libc::getpgid(*holder) }).collect();
     fixture.holder = holders[0];
     assert_eq!(unsafe { libc::kill(cargo_val, libc::SIGINT) }, 0);
-    stamp(label, "sigint_sent", "exit");
+    stamp(run, "sigint_sent", "exit");
     groups
 }
 
-// one json line per wait boundary, printed in the file's c74 event shape, so a timed-out run's captured output names the wait it was in
-fn stamp(label: &str, wait: &str, phase: &str) {
+// one json line per wait boundary, kept in the caller's log: the test body runs on a worker thread whose stdout the harness does not capture, so only a panic carrying the log reaches the failure report
+fn stamp((label, log): (&str, &RefCell<Vec<String>>), wait: &str, phase: &str) {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     let elapsed_ms = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
-    println!("{{\"event\":\"c74_wait\",\"label\":\"{label}\",\"wait\":\"{wait}\",\"phase\":\"{phase}\",\"elapsed_ms\":{elapsed_ms}}}");
+    log.borrow_mut().push(format!("{{\"event\":\"c74_wait\",\"label\":\"{label}\",\"wait\":\"{wait}\",\"phase\":\"{phase}\",\"elapsed_ms\":{elapsed_ms}}}"));
 }
 
-async fn interrupted_plain_run(label: &str, launch: Launch) -> Observed {
-    let (mut fixture, ready) = start_as(label, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "plain", Stdio::piped());
+async fn interrupted_plain_run(run: (&str, &RefCell<Vec<String>>), launch: Launch) -> Observed {
+    let (mut fixture, ready) = start_as(run.0, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "plain", Stdio::piped());
     let ready = Box::new(ready);
-    let groups = interrupt_once_in_flight(label, &mut fixture, &ready, (launch.2, &[])).await;
-    stamp(label, "plain_exit", "enter");
+    let groups = interrupt_once_in_flight(run, &mut fixture, &ready, (launch.2, &[])).await;
+    stamp(run, "plain_exit", "enter");
     let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
-    stamp(label, "plain_exit", "exit");
-    let mut output = String::new();
-    stamp(label, "plain_stdout_eof", "enter");
-    fixture.child.stdout.take().expect("stdout is piped").read_to_string(&mut output).expect("plain output is UTF-8");
-    stamp(label, "plain_stdout_eof", "exit");
+    stamp(run, "plain_exit", "exit");
+    let stdout = OwnedFd::from(fixture.child.stdout.take().expect("stdout is piped"));
+    let nonblocking = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+    assert_eq!(nonblocking, 0, "the plain stdout turns nonblocking: {}", std::io::Error::last_os_error());
+    let stdout = Box::new(ChildStream::new(stdout));
+    stamp(run, "plain_stdout_eof", "enter");
+    let (bytes, fault) = drain::drain_until(&stdout, |_| false).await;
+    stamp(run, "plain_stdout_eof", "exit");
+    assert!(fault.is_none(), "the plain output read failed: {fault:?}");
+    let output = String::from_utf8(bytes).expect("plain output is UTF-8");
     let leader_group = unsafe { libc::getpgid(0) };
     Observed { output, status, groups, leader_group }
 }
 
-async fn interrupted_rich_run(label: &str, launch: Launch) -> Observed {
+async fn interrupted_rich_run(run: (&str, &RefCell<Vec<String>>), launch: Launch) -> Observed {
     let Pty { master, slave } = open_pty();
-    let (mut fixture, ready) = start_as(label, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "rich", Stdio::from(slave));
+    let (mut fixture, ready) = start_as(run.0, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "rich", Stdio::from(slave));
     let (ready, master) = (Box::new(ready), Box::new(ChildStream::new(OwnedFd::from(master))));
     let leader = fixture.child.id();
     let drained = async {
-        stamp(label, "master_eof", "enter");
+        stamp(run, "master_eof", "enter");
         let finished = drain::drain_until(&master, |_| false).await;
-        stamp(label, "master_eof", "exit");
+        stamp(run, "master_eof", "exit");
         finished
     };
     let streams = [("pty", &*master)];
-    let work = join(interrupt_once_in_flight(label, &mut fixture, &ready, (launch.2, &streams)), drained);
-    stamp(label, "rich_work", "enter");
+    let work = join(interrupt_once_in_flight(run, &mut fixture, &ready, (launch.2, &streams)), drained);
+    stamp(run, "rich_work", "enter");
     let (groups, (bytes, _)) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, work).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("{report}"),
     };
-    stamp(label, "rich_work", "exit");
-    stamp(label, "rich_exit", "enter");
+    stamp(run, "rich_work", "exit");
+    stamp(run, "rich_exit", "enter");
     let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
-    stamp(label, "rich_exit", "exit");
+    stamp(run, "rich_exit", "exit");
     let leader_group = unsafe { libc::getpgid(0) };
     Observed { output: String::from_utf8_lossy(&bytes).replace('\r', ""), status, groups, leader_group }
 }
@@ -393,7 +407,7 @@ fn without_ages_groups_and_wall(block: &[String]) -> String {
 
 #[proxima::test(timeout = "310s")]
 async fn an_interrupted_plain_run_prints_the_specs_interrupted_block_with_each_tests_real_group_and_exits_130() {
-    let observed = interrupted_plain_run("block-plain", TEST_PROCESSES).await;
+    let observed = interrupted_plain_run(("block-plain", &RefCell::new(Vec::new())), TEST_PROCESSES).await;
 
     println!("{}", closing_block(&observed.output).join("\n"));
     assert_spec_block(&observed);
@@ -401,8 +415,12 @@ async fn an_interrupted_plain_run_prints_the_specs_interrupted_block_with_each_t
 
 #[proxima::test(timeout = "310s")]
 async fn an_interrupted_rich_run_prints_the_same_block_as_plain_after_the_frame_is_erased() {
-    let plain = interrupted_plain_run("block-rich-reference", TEST_PROCESSES).await;
-    let rich = interrupted_rich_run("block-rich", TEST_PROCESSES).await;
+    let stamps = RefCell::new(Vec::new());
+    let both = async { (interrupted_plain_run(("block-rich-reference", &stamps), TEST_PROCESSES).await, interrupted_rich_run(("block-rich", &stamps), TEST_PROCESSES).await) };
+    let mut both = pin!(both);
+    let Ok((plain, rich)) = timeout(RUN_BUDGET, both.as_mut()).await else {
+        panic!("the plain and rich runs outlived {RUN_BUDGET:?}; the last stamp without its exit names the wait:\n{}", stamps.borrow().join("\n"));
+    };
 
     assert_spec_block(&rich);
     assert_eq!(without_ages_groups_and_wall(&closing_block(&rich.output)), without_ages_groups_and_wall(&closing_block(&plain.output)));
@@ -438,7 +456,7 @@ async fn an_interrupted_run_leaves_the_earlier_last_run_record_intact() {
 
 #[proxima::test(timeout = "310s")]
 async fn an_interrupted_shard_run_accounts_for_every_discovered_name() {
-    let observed = interrupted_plain_run("block-shard", ONE_SHARD_AT_A_TIME).await;
+    let observed = interrupted_plain_run(("block-shard", &RefCell::new(Vec::new())), ONE_SHARD_AT_A_TIME).await;
 
     let block = closing_block(&observed.output);
     let report = format!("{}\nstatus: {:?}", observed.output, observed.status);
