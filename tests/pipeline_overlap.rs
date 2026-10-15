@@ -214,7 +214,7 @@ async fn at_sixty_four_jobs_listings_stop_short_of_the_signal_table_and_the_run_
     }))
     .await;
 
-    assert_eq!(spawned(held.as_bytes()), 3, "72 signal slots less 64 tests and the build and doc groups leave three listings:\n{held}");
+    assert_eq!(spawned(held.as_bytes()), 3, "73 signal slots less 64 tests and the build, doc and editor groups leave three listings:\n{held}");
     assert!(stdout_text.contains("passed=4"), "all four listed tests pass once released:\n{stdout_text}\n{stderr_text}");
     assert!(!stderr_text.contains("signal table"), "no signal-table refusal:\n{stderr_text}");
 }
