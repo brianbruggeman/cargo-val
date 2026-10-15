@@ -176,8 +176,9 @@ impl BinCounts {
     pub fn member_directories(&self) -> impl Iterator<Item = &[u8]> {
         self.entries[..self.count].iter().filter(|entry| self.is_member(entry)).filter_map(|entry| {
             let rest = entry.id[..entry.id_length].strip_prefix(b"path+file://")?;
-            let end = memchr::memchr(b'#', rest).unwrap_or(rest.len());
-            Some(&rest[..end])
+            let path = if cfg!(windows) && rest.len() > 2 && rest[0] == b'/' && rest[1].is_ascii_alphabetic() && rest[2] == b':' { &rest[1..] } else { rest };
+            let end = memchr::memchr(b'#', path).unwrap_or(path.len());
+            Some(&path[..end])
         })
     }
 
@@ -244,14 +245,26 @@ impl PathText {
         }
     }
 
-    // a JSON escape means the raw bytes are not the path, so the path is reported as absent
+    // a windows path arrives with every separator escaped as `\\`; any other JSON escape means the raw bytes are not the path, so it is reported as absent
     fn set(&mut self, text: &[u8], overflow: bool) {
-        if overflow || text.contains(&b'\\') {
-            self.length = 0;
+        self.length = 0;
+        if overflow {
             return;
         }
-        self.bytes[..text.len()].copy_from_slice(text);
-        self.length = text.len();
+        let mut length = 0;
+        let mut remaining = text.iter().copied();
+        while let Some(byte) = remaining.next() {
+            let byte = match (byte, byte == b'\\') {
+                (_, true) => match remaining.next() {
+                    Some(escaped @ (b'\\' | b'/')) => escaped,
+                    _ => return,
+                },
+                (plain, false) => plain,
+            };
+            self.bytes[length] = byte;
+            length += 1;
+        }
+        self.length = length;
     }
 
     fn get(&self) -> Option<&[u8]> {
@@ -815,5 +828,16 @@ mod tests {
 
         assert_eq!(facts.workspace_root(), None);
         assert_eq!(facts.target_directory(), None);
+    }
+
+    #[proxima::test]
+    async fn a_windows_directory_with_escaped_separators_is_read_back_with_single_backslashes() {
+        let document = r#"{"packages":[],"workspace_root":"C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\.tmpj2Z52Q","target_directory":"D:\\a\\cargo-val\\target","version":1}"#;
+        let mut scan = Box::new(MetadataScan::new());
+        scan.feed(document.as_bytes()).expect("document fits");
+        let facts = scan.finish();
+
+        assert_eq!(facts.workspace_root(), Some(&br"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpj2Z52Q"[..]));
+        assert_eq!(facts.target_directory(), Some(&br"D:\a\cargo-val\target"[..]));
     }
 }
