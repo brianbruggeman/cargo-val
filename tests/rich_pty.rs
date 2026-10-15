@@ -1738,7 +1738,7 @@ async fn an_editor_that_cannot_start_shows_a_not_found_footer_line_and_review_co
 async fn ctrl_c_while_the_editor_runs_goes_to_the_editor_and_review_continues() {
     let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_WAIT", "1")], (true, "editor exited with status 130")).await;
 
-    assert!(recorded(&log).contains(&"foreground=true".to_owned()));
+    assert!(recorded(&log).contains(&"foreground=true".to_owned()), "the editor was not the terminal foreground when it started: {:?}", recorded(&log));
     assert!(!output.contains("INTERRUPTED"), "cargo-val must not take the editor's Ctrl-C:\n{}", shown(&output));
     assert!(output.contains("editor exited with status 130"), "the editor, not cargo-val, took SIGINT:\n{}", shown(&output));
     assert_review_resumed_and_quit(&output, status);
@@ -1865,7 +1865,7 @@ async fn sigterm_while_the_editor_is_open_restores_the_terminal_and_exits_143() 
 async fn an_editor_that_stops_itself_is_continued_within_a_tick_and_the_run_still_finishes() {
     let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[("FAKE_EDITOR_STOP_ONCE", "1"), ("FAKE_EDITOR_EXIT", "3")], (false, "editor exited with status 3")).await;
 
-    assert!(recorded(&log).contains(&"foreground=true".to_owned()));
+    assert!(recorded(&log).contains(&"foreground=true".to_owned()), "the editor was not the terminal foreground when it started: {:?}", recorded(&log));
     assert!(output.contains(EDITOR_DONE), "the editor ran on past its own stop:\n{}", shown(&output));
     assert_review_resumed_and_quit(&output, status);
 }
