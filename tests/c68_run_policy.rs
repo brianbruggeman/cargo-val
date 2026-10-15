@@ -10,6 +10,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -56,10 +58,7 @@ impl Run {
 }
 
 fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
-        PathBuf::from,
-    )
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
 fn probe_directory(label: &str) -> PathBuf {
@@ -98,7 +97,7 @@ fn fixture_command(
         .env_remove("CARGO_VAL_NO_TESTS")
         .env_remove("CARGO_VAL_FIXTURE_FAILING")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join("c68-fixture"));
+        .envs(isolation::environment("c68-run-policy"));
     if let Some(probe) = probe {
         command.env("CARGO_VAL_PROBE_DIR", probe);
     }
@@ -507,7 +506,7 @@ async fn c68_short_manifest_path_is_forwarded_and_not_taken_as_the_filter() {
         .env("CARGO_VAL_OUTPUT", "plain")
         .args(["-m", manifest, "--no-fail-fast"])
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join("c68-fixture"));
+        .envs(isolation::environment("c68-run-policy"));
     let output = fixture_output(&mut command).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -612,7 +611,7 @@ async fn cargo_test_doc_reference() -> DocReference {
         Command::new("cargo")
             .args(["test", "--doc", "--manifest-path"])
             .arg(fixture_manifest(DOC_FIXTURE))
-            .env("CARGO_TARGET_DIR", target_directory().join("c68-reference")),
+            .envs(isolation::environment("c68-reference")),
     )
     .await;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
