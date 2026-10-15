@@ -105,6 +105,15 @@ pub fn track_group(_target: u32) -> Result<(), i32> {
     Ok(())
 }
 
+/// An editor is never attached on this OS, so there is no group to hang up.
+///
+/// # Errors
+///
+/// Never fails on this OS; the result matches the edges with a bounded target table.
+pub fn track_group_hangup(_target: u32) -> Result<(), i32> {
+    Ok(())
+}
+
 /// A reaped child needs no unregistering: the run job holds no process id that Windows could recycle.
 pub fn release_child(_target: u32) {}
 
