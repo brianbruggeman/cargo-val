@@ -487,7 +487,8 @@ async fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
     let frame = run.stdout.split("------ stdout: cargo_val_shard_fixture suite::d_panics_on_request ------\n").nth(1).and_then(|rest| rest.split_once("------ end stdout ------\n")).map(|(body, _)| body);
     let body = frame.unwrap_or_default();
     assert!(body.starts_with("\nthread 'suite::d_panics_on_request' ("), "{full}");
-    assert!(body.contains("panicked at src/lib.rs:40:13:\nrequested shard failure in d\n"), "{full}");
+    let site = format!("panicked at {}:40:13:\nrequested shard failure in d\n", PathBuf::from("src").join("lib.rs").display());
+    assert!(body.contains(&site), "{full}");
     assert!(!run.stdout.contains("---- suite::d_panics_on_request stdout ----"), "libtest's raw header must not print: {full}");
     assert!(!run.stdout.contains("running 1 test"), "{full}");
     assert!(!run.stdout.contains("re-run alone"), "{full}");

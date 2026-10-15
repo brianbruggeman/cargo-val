@@ -209,7 +209,8 @@ async fn a_failure_is_a_fail_record_with_agent_fields_then_output_then_rerun_the
     let fail = lines.iter().find(|line| line.contains("\"t\":\"fail\"")).expect("a fail record");
     assert!(fail.contains("\"id\":\"cli_run::fixture::fails_when_requested\""), "{fail}");
     assert!(fail.contains("\"class\":\"PANIC\""), "{fail}");
-    assert!(fail.contains("\"file\":\"src/lib.rs\",\"line\":12,\"col\":13"), "{fail}");
+    let file = PathBuf::from("src").join("lib.rs").display().to_string().replace('\\', "\\\\");
+    assert!(fail.contains(&format!("\"file\":\"{file}\",\"line\":12,\"col\":13")), "{fail}");
     assert!(fail.contains("\"message\":\"requested fixture failure\""), "{fail}");
     assert!(fail.contains("\"rerun\":\"cargo val --no-fail-fast -E '(binary(=cli_run) & test(=fixture::fails_when_requested))'\""), "{fail}");
     assert!(lines.iter().any(|line| line.contains("\"t\":\"end\"") && line.contains("\"outcome\":\"failed\"")), "{lines:?}");

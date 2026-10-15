@@ -138,7 +138,7 @@ fn external_reason(text: &str) -> String {
     let line_number = parts.next().expect("a line number");
     let file = parts.next().expect("a file");
     let reason = format!("external:{file}:{line_number}");
-    let slashed = reason.replace('\\', "/");
+    let slashed = reason.replace("\\\\", "/").replace('\\', "/");
     assert!(slashed.ends_with(BYTES_PANIC_SITE) && slashed.contains("/registry/src/"), "{reason}");
     reason
 }
