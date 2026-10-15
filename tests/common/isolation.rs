@@ -22,15 +22,21 @@ pub fn environment(label: &str) -> [(&'static str, PathBuf); 2] {
     [("CARGO_TARGET_DIR", layout::target_in(&run)), ("CARGO_HOME", home)]
 }
 
+// the run number is claimed on the home, whose name carries no label, so two labels in one process can never share a home
 fn claim(parent: &Path, label: &str) -> PathBuf {
     let process = std::process::id();
     let mut run = 0_u64;
     loop {
         let candidate = parent.join(format!("{label}-{process}-{run}"));
-        match fs::create_dir(&candidate) {
-            Ok(()) => return candidate,
+        let home = layout::home_in(&candidate);
+        fs::create_dir_all(home.parent().expect("a home has a parent")).unwrap_or_else(|error| panic!("{} is not creatable: {error}", home.display()));
+        match fs::create_dir(&home) {
+            Ok(()) => {
+                fs::create_dir(&candidate).unwrap_or_else(|error| panic!("{} is not creatable: {error}", candidate.display()));
+                return candidate;
+            }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => run += 1,
-            Err(error) => panic!("{} is not creatable: {error}", candidate.display()),
+            Err(error) => panic!("{} is not creatable: {error}", home.display()),
         }
     }
 }
