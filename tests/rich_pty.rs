@@ -48,7 +48,7 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
 
 // the noisy fixture is the one run that keeps the default selection, which launches the doc cargo beside the test binaries
 fn selection_of(fixture: &str) -> &'static [&'static str] {
-    if fixture == "rich_pty_noisy" { &[] } else { &["--tests"] }
+    if fixture == "rich_pty_noisy" || fixture == "rich_pty_doc" { &[] } else { &["--tests"] }
 }
 
 fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
@@ -77,9 +77,9 @@ fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, 
         .env_remove("EDITOR")
         .env_remove("TERM_PROGRAM")
         .env_remove("CARGO_VAL_EDITOR_URL")
-        .envs(environment.iter().copied())
         .env("CARGO_VAL_FIXTURE_RELEASE_FILE", release)
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-{fixture}-{run}")))
+        .envs(environment.iter().copied())
         .stdin(stdin)
         .stdout(stream())
         .stderr(stream())
@@ -1965,4 +1965,69 @@ async fn a_held_build_lock_shows_in_the_state_row_and_writes_nothing_above_the_f
     }
     assert_frames_replace_the_last(&output, usize::from(pty::COLUMNS));
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+const QUIT_BOUND_MS: u128 = 500;
+
+async fn quit_when(master: &ChildStream, mut keys: File, (leader, session, elapsed): (u32, &std::cell::Cell<u32>, &std::cell::Cell<Option<std::time::Duration>>), ready: impl Fn(&str) -> bool) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| ready(&without_sgr(&String::from_utf8_lossy(bytes)))).await;
+    session.set(leader);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let pressed = Instant::now();
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    elapsed.set(Some(pressed.elapsed()));
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn session_members(session: u32) -> String {
+    let found = Command::new("pgrep").args(["-s", &session.to_string()]).output().expect("pgrep runs");
+    String::from_utf8_lossy(&found.stdout).into_owned()
+}
+
+struct QuitRun {
+    output: String,
+    status: ExitStatus,
+    elapsed_ms: u128,
+    session: u32,
+}
+
+async fn quit_run(fixture: &str, doc_started: bool) -> QuitRun {
+    let elapsed = std::cell::Cell::new(None);
+    let session = std::cell::Cell::new(0);
+    let (output, status) = run_driven(fixture, "rich", &NO_COLOR, async |master, keys, release, leader| {
+        let started = release.with_extension("started");
+        quit_when(master, keys, (leader, &session, &elapsed), |screen| if doc_started { started.exists() } else { screen.contains("test binaries") }).await
+    })
+    .await;
+    QuitRun { output, status, elapsed_ms: elapsed.get().expect("the drive measured the quit").as_millis(), session: session.get() }
+}
+
+fn assert_quit_is_prompt_and_clean(run: &QuitRun, phase: &str) {
+    println!("quit {phase}: {} ms from the second q to exit, status {}", run.elapsed_ms, run.status);
+    assert!(run.elapsed_ms < QUIT_BOUND_MS, "q then q {phase} took {} ms, bound {QUIT_BOUND_MS} ms:\n{}", run.elapsed_ms, shown(&run.output));
+    assert_eq!(run.status.code(), Some(130), "a quit {phase} is an interrupt: {}\n{}", run.status, shown(&run.output));
+    assert!(run.output.ends_with(SHOW_CURSOR), "the last bytes of a quit show the cursor:\n{}", shown(&run.output));
+    let survivors = session_members(run.session);
+    assert!(survivors.trim().is_empty(), "children of the quit run survive in its session {}: {survivors}", run.session);
+}
+
+fn closing_block_shape(output: &str) -> Vec<String> {
+    let start = output.rfind("\x1b[J").unwrap_or_else(|| panic!("the quit erased no live frame:\n{}", shown(output)));
+    let block = &output[start + "\x1b[J".len()..];
+    block.lines().filter_map(|line| line.split_whitespace().next()).map(|word| word.trim_end_matches(SHOW_CURSOR).to_owned()).collect()
+}
+
+#[proxima::test]
+async fn quitting_mid_build_with_q_then_q_exits_130_within_the_bound_with_the_terminal_restored_and_no_child_left() {
+    assert_quit_is_prompt_and_clean(&quit_run("rich_pty_noisy", false).await, "mid-build");
+}
+
+#[proxima::test]
+async fn quitting_while_doc_tests_execute_with_q_then_q_exits_130_within_the_bound_and_closes_with_the_same_block_shape_as_a_mid_build_quit() {
+    let doc = quit_run("rich_pty_doc", true).await;
+    let build = quit_run("rich_pty_noisy", false).await;
+
+    assert_quit_is_prompt_and_clean(&doc, "while doc tests execute");
+    assert_eq!(closing_block_shape(&doc.output), closing_block_shape(&build.output), "the doc quit's closing block differs in shape from the mid-build quit's:\n{}\n---\n{}", shown(&doc.output), shown(&build.output));
 }
