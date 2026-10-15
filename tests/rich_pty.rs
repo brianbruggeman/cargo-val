@@ -2100,7 +2100,7 @@ async fn quit_run(fixture: &str, doc_started: bool) -> QuitRun {
     .await;
     let written_to_eof_ms = elapsed.get().expect("the drive measured the quit").as_millis();
     let (read, exited) = (stamped_ms(&output, "second-q"), stamped_ms(&output, "process-exit"));
-    QuitRun { output: without_debug_stamps(&output), status, elapsed_ms: u128::from(exited.saturating_sub(read)), written_to_eof_ms, session: session.get() }
+    QuitRun { output: without_debug_stamps(&output), status, elapsed_ms: exited.saturating_sub(read), written_to_eof_ms, session: session.get() }
 }
 
 fn assert_quit_is_prompt_and_clean(run: &QuitRun, phase: &str) {
