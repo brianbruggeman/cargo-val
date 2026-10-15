@@ -626,6 +626,7 @@ const fn class_word(class: Class) -> &'static [u8] {
         Class::Panic => b"PANIC",
         Class::Timeout { .. } => b"TIMEOUT",
         Class::Hang => b"HANG",
+        Class::LockWait { .. } => b"LOCK",
         Class::Crash { .. } => b"CRASH",
     }
 }
@@ -925,6 +926,12 @@ fn hint_line<const FRAME: usize>(frame: &mut Line<FRAME>, look: Look, class: Cla
         }
         Class::Timeout { enforced_by: Enforcer::Harness } => text.text(b"the test's own harness enforced this timeout"),
         Class::Hang => text.text(b"killed at its deadline with no output captured"),
+        Class::LockWait { lock, holder } => {
+            text.text(b"killed at its deadline waiting on ");
+            text.text(lock.phrase());
+            text.text(b" held by pid ");
+            text.number(holder as usize);
+        }
         Class::Crash { signal } => {
             text.text(b"the process died from signal ");
             text.number(usize::try_from(signal).unwrap_or(0));

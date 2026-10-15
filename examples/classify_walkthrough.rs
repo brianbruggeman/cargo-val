@@ -48,6 +48,6 @@ fn main() {
     let dropped = (noisy.stdout.len() - kept.len()) as u64;
     show("truncated_capture", &classify(kept, noisy.exit, dropped).expect("head classifies"));
 
-    show("val_deadline_silent", &classify(b"", Exit::DeadlineKilled, 0).expect("deadline classifies"));
-    show("val_deadline_output", &classify(b"running 1 test\n", Exit::DeadlineKilled, 0).expect("deadline classifies"));
+    show("val_deadline_silent", &classify(b"", Exit::DeadlineKilled { waiting: None }, 0).expect("deadline classifies"));
+    show("val_deadline_output", &classify(b"running 1 test\n", Exit::DeadlineKilled { waiting: None }, 0).expect("deadline classifies"));
 }

@@ -7,6 +7,7 @@ mod failure_fixture;
 mod failure_fixture_async;
 
 use cargo_val::failure_class::{Absent, Class, Enforcer, Exit, Location, Reject, classify};
+use cargo_val::isolated_target::LockKind;
 use failure_fixture::Captured;
 use failure_fixture_async::{build, run};
 
@@ -131,8 +132,8 @@ async fn capture_cut_before_the_panic_has_no_evidence() {
 
 #[test]
 fn val_deadline_kill_is_val_enforced_timeout_or_hang_when_silent() {
-    let loud = classify(b"running 1 test\n", Exit::DeadlineKilled, 0).expect("deadline kills classify");
-    let silent = classify(b"", Exit::DeadlineKilled, 0).expect("deadline kills classify");
+    let loud = classify(b"running 1 test\n", Exit::DeadlineKilled { waiting: None }, 0).expect("deadline kills classify");
+    let silent = classify(b"", Exit::DeadlineKilled { waiting: None }, 0).expect("deadline kills classify");
 
     assert_eq!(loud.class, Class::Timeout { enforced_by: Enforcer::Val });
     assert_eq!(silent.class, Class::Hang);
@@ -151,4 +152,16 @@ fn in_fixture_lib(file: &[u8]) -> bool {
 
 fn user_site<'a>(location: Result<Location<'a>, Absent<'a>>, capture: &[u8]) -> Location<'a> {
     location.unwrap_or_else(|absent| panic!("no user frame ({absent:?}) in capture:\n{}", String::from_utf8_lossy(capture)))
+}
+
+#[test]
+fn a_deadline_kill_behind_a_held_lock_is_a_lock_wait_whatever_the_capture_holds() {
+    let waiting = Exit::DeadlineKilled { waiting: Some((LockKind::BuildDirectory, 4242)) };
+
+    let silent = classify(b"", waiting, 0).expect("deadline kills classify");
+    let loud = classify(b"    Blocking waiting for file lock on build directory\n", waiting, 0).expect("deadline kills classify");
+
+    assert_eq!(silent.class, Class::LockWait { lock: LockKind::BuildDirectory, holder: 4242 });
+    assert_eq!(loud.class, silent.class);
+    assert_eq!(silent.location, Err(Absent::NoPanicSite));
 }
