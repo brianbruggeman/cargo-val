@@ -34,7 +34,7 @@ fn local_flags() -> Option<u64> {
     Some(u64::from_le_bytes(flags))
 }
 
-fn record(log: &str) -> std::io::Result<()> {
+fn record(log: &str, first_foreground: bool) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     for argument in std::env::args().skip(1) {
         writeln!(file, "arg={argument}")?;
@@ -42,6 +42,7 @@ fn record(log: &str) -> std::io::Result<()> {
     let flags = local_flags();
     writeln!(file, "canonical={}", flags.is_some_and(|flags| flags & ICANON != 0))?;
     writeln!(file, "echo={}", flags.is_some_and(|flags| flags & ECHO != 0))?;
+    writeln!(file, "first_foreground={first_foreground}")?;
     writeln!(file, "pgid={}", unsafe { getpgrp() })?;
     writeln!(file, "foreground={}", unsafe { tcgetpgrp(0) == getpgrp() })
 }
@@ -52,6 +53,7 @@ const SIGSTOP: i32 = 17;
 const SIGSTOP: i32 = 19;
 
 fn main() {
+    let first_foreground = unsafe { tcgetpgrp(0) == getpid() };
     if std::env::args().nth(1).as_deref() == Some("--serverlist") {
         while std::env::var_os("FAKE_EDITOR_SERVERLIST_HANG").is_some() {
             std::thread::yield_now();
@@ -60,7 +62,7 @@ fn main() {
         return;
     }
     let log = std::env::var("FAKE_EDITOR_LOG").expect("the test names a log file");
-    record(&log).expect("the editor records what it saw");
+    record(&log, first_foreground).expect("the editor records what it saw");
     println!("fake-editor-ready");
     std::io::stdout().flush().expect("the ready marker reaches the terminal");
     if std::env::var_os("FAKE_EDITOR_STOP_ONCE").is_some() {
