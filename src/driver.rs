@@ -1998,6 +1998,19 @@ impl ListingRun<'_> {
         scope_for(rerun, (&self.root, &self.trip))
     }
 
+    // quit and interrupt are one event: the root fires once and every consumer observes it; the signal table holds every spawned child, so no child kind is named here
+    pub(crate) fn cancel(&self, interrupt: bool) {
+        if interrupt {
+            self.signals.raise_interrupt();
+        } else {
+            self.signals.stop_children();
+        }
+        quit_step(b"children-stopped", 0);
+        abandon_editor();
+        self.root.fire();
+        quit_step(b"root-fired", 0);
+    }
+
     // a key is an event like any other: the state moves, the screen redraws, and the action it asked for runs here
     pub(crate) fn key(&self, key: Key) -> Result<(), RunError> {
         let state = self.render().1.borrow();
@@ -2011,19 +2024,9 @@ impl ListingRun<'_> {
         drop(state);
         if leaving {
             quit_step(if interrupting { b"interrupt-key" } else { b"second-q" }, 0);
-        }
-        if interrupting {
-            self.signals.raise_interrupt();
-        } else if leaving {
-            self.signals.stop_children();
-            self.stop_doc_tests();
-            quit_step(b"children-stopped", 0);
+            self.cancel(interrupting);
         }
         emit(self.render(), &Event::Key(key))?;
-        if leaving {
-            self.root.fire();
-            quit_step(b"root-fired", 0);
-        }
         match editing.filter(|_| !editor_reserved()) {
             Some(_) if self.editor_in_flight() => emit(self.render(), &Event::Notice { what: "opening the editor…".as_bytes() }),
             Some(request) => {
@@ -2331,14 +2334,6 @@ impl ListingRun<'_> {
         self.doc.try_borrow().is_ok_and(|doc| doc.as_ref().is_some_and(|doc| doc.phase == DocPhase::Interrupted))
     }
 
-    fn stop_doc_tests(&self) {
-        if let Ok(mut doc) = self.doc.try_borrow_mut()
-            && let Some(doc) = doc.as_mut()
-        {
-            doc.stop_for_quit();
-        }
-    }
-
     fn interrupt_doc_tests(&self) -> DocAtTrip {
         self.doc
             .try_borrow_mut()
@@ -2362,6 +2357,7 @@ impl ListingRun<'_> {
         }
         let mut doc = spawn()?;
         pipeline_step(b"doc-cargo-spawned", b"");
+        doc.scope = self.root.clone();
         if let Some(child) = doc.take_child() {
             attach(&lanes[DOC_LANE], child)?;
         }
@@ -4433,6 +4429,7 @@ pub(crate) struct DocRun {
     stderr_eof: bool,
     exit_code: Option<i32>,
     phase: DocPhase,
+    scope: Signal,
     stderr_bytes: [u8; DOC_STDERR_CAPACITY],
     stderr_length: usize,
     lock_watch: LockWatch,
@@ -4498,6 +4495,7 @@ fn spawn_doc_tests(
         stderr_eof: false,
         exit_code: None,
         phase: DocPhase::Starting,
+        scope: Signal::new(),
         backlog: None,
         stderr_bytes: [0; DOC_STDERR_CAPACITY],
         stderr_length: 0,
@@ -4561,6 +4559,10 @@ impl DocRun {
     pub(crate) fn exited(&mut self, code: i32) {
         quit_step(b"doc-cargo-exited", self.process_id as usize);
         release_group(self.process_id);
+        // a fail-fast trip leaves executing doc tests to finish, but a root that fired before the exit ended them: the run is being cancelled, not reported
+        if self.exit_code.is_none() && self.scope.is_fired() {
+            self.phase = DocPhase::Interrupted;
+        }
         self.exit_code = Some(code);
     }
 
@@ -4570,14 +4572,6 @@ impl DocRun {
         self.stderr_bytes[self.stderr_length..self.stderr_length + taken]
             .copy_from_slice(&bytes[..taken]);
         self.stderr_length += taken;
-    }
-
-    // a fail-fast trip leaves executing doc tests to finish, but a quit ends them: the run is being cancelled, not reported
-    fn stop_for_quit(&mut self) {
-        if self.exit_code.is_none() {
-            interrupt_group(self.process_id);
-            self.phase = DocPhase::Interrupted;
-        }
     }
 
     fn state_for_trip(&mut self) -> DocAtTrip {
@@ -5303,7 +5297,7 @@ mod tests {
 }
 
 #[cfg(all(test, unix))]
-mod listing_allocation_tests {
+pub(super) mod listing_allocation_tests {
     use core::cell::{Cell, RefCell};
     use std::vec::Vec;
 
@@ -5330,7 +5324,7 @@ mod listing_allocation_tests {
         crate::edge_exit::fixture::in_single_threaded_process(spawning_a_listing_child_allocates_zero_times_in_isolation);
     }
 
-    fn with_run<Output>(body: impl FnOnce(&ListingRun<'_>) -> Output) -> Output {
+    pub(super) fn with_run<Output>(body: impl FnOnce(&ListingRun<'_>) -> Output) -> Output {
         let inherited_storage = std::env::vars()
             .map(|(key, value)| std::format!("{key}={value}"))
             .collect::<std::vec::Vec<_>>();
@@ -5421,12 +5415,14 @@ mod listing_allocation_tests {
 }
 
 #[cfg(test)]
-mod doc_trip_tests {
+pub(super) mod doc_trip_tests {
+    use proxima_core::signal::Signal;
+
     use super::{DOC_STDERR_CAPACITY, DocAtTrip, DocParser, DocPhase, DocRun, LockWatch};
 
     const ABSENT_GROUP: u32 = 2_000_000_000;
 
-    fn doc_run(phase: DocPhase, exit_code: Option<i32>) -> DocRun {
+    pub(super) fn doc_run(phase: DocPhase, exit_code: Option<i32>) -> DocRun {
         DocRun {
             child: None,
             process_id: ABSENT_GROUP,
@@ -5437,6 +5433,7 @@ mod doc_trip_tests {
             phase,
             stderr_bytes: [0; DOC_STDERR_CAPACITY],
             stderr_length: 0,
+            scope: Signal::new(),
             lock_watch: LockWatch::new(),
             backlog: None,
         }
@@ -5646,5 +5643,97 @@ mod close_sequence_tests {
             assert_eq!(reporting, crate::render::review::MOUSE_OFF, "a set flag writes the disable sequence once:\n{:?}", std::string::String::from_utf8_lossy(&reporting));
             assert!(quiet.is_empty(), "a clear flag writes nothing:\n{:?}", std::string::String::from_utf8_lossy(&quiet));
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod quit_registry_tests {
+    use core::sync::atomic::Ordering;
+    use std::format;
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::string::String;
+    use std::vec::Vec;
+
+    use super::doc_trip_tests::doc_run;
+    use super::listing_allocation_tests::with_run;
+    use super::{DocPhase, EDITOR_GROUP, Key, RunError, spawn_reserved, track, track_leader};
+
+    const KINDS: [&str; 5] = ["build", "doc", "listing", "test", "editor"];
+
+    // a child that stamps its kind on the signal its kind receives, then exits: the editor takes a hangup, every other kind the interrupt the signal table sends
+    fn held(kind: &str) -> std::io::Result<(Child, BufReader<ChildStdout>)> {
+        let signal = if kind == "editor" { "HUP" } else { "INT" };
+        let script = format!("trap 'echo stamp-{kind}; kill $held; exit 0' {signal}; sleep 600 >/dev/null & held=$!; echo ready; wait $held");
+        let mut child = Command::new("sh").args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0).spawn()?;
+        let mut stdout = BufReader::new(child.stdout.take().expect("the child's stdout is piped"));
+        let mut ready = String::new();
+        stdout.read_line(&mut ready)?;
+        assert_eq!(ready, "ready\n", "{kind} installed its trap before the quit");
+        Ok((child, stdout))
+    }
+
+    fn register(kind: &str, process: u32) {
+        match kind {
+            "build" | "listing" => track(process).expect("a free slot tracks the child"),
+            "test" | "doc" => track_leader(process).expect("a free slot tracks the group"),
+            _ => EDITOR_GROUP.store(process, Ordering::SeqCst),
+        }
+    }
+
+    fn quit_with_every_kind_alive(untracked: &str) {
+        with_run(|run| {
+            let _capture = crate::status_queue::Capture::enter();
+            let mut children: Vec<(&str, Child, BufReader<ChildStdout>)> = Vec::new();
+            for kind in KINDS {
+                let spawn = || held(kind).map_err(|_| RunError::Spawn);
+                let (child, stdout) = if kind == untracked { spawn() } else { spawn_reserved(spawn) }.expect("the held child starts");
+                if kind == "doc" {
+                    let mut doc = doc_run(DocPhase::Starting, None);
+                    doc.process_id = child.id();
+                    doc.scope = run.root.clone();
+                    run.doc.replace(Some(std::boxed::Box::new(doc)));
+                }
+                if kind != untracked {
+                    register(kind, child.id());
+                }
+                children.push((kind, child, stdout));
+            }
+
+            run.key(Key::Char(b'q')).expect("the first q arms the quit");
+            run.key(Key::Char(b'q')).expect("the second q quits");
+
+            for (kind, child, stdout) in &mut children {
+                if *kind == untracked {
+                    assert!(child.try_wait().expect("the untracked child polls").is_none(), "{kind} left the registry, so nothing reached it");
+                    unsafe { libc::kill(-child.id().cast_signed(), libc::SIGKILL) };
+                } else {
+                    let mut stamp = String::new();
+                    stdout.read_to_string(&mut stamp).expect("the stamp is readable until the child exits");
+                    assert_eq!(stamp, format!("stamp-{kind}\n"), "{kind} was reached by the quit");
+                }
+                child.wait().expect("the child is reaped");
+            }
+            EDITOR_GROUP.store(0, Ordering::SeqCst);
+            assert!(run.root.is_fired(), "the quit fired the root once");
+            run.doc.borrow_mut().as_mut().expect("the doc run exists").exited(130);
+            assert!(run.doc_stopped(), "the doc phase moved to interrupted by observing the root, with no poke from the key");
+        });
+    }
+
+    #[proxima::test]
+    async fn a_quit_with_one_of_every_child_kind_alive_stamps_and_reaps_all_five() {
+        crate::edge_exit::fixture::in_single_threaded_process(|| quit_with_every_kind_alive(""));
+    }
+
+    #[proxima::test]
+    #[case::without_the_build_cargo("build")]
+    #[case::without_the_doc_cargo("doc")]
+    #[case::without_a_listing("listing")]
+    #[case::without_a_test("test")]
+    #[case::without_the_editor("editor")]
+    async fn a_kind_missing_from_the_registry_is_not_reached_while_the_rest_still_are(#[case] kind: &'static str) {
+        crate::edge_exit::fixture::in_single_threaded_process(move || quit_with_every_kind_alive(kind));
     }
 }
