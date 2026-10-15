@@ -17,7 +17,6 @@ pub mod review;
 
 use memchr::memchr;
 
-use crate::edge_store::View;
 use crate::line::Line;
 use crate::failure_class::{Absent, Class, Enforcer, Exit, Location, Record, Reject, classify};
 use crate::hyperlink::write_linked;
@@ -296,7 +295,7 @@ pub struct State<'storage, const RERUN: usize> {
     passed: usize,
     skipped: usize,
     warnings: usize,
-    held: View,
+    held: (u64, u64),
     key_carry: [u8; review::CARRY],
     mouse: Option<bool>,
     hover: bool,
@@ -369,7 +368,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             passed: 0,
             skipped: 0,
             warnings: 0,
-            held: (0, 0, 0, 0),
+            held: (0, 0),
             key_carry: [0; review::CARRY],
             mouse: None,
             hover: false,
@@ -517,11 +516,11 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
 
     /// The chain in the run store that holds the warning text a rich run keeps for its closing block; the state keeps only this reference.
     #[must_use]
-    pub const fn held(&self) -> View {
+    pub const fn held(&self) -> (u64, u64) {
         self.held
     }
 
-    pub const fn hold(&mut self, chain: View) {
+    pub const fn hold(&mut self, chain: (u64, u64)) {
         self.held = chain;
     }
 
