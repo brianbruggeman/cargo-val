@@ -63,7 +63,7 @@ async fn an_error_exit_with_stdout_on_an_unread_pipe_exits_within_the_bound_and_
     let leader = libc::pid_t::try_from(spawned).expect("a pid fits pid_t");
     let exit = ExitSource::new(NonZeroI32::new(leader).expect("a spawned child has a nonzero pid"));
 
-    let status = group::bounded(spawned, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", Pipe::call(&exit, ()))
+    let status = group::bounded(spawned, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, Pipe::call(&exit, ()))
         .await
         .unwrap_or_else(|(report, _)| panic!("cargo-val still ran after an error exit with stdout on an unread pipe: {report}"))
         .expect("the exit source is unspent")

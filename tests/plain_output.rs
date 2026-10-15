@@ -363,8 +363,9 @@ async fn await_ready(master: &OwnedFd, ready: &std::fs::File, leader: u32, scree
         ];
         let timeout = i32::try_from(remaining.as_millis()).expect("the deadline fits poll");
         if unsafe { libc::poll(watched.as_mut_ptr(), 2, timeout) } == 0 {
+            let (_, path) = group::deadline_report::persist_deadline_report(fixture_deadline(), Some(leader), None, screen, &[]);
             let failures = kill_process_group(leader).await.err();
-            panic!("the blocked test never reached the rendezvous within {:?}; group kill: {failures:?}\n{}", fixture_deadline(), String::from_utf8_lossy(screen));
+            panic!("the blocked test never reached the rendezvous within {:?}; group kill: {failures:?}\n{}\n{path}", fixture_deadline(), String::from_utf8_lossy(screen));
         }
         if watched[1].revents & libc::POLLIN != 0 {
             return;
@@ -388,8 +389,9 @@ async fn read_until_hangup(master: &OwnedFd, leader: u32) -> Vec<u8> {
         let mut watched = libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(master), events: libc::POLLIN, revents: 0 };
         let timeout = i32::try_from(remaining.as_millis()).expect("the deadline fits poll");
         if unsafe { libc::poll(&raw mut watched, 1, timeout) } == 0 {
+            let (_, path) = group::deadline_report::persist_deadline_report(fixture_deadline(), Some(leader), None, &received, &[]);
             let failures = kill_process_group(leader).await.err();
-            panic!("cargo-val (pid {leader}) outlived {:?} on a pty; group kill: {failures:?}\nreceived so far:\n{}", fixture_deadline(), String::from_utf8_lossy(&received));
+            panic!("cargo-val (pid {leader}) outlived {:?} on a pty; group kill: {failures:?}\nreceived so far:\n{}\n{path}", fixture_deadline(), String::from_utf8_lossy(&received));
         }
         let count = unsafe { libc::read(std::os::fd::AsRawFd::as_raw_fd(master), chunk.as_mut_ptr().cast(), chunk.len()) };
         match usize::try_from(count) {

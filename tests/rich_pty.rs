@@ -185,7 +185,7 @@ where
     // boxed: the stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
     let master = Box::new(ChildStream::new(OwnedFd::from(master)));
     let waiting = join(drive(&master, keys, release, leader), exit.call(()));
-    let (output, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
+    let (output, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, waiting).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("{report}"),
     };
@@ -723,7 +723,7 @@ async fn a_test_that_reads_stdin_under_a_controlling_terminal_completes_without_
     // boxed: the stream owns a capture window and scratch tail, together ~40 KB, which would make every test future that awaits a run trip clippy::large_futures
     let master = Box::new(ChildStream::new(OwnedFd::from(master)));
     let waiting = join(drain::drain_until(&master, |_| false), exit.call(()));
-    let (_, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
+    let (_, exited) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, waiting).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("{report}"),
     };

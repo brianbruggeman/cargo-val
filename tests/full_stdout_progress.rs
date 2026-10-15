@@ -295,7 +295,7 @@ async fn ignored_listing_flood_pauses_on_a_full_queue_and_reports_every_skip_in_
 // the test-level timeout only fails the test; bounded kills cargo-val's whole group at the bound, which ends the drain and the exit wait
 async fn drain_and_exit(stdout: &ChildStream, running: &Running) -> (Vec<u8>, std::process::ExitStatus) {
     let waiting = join(drain_stdout(stdout), Pipe::call(&running.exit, ()));
-    let (output, exited) = match group::bounded(running.child.id(), group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", waiting).await {
+    let (output, exited) = match group::bounded(running.child.id(), group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, waiting).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("cargo-val (pid {}) did not finish while its stdout drained: {report}", running.child.id()),
     };
