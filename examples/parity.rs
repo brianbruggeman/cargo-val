@@ -51,13 +51,14 @@ fn observe(binary: &Path, target: &Path) -> Result<(), String> {
     let mut val_command = Command::new(binary);
     #[cfg(unix)]
     val_command.env("CARGO_VAL_EXIT_WITH_PARENT", "1");
-    val_command.env("CARGO_VAL_OUTPUT", "rich");
-    let val_output = run(val_command, target)?;
+    val_command.env("CARGO_VAL_OUTPUT", "plain");
+    let (val_stdout, val_stderr) = run(val_command, target)?;
+    let val_output = format!("{val_stdout}{val_stderr}");
     let mut cargo = Command::new("cargo");
     cargo.args(["test", "--locked", "--color", "never"]);
-    let test_output = run(cargo, target)?;
+    let (test_stdout, test_stderr) = run(cargo, target)?;
     let val = parse_val(&val_output);
-    let test = parse_cargo_test(&test_output);
+    let test = parse_cargo_test(&test_stdout, &test_stderr);
     print_report("cargo val", &val);
     print_report("cargo test", &test);
     if val.names.is_empty() {
@@ -70,14 +71,15 @@ fn observe(binary: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run(mut command: Command, target: &Path) -> Result<String, String> {
+fn run(mut command: Command, target: &Path) -> Result<(String, String), String> {
     command.args(["--manifest-path", FIXTURE, "--target-dir"]).arg(target);
     let output = block_on::output_blocking(command, common::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE")?;
-    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if output.status.success() {
-        return Ok(text);
+        return Ok((stdout, stderr));
     }
-    Err(format!("exit {}: {text}", output.status))
+    Err(format!("exit {}: {stdout}{stderr}", output.status))
 }
 
 fn strip_escapes(line: &str) -> String {
@@ -96,8 +98,8 @@ fn strip_escapes(line: &str) -> String {
 fn parse_val(output: &str) -> Report {
     let mut report = Report::default();
     for line in output.lines().map(strip_escapes) {
-        if let Some(name) = line.strip_suffix(" PASS") {
-            report.names.push(name.to_string());
+        if let Some(settled) = line.strip_prefix("PASS ") {
+            report.names.extend(settled.split_whitespace().nth(1).map(str::to_string));
         } else if let Some((label, counts)) = line.split_once(": discovered ") {
             let passed = counts.split("passed ").nth(1).and_then(|rest| rest.split(',').next());
             if let (Some(passed), false) = (passed.and_then(|text| text.parse::<usize>().ok()), label == "total") {
@@ -117,24 +119,27 @@ fn val_key(label: &str) -> String {
     }
 }
 
-fn parse_cargo_test(output: &str) -> Report {
+fn parse_cargo_test(stdout: &str, stderr: &str) -> Report {
     let mut report = Report::default();
-    let mut binary = String::new();
-    for line in output.lines() {
-        let line = line.trim_start();
-        if let Some(running) = line.strip_prefix("Running ") {
-            binary = test_key(running);
-        } else if line.starts_with("Doc-tests ") {
-            binary = DOC_TESTS.to_string();
-        } else if let Some(name) = line.strip_prefix("test ").and_then(|rest| rest.strip_suffix(" ... ok")) {
+    let mut binaries = stderr.lines().filter_map(binary_key);
+    for line in stdout.lines().map(str::trim_start) {
+        if let Some(name) = line.strip_prefix("test ").and_then(|rest| rest.strip_suffix(" ... ok")) {
             report.names.push(name.to_string());
         } else if let Some(rest) = line.strip_prefix("test result: ok. ") {
             let passed = rest.split(' ').next().and_then(|text| text.parse::<usize>().ok());
-            report.passed_per_binary.insert(binary.clone(), passed.unwrap_or(0));
+            report.passed_per_binary.insert(binaries.next().unwrap_or_default(), passed.unwrap_or(0));
         }
     }
     report.names.sort();
     report
+}
+
+fn binary_key(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    match line.strip_prefix("Running ") {
+        Some(running) => Some(test_key(running)),
+        None => line.starts_with("Doc-tests ").then(|| DOC_TESTS.to_string()),
+    }
 }
 
 fn test_key(running: &str) -> String {
