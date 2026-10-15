@@ -47,6 +47,10 @@ const PTY: &str = "pty";
 const DETACHED: &str = "detached";
 const BLOCKED: &str = "blocked";
 const ARMED: &str = "armed";
+fn gone_report() -> String {
+    common::group::deadline_report::persist_deadline_report(gone_deadline(), None, None, &[], &[]).1
+}
+
 fn gone_deadline() -> Duration {
     common::settings::bound("GONE_DEADLINE")
 }
@@ -178,7 +182,7 @@ async fn reaping_on_panic(cargo_val: &Cell<libc::pid_t>, body: impl Future<Outpu
 // the lifeline is the intermediary's stderr, which cargo-val inherits: once the intermediary is dead only cargo-val holds its write end, so EOF means cargo-val is gone
 async fn await_cargo_val_gone(lifeline: &ChildStream, what: &str) {
     let started = Instant::now();
-    let (_, fault) = timeout(gone_deadline(), drain(lifeline)).await.unwrap_or_else(|elapsed| panic!("{what}: still running after {:?} ({elapsed:?})", gone_deadline()));
+    let (_, fault) = timeout(gone_deadline(), drain(lifeline)).await.unwrap_or_else(|elapsed| panic!("{what}: still running after {:?} ({elapsed:?})\n{}", gone_deadline(), gone_report()));
     assert!(fault.is_none(), "{what}: the lifeline failed to read: {fault:?}");
     assert!(started.elapsed() < GONE_PROMPT, "{what}: gone only after {:?}, not within {GONE_PROMPT:?} of its parent dying", started.elapsed());
 }
@@ -194,7 +198,7 @@ fn await_fifo_eof(held: &File, what: &str) {
     }
     let mut limit = libc::timeval { tv_sec: libc::time_t::try_from(gone_deadline().as_secs()).expect("the deadline fits time_t"), tv_usec: 0 };
     let ready = unsafe { libc::select(descriptor + 1, &raw mut readable, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut limit) };
-    assert_eq!(ready, 1, "{what}: the held fifo never reached EOF");
+    assert_eq!(ready, 1, "{what}: the held fifo never reached EOF\n{}", if ready == 0 { gone_report() } else { String::new() });
     let mut byte = [0_u8; 1];
     let count = unsafe { libc::read(descriptor, byte.as_mut_ptr().cast(), 1) };
     assert_eq!(count, 0, "{what}: the held fifo carried data instead of EOF");
@@ -311,7 +315,7 @@ fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finishes() 
                 await_cargo_val_gone(lifeline, "the released run").await;
                 timeout(gone_deadline(), fifo::until_eof(&held, "the released test"))
                     .await
-                    .unwrap_or_else(|elapsed| panic!("the released test never closed the held fifo ({elapsed:?})"));
+                    .unwrap_or_else(|elapsed| panic!("the released test never closed the held fifo ({elapsed:?})\n{}", gone_report()));
             })
             .await;
         })

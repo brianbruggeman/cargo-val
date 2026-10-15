@@ -8,12 +8,20 @@ pub mod settings {
     include!("settings.rs");
 }
 
+pub mod deadline_report {
+    include!("deadline_report.rs");
+}
+
 // the fifo has no child to kill; every caller owns its child through supervised or a Drop guard that kills the group when this panics
 
 pub async fn first_line(stream: &ChildStream, what: &str) -> String {
     timeout(fifo_deadline(), read_line(stream, what))
         .await
-        .unwrap_or_else(|elapsed| panic!("{what}: no line within {:?} ({elapsed:?})", fifo_deadline()))
+        .unwrap_or_else(|elapsed| panic!("{what}: no line within {:?} ({elapsed:?})\n{}", fifo_deadline(), fifo_report()))
+}
+
+fn fifo_report() -> String {
+    deadline_report::persist_deadline_report(fifo_deadline(), None, None, &[], &[]).1
 }
 
 fn fifo_deadline() -> Duration {
@@ -35,7 +43,7 @@ async fn read_line(stream: &ChildStream, what: &str) -> String {
 pub async fn until_eof(stream: &ChildStream, what: &str) {
     let read = timeout(fifo_deadline(), stream.call(()))
         .await
-        .unwrap_or_else(|elapsed| panic!("{what}: no EOF within {:?} ({elapsed:?})", fifo_deadline()));
+        .unwrap_or_else(|elapsed| panic!("{what}: no EOF within {:?} ({elapsed:?})\n{}", fifo_deadline(), fifo_report()));
     match read {
         Err(Exhausted) => {}
         Ok(read) => panic!("{what}: the fifo carried {read:?} instead of EOF"),
