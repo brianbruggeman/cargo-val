@@ -59,7 +59,7 @@ use crate::parked_artifacts::{OwnedArtifact, ParkFault, ParkedArtifacts};
 use crate::status_queue::{self, EVENT_RESERVE};
 use crate::summary::{Counts, Tally, TargetTable};
 use crate::edge_signal::{
-    SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group, abandon_slot, reserve_slot, TABLE_FULL,
+    SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group, track_group_hangup, abandon_slot, reserve_slot, TABLE_FULL,
 };
 use crate::edge_args::{DYLIB_PATH_KEY, Environment};
 use crate::edge_spawn::{
@@ -108,7 +108,7 @@ const LINKED_CAPACITY: usize = 32768;
 const BUILD_SCRIPT_CAPACITY: usize = 65536;
 const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
 const LISTING_SLOTS: usize = 8;
-const SIGNAL_HOLDERS: usize = 2;
+const SIGNAL_HOLDERS: usize = 3;
 const LIBDIR_CAPACITY: usize = 1024;
 const SOURCE_CAPACITY: usize = 8192;
 const FRAME_CAPACITY: usize = 131_072;
@@ -691,6 +691,11 @@ fn track(target: u32) -> Result<(), RunError> {
     track_child(target).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })
 }
 
+// the editor leads its own group too, but a walk hangs it up: an interrupt is only a key to it
+fn track_hangup(target: u32) -> Result<(), RunError> {
+    track_group_hangup(target).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })
+}
+
 // a session child leads its own process group, so the signal table holds its group and a forwarded signal reaches what the test spawned
 fn track_leader(target: u32) -> Result<(), RunError> {
     track_group(target).map_err(|code| if code == TABLE_FULL { RunError::SignalSlots } else { RunError::Reactor })
@@ -1217,6 +1222,7 @@ fn abandon_editor() {
     quit_step(b"editor-abandon", group as usize);
     if group != 0 {
         crate::editor_launch::abandon(group);
+        release_group(group);
         quit_step(b"editor-reclaimed", usize::try_from(crate::editor_launch::foreground_group()).unwrap_or(usize::MAX));
     }
 }
@@ -1684,6 +1690,7 @@ pub(crate) struct ListingRun<'run> {
     sched_target: Cell<Option<usize>>,
     interrupt_reported: Cell<usize>,
     interrupt_not_run: Cell<usize>,
+    quit: Cell<Option<i32>>,
     store: Rc<edge_store::Store>,
     editing: RefCell<Option<Vec<Vec<u8>>>>,
     editor_program: RefCell<Vec<u8>>,
@@ -1998,15 +2005,17 @@ impl ListingRun<'_> {
         scope_for(rerun, (&self.root, &self.trip))
     }
 
-    // quit and interrupt are one event: the root fires once and every consumer observes it; the signal table holds every spawned child, so no child kind is named here
+    // quit and interrupt are one event: it is recorded here, the signal table's one walk reaches every spawned child, and the root fires for every consumer that observes it
+    // a quit from the review of a finished run leaves nothing to cut short, so only a quit from any other screen is recorded
     pub(crate) fn cancel(&self, interrupt: bool) {
         if interrupt {
             self.signals.raise_interrupt();
         } else {
+            let reviewing = matches!(self.render().1.borrow().mode(), Mode::Review { .. });
+            self.quit.set((!reviewing).then_some(QUIT_SIGNAL));
             self.signals.stop_children();
         }
         quit_step(b"children-stopped", 0);
-        abandon_editor();
         self.root.fire();
         quit_step(b"root-fired", 0);
     }
@@ -2176,8 +2185,9 @@ impl ListingRun<'_> {
         let directory = absolute_directory(&self.settings.source_root);
         crate::edge_output::leave_raw_mode(0);
         *self.editor_program.borrow_mut() = program;
-        match crate::editor_launch::spawn(&argv, self.environment, directory.as_bytes()) {
+        match reserve_slot().and_then(|()| crate::editor_launch::spawn(&argv, self.environment, directory.as_bytes()).inspect_err(|_| abandon_slot())) {
             Ok((group, exit)) => {
+                track_hangup(group)?;
                 EDITOR_GROUP.store(group, Ordering::SeqCst);
                 *lanes[EDITOR_LANE].2.borrow_mut() = Some(exit);
                 lanes[KEY_LANE].3.set(false);
@@ -2189,9 +2199,11 @@ impl ListingRun<'_> {
 
     pub(crate) fn editor_exited(&self, lanes: &Lanes, status: io::Result<ExitStatus>) -> Result<(), RunError> {
         // the group is cleared before anything else: the reaped pid may be reused, and a tick that still saw it would continue a stranger's group
-        if EDITOR_GROUP.swap(0, Ordering::SeqCst) == 0 {
+        let group = EDITOR_GROUP.swap(0, Ordering::SeqCst);
+        if group == 0 {
             return self.detached_exited(lanes, status);
         }
+        release_group(group);
         crate::editor_launch::reclaim_terminal();
         let outcome = status.map(crate::editor_launch::exit_code).map_err(|error| error.raw_os_error().unwrap_or(EXIT_FAULT_CODE));
         self.editor_ended(lanes, outcome)
@@ -2327,11 +2339,6 @@ impl ListingRun<'_> {
             .get()
             .is_some_and(|slot| ledger.sessions().get(slot).is_some());
         ledger.sessions().len() - usize::from(frozen)
-    }
-
-    // the phase `stop_for_quit` leaves is the record that a quit ended the doc tests; root fired distinguishes it from a fail-fast stop
-    fn doc_stopped(&self) -> bool {
-        self.doc.try_borrow().is_ok_and(|doc| doc.as_ref().is_some_and(|doc| doc.phase == DocPhase::Interrupted))
     }
 
     fn interrupt_doc_tests(&self) -> DocAtTrip {
@@ -3843,7 +3850,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
         sched: RefCell::new(SchedTable::new(sched_bytes)),
         specials: RefCell::new(SpecialPlan::new(picked)),
         sched_target: Cell::new(None),
-            interrupt_reported: Cell::new(0), interrupt_not_run: Cell::new(0),
+            interrupt_reported: Cell::new(0), interrupt_not_run: Cell::new(0), quit: Cell::new(None),
             editing: RefCell::new(None), editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), detached_running: Cell::new(false), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
             root,
@@ -4281,7 +4288,7 @@ fn finish_run(
     build_reported: bool,
 ) -> Result<RunSummary, RunError> {
     let cargo_failed = cargo_exit_code.is_some_and(|code| code != 0);
-    let stopped = interrupted(run.signals).err().or_else(|| ((cargo_failed || run.doc_stopped()) && run.root.is_fired()).then_some(RunError::Interrupted(QUIT_SIGNAL)));
+    let stopped = interrupted(run.signals).err().or_else(|| run.quit.get().map(RunError::Interrupted));
     if let Some(error) = stopped {
         agent_exit(run, error.exit_code())?;
         close_interrupted(parser, run, error.exit_code())?;
@@ -5285,7 +5292,7 @@ mod tests {
             let children = 2 * super::listing_limit(jobs);
             assert!(jobs + super::SIGNAL_HOLDERS + children <= super::SIGNAL_SLOTS, "jobs {jobs} with {children} listing children overflows {} slots", super::SIGNAL_SLOTS);
         }
-        assert_eq!(super::listing_limit(64), 3, "the default 72 slots leave room for three listings beside 64 tests");
+        assert_eq!(super::listing_limit(64), 2, "the default 72 slots leave room for two listings beside 64 tests, the build cargo, the doc test group and the editor");
         assert_eq!(super::listing_limit(10), 8, "the default jobs keep the full listing width");
     }
 
@@ -5384,6 +5391,7 @@ pub(super) mod listing_allocation_tests {
             sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
+            quit: Cell::new(None),
             editing: RefCell::new(None),
             editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), detached_running: Cell::new(false), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
@@ -5650,75 +5658,114 @@ mod close_sequence_tests {
 mod quit_registry_tests {
     use core::sync::atomic::Ordering;
     use std::format;
-    use std::io::{BufRead, BufReader, Read};
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
-    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::process::{Command, Stdio};
     use std::string::String;
     use std::vec::Vec;
 
     use super::doc_trip_tests::doc_run;
     use super::listing_allocation_tests::with_run;
-    use super::{DocPhase, EDITOR_GROUP, Key, RunError, spawn_reserved, track, track_leader};
+    use super::{DocPhase, EDITOR_GROUP, Key, ListingRun, RunError, release_child, spawn_list, spawn_reserved, track, track_hangup, track_leader};
 
     const KINDS: [&str; 5] = ["build", "doc", "listing", "test", "editor"];
 
     // a child that stamps its kind on the signal its kind receives, then exits: the editor takes a hangup, every other kind the interrupt the signal table sends
-    fn held(kind: &str) -> std::io::Result<(Child, BufReader<ChildStdout>)> {
+    fn body(kind: &str) -> String {
         let signal = if kind == "editor" { "HUP" } else { "INT" };
-        let script = format!("trap 'echo stamp-{kind}; kill $held; exit 0' {signal}; sleep 600 >/dev/null & held=$!; echo ready; wait $held");
-        let mut child = Command::new("sh").args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0).spawn()?;
-        let mut stdout = BufReader::new(child.stdout.take().expect("the child's stdout is piped"));
-        let mut ready = String::new();
-        stdout.read_line(&mut ready)?;
-        assert_eq!(ready, "ready\n", "{kind} installed its trap before the quit");
-        Ok((child, stdout))
+        format!("trap 'echo stamp-{kind}; kill $held; exit 0' {signal}; sleep 30 >/dev/null & held=$!; echo ready; wait $held")
+    }
+
+    fn await_ready(stdout: &mut File, kind: &str) {
+        let mut ready = [0_u8; 6];
+        stdout.read_exact(&mut ready).expect("the child announces itself");
+        assert_eq!(&ready, b"ready\n", "{kind} installed its trap before the quit");
+    }
+
+    // build cargo, doc cargo, tests and the editor run real programs (cargo, the tty) that a unit test cannot hold, so a shell stands in and is spawned through the same reservation and tracked by the same calls the driver makes
+    fn held(kind: &str) -> Result<(u32, File), RunError> {
+        let mut child = Command::new("sh").args(["-c", &body(kind)]).stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0).spawn().map_err(|_| RunError::Spawn)?;
+        let mut stdout = File::from(OwnedFd::from(child.stdout.take().expect("the child's stdout is piped")));
+        await_ready(&mut stdout, kind);
+        Ok((child.id(), stdout))
+    }
+
+    // the listing is the one kind whose real spawn path runs a program the test chooses: spawn_list runs `<executable> --list`, so the executable is a script
+    fn held_listing(run: &ListingRun<'_>) -> Result<(u32, File), RunError> {
+        let directory = tempfile::tempdir().map_err(|_| RunError::Spawn)?;
+        let executable = directory.path().join("listing.sh");
+        std::fs::write(&executable, format!("#!/bin/sh\n{}\n", body("listing"))).map_err(|_| RunError::Spawn)?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).map_err(|_| RunError::Spawn)?;
+        let path = executable.to_str().ok_or(RunError::Spawn)?;
+        let (process, stdout, _) = spawn_list(&mut run.launch_storage.borrow_mut(), path, false, run, &[], directory.path().to_str().ok_or(RunError::Spawn)?)?.into_parts();
+        let mut stdout = File::from(stdout);
+        // the driver reads its pipes without blocking; the test waits on this one
+        unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, 0) };
+        await_ready(&mut stdout, "listing");
+        Ok((process, stdout))
     }
 
     fn register(kind: &str, process: u32) {
         match kind {
-            "build" | "listing" => track(process).expect("a free slot tracks the child"),
+            "build" => track(process).expect("a free slot tracks the child"),
             "test" | "doc" => track_leader(process).expect("a free slot tracks the group"),
-            _ => EDITOR_GROUP.store(process, Ordering::SeqCst),
+            "editor" => {
+                track_hangup(process).expect("a free slot tracks the group");
+                EDITOR_GROUP.store(process, Ordering::SeqCst);
+            }
+            _ => {}
         }
     }
 
     fn quit_with_every_kind_alive(untracked: &str) {
         with_run(|run| {
             let _capture = crate::status_queue::Capture::enter();
-            let mut children: Vec<(&str, Child, BufReader<ChildStdout>)> = Vec::new();
+            let mut children: Vec<(&str, u32, File)> = Vec::new();
             for kind in KINDS {
-                let spawn = || held(kind).map_err(|_| RunError::Spawn);
-                let (child, stdout) = if kind == untracked { spawn() } else { spawn_reserved(spawn) }.expect("the held child starts");
+                let (process, stdout) = match kind {
+                    "listing" => held_listing(run),
+                    _ if kind == untracked => held(kind),
+                    _ => spawn_reserved(|| held(kind)),
+                }
+                .expect("the held child starts");
                 if kind == "doc" {
                     let mut doc = doc_run(DocPhase::Starting, None);
-                    doc.process_id = child.id();
+                    doc.process_id = process;
                     doc.scope = run.root.clone();
                     run.doc.replace(Some(std::boxed::Box::new(doc)));
                 }
-                if kind != untracked {
-                    register(kind, child.id());
+                match kind == untracked {
+                    true if kind == "listing" => release_child(process),
+                    true => {}
+                    false => register(kind, process),
                 }
-                children.push((kind, child, stdout));
+                children.push((kind, process, stdout));
             }
 
             run.key(Key::Char(b'q')).expect("the first q arms the quit");
             run.key(Key::Char(b'q')).expect("the second q quits");
 
-            for (kind, child, stdout) in &mut children {
+            for (kind, process, stdout) in &mut children {
                 if *kind == untracked {
-                    assert!(child.try_wait().expect("the untracked child polls").is_none(), "{kind} left the registry, so nothing reached it");
-                    unsafe { libc::kill(-child.id().cast_signed(), libc::SIGKILL) };
+                    let mut status = 0;
+                    let alive = unsafe { libc::waitpid(process.cast_signed(), &raw mut status, libc::WNOHANG) };
+                    assert_eq!(alive, 0, "{kind} left the registry, so nothing reached it");
+                    unsafe { libc::kill(process.cast_signed(), libc::SIGKILL) };
                 } else {
                     let mut stamp = String::new();
                     stdout.read_to_string(&mut stamp).expect("the stamp is readable until the child exits");
                     assert_eq!(stamp, format!("stamp-{kind}\n"), "{kind} was reached by the quit");
                 }
-                child.wait().expect("the child is reaped");
+                unsafe { libc::waitpid(process.cast_signed(), core::ptr::null_mut(), 0) };
             }
             EDITOR_GROUP.store(0, Ordering::SeqCst);
             assert!(run.root.is_fired(), "the quit fired the root once");
+            assert_eq!(run.quit.get(), Some(super::QUIT_SIGNAL), "the quit was recorded where finish_run reads it");
             run.doc.borrow_mut().as_mut().expect("the doc run exists").exited(130);
-            assert!(run.doc_stopped(), "the doc phase moved to interrupted by observing the root, with no poke from the key");
+            assert_eq!(run.doc.borrow().as_ref().map(|doc| doc.phase), Some(DocPhase::Interrupted), "the doc phase moved to interrupted by observing the root, with no poke from the key");
         });
     }
 

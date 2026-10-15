@@ -1071,6 +1071,7 @@ mod pause_tests {
             sched_target: Cell::new(None),
             interrupt_reported: Cell::new(0),
             interrupt_not_run: Cell::new(0),
+            quit: Cell::new(None),
             editing: RefCell::new(None),
             editor_program: RefCell::new(Vec::new()), request: RefCell::new(None), outside: RefCell::new(Vec::new()), detached_running: Cell::new(false), probe: RefCell::new(None), probe_site: RefCell::new((Vec::new(), 0, 0)), probe_output: RefCell::new((Vec::new(), None, false)),
             trip: root.child(),
