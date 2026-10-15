@@ -1,0 +1,13 @@
+[package]
+name = "eta_app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+exclude = ["crates/eta_core", "crates/eta_text", "crates/eta_route"]
+
+[dependencies]
+eta_core = { path = "crates/eta_core" }
+eta_text = { path = "crates/eta_text" }
+eta_route = { path = "crates/eta_route" }
