@@ -1,0 +1,21 @@
+[package]
+name = "pipeline_listed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[test]]
+name = "lister_one"
+harness = false
+
+[[test]]
+name = "lister_two"
+harness = false
+
+[[test]]
+name = "lister_three"
+harness = false
+
+[[test]]
+name = "lister_four"
+harness = false
