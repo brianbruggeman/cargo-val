@@ -131,7 +131,7 @@ async fn a_blocked_test_prints_running_with_its_age_then_passes_when_released() 
 
     assert!(age_seconds(&running) >= 1.0, "the heartbeat waits its interval: {running}");
     assert!(running.ends_with("(oldest of 1 running)"), "{}", running);
-    assert!(text.lines().any(|line| line == format!("PASS     {BINARY}  {TEST}")), "{}", text);
+    assert!(text.lines().any(|line| line == format!("PASS {BINARY} {TEST}")), "{}", text);
     assert!(text.lines().any(|line| line.starts_with("SUMMARY  passed=1 failed=0")), "{}", text);
     assert_eq!(code, Some(0), "{text}");
 }

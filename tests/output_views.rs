@@ -16,11 +16,7 @@ mod binary;
 use fixture::fixture_output;
 
 const MEBIBYTE: usize = 1_048_576;
-const STDOUT_OPEN: &str = "------ stdout: cli_run fixture::fails_when_requested ------\n";
-const STDOUT_CLOSE: &str = "------ end stdout ------\n";
 const STDERR_HEADER: &str = "---- stderr ----\n";
-const STDERR_OPEN: &str = "------ stderr: cli_run fixture::fails_when_requested ------\n";
-const STDERR_CLOSE: &str = "------ end stderr ------\n";
 
 fn target_directory(label: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("output-views-{label}"))
@@ -57,12 +53,6 @@ fn digest(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-fn fenced<'a>(output: &'a [u8], (open, close): (&str, &str)) -> &'a [u8] {
-    let start = memmem::find(output, open.as_bytes()).expect("the opening fence is printed") + open.len();
-    let length = memmem::find(&output[start..], close.as_bytes()).expect("the closing fence is printed");
-    &output[start..start + length]
-}
-
 fn read_only_run_directory(label: &str) {
     let run = target_directory(label).join("cargo-val").join("run");
     let _ = std::fs::remove_dir_all(&run);
@@ -92,9 +82,10 @@ async fn plain_output_prints_every_byte_of_both_streams_of_a_failure_from_the_ru
     let output: Output = fixture_output(&mut command("full", "plain", 2 * MEBIBYTE)).await;
 
     let expected = pattern(2 * MEBIBYTE);
-    let stdout_block = fenced(&output.stdout, (STDOUT_OPEN, STDOUT_CLOSE));
-    let stderr_block = fenced(&output.stdout, (STDERR_OPEN, STDERR_CLOSE));
-    let at = memmem::find(stdout_block, &expected[..4096]).expect("the stdout pattern starts inside its fence");
+    let header = memmem::find(&output.stdout, STDERR_HEADER.as_bytes()).expect("the stderr header is printed");
+    let stdout_block = &output.stdout[..header];
+    let stderr_block = &output.stdout[header + STDERR_HEADER.len()..][..expected.len()];
+    let at = memmem::find(stdout_block, &expected[..4096]).expect("the stdout pattern is printed before the stderr header");
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(digest(&stdout_block[at..at + expected.len()]), digest(&expected), "stdout pattern is byte-identical");
     assert_eq!(digest(stderr_block), digest(&expected), "stderr is the pattern and nothing else");

@@ -99,16 +99,14 @@ fn failure_block<const FRAME: usize>(
     frame.text(b"  ");
     frame.text(id.1);
     frame.text(b"\n");
-    match located(stdout, stderr, exit) {
-        Ok(found) => {
-            classified(frame, &found);
-            excerpt_rows(frame, excerpt);
-        }
-        Err(_) => {
-            unclassified(frame);
-            excerpt_rows(frame, excerpt);
-            output(frame, capture, dropped);
-        }
+    let record = located(stdout, stderr, exit);
+    match &record {
+        Ok(found) => classified(frame, found),
+        Err(_) => unclassified(frame),
+    }
+    excerpt_rows(frame, excerpt);
+    if record.is_err() {
+        output(frame, capture, dropped);
     }
 }
 
