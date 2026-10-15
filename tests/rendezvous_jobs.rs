@@ -2,6 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -33,7 +35,7 @@ async fn twelve_tests_alive_at_once_under_jobs_twelve_all_report_pass() {
         .env("CARGO_VAL_OUTPUT", "plain")
         .env("CARGO_VAL_JOBS", PEERS.to_string())
         .env("CARGO_VAL_FIXTURE_RENDEZVOUS_DIR", &rendezvous)
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target"));
+        .envs(isolation::environment("rendezvous-jobs"));
     let output = fixture_output(&mut command).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

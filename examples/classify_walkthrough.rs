@@ -9,6 +9,8 @@
 mod common;
 #[path = "../tests/common/block_on.rs"]
 mod block_on;
+#[path = "../tests/common/isolation.rs"]
+mod isolation;
 #[path = "../tests/common/failure_fixture.rs"]
 mod failure_fixture;
 #[path = "../tests/common/failure_fixture_sync.rs"]
