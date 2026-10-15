@@ -33,8 +33,11 @@ mod wait;
 mod group;
 #[path = "common/pty.rs"]
 mod pty;
+#[path = "common/wait_log.rs"]
+mod wait_log;
 
 use pty::{Pty, open_pty, open_pty_at};
+use wait_log::{Log, guarded, stamp};
 
 const FRAME_START: &str = "\x1b[?25l";
 static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
@@ -1825,28 +1828,76 @@ fn group_gone(group: i32) -> bool {
     unsafe { libc::kill(-group, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
 }
 
-async fn terminate_while_editing(master: &ChildStream, mut keys: File, leader: u32) -> String {
-    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+// a killed cargo-val cannot restore the pty it put in raw mode, and the run helper asserts it was restored
+fn restore_line_discipline(terminal: i32) {
+    let mut attributes: libc::termios = unsafe { core::mem::zeroed() };
+    if unsafe { libc::tcgetattr(terminal, &raw mut attributes) } == 0 {
+        attributes.c_lflag |= libc::ICANON | libc::ECHO;
+        unsafe { libc::tcsetattr(terminal, libc::TCSANOW, &raw const attributes) };
+    }
+}
+
+// a wait on the pty that also ends, naming what it waited for, when cargo-val exits first or the wait outlives its budget;
+// a missed wait is recorded as the failure and ends cargo-val, so the run returns and the test thread reports it with the wait log
+async fn master_until(waits: &Log, wait: &str, (master, (leader, terminal)): (&ChildStream, (u32, i32)), text: &str) -> Option<Vec<u8>> {
+    stamp(waits, wait, "enter");
+    let reading = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(text));
+    let verdict = match proxima_core::time::timeout(WAIT_BUDGET, reading).await {
+        Ok((seen, _)) if String::from_utf8_lossy(&seen).contains(text) => Ok(seen),
+        Ok(_) => Err("the pty closed before it appeared".to_owned()),
+        Err(elapsed) => Err(format!("no output within {WAIT_BUDGET:?} ({elapsed:?})")),
+    };
+    stamp(waits, wait, "exit");
+    let Err(why) = verdict else {
+        return verdict.ok();
+    };
+    let retained = String::from_utf8_lossy(&master.retained()).into_owned();
+    let tail: String = retained.chars().rev().take(6000).collect::<Vec<char>>().into_iter().rev().collect();
+    waits.borrow_mut().push(format!("FAILED {wait}: waiting for {text:?}: {why}; the pty so far, cargo-val debug lines included:\n{tail}"));
+    unsafe { libc::kill(leader.cast_signed(), libc::SIGKILL) };
+    restore_line_discipline(terminal);
+    None
+}
+
+async fn terminate_while_editing(master: &ChildStream, mut keys: File, leader: u32, waits: &Log) -> String {
+    let held = (master, (leader, keys.as_raw_fd()));
+    let Some(mut output) = master_until(waits, "review_header", held, REVIEW_HEADER).await else {
+        return String::new();
+    };
     keys.write_all(b"e").expect("the editor key is writable");
-    let (running, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(EDITOR_READY)).await;
+    let Some(running) = master_until(waits, "editor_ready", held, EDITOR_READY).await else {
+        return String::from_utf8_lossy(&output).into_owned();
+    };
     output.extend_from_slice(&running);
     assert_eq!(unsafe { libc::kill(leader.cast_signed(), libc::SIGTERM) }, 0, "SIGTERM reaches cargo-val");
-    let (interrupted, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("INTERRUPTED  signal=15")).await;
+    stamp(waits, "sigterm_sent", "exit");
+    let Some(interrupted) = master_until(waits, "interrupted_block", held, "INTERRUPTED  signal=15").await else {
+        return String::from_utf8_lossy(&output).into_owned();
+    };
     output.extend_from_slice(&interrupted);
     let foreground = unsafe { libc::tcgetpgrp(keys.as_raw_fd()) };
     // cargo-val exits within a millisecond of printing the block, and linux reports a tty whose foreground group has emptied as group 0
     assert!(foreground == leader.cast_signed() || foreground == 0, "the terminal's foreground group is cargo-val's again once it reports the interrupt, got {foreground}:\n{}", shown(&String::from_utf8_lossy(&output)));
+    stamp(waits, "pty_to_eof", "enter");
     let (rest, _) = drain::drain_until(master, |_| false).await;
+    stamp(waits, "pty_to_eof", "exit");
     output.extend_from_slice(&rest);
     String::from_utf8_lossy(&output).into_owned()
 }
 
-#[proxima::test]
+const SIGTERM_BUDGET: core::time::Duration = core::time::Duration::from_secs(180);
+const WAIT_BUDGET: core::time::Duration = core::time::Duration::from_secs(60);
+
+#[proxima::test(timeout = "220s")]
 async fn sigterm_while_the_editor_is_open_restores_the_terminal_and_exits_143() {
     let log = editor_log();
+    let waits = Log::default();
     let visual = fake_editor_named("vim").display().to_string();
     let environment = [("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_WAIT", "1"), ("FAKE_EDITOR_STOP_ONCE", "1"), ("CARGO_VAL_LOG", "debug")];
-    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, leader| terminate_while_editing(master, keys, leader).await).await;
+    let driven = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, leader| terminate_while_editing(master, keys, leader, &waits).await);
+    let (output, status) = guarded("the sigterm-while-editing run", (&waits, SIGTERM_BUDGET), driven).await;
+    let missed = waits.borrow().iter().find(|line| line.starts_with("FAILED ")).cloned();
+    assert!(missed.is_none(), "{}\nwait log:\n{}", missed.unwrap_or_default(), waits.borrow().join("\n"));
 
     output.lines().filter(|line| line.contains("step=editor") || line.contains("signal-received")).for_each(|line| println!("{}", line.trim_end()));
     let screen = without_sgr(&without_debug_stamps(&output));
