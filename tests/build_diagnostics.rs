@@ -29,7 +29,7 @@ fn manifest() -> PathBuf {
 }
 
 async fn run_build_error() -> Run {
-    run_with(&["--lib"]).await
+    run_with(&["--lib", "--output", "agent"]).await
 }
 
 async fn run_with(arguments: &[&str]) -> Run {
