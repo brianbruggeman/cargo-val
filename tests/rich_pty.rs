@@ -650,7 +650,7 @@ async fn a_failing_rich_run_with_a_compiler_warning_counts_it_in_review_and_prin
 }
 
 #[proxima::test]
-async fn a_green_plain_run_with_a_compiler_warning_prints_the_closing_block_and_no_warning_text_as_it_did_before_the_rich_hold() {
+async fn a_green_plain_run_with_a_compiler_warning_prints_it_exactly_once_before_the_summary_line() {
     let (plain, status) = run_driven("rich_pty_warn", "plain", &NO_COLOR, async |master, _keys, release, _leader| {
         File::create(release).expect("the release file is creatable");
         read_plain(master).await
@@ -659,7 +659,8 @@ async fn a_green_plain_run_with_a_compiler_warning_prints_the_closing_block_and_
 
     assert!(status.success(), "a green plain run exits 0: {status}");
     assert!(plain.contains("SUMMARY"), "plain still prints the closing block:\n{plain}");
-    assert_eq!(plain.matches(WARNING_TEXT).count(), 0, "plain output gained the compiler warning text:\n{plain}");
+    assert_eq!(plain.matches(WARNING_TEXT).count(), 1, "plain prints the compiler warning once:\n{plain}");
+    assert!(plain.find(WARNING_TEXT) < plain.find("SUMMARY"), "the warning precedes SUMMARY as it does in rich:\n{plain}");
 }
 
 #[proxima::test]
