@@ -77,9 +77,9 @@ fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, 
         .env_remove("EDITOR")
         .env_remove("TERM_PROGRAM")
         .env_remove("CARGO_VAL_EDITOR_URL")
-        .envs(environment.iter().copied())
         .env("CARGO_VAL_FIXTURE_RELEASE_FILE", release)
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-{fixture}-{run}")))
+        .envs(environment.iter().copied())
         .stdin(stdin)
         .stdout(stream())
         .stderr(stream())
@@ -1965,4 +1965,36 @@ async fn a_held_build_lock_shows_in_the_state_row_and_writes_nothing_above_the_f
     }
     assert_frames_replace_the_last(&output, usize::from(pty::COLUMNS));
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+const QUIT_BOUND_MS: u128 = 500;
+
+async fn quit_during_build(master: &ChildStream, mut keys: File, (leader, session, elapsed): (u32, &std::cell::Cell<u32>, &std::cell::Cell<Option<std::time::Duration>>)) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains("compile units")).await;
+    session.set(leader);
+    keys.write_all(b"qq").expect("the quit keys are writable");
+    let pressed = Instant::now();
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    elapsed.set(Some(pressed.elapsed()));
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn session_members(session: u32) -> String {
+    let found = Command::new("pgrep").args(["-s", &session.to_string()]).output().expect("pgrep runs");
+    String::from_utf8_lossy(&found.stdout).into_owned()
+}
+
+#[proxima::test]
+async fn quitting_mid_build_with_q_then_q_exits_within_the_bound_with_the_terminal_restored_and_no_child_left() {
+    let elapsed = std::cell::Cell::new(None);
+    let session = std::cell::Cell::new(0);
+    let (output, status) = run_driven("rich_pty_noisy", "rich", &NO_COLOR, async |master, keys, _release, leader| quit_during_build(master, keys, (leader, &session, &elapsed)).await).await;
+
+    let taken = elapsed.get().expect("the drive measured the quit").as_millis();
+    println!("quit from the second q to exit: {taken} ms, status {status}");
+    assert!(taken < QUIT_BOUND_MS, "q then q mid-build took {taken} ms, bound {QUIT_BOUND_MS} ms:\n{}", shown(&output));
+    assert!(output.ends_with(SHOW_CURSOR), "the last bytes of a quit show the cursor:\n{}", shown(&output));
+    let survivors = session_members(session.get());
+    assert!(survivors.trim().is_empty(), "children of the quit run survive in its session {}: {survivors}", session.get());
 }
