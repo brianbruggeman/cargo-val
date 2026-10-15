@@ -4715,6 +4715,7 @@ fn close_interrupted(parser: &CliParser<'_>, run: &ListingRun<'_>, exit: i32) ->
     let settled = (0..targets.len()).fold(Counts::default(), |sum, target| sum.plus(&targets.counts(target)));
     // a withdrawn name left the discovered count when its child was ended, so the interrupted run puts it back as not_run
     let total = Counts { discovered: settled.discovered + not_run, ..settled };
+    proxima_telemetry::debug!(exit = exit, not_run = not_run, discovered = total.discovered, "interrupted run erasing its frame to print the closing block");
     erase_frame(run.render())?;
     emit_finished(run.render(), &total, not_run, (run.started_millis, parser.manifest_path(), exit))?;
     close_cursor()
