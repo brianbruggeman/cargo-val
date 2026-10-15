@@ -989,23 +989,45 @@ fn is_status_line(line: &[u8]) -> bool {
     })
 }
 
-std::thread_local! {
-    // a rich run writes nothing above its frame, so cargo's own warnings wait here for the closing block
-    static HELD_WARNINGS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+// the stream key of the warning chain; pages carry no key, so it only names the chain in its view
+const WARNINGS_STREAM: u32 = u32::MAX - 1;
+const WARNING_PAGE_BYTES: usize = 4096;
+
+// a rich run writes nothing above its frame, so cargo's own warnings are sealed into the run store and the state keeps the chain
+fn hold_warnings(render: &Render<'_>, bytes: &[u8]) {
+    let Some(store) = render.3.borrow().clone() else {
+        return;
+    };
+    let mut state = render.1.borrow_mut();
+    let chain = bytes.chunks(WARNING_PAGE_BYTES).try_fold(state.held(), |chain, page| {
+        edge_store::append(&store, (WARNINGS_STREAM, chain.1, chain.2, chain.3), page).inspect_err(|error| edge_store::lose(&store, page.len(), error))
+    });
+    if let Ok(chain) = chain {
+        state.hold(chain);
+    }
 }
 
-fn hold_warnings(bytes: &[u8]) {
-    HELD_WARNINGS.with(|held| held.borrow_mut().extend_from_slice(bytes));
-}
-
-// prints what a rich run held, once, after the frame is gone and before the closing block
+// streams what a rich run held back from the store in order, once, after the frame is gone and before the closing block
 fn release_warnings(render: &Render<'_>) -> Result<(), RunError> {
-    let held = HELD_WARNINGS.with(|held| core::mem::take(&mut *held.borrow_mut()));
-    if held.is_empty() {
+    let (_, first, last, _) = render.1.borrow().held();
+    let Some(store) = render.3.borrow().clone() else {
+        return Ok(());
+    };
+    if first == 0 {
         return Ok(());
     }
     erase_live(render)?;
-    write_fd(2, &held)
+    let mut page = [0_u8; WARNING_PAGE_BYTES];
+    let mut position = (0, first);
+    while let Ok((at, length)) = edge_store::next_page(&store, position, &mut page) {
+        write_fd(2, &page[..length])?;
+        position = (at, at + (edge_store::HEADER_BYTES + length) as u64);
+        if at == last {
+            break;
+        }
+    }
+    render.1.borrow_mut().hold((WARNINGS_STREAM, 0, 0, 0));
+    Ok(())
 }
 
 // a rich run shows cargo's progress in the frame, so status lines are consumed; anything else is held for the closing block
@@ -1016,7 +1038,7 @@ fn summarize_status_lines(bytes: &[u8], render: &Render<'_>) -> Result<(), RunEr
         let (line, after) = rest.split_at(length);
         rest = after;
         if !is_status_line(line) {
-            hold_warnings(line);
+            hold_warnings(render, line);
             continue;
         }
         if let Some(at) = memchr::memmem::find(line, LOCK_WAIT) {
@@ -3095,7 +3117,7 @@ impl CargoDriver<'_> {
     fn report_diagnostics(&mut self, success: bool, render: &Render<'_>) -> Result<(), RunError> {
         let held = core::mem::take(&mut self.diagnostics);
         if success && self.output == OutputMode::Rich {
-            hold_warnings(&held);
+            hold_warnings(render, &held);
         }
         if !success && !held.is_empty() {
             erase_live(render)?;
@@ -4740,6 +4762,28 @@ mod tests {
     use crate::cli::CliParser;
     use crate::config::NoTestsPolicy;
     use crate::test_dir::tempdir;
+
+    #[test]
+    fn ten_thousand_held_warnings_sit_in_the_store_file_and_the_state_footprint_stays_flat() {
+        let directory = tempfile::tempdir().expect("temporary target");
+        let store = std::rc::Rc::new(crate::edge_store::open(Some(directory.path())));
+        let (mut arena, mut ledger) = ([0_u8; 64], [0_u32; 4]);
+        let mut frame = crate::line::Line::<{ crate::view_defaults::FRAME_BYTES }>::new();
+        let render: super::Render<'_> = (OutputMode::Rich, core::cell::RefCell::new(super::RenderState::new(&mut arena, &mut ledger)), core::cell::RefCell::new(&mut frame), core::cell::RefCell::new(Some(std::rc::Rc::clone(&store))));
+        let footprint = core::mem::size_of_val(&*render.1.borrow());
+        let warning = b"warning: `fixture` (lib) generated 1 warning\n";
+
+        (0..10_000).for_each(|_| super::hold_warnings(&render, warning));
+
+        let held = render.1.borrow().held();
+        assert_eq!(core::mem::size_of_val(&*render.1.borrow()), footprint, "the state is the same size however many warnings it holds");
+        assert_eq!(held.3, 10_000 * warning.len() as u64, "every held byte is sealed in the chain");
+        let file_length = store.0.as_ref().expect("the store has a file").metadata().expect("the store file has metadata").len();
+        assert!(file_length >= held.3, "the store file holds the {} held bytes, it is {file_length} long", held.3);
+        let mut page = [0_u8; super::WARNING_PAGE_BYTES];
+        let (_, length) = crate::edge_store::next_page(&store, (0, held.1), &mut page).expect("the first page reads back");
+        assert_eq!(&page[..length], warning, "the chain reads back in append order from its first page");
+    }
 
     #[test]
     fn only_runs_with_a_summary_map_to_a_record() {
