@@ -68,7 +68,7 @@ async fn assert_up_front_matches_listed(manifest: &str, flags: &[&str], target: 
 }
 
 const DEMO: &str = "examples/demo/Cargo.toml";
-const SELF: &str = "Cargo.toml";
+const FIXTURE: &str = "tests/fixtures/binary_count/Cargo.toml";
 
 #[proxima::test(timeout = "310s")]
 async fn demo_default_selection_counts_its_library_and_its_integration_test() {
@@ -90,22 +90,22 @@ async fn demo_tests_flag_counts_every_tested_target() {
     assert_up_front_matches_listed(DEMO, &["--tests"], "binary-count-demo", 2).await;
 }
 
-#[proxima::test(timeout = "1200s")]
-async fn this_workspace_lib_flag_counts_the_library_harness() {
-    assert_up_front_matches_listed(SELF, &["--lib"], "binary-count-self", 1).await;
+#[proxima::test(timeout = "310s")]
+async fn fixture_workspace_lib_flag_counts_the_library_harness() {
+    assert_up_front_matches_listed(FIXTURE, &["--lib"], "binary-count-fixture", 1).await;
 }
 
-#[proxima::test(timeout = "1200s")]
-async fn this_workspace_bins_flag_counts_the_binary_harness() {
-    assert_up_front_matches_listed(SELF, &["--bins"], "binary-count-self", 1).await;
+#[proxima::test(timeout = "310s")]
+async fn fixture_workspace_bins_flag_counts_the_binary_harness() {
+    assert_up_front_matches_listed(FIXTURE, &["--bins"], "binary-count-fixture", 1).await;
 }
 
-#[proxima::test(timeout = "1200s")]
-async fn this_workspace_named_test_flag_counts_one_integration_test() {
-    assert_up_front_matches_listed(SELF, &["--test", "cli_arguments"], "binary-count-self", 1).await;
+#[proxima::test(timeout = "310s")]
+async fn fixture_workspace_named_test_flag_counts_one_integration_test() {
+    assert_up_front_matches_listed(FIXTURE, &["--test", "alpha"], "binary-count-fixture", 1).await;
 }
 
-#[proxima::test(timeout = "1200s")]
-async fn this_workspace_package_and_two_selectors_count_both() {
-    assert_up_front_matches_listed(SELF, &["-p", "cargo-val", "--lib", "--bins"], "binary-count-self", 2).await;
+#[proxima::test(timeout = "310s")]
+async fn fixture_workspace_package_and_two_selectors_count_both() {
+    assert_up_front_matches_listed(FIXTURE, &["-p", "cargo_val_binary_count_fixture", "--lib", "--bins"], "binary-count-fixture", 2).await;
 }
