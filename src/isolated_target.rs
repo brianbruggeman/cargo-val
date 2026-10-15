@@ -106,6 +106,28 @@ pub enum LockKind {
     Other,
 }
 
+impl LockKind {
+    /// The machine word agent and json output carry as `lock=`.
+    #[must_use]
+    pub const fn word(self) -> &'static [u8] {
+        match self {
+            Self::BuildDirectory => b"build_directory",
+            Self::PackageCache => b"package_cache",
+            Self::Other => b"other",
+        }
+    }
+
+    /// The name a sentence uses, as cargo prints it after "waiting for file lock on".
+    #[must_use]
+    pub const fn phrase(self) -> &'static [u8] {
+        match self {
+            Self::BuildDirectory => b"build directory",
+            Self::PackageCache => b"package cache",
+            Self::Other => b"file lock",
+        }
+    }
+}
+
 const LOCK_NEEDLE: &[u8] = b"waiting for file lock on ";
 const WHICH_CAPACITY: usize = 48;
 
