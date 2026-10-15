@@ -1,17 +1,11 @@
 #![cfg(unix)]
 
-use core::cell::RefCell;
 use core::time::Duration;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
-use std::time::Instant;
-
-use futures::FutureExt;
-use proxima_core::time::timeout;
 
 mod common;
 #[path = "common/binary.rs"]
@@ -22,16 +16,17 @@ mod exit_wait;
 mod fixture;
 #[path = "common/supervise.rs"]
 mod supervise;
+#[path = "common/wait_log.rs"]
+mod wait_log;
 
 use common::{ChildStream, drain, drain_until};
 use exit_wait::{ExitSource, until_exit};
 use fixture::fixture_output;
 use supervise::supervised;
+use wait_log::{Log, guarded, stamp};
 
 const RUN_BUDGET: Duration = Duration::from_secs(280);
 const CHILD_BUDGET: Duration = Duration::from_secs(250);
-
-type Log = RefCell<Vec<String>>;
 
 // only the four held binaries: the package lib has a listing the fifo does not hold, and it would free a slot
 const LISTERS: [&str; 10] = ["-p", "pipeline_listed", "--test", "lister_one", "--test", "lister_two", "--test", "lister_three", "--test", "lister_four"];
@@ -86,26 +81,6 @@ fn release(fifo: &Path) -> fs::File {
     OpenOptions::new().read(true).write(true).open(fifo).expect("the harness-made fifo opens for holding")
 }
 
-// one json line per wait boundary, in the c74 event shape, so a run that outlives its budget names the wait it was in
-fn stamp(log: &Log, wait: &str, phase: &str) {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let elapsed_ms = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
-    log.borrow_mut().push(format!("{{\"event\":\"c74_wait\",\"wait\":\"{wait}\",\"phase\":\"{phase}\",\"elapsed_ms\":{elapsed_ms}}}"));
-}
-
-fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
-    payload.downcast_ref::<&str>().map(|text| (*text).to_owned()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a non-text panic payload".to_owned())
-}
-
-// the harness keeps only the panic message of the thread it armed, so a panic carries its text and the wait log out here
-async fn guarded<Outcome>(label: &str, log: &Log, body: impl Future<Output = Outcome>) -> Outcome {
-    match timeout(RUN_BUDGET, std::panic::AssertUnwindSafe(body).catch_unwind()).await {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(payload)) => panic!("{label} panicked: {}\n{}", payload_text(payload.as_ref()), log.borrow().join("\n")),
-        Err(elapsed) => panic!("{label} outlived {RUN_BUDGET:?} ({elapsed:?}); the last stamp without its exit names the wait:\n{}", log.borrow().join("\n")),
-    }
-}
-
 async fn until_seen(log: &Log, wait: &str, (stderr, exit): (&ChildStream, &ExitSource), done: impl Fn(&[u8]) -> bool) -> Vec<u8> {
     stamp(log, wait, "enter");
     let (seen, fault) = until_exit(drain_until(stderr, done), wait, exit, &[("stderr", stderr)]).await;
@@ -131,7 +106,7 @@ async fn a_test_binary_launches_while_a_later_package_is_still_held_compiling() 
     invocation.env("CARGO_VAL_FIXTURE_BUILD_FIFO", &build_fifo).env_remove("CARGO_VAL_FIXTURE_TEST_FIFO");
     let log = Log::default();
 
-    let (before_release, after_release) = guarded("the held build run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+    let (before_release, after_release) = guarded("the held build run", (&log, RUN_BUDGET), supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
         let seen = until_seen(&log, "first_launch", (stderr, exit), |bytes| has_step(bytes, "test-launched", "doubling_a_request_count_is_exact")).await;
         let writer = release(&build_fifo);
         stamp(&log, "released", "exit");
@@ -154,7 +129,7 @@ async fn artifacts_keep_arriving_while_every_job_slot_is_held_by_a_running_test(
     let binaries = ["pipeline_quick", "alpha", "gamma", "delta"];
     let log = Log::default();
 
-    let seen = guarded("the held slots run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+    let seen = guarded("the held slots run", (&log, RUN_BUDGET), supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
         let seen = until_seen(&log, "every_artifact", (stderr, exit), |bytes| binaries.iter().all(|name| has_step(bytes, "artifact-arrived", name))).await;
         let writer = release(&test_fifo);
         let (rest, _) = to_the_end(&log, stdout, stderr).await;
@@ -173,7 +148,7 @@ async fn the_doc_cargo_builds_and_runs_while_the_unit_tests_are_held() {
     invocation.env("CARGO_VAL_FIXTURE_TEST_FIFO", &test_fifo).env_remove("CARGO_VAL_FIXTURE_BUILD_FIFO");
     let log = Log::default();
 
-    let (held, finished) = guarded("the held doc run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+    let (held, finished) = guarded("the held doc run", (&log, RUN_BUDGET), supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
         let held = until_seen(&log, "doc_tests_running", (stderr, exit), |bytes| has_step(bytes, "doc-cargo-spawned", "") && has_step(bytes, "doc-tests-running", "")).await;
         let writer = release(&test_fifo);
         let (rest, _) = to_the_end(&log, stdout, stderr).await;
@@ -210,7 +185,7 @@ async fn every_held_listing_is_in_flight_at_once_up_to_the_jobs_limit() {
     let binaries = ["lister_one", "lister_two", "lister_three", "lister_four"];
     let log = Log::default();
 
-    let (held, stdout_text) = guarded("the held listing run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+    let (held, stdout_text) = guarded("the held listing run", (&log, RUN_BUDGET), supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
         let held = until_seen(&log, "every_listing", (stderr, exit), |bytes| binaries.iter().all(|name| has_step(bytes, "listing-spawned", name))).await;
         let writer = release(&list_fifo);
         let (_, printed) = to_the_end(&log, stdout, stderr).await;
@@ -230,7 +205,7 @@ async fn at_sixty_four_jobs_listings_stop_short_of_the_signal_table_and_the_run_
     invocation.env("CARGO_VAL_FIXTURE_LIST_FIFO", &list_fifo).env("CARGO_VAL_JOBS", "64");
     let log = Log::default();
 
-    let (held, stdout_text, stderr_text) = guarded("the sixty-four job run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+    let (held, stdout_text, stderr_text) = guarded("the sixty-four job run", (&log, RUN_BUDGET), supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
         let held = until_seen(&log, "three_listings", (stderr, exit), |bytes| spawned(bytes) >= 3).await;
         let writer = release(&list_fifo);
         let (rest, printed) = to_the_end(&log, stdout, stderr).await;
