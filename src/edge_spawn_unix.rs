@@ -586,9 +586,9 @@ mod spawn {
             && report.iter().all(|end| unsafe { libc::fcntl(*end, libc::F_SETFD, libc::FD_CLOEXEC) } == 0);
         if !made {
             let code = io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
-            report.iter().for_each(|end| {
-                unsafe { libc::close(*end) };
-            });
+            for end in report {
+                unsafe { libc::close(end) };
+            }
             return Err(SpawnError { os_code: code });
         }
         Ok(report)
