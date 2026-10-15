@@ -2,23 +2,15 @@
 //! `cargo metadata --filter-platform <triple> --format-version 1` one byte at a time over fixed storage, so the scan allocates only its package table
 //! and one entry per resolve dependency edge, and keeps no whole-document buffer.
 
-use std::boxed::Box;
 use std::vec;
 
-const MAX_PACKAGES: usize = 4096;
-const ID_CAPACITY: usize = 192;
 const MAX_DEPTH: usize = 8;
-/// Longest `target_directory` or `workspace_root` the scan keeps; a longer path makes it report none.
-pub const PATH_CAPACITY: usize = 512;
-const TEXT_CAPACITY: usize = PATH_CAPACITY;
 
 /// Why the metadata could not be used; the caller falls back to waiting for `build-finished`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanFault {
     /// Nesting passed the fixed stack, so the document is not cargo's metadata shape.
     TooDeep,
-    /// More packages with bins than the fixed table holds, or an id longer than it holds.
-    TooLarge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +32,8 @@ enum Key {
     Deps,
     Pkg,
     DepKinds,
+    RequiredFeatures,
+    Features,
 }
 
 const LIB: u8 = 1;
@@ -56,6 +50,10 @@ const TARGET_SELECTORS: [&[u8]; 10] = [
 
 fn flags_selector(arguments: &[&[u8]], selector: &[u8]) -> bool {
     arguments.iter().any(|argument| *argument == selector || argument.strip_prefix(selector).is_some_and(|rest| rest.first() == Some(&b'=')))
+}
+
+fn selects_features(arguments: &[&[u8]]) -> bool {
+    arguments.iter().any(|argument| *argument == b"--no-default-features" || *argument == b"--features" || argument.starts_with(b"--features=") || argument.starts_with(b"-F"))
 }
 
 fn has_flag(arguments: &[&[u8]], flag: &[u8]) -> bool {
@@ -97,10 +95,11 @@ struct Targets {
     doctested: u16,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Entry {
-    id: [u8; ID_CAPACITY],
-    id_length: usize,
+    id: vec::Vec<u8>,
+    gated: vec::Vec<vec::Vec<vec::Vec<u8>>>,
+    features: vec::Vec<vec::Vec<u8>>,
     bins: usize,
     built: usize,
     tests: usize,
@@ -116,15 +115,15 @@ const REACHABLE: u8 = 2;
 const SELECTED: u8 = 4;
 const NEEDED: u8 = 8;
 const DEPENDED: u8 = 16;
+const RESOLVED: u8 = 32;
 
 /// Every package the document lists: how many `bin` targets it has and how many were built so far, the test executables the run's flags select in it,
 /// whether it is a workspace member and whether the resolve graph reaches it.
 pub struct BinCounts {
-    entries: Box<[Entry]>,
-    count: usize,
-    unselectable: bool,
+    entries: vec::Vec<Entry>,
     default_members_seen: bool,
     members_marked: bool,
+    features_exact: bool,
     edges: vec::Vec<(usize, usize, bool)>,
 }
 
@@ -132,22 +131,10 @@ impl BinCounts {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: vec![Entry {
-                id: [0; ID_CAPACITY],
-                id_length: 0,
-                bins: 0,
-                built: 0,
-                tests: 0,
-                targets: Targets::default(),
-                named: false,
-                excluded: false,
-                default: false,
-                marks: 0,
-            }; MAX_PACKAGES].into_boxed_slice(),
-            count: 0,
-            unselectable: false,
+            entries: vec::Vec::new(),
             default_members_seen: false,
             members_marked: false,
+            features_exact: true,
             edges: vec::Vec::new(),
         }
     }
@@ -158,9 +145,9 @@ impl BinCounts {
     }
 
     fn find(&self, package_id: &[u8]) -> Option<usize> {
-        self.entries[..self.count]
+        self.entries
             .iter()
-            .position(|entry| &entry.id[..entry.id_length] == package_id)
+            .position(|entry| entry.id == package_id)
     }
 
     /// Records that one `bin` executable of `package_id` was built.
@@ -170,17 +157,37 @@ impl BinCounts {
         }
     }
 
-    /// Whether `package_id` is a workspace member that still has a `bin` target that has not been built.
+    /// Whether `package_id` is a workspace member that still has a `bin` target cargo will build that has not been built.
     #[must_use]
     pub fn awaiting(&self, package_id: &str) -> bool {
         self.find(package_id.as_bytes())
-            .is_some_and(|index| self.is_member(&self.entries[index]) && self.entries[index].built < self.entries[index].bins)
+            .is_some_and(|index| self.is_member(&self.entries[index]) && self.entries[index].built < self.expected_bins(&self.entries[index]))
+    }
+
+    // a bin behind `required-features` is built only when the package resolved with all of them on; where that set is not exactly known, every bin counts and the package waits for build-finished
+    fn expected_bins(&self, entry: &Entry) -> usize {
+        if !self.features_known(entry) {
+            return entry.bins;
+        }
+        let unmet = entry.gated.iter().filter(|required| !required.iter().all(|feature| entry.features.contains(feature))).count();
+        entry.bins - unmet
+    }
+
+    fn features_known(&self, entry: &Entry) -> bool {
+        self.features_exact && entry.marks & RESOLVED != 0 && entry.gated.iter().flatten().all(|feature| !feature.contains(&b'/') && !feature.contains(&b':'))
+    }
+
+    /// Members with a `required-features` bin whose enabled feature set is not exactly known, so they wait for build-finished; `reason` is why.
+    #[must_use]
+    pub fn unknown_feature_packages(&self) -> (usize, &'static str) {
+        let unknown = self.entries.iter().filter(|entry| self.is_member(entry) && !entry.gated.is_empty() && !self.features_known(entry)).count();
+        (unknown, if self.features_exact { "no-resolve-or-feature-syntax" } else { "feature-flags" })
     }
 
     /// Number of workspace members with at least one `bin` target.
     #[must_use]
     pub fn packages(&self) -> usize {
-        self.entries[..self.count].iter().filter(|entry| self.is_member(entry) && entry.bins > 0).count()
+        self.entries.iter().filter(|entry| self.is_member(entry) && entry.bins > 0).count()
     }
 
     fn mark(&mut self, id: &[u8], member: bool) {
@@ -191,8 +198,8 @@ impl BinCounts {
 
     /// The directory of each workspace member whose id is a `path+file://` url, in document order.
     pub fn member_directories(&self) -> impl Iterator<Item = &[u8]> {
-        self.entries[..self.count].iter().filter(|entry| self.is_member(entry)).filter_map(|entry| {
-            let rest = entry.id[..entry.id_length].strip_prefix(b"path+file://")?;
+        self.entries.iter().filter(|entry| self.is_member(entry)).filter_map(|entry| {
+            let rest = entry.id.strip_prefix(b"path+file://")?;
             let path = if cfg!(windows) && rest.len() > 2 && rest[0] == b'/' && rest[1].is_ascii_alphabetic() && rest[2] == b':' { &rest[1..] } else { rest };
             let end = memchr::memchr(b'#', path).unwrap_or(path.len());
             Some(&path[..end])
@@ -206,14 +213,14 @@ impl BinCounts {
     /// every bin when a selected integration test exists to need them, and each example. Resolver-2 host/target feature duplicates are not visible in the graph, so the count can fall short of the build.
     #[must_use]
     pub fn predicted_units(&self) -> Option<usize> {
-        if self.unselectable || !self.entries[..self.count].iter().any(|entry| entry.marks & REACHABLE != 0) {
+        if !self.entries.iter().any(|entry| entry.marks & REACHABLE != 0) {
             return None;
         }
-        let units = self.entries[..self.count].iter().filter(|entry| entry.marks & NEEDED != 0).map(Self::units_of).sum();
+        let units = self.entries.iter().filter(|entry| entry.marks & NEEDED != 0).map(|entry| self.units_of(entry)).sum();
         Some(units)
     }
 
-    fn units_of(entry: &Entry) -> usize {
+    fn units_of(&self, entry: &Entry) -> usize {
         let targets = entry.targets;
         let libs = usize::from(targets.libs);
         let scripts = usize::from(targets.scripts);
@@ -223,7 +230,7 @@ impl BinCounts {
         let integration = usize::from(targets.selected_tests);
         let library_needed = targets.doctested > 0 || integration > 0 || targets.selected_bins > 0 || targets.examples > 0 || entry.marks & DEPENDED != 0;
         let normal_lib = if library_needed { libs } else { 0 };
-        let normal_bins = if integration > 0 { entry.bins } else { 0 };
+        let normal_bins = if integration > 0 { self.expected_bins(entry) } else { 0 };
         scripts + entry.tests + normal_lib + normal_bins + usize::from(targets.examples)
     }
 
@@ -245,17 +252,20 @@ impl BinCounts {
         }
     }
 
-    fn add(&mut self, id: &[u8], bins: usize) -> Result<(), ScanFault> {
-        if self.count == MAX_PACKAGES || id.len() > ID_CAPACITY {
-            return Err(ScanFault::TooLarge);
-        }
-        let entry = &mut self.entries[self.count];
-        entry.id[..id.len()].copy_from_slice(id);
-        entry.id_length = id.len();
-        entry.bins = bins;
-        entry.built = 0;
-        self.count += 1;
-        Ok(())
+    fn add(&mut self, id: &[u8], bins: usize) {
+        self.entries.push(Entry {
+            id: id.to_vec(),
+            gated: vec::Vec::new(),
+            features: vec::Vec::new(),
+            bins,
+            built: 0,
+            tests: 0,
+            targets: Targets::default(),
+            named: false,
+            excluded: false,
+            default: false,
+            marks: 0,
+        });
     }
 
     fn mark_default(&mut self, package_id: &[u8]) {
@@ -271,44 +281,36 @@ impl Default for BinCounts {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PathText {
-    bytes: [u8; PATH_CAPACITY],
-    length: usize,
+    bytes: vec::Vec<u8>,
 }
 
 impl PathText {
     const fn new() -> Self {
-        Self {
-            bytes: [0; PATH_CAPACITY],
-            length: 0,
-        }
+        Self { bytes: vec::Vec::new() }
     }
 
     // a windows path arrives with every separator escaped as `\\`; any other JSON escape means the raw bytes are not the path, so it is reported as absent
-    fn set(&mut self, text: &[u8], overflow: bool) {
-        self.length = 0;
-        if overflow {
-            return;
-        }
-        let mut length = 0;
+    fn set(&mut self, text: &[u8]) {
+        self.bytes.clear();
         let mut remaining = text.iter().copied();
         while let Some(byte) = remaining.next() {
-            let byte = match (byte, byte == b'\\') {
-                (_, true) => match remaining.next() {
-                    Some(escaped @ (b'\\' | b'/')) => escaped,
-                    _ => return,
-                },
-                (plain, false) => plain,
-            };
-            self.bytes[length] = byte;
-            length += 1;
+            match (byte, byte == b'\\') {
+                (_, true) => {
+                    let Some(escaped @ (b'\\' | b'/')) = remaining.next() else {
+                        self.bytes.clear();
+                        return;
+                    };
+                    self.bytes.push(escaped);
+                }
+                (plain, false) => self.bytes.push(plain),
+            }
         }
-        self.length = length;
     }
 
     fn get(&self) -> Option<&[u8]> {
-        (self.length > 0).then(|| &self.bytes[..self.length])
+        (!self.bytes.is_empty()).then_some(self.bytes.as_slice())
     }
 }
 
@@ -316,8 +318,8 @@ impl PathText {
 pub struct MetadataFacts {
     /// Per package with at least one `bin` target.
     pub bins: BinCounts,
-    /// Test executables the run builds: the targets with `test = true` that the package and target flags select. `None` when the packages overflowed the fixed table.
-    pub test_targets: Option<usize>,
+    /// Test executables the run builds: the targets with `test = true` that the package and target flags select.
+    pub test_targets: usize,
     target_directory: PathText,
     workspace_root: PathText,
 }
@@ -342,12 +344,8 @@ pub struct MetadataScan<'a> {
     stack: [Frame; MAX_DEPTH],
     depth: usize,
     lexing: Lexing,
-    text: [u8; TEXT_CAPACITY],
-    text_length: usize,
-    text_overflow: bool,
-    package_id: [u8; ID_CAPACITY],
-    package_id_length: usize,
-    package_id_overflow: bool,
+    text: vec::Vec<u8>,
+    package_id: vec::Vec<u8>,
     package_bins: usize,
     package_tests: usize,
     package_targets: Targets,
@@ -356,11 +354,11 @@ pub struct MetadataScan<'a> {
     dependency_index: Option<usize>,
     dependency_kinds: u16,
     dependency_dev_kinds: u16,
-    package_name: [u8; ID_CAPACITY],
-    package_name_length: Option<usize>,
+    package_name: vec::Vec<u8>,
     target_kinds: u8,
-    target_name: [u8; ID_CAPACITY],
-    target_name_length: Option<usize>,
+    target_name: vec::Vec<u8>,
+    target_required: vec::Vec<vec::Vec<u8>>,
+    package_gated: vec::Vec<vec::Vec<vec::Vec<u8>>>,
     counts: BinCounts,
     target_directory: PathText,
     workspace_root: PathText,
@@ -397,12 +395,8 @@ impl<'a> MetadataScan<'a> {
             stack: [FRAME; MAX_DEPTH],
             depth: 0,
             lexing: Lexing::Outside,
-            text: [0; TEXT_CAPACITY],
-            text_length: 0,
-            text_overflow: false,
-            package_id: [0; ID_CAPACITY],
-            package_id_length: 0,
-            package_id_overflow: false,
+            text: vec::Vec::new(),
+            package_id: vec::Vec::new(),
             package_bins: 0,
             package_tests: 0,
             package_targets: Targets::default(),
@@ -411,11 +405,11 @@ impl<'a> MetadataScan<'a> {
             dependency_index: None,
             dependency_kinds: 0,
             dependency_dev_kinds: 0,
-            package_name: [0; ID_CAPACITY],
-            package_name_length: Some(0),
+            package_name: vec::Vec::new(),
             target_kinds: 0,
-            target_name: [0; ID_CAPACITY],
-            target_name_length: Some(0),
+            target_name: vec::Vec::new(),
+            target_required: vec::Vec::new(),
+            package_gated: vec::Vec::new(),
             counts: BinCounts::new(),
             target_directory: PathText::new(),
             workspace_root: PathText::new(),
@@ -441,6 +435,7 @@ impl<'a> MetadataScan<'a> {
     /// The facts, once the whole document was fed.
     #[must_use]
     pub fn finish(mut self) -> MetadataFacts {
+        self.counts.features_exact = !selects_features(self.arguments);
         let test_targets = self.selected_test_targets();
         self.mark_selection();
         MetadataFacts {
@@ -463,16 +458,12 @@ impl<'a> MetadataScan<'a> {
             }
     }
 
-    fn selected_test_targets(&self) -> Option<usize> {
-        if self.counts.unselectable {
-            return None;
-        }
-        let entries = &self.counts.entries[..self.counts.count];
-        Some(entries.iter().filter(|entry| self.chosen(entry)).map(|entry| entry.tests).sum())
+    fn selected_test_targets(&self) -> usize {
+        self.counts.entries.iter().filter(|entry| self.chosen(entry)).map(|entry| entry.tests).sum()
     }
 
     fn mark_selection(&mut self) {
-        for index in 0..self.counts.count {
+        for index in 0..self.counts.entries.len() {
             if self.chosen(&self.counts.entries[index]) {
                 self.counts.entries[index].marks |= SELECTED | NEEDED;
             }
@@ -483,14 +474,11 @@ impl<'a> MetadataScan<'a> {
     fn target_selected(&self) -> bool {
         let kinds = self.target_kinds & !(UNTESTED | NODOCTEST);
         let tested = self.target_kinds & UNTESTED == 0;
-        let Some(name_length) = self.target_name_length else {
-            return false;
-        };
         if kinds == 0 {
             return false;
         }
         let arguments = self.arguments;
-        let name = &self.target_name[..name_length];
+        let name = self.target_name.as_slice();
         let flagged = |selector: &[u8]| flags_selector(arguments, selector);
         if !TARGET_SELECTORS.iter().any(|selector| flagged(selector)) {
             return tested;
@@ -518,12 +506,7 @@ impl<'a> MetadataScan<'a> {
         } else {
             Lexing::InString
         };
-        if self.text_length < TEXT_CAPACITY {
-            self.text[self.text_length] = byte;
-            self.text_length += 1;
-        } else {
-            self.text_overflow = true;
-        }
+        self.text.push(byte);
     }
 
     fn top(&mut self) -> Option<&mut Frame> {
@@ -531,12 +514,10 @@ impl<'a> MetadataScan<'a> {
     }
 
     fn string_done(&mut self) {
-        let text_length = self.text_length;
-        let overflow = self.text_overflow;
         let depth = self.depth;
         let is_key = self.top().is_some_and(|frame| frame.object && frame.expect_key);
         if is_key {
-            let key = match &self.text[..text_length] {
+            let key = match self.text.as_slice() {
                 b"packages" => Key::Packages,
                 b"id" => Key::Id,
                 b"targets" => Key::Targets,
@@ -553,6 +534,8 @@ impl<'a> MetadataScan<'a> {
                 b"deps" => Key::Deps,
                 b"pkg" => Key::Pkg,
                 b"dep_kinds" => Key::DepKinds,
+                b"required-features" => Key::RequiredFeatures,
+                b"features" => Key::Features,
                 _ => Key::Other,
             };
             self.counts.default_members_seen |= key == Key::DefaultMembers && depth == 1;
@@ -561,49 +544,43 @@ impl<'a> MetadataScan<'a> {
                 frame.expect_key = false;
             }
         } else if depth == 1 && self.stack[0].object && self.stack[0].key == Key::TargetDirectory {
-            self.target_directory.set(&self.text[..text_length], overflow);
+            self.target_directory.set(&self.text);
         } else if depth == 1 && self.stack[0].object && self.stack[0].key == Key::WorkspaceRoot {
-            self.workspace_root.set(&self.text[..text_length], overflow);
+            self.workspace_root.set(&self.text);
         } else if depth == 3 && self.stack[2].key == Key::Id && self.in_package() {
-            self.package_id_overflow = overflow || text_length > ID_CAPACITY;
-            if !self.package_id_overflow {
-                self.package_id_length = text_length;
-                self.package_id[..text_length].copy_from_slice(&self.text[..text_length]);
-            }
+            self.package_id.clone_from(&self.text);
         } else if depth == 3 && self.stack[2].key == Key::Name && self.in_package() {
-            let fits = !overflow && text_length <= ID_CAPACITY;
-            self.package_name_length = fits.then_some(text_length);
-            if fits {
-                self.package_name[..text_length].copy_from_slice(&self.text[..text_length]);
-            }
+            self.package_name.clone_from(&self.text);
         } else if depth == 5 && self.stack[4].key == Key::Name && self.in_target() {
-            let fits = !overflow && text_length <= ID_CAPACITY;
-            self.target_name_length = fits.then_some(text_length);
-            if fits {
-                self.target_name[..text_length].copy_from_slice(&self.text[..text_length]);
-            }
+            self.target_name.clone_from(&self.text);
         } else if depth == 2 && self.stack[0].object && self.stack[0].key == Key::DefaultMembers && !self.stack[1].object {
-            let member = &self.text[..text_length];
+            let member = self.text.as_slice();
             self.counts.mark_default(member);
         } else if depth == 2 && self.stack[0].key == Key::WorkspaceMembers && !self.stack[1].object {
             self.counts.members_marked = true;
-            self.counts.mark(&self.text[..text_length], true);
+            self.counts.mark(&self.text, true);
         } else if depth == 4 && self.in_resolve_node() {
-            self.counts.mark(&self.text[..text_length], false);
-            self.node_index = self.counts.find(&self.text[..text_length]);
+            self.counts.mark(&self.text, false);
+            self.node_index = self.counts.find(&self.text);
+            if let Some(index) = self.node_index {
+                self.counts.entries[index].marks |= RESOLVED;
+            }
         } else if depth == 6 && self.in_dependency() && self.stack[5].key == Key::Pkg {
-            self.dependency_index = self.counts.find(&self.text[..text_length]);
+            self.dependency_index = self.counts.find(&self.text);
         } else if depth == 8 && self.in_dependency_kind() && self.stack[7].key == Key::Kind {
-            self.dependency_dev_kinds += u16::from(&self.text[..text_length] == b"dev");
-        } else if depth == 6 && self.in_kind_list() {
-            self.count_kind(text_length);
+            self.dependency_dev_kinds += u16::from(self.text.as_slice() == b"dev");
+        } else if depth == 6 && self.in_target_list(Key::Kind) {
+            self.count_kind();
+        } else if depth == 6 && self.in_target_list(Key::RequiredFeatures) {
+            self.target_required.push(self.text.clone());
+        } else if depth == 5 && self.in_node_features() && let Some(index) = self.node_index {
+            self.counts.entries[index].features.push(self.text.clone());
         }
-        self.text_length = 0;
-        self.text_overflow = false;
+        self.text.clear();
     }
 
-    fn count_kind(&mut self, text_length: usize) {
-        let kind = &self.text[..text_length];
+    fn count_kind(&mut self) {
+        let kind = self.text.as_slice();
         if kind == b"bin" {
             self.package_bins += 1;
         }
@@ -660,15 +637,27 @@ impl<'a> MetadataScan<'a> {
             && self.stack[2].object
     }
 
-    // package -> targets array -> target object -> kind array
-    fn in_kind_list(&self) -> bool {
+    // package -> targets array -> target object -> an array under `key`
+    fn in_target_list(&self, key: Key) -> bool {
         self.in_package()
             && self.depth == 6
             && self.stack[2].key == Key::Targets
             && !self.stack[3].object
             && self.stack[4].object
-            && self.stack[4].key == Key::Kind
+            && self.stack[4].key == key
             && !self.stack[5].object
+    }
+
+    // root object, `resolve` object, `nodes` array, one node object, its `features` array
+    fn in_node_features(&self) -> bool {
+        self.depth == 5
+            && self.stack[0].key == Key::Resolve
+            && self.stack[1].object
+            && self.stack[1].key == Key::Nodes
+            && !self.stack[2].object
+            && self.stack[3].object
+            && self.stack[3].key == Key::Features
+            && !self.stack[4].object
     }
 
     // root object, `resolve` object, `nodes` array, one node object, its `deps` array, one dependency object
@@ -702,7 +691,8 @@ impl<'a> MetadataScan<'a> {
         if object && self.depth == 5 && self.in_target() {
             self.target_kinds = 0;
             self.target_script = false;
-            self.target_name_length = Some(0);
+            self.target_name.clear();
+            self.target_required.clear();
         }
         if object && self.depth == 6 && self.in_dependency() {
             self.dependency_index = None;
@@ -713,23 +703,26 @@ impl<'a> MetadataScan<'a> {
             self.dependency_kinds += 1;
         }
         if object && self.depth == 3 && self.in_package() {
-            self.package_id_length = 0;
-            self.package_id_overflow = false;
+            self.package_id.clear();
+            self.package_gated.clear();
             self.package_bins = 0;
             self.package_tests = 0;
             self.package_targets = Targets::default();
-            self.package_name_length = Some(0);
+            self.package_name.clear();
         }
         Ok(())
     }
 
-    fn close(&mut self) -> Result<(), ScanFault> {
+    fn close(&mut self) {
         let closing_package = self.depth == 3 && self.in_package();
         if self.depth == 6 && self.in_dependency() {
             self.record_edge();
         }
         if self.depth == 5 && self.in_target() {
             self.finish_target();
+            if self.target_kinds & BIN != 0 && !self.target_required.is_empty() {
+                self.package_gated.push(core::mem::take(&mut self.target_required));
+            }
             if self.target_selected() {
                 self.package_tests += 1;
                 self.package_targets.selected_tests += u16::from(self.target_kinds & TEST != 0);
@@ -738,9 +731,8 @@ impl<'a> MetadataScan<'a> {
         }
         self.depth = self.depth.saturating_sub(1);
         if closing_package {
-            self.record_package()?;
+            self.record_package();
         }
-        Ok(())
     }
 
     // a dependency whose every kind entry is `dev` only matters to a package the run tests
@@ -751,23 +743,19 @@ impl<'a> MetadataScan<'a> {
         }
     }
 
-    // a package with bins that cannot be stored refuses the document; one without only costs the test count
-    fn record_package(&mut self) -> Result<(), ScanFault> {
-        let id = self.package_id;
-        let stored = if self.package_id_overflow { Err(ScanFault::TooLarge) } else { self.counts.add(&id[..self.package_id_length], self.package_bins) };
-        if let Err(fault) = stored {
-            self.counts.unselectable = true;
-            return if self.package_bins > 0 { Err(fault) } else { Ok(()) };
-        }
-        let name = &self.package_name[..self.package_name_length.unwrap_or(0)];
-        let matches = |long: &[u8], short: &[u8]| self.package_name_length.is_some() && option_values(self.arguments, long, short).any(|spec| spec_names(spec, name));
+    fn record_package(&mut self) {
+        self.counts.add(&self.package_id, self.package_bins);
+        let name = self.package_name.as_slice();
+        let matches = |long: &[u8], short: &[u8]| option_values(self.arguments, long, short).any(|spec| spec_names(spec, name));
         let (named, excluded) = (matches(b"--package", b"-p"), matches(b"--exclude", b""));
-        let entry = &mut self.counts.entries[self.counts.count - 1];
+        let Some(entry) = self.counts.entries.last_mut() else {
+            return;
+        };
         entry.tests = self.package_tests;
         entry.targets = self.package_targets;
         entry.named = named;
         entry.excluded = excluded;
-        Ok(())
+        entry.gated = core::mem::take(&mut self.package_gated);
     }
 
     fn structural_byte(&mut self, byte: u8) -> Result<(), ScanFault> {
@@ -777,7 +765,7 @@ impl<'a> MetadataScan<'a> {
             }
             b'{' => self.open(true)?,
             b'[' => self.open(false)?,
-            b'}' | b']' => self.close()?,
+            b'}' | b']' => self.close(),
             b'f' if self.depth == 5 && self.in_target() && self.stack[4].key == Key::Test => self.target_kinds |= UNTESTED,
             b'f' if self.depth == 5 && self.in_target() && self.stack[4].key == Key::Doctest => self.target_kinds |= NODOCTEST,
             b':' => {
@@ -805,6 +793,7 @@ impl Default for MetadataScan<'static> {
 #[cfg(test)]
 mod tests {
     use std::boxed::Box;
+    use std::string::String;
 
     use super::{MetadataScan, ScanFault};
 
@@ -835,7 +824,7 @@ mod tests {
         let mut scan = Box::new(MetadataScan::new());
         scan.feed(WORKSPACE.as_bytes()).expect("document fits");
 
-        assert_eq!(scan.finish().test_targets, Some(3));
+        assert_eq!(scan.finish().test_targets, 3);
     }
 
     #[proxima::test]
@@ -843,10 +832,10 @@ mod tests {
         let mut scan = Box::new(MetadataScan::new());
         scan.feed(TWO_PACKAGES.as_bytes()).expect("document fits");
 
-        assert_eq!(scan.finish().test_targets, Some(6));
+        assert_eq!(scan.finish().test_targets, 6);
     }
 
-    fn counted(arguments: &[&[u8]]) -> Option<usize> {
+    fn counted(arguments: &[&[u8]]) -> usize {
         let mut scan = Box::new(MetadataScan::selecting(arguments));
         for chunk in WORKSPACE.as_bytes().chunks(11) {
             scan.feed(chunk).expect("document fits");
@@ -869,7 +858,7 @@ mod tests {
             (&[b"--workspace", b"--tests"], 5),
         ];
         for (arguments, expected) in table {
-            assert_eq!(counted(arguments), Some(expected), "arguments {arguments:?}");
+            assert_eq!(counted(arguments), expected, "arguments {arguments:?}");
         }
     }
 
@@ -879,7 +868,7 @@ mod tests {
         let mut scan = Box::new(MetadataScan::new());
         scan.feed(document.as_bytes()).expect("document fits");
 
-        assert_eq!(scan.finish().test_targets, Some(1));
+        assert_eq!(scan.finish().test_targets, 1);
     }
 
     const DEMO_METADATA: &str = include_str!("../tests/fixtures/demo_metadata.json");
@@ -893,7 +882,7 @@ mod tests {
         let facts = scan.finish();
 
         assert_eq!(facts.bins.predicted_units(), Some(312));
-        assert_eq!(facts.test_targets, Some(2));
+        assert_eq!(facts.test_targets, 2);
     }
 
     #[proxima::test]
@@ -905,7 +894,7 @@ mod tests {
 
         assert!(!facts.bins.awaiting("registry+https://github.com/rust-lang/crates.io-index#tool@1.0.0"));
         assert_eq!(facts.bins.member_directories().collect::<std::vec::Vec<_>>(), [b"/w/app".as_slice()]);
-        assert_eq!(facts.test_targets, Some(1));
+        assert_eq!(facts.test_targets, 1);
         assert_eq!(facts.bins.predicted_units(), Some(2));
     }
 
@@ -929,16 +918,16 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn an_escaped_or_overlong_directory_is_reported_as_absent() {
-        let overlong = std::format!(
-            r#"{{"packages":[],"workspace_root":"/{}","target_directory":"/a\"b","version":1}}"#,
-            "d".repeat(super::PATH_CAPACITY)
+    async fn an_escaped_directory_is_reported_as_absent_and_a_long_one_is_kept_whole() {
+        let long = "d".repeat(2000);
+        let document = std::format!(
+            r#"{{"packages":[],"workspace_root":"/{long}","target_directory":"/a\"b","version":1}}"#
         );
         let mut scan = Box::new(MetadataScan::new());
-        scan.feed(overlong.as_bytes()).expect("document fits");
+        scan.feed(document.as_bytes()).expect("document fits");
         let facts = scan.finish();
 
-        assert_eq!(facts.workspace_root(), None);
+        assert_eq!(facts.workspace_root(), Some(std::format!("/{long}").as_bytes()));
         assert_eq!(facts.target_directory(), None);
     }
 
@@ -951,6 +940,66 @@ mod tests {
 
         assert_eq!(facts.workspace_root(), Some(&br"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpj2Z52Q"[..]));
         assert_eq!(facts.target_directory(), Some(&br"D:\a\cargo-val\target"[..]));
+    }
+
+    fn gated_document(required: &str, resolve: &str) -> String {
+        std::format!(
+            r#"{{"packages":[{{"name":"app","version":"0.1.0","id":"path+file:///w/app#0.1.0","targets":[{{"kind":["bin"],"crate_types":["bin"],"name":"app","test":true}},{{"kind":["bin"],"crate_types":["bin"],"name":"tool","required-features":[{required}],"test":true}}],"manifest_path":"/w/app/Cargo.toml"}}],"workspace_members":["path+file:///w/app#0.1.0"],"resolve":{resolve},"target_directory":"/w/target","version":1}}"#
+        )
+    }
+
+    fn resolved_with(features: &str) -> String {
+        std::format!(r#"{{"nodes":[{{"id":"path+file:///w/app#0.1.0","dependencies":[],"deps":[],"features":[{features}]}}],"root":null}}"#)
+    }
+
+    fn gated_counts(document: &str, arguments: &[&[u8]]) -> super::BinCounts {
+        let mut scan = Box::new(MetadataScan::selecting(arguments));
+        for chunk in document.as_bytes().chunks(11) {
+            scan.feed(chunk).expect("document fits");
+        }
+        scan.finish().bins
+    }
+
+    const APP: &str = "path+file:///w/app#0.1.0";
+
+    #[proxima::test]
+    async fn a_bin_whose_required_feature_is_off_is_not_awaited() {
+        let mut counts = gated_counts(&gated_document(r#""extra""#, &resolved_with("")), &[]);
+
+        assert!(counts.awaiting(APP));
+        counts.note_built(APP);
+        assert!(!counts.awaiting(APP));
+        assert_eq!(counts.unknown_feature_packages().0, 0);
+    }
+
+    #[proxima::test]
+    async fn a_bin_whose_required_feature_is_on_is_awaited() {
+        let mut counts = gated_counts(&gated_document(r#""extra""#, &resolved_with(r#""extra""#)), &[]);
+
+        counts.note_built(APP);
+        assert!(counts.awaiting(APP));
+        counts.note_built(APP);
+        assert!(!counts.awaiting(APP));
+    }
+
+    #[proxima::test]
+    async fn feature_flags_make_the_package_wait_for_every_bin_and_say_why() {
+        let mut counts = gated_counts(&gated_document(r#""extra""#, &resolved_with("")), &[b"--features", b"extra"]);
+
+        counts.note_built(APP);
+        assert!(counts.awaiting(APP));
+        assert_eq!(counts.unknown_feature_packages(), (1, "feature-flags"));
+    }
+
+    #[proxima::test]
+    async fn a_document_without_a_resolve_or_with_a_dependency_feature_waits_for_every_bin() {
+        for document in [gated_document(r#""extra""#, "null"), gated_document(r#""serde/derive""#, &resolved_with(r#""serde""#))] {
+            let mut counts = gated_counts(&document, &[]);
+
+            counts.note_built(APP);
+            assert!(counts.awaiting(APP), "{document}");
+            assert_eq!(counts.unknown_feature_packages(), (1, "no-resolve-or-feature-syntax"), "{document}");
+        }
     }
 
     const BUILD_ETA_METADATA: &str = include_str!("../tests/fixtures/build_eta_metadata.json");
