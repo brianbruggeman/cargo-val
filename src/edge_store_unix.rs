@@ -163,6 +163,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::{append, from_file, open, read_page, unavailable};
+    use crate::edge_exit::fixture::in_single_threaded_process;
     use crate::test_alloc::measure_allocations;
 
     #[test]
@@ -232,6 +233,11 @@ mod tests {
 
     #[test]
     fn a_write_that_hits_the_size_limit_leaves_a_clean_chain_and_the_next_append_links_to_it() {
+        in_single_threaded_process(size_limited_appends_leave_a_clean_chain);
+    }
+
+    // the file size limit is per process, so it is lowered in a forked child where no sibling test can be writing
+    fn size_limited_appends_leave_a_clean_chain() {
         let directory = tempfile::tempdir().expect("temporary target");
         let file = std::fs::File::options().read(true).write(true).create_new(true).open(directory.path().join("data")).expect("data file");
         let store = from_file(file).expect("store opens");
