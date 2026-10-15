@@ -1,22 +1,40 @@
 #![cfg(unix)]
 
+use core::cell::RefCell;
+use core::time::Duration;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+use std::time::Instant;
+
+use futures::FutureExt;
+use proxima_core::time::timeout;
 
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/exit_wait.rs"]
+mod exit_wait;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/supervise.rs"]
 mod supervise;
 
-use common::{drain, drain_until};
-use fixture::{fixture_deadline, fixture_output};
+use common::{ChildStream, drain, drain_until};
+use exit_wait::{ExitSource, until_exit};
+use fixture::fixture_output;
 use supervise::supervised;
+
+const RUN_BUDGET: Duration = Duration::from_secs(280);
+const CHILD_BUDGET: Duration = Duration::from_secs(250);
+
+type Log = RefCell<Vec<String>>;
+
+// only the four held binaries: the package lib has a listing the fifo does not hold, and it would free a slot
+const LISTERS: [&str; 10] = ["-p", "pipeline_listed", "--test", "lister_one", "--test", "lister_two", "--test", "lister_three", "--test", "lister_four"];
 
 fn target_directory() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
@@ -59,9 +77,51 @@ fn has_quit(text: &[u8], step: &str) -> bool {
     String::from_utf8_lossy(text).lines().any(|line| line.contains("debug: quit ms=") && line.contains(&format!("step={step} ")))
 }
 
-// opening the write end rendezvouses with every reader the fixture has parked on the fifo; holding it open keeps later readers from parking
+fn spawned(text: &[u8]) -> usize {
+    String::from_utf8_lossy(text).matches("step=listing-spawned").count()
+}
+
+// read and write on one descriptor never blocks in open, and counts as the writer every parked reader of the fifo is waiting for
 fn release(fifo: &Path) -> fs::File {
-    OpenOptions::new().write(true).open(fifo).expect("the fixture holds the fifo open for reading before announcing")
+    OpenOptions::new().read(true).write(true).open(fifo).expect("the harness-made fifo opens for holding")
+}
+
+// one json line per wait boundary, in the c74 event shape, so a run that outlives its budget names the wait it was in
+fn stamp(log: &Log, wait: &str, phase: &str) {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let elapsed_ms = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
+    log.borrow_mut().push(format!("{{\"event\":\"c74_wait\",\"wait\":\"{wait}\",\"phase\":\"{phase}\",\"elapsed_ms\":{elapsed_ms}}}"));
+}
+
+fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload.downcast_ref::<&str>().map(|text| (*text).to_owned()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a non-text panic payload".to_owned())
+}
+
+// the harness keeps only the panic message of the thread it armed, so a panic carries its text and the wait log out here
+async fn guarded<Outcome>(label: &str, log: &Log, body: impl Future<Output = Outcome>) -> Outcome {
+    match timeout(RUN_BUDGET, std::panic::AssertUnwindSafe(body).catch_unwind()).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(payload)) => panic!("{label} panicked: {}\n{}", payload_text(payload.as_ref()), log.borrow().join("\n")),
+        Err(elapsed) => panic!("{label} outlived {RUN_BUDGET:?} ({elapsed:?}); the last stamp without its exit names the wait:\n{}", log.borrow().join("\n")),
+    }
+}
+
+async fn until_seen(log: &Log, wait: &str, (stderr, exit): (&ChildStream, &ExitSource), done: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+    stamp(log, wait, "enter");
+    let (seen, fault) = until_exit(drain_until(stderr, done), wait, exit, &[("stderr", stderr)]).await;
+    stamp(log, wait, "exit");
+    assert!(fault.is_none(), "{wait}: stderr failed: {fault:?}");
+    seen
+}
+
+async fn to_the_end(log: &Log, stdout: &ChildStream, stderr: &ChildStream) -> (String, String) {
+    stamp(log, "stderr_to_eof", "enter");
+    let (rest, _) = drain(stderr).await;
+    stamp(log, "stderr_to_eof", "exit");
+    stamp(log, "stdout_to_eof", "enter");
+    let (printed, _) = drain(stdout).await;
+    stamp(log, "stdout_to_eof", "exit");
+    (String::from_utf8_lossy(&rest).into_owned(), String::from_utf8_lossy(&printed).into_owned())
 }
 
 #[proxima::test(timeout = "500s")]
@@ -69,18 +129,16 @@ async fn a_test_binary_launches_while_a_later_package_is_still_held_compiling() 
     let build_fifo = make_fifo("build");
     let mut invocation = command("build", &["--workspace"]);
     invocation.env("CARGO_VAL_FIXTURE_BUILD_FIFO", &build_fifo).env_remove("CARGO_VAL_FIXTURE_TEST_FIFO");
+    let log = Log::default();
 
-    let (before_release, after_release) = supervised(&mut invocation, fixture_deadline(), async |_, stdout, stderr, _| {
-        let (seen, fault) = drain_until(stderr, |bytes| has_step(bytes, "test-launched", "doubling_a_request_count_is_exact")).await;
-        assert!(fault.is_none(), "stderr failed before the first launch: {fault:?}");
+    let (before_release, after_release) = guarded("the held build run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+        let seen = until_seen(&log, "first_launch", (stderr, exit), |bytes| has_step(bytes, "test-launched", "doubling_a_request_count_is_exact")).await;
         let writer = release(&build_fifo);
-        let (rest, fault) = drain(stderr).await;
-        assert!(fault.is_none(), "stderr failed after the release: {fault:?}");
-        let (_, fault) = drain(stdout).await;
-        assert!(fault.is_none(), "stdout failed after the release: {fault:?}");
+        stamp(&log, "released", "exit");
+        let (rest, _) = to_the_end(&log, stdout, stderr).await;
         drop(writer);
-        (String::from_utf8_lossy(&seen).into_owned(), String::from_utf8_lossy(&rest).into_owned())
-    })
+        (String::from_utf8_lossy(&seen).into_owned(), rest)
+    }))
     .await;
 
     assert!(!has_quit(before_release.as_bytes(), "build-cargo-exited"), "the build cargo had already exited when the first test launched:\n{before_release}");
@@ -94,18 +152,15 @@ async fn artifacts_keep_arriving_while_every_job_slot_is_held_by_a_running_test(
     let mut invocation = command("slots", &["-p", "pipeline_quick", "--lib", "--tests"]);
     invocation.env("CARGO_VAL_FIXTURE_TEST_FIFO", &test_fifo).env_remove("CARGO_VAL_FIXTURE_BUILD_FIFO");
     let binaries = ["pipeline_quick", "alpha", "gamma", "delta"];
+    let log = Log::default();
 
-    let seen = supervised(&mut invocation, fixture_deadline(), async |_, stdout, stderr, _| {
-        let (seen, fault) = drain_until(stderr, |bytes| binaries.iter().all(|name| has_step(bytes, "artifact-arrived", name))).await;
-        assert!(fault.is_none(), "stderr failed before every artifact arrived: {fault:?}");
+    let seen = guarded("the held slots run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+        let seen = until_seen(&log, "every_artifact", (stderr, exit), |bytes| binaries.iter().all(|name| has_step(bytes, "artifact-arrived", name))).await;
         let writer = release(&test_fifo);
-        let (rest, _) = drain(stderr).await;
-        let (_, _) = drain(stdout).await;
+        let (rest, _) = to_the_end(&log, stdout, stderr).await;
         drop(writer);
-        let mut all = seen;
-        all.extend_from_slice(&rest);
-        String::from_utf8_lossy(&all).into_owned()
-    })
+        String::from_utf8_lossy(&seen).into_owned() + &rest
+    }))
     .await;
 
     assert!(seen.contains("step=test-launched"), "a test was held on the only job slot:\n{seen}");
@@ -116,16 +171,15 @@ async fn the_doc_cargo_builds_and_runs_while_the_unit_tests_are_held() {
     let test_fifo = make_fifo("doc");
     let mut invocation = command("doc", &["-p", "pipeline_quick"]);
     invocation.env("CARGO_VAL_FIXTURE_TEST_FIFO", &test_fifo).env_remove("CARGO_VAL_FIXTURE_BUILD_FIFO");
+    let log = Log::default();
 
-    let (held, finished) = supervised(&mut invocation, fixture_deadline(), async |_, stdout, stderr, _| {
-        let (held, fault) = drain_until(stderr, |bytes| has_step(bytes, "doc-cargo-spawned", "") && has_step(bytes, "doc-tests-running", "")).await;
-        assert!(fault.is_none(), "stderr failed before the doc tests ran: {fault:?}");
+    let (held, finished) = guarded("the held doc run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+        let held = until_seen(&log, "doc_tests_running", (stderr, exit), |bytes| has_step(bytes, "doc-cargo-spawned", "") && has_step(bytes, "doc-tests-running", "")).await;
         let writer = release(&test_fifo);
-        let (rest, _) = drain(stderr).await;
-        let (_, _) = drain(stdout).await;
+        let (rest, _) = to_the_end(&log, stdout, stderr).await;
         drop(writer);
-        (String::from_utf8_lossy(&held).into_owned(), String::from_utf8_lossy(&rest).into_owned())
-    })
+        (String::from_utf8_lossy(&held).into_owned(), rest)
+    }))
     .await;
 
     assert!(!has_quit(held.as_bytes(), "child-reaped"), "a unit test had already exited when the doc tests ran; the harness-held tests cannot exit:\n{held}");
@@ -151,19 +205,18 @@ async fn an_unheld_run_stamps_every_binary_the_build_and_the_doc_tests() {
 #[proxima::test(timeout = "500s")]
 async fn every_held_listing_is_in_flight_at_once_up_to_the_jobs_limit() {
     let list_fifo = make_fifo("listing");
-    let mut invocation = command("listing", &["-p", "pipeline_listed", "--tests"]);
+    let mut invocation = command("listing", &LISTERS);
     invocation.env("CARGO_VAL_FIXTURE_LIST_FIFO", &list_fifo).env("CARGO_VAL_JOBS", "4");
     let binaries = ["lister_one", "lister_two", "lister_three", "lister_four"];
+    let log = Log::default();
 
-    let (held, stdout_text) = supervised(&mut invocation, fixture_deadline(), async |_, stdout, stderr, _| {
-        let (held, fault) = drain_until(stderr, |bytes| binaries.iter().all(|name| has_step(bytes, "listing-spawned", name))).await;
-        assert!(fault.is_none(), "stderr failed before every listing was in flight: {fault:?}");
+    let (held, stdout_text) = guarded("the held listing run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+        let held = until_seen(&log, "every_listing", (stderr, exit), |bytes| binaries.iter().all(|name| has_step(bytes, "listing-spawned", name))).await;
         let writer = release(&list_fifo);
-        let (_, _) = drain(stderr).await;
-        let (printed, _) = drain(stdout).await;
+        let (_, printed) = to_the_end(&log, stdout, stderr).await;
         drop(writer);
-        (String::from_utf8_lossy(&held).into_owned(), String::from_utf8_lossy(&printed).into_owned())
-    })
+        (String::from_utf8_lossy(&held).into_owned(), printed)
+    }))
     .await;
 
     assert!(!held.contains("step=test-launched"), "a test launched while every listing was held:\n{held}");
@@ -173,21 +226,20 @@ async fn every_held_listing_is_in_flight_at_once_up_to_the_jobs_limit() {
 #[proxima::test(timeout = "500s")]
 async fn at_sixty_four_jobs_listings_stop_short_of_the_signal_table_and_the_run_still_passes() {
     let list_fifo = make_fifo("sixty-four");
-    let mut invocation = command("sixty-four", &["-p", "pipeline_listed", "--tests"]);
+    let mut invocation = command("sixty-four", &LISTERS);
     invocation.env("CARGO_VAL_FIXTURE_LIST_FIFO", &list_fifo).env("CARGO_VAL_JOBS", "64");
+    let log = Log::default();
 
-    let (held, stdout_text, stderr_text) = supervised(&mut invocation, fixture_deadline(), async |_, stdout, stderr, _| {
-        let (held, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).matches("step=listing-spawned").count() >= 3).await;
-        assert!(fault.is_none(), "stderr failed before three listings were in flight: {fault:?}");
+    let (held, stdout_text, stderr_text) = guarded("the sixty-four job run", &log, supervised(&mut invocation, CHILD_BUDGET, async |_, stdout, stderr, exit| {
+        let held = until_seen(&log, "three_listings", (stderr, exit), |bytes| spawned(bytes) >= 3).await;
         let writer = release(&list_fifo);
-        let (rest, _) = drain(stderr).await;
-        let (printed, _) = drain(stdout).await;
+        let (rest, printed) = to_the_end(&log, stdout, stderr).await;
         drop(writer);
-        (String::from_utf8_lossy(&held).into_owned(), String::from_utf8_lossy(&printed).into_owned(), String::from_utf8_lossy(&rest).into_owned())
-    })
+        (String::from_utf8_lossy(&held).into_owned(), printed, rest)
+    }))
     .await;
 
-    assert_eq!(held.matches("step=listing-spawned").count(), 3, "72 signal slots less 64 tests and the build and doc groups leave three listings:\n{held}");
+    assert_eq!(spawned(held.as_bytes()), 3, "72 signal slots less 64 tests and the build and doc groups leave three listings:\n{held}");
     assert!(stdout_text.contains("passed=4"), "all four listed tests pass once released:\n{stdout_text}\n{stderr_text}");
     assert!(!stderr_text.contains("signal table"), "no signal-table refusal:\n{stderr_text}");
 }
