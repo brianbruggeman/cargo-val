@@ -318,7 +318,9 @@ fn inside_workspace(root: &Path, file: &str) -> bool {
     if path.components().any(|part| part == Component::ParentDir) {
         return false;
     }
-    path.is_relative() || (!root.as_os_str().is_empty() && path.starts_with(root))
+    let drive_lettered = matches!(file.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
+    let rooted = drive_lettered || path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_)));
+    !rooted ||(!root.as_os_str().is_empty() && path.starts_with(root))
 }
 
 /// `NO_COLOR` present, even empty, disables colour (no-color.org); the one ambient read, so the
@@ -700,6 +702,14 @@ mod tests {
         let reason = for_span(Path::new(""), false, ("/rustc/abc123/library/core/src/option.rs", 1, 1, 1, None)).expect_err("no root to be inside of");
 
         assert_eq!(reason, b"external:/rustc/abc123/library/core/src/option.rs");
+    }
+
+    #[proxima::test]
+    #[case::rooted_without_a_drive("/rustc/abc123/library/core/src/option.rs")]
+    #[case::drive_letter_with_forward_slashes("D:/home/ci/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs")]
+    #[case::drive_letter_with_backslashes("C:\\Users\\runneradmin\\.cargo\\registry\\src\\serde-1.0.228\\src\\lib.rs")]
+    async fn a_rooted_or_drive_lettered_span_is_external_on_every_os(#[case] file: &str) {
+        assert!(!inside_workspace(Path::new("/work/cli_run"), file), "{file}");
     }
 
     #[test]
