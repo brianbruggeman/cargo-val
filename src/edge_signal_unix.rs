@@ -246,7 +246,9 @@ impl SignalPipe {
     }
 
     fn forward(&self, signal: c_int) {
-        if self.received.get().is_none() {
+        let first = self.received.get().is_none();
+        proxima_telemetry::debug!(signal = signal, first = first, "signal forwarded to every tracked child group");
+        if first {
             self.received.set(Some(signal));
             self.interrupt.fire();
         }
