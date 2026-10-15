@@ -14,6 +14,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use futures::FutureExt;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/exit_wait.rs"]
 mod exit_wait;
 #[path = "common/fixture.rs"]
@@ -55,7 +57,7 @@ fn blocked_test_command(directory: Option<&Path>) -> Command {
         .env_remove("RUST_TEST_THREADS")
         .env_remove("CARGO_VAL_JOBS")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-panic-target"))
+        .envs(isolation::environment("fixture-panic"))
         .env_remove("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR");
     if let Some(directory) = directory {
         command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", directory);
@@ -188,12 +190,30 @@ async fn a_missed_deadline_names_who_holds_the_build_directory_lock_and_who_does
 
     let message = panic_text(&*unwound.expect_err("a child that never exits must miss the deadline"));
     let cwd = std::env::current_dir().expect("the test has a working directory");
-    let holder = format!("  pid {} cwd {} argv ", std::process::id(), cwd.display());
+    let holder = format!("  pid {} ", std::process::id());
     assert!(message.contains("lock holders at the deadline:"), "{message}");
     assert!(message.contains(&format!("{}:\n{holder}", held_path.display())), "{message}");
-    assert!(message.contains(&format!("{}:\n  no holder", free_path.display())), "{message}");
+    assert!(message.contains(&format!(" cwd {} argv ", cwd.display())), "{message}");
+    assert!(!message.contains(&format!("{}:", free_path.display())), "a lock file no process has open is not listed as held: {message}");
     assert!(message.contains("sccache servers:"), "{message}");
     drop(held);
+}
+
+#[proxima::test(timeout = "60s")]
+async fn a_missed_deadline_with_no_lock_open_says_no_cargo_lock_held() {
+    let target = probe_directory("deadline-no-lock-holders");
+    let build_directory = target.join("debug");
+    fs::create_dir_all(&build_directory).expect("the profile directory is creatable");
+    File::create(build_directory.join(".cargo-lock")).expect("the unheld lock file is creatable");
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "exec sleep 600"]).env("CARGO_TARGET_DIR", &target).env("CARGO_HOME", target.join("cargo-home"));
+
+    let unwound = AssertUnwindSafe(supervised(&mut command, Duration::from_millis(50), async |_, _, _, _| std::future::pending::<()>().await))
+        .catch_unwind()
+        .await;
+
+    let message = panic_text(&*unwound.expect_err("a child that never exits must miss the deadline"));
+    assert!(message.contains("lock holders at the deadline:\nno cargo lock held"), "{message}");
 }
 
 #[proxima::test(timeout = "60s")]
