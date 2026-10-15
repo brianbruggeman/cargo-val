@@ -22,7 +22,7 @@ fn main() {
 "#;
 
 pub struct Holder {
-    child: Child,
+    pub child: Child,
     release: File,
 }
 

@@ -37,6 +37,8 @@ pub mod hyperlink;
 pub mod ignored_set;
 pub mod isolated_target;
 #[cfg(feature = "edge-os")]
+pub mod lock_wait;
+#[cfg(feature = "edge-os")]
 pub mod last_run;
 pub mod life;
 pub mod line;
