@@ -96,8 +96,8 @@ async fn this_workspace_lib_flag_counts_the_library_harness() {
 }
 
 #[proxima::test(timeout = "1200s")]
-async fn this_workspace_bins_flag_counts_the_binary_harness() {
-    assert_up_front_matches_listed(SELF, &["--bins"], "binary-count-self", 1).await;
+async fn this_workspace_bins_flag_counts_both_binary_harnesses() {
+    assert_up_front_matches_listed(SELF, &["--bins"], "binary-count-self", 2).await;
 }
 
 #[proxima::test(timeout = "1200s")]
@@ -107,5 +107,5 @@ async fn this_workspace_named_test_flag_counts_one_integration_test() {
 
 #[proxima::test(timeout = "1200s")]
 async fn this_workspace_package_and_two_selectors_count_both() {
-    assert_up_front_matches_listed(SELF, &["-p", "cargo-val", "--lib", "--bins"], "binary-count-self", 2).await;
+    assert_up_front_matches_listed(SELF, &["-p", "cargo-val", "--lib", "--bins"], "binary-count-self", 3).await;
 }

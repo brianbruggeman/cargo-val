@@ -376,6 +376,7 @@ mod bin_gate_hold {
     }
 
     // the fixture has no dependencies, so a private CARGO_HOME costs nothing and takes it off the package-cache lock every other cargo on the box takes
+    // RUSTC_WRAPPER closes the cargo pipes a rustc inherits when cargo forks it between pipe() and CLOEXEC; left open, the rustc held on the fifo keeps a sibling's EOF from arriving and cargo never sees the bin artifact
     pub fn command(target: &Path, fifo: &Path) -> Command {
         let mut command = crate::binary::command();
         command
@@ -390,6 +391,8 @@ mod bin_gate_hold {
             .env("CARGO_VAL_TARGET_DIR", "shared")
             .env("CARGO_VAL_BIN_GATE_HOLD", fifo)
             .env("CARGO_BUILD_JOBS", FIXTURE_BUILD_JOBS.to_string())
+            .env("RUSTC_WRAPPER", env!("CARGO_BIN_EXE_fd_scrub_rustc"))
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
             .env_remove("MAKEFLAGS")
             .env_remove("CARGO_MAKEFLAGS")
             .env_remove("MFLAGS");
