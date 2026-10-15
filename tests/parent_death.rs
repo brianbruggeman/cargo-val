@@ -20,6 +20,8 @@ use futures::FutureExt;
 use proxima_core::time::timeout;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/exit_wait.rs"]
 mod exit_wait;
 #[path = "common/fixture.rs"]
@@ -136,26 +138,26 @@ fn intermediary() {
     cargo_val.wait().expect("the intermediary outlives cargo-val until it is killed");
 }
 
-fn intermediary_command(kind: &str, arguments: &str, label: &str) -> Command {
+fn intermediary_command(kind: &str, arguments: &str, environment: &[(&str, PathBuf); 2]) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("the test binary path"));
     command
         .args(["--ignored", "--exact", "--nocapture", "intermediary"])
         .env(KIND, kind)
         .env(ARGUMENTS, arguments)
         .env("CARGO_VAL_C52D_FAIL", "1")
-        .env("CARGO_TARGET_DIR", Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("parent-death-fixture-{label}")))
+        .envs(environment.clone())
         .stdin(Stdio::null());
     command
 }
 
 // builds the fixture once before the run under test, so the rendezvous waits on a test and not on a compile
-async fn warm_fixture(arguments: &str, label: &str) {
+async fn warm_fixture(arguments: &str, environment: &[(&str, PathBuf); 2]) {
     let mut command = binary::command();
     command
         .args(arguments.split('\n'))
         .env("NO_COLOR", "1")
         .env_remove("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR")
-        .env("CARGO_TARGET_DIR", Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("parent-death-fixture-{label}")));
+        .envs(environment.clone());
     let warm = fixture_output(&mut command).await;
     assert_eq!(warm.status.code(), Some(0), "the fixture builds and its unblocked test passes");
 }
@@ -233,8 +235,9 @@ fn a_run_waiting_on_a_blocked_test_exits_and_kills_it_when_its_parent_is_sigkill
         let ready = Box::new(ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready")))));
         let held = open_reader(&directory.join("held"));
         let arguments = format!("--manifest-path\n{}\n--lib\nunit_blocks_when_requested", fixture_manifest("blocked_test").display());
-        warm_fixture(&arguments, BLOCKED).await;
-        let mut command = intermediary_command(BLOCKED, &arguments, BLOCKED);
+        let environment = isolation::environment("parent-death-blocked");
+        warm_fixture(&arguments, &environment).await;
+        let mut command = intermediary_command(BLOCKED, &arguments, &environment);
         command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory);
 
         let cargo_val = Cell::new(0);
@@ -261,7 +264,8 @@ fn a_run_waiting_on_a_blocked_test_exits_and_kills_it_when_its_parent_is_sigkill
 fn a_run_blocked_writing_to_an_unread_terminal_exits_when_its_parent_is_sigkilled() {
     on_hangup_runtime(async {
         let arguments = format!("--manifest-path\n{}\n--tests\n--no-fail-fast", fixture_manifest("cli_run").display());
-        let mut command = intermediary_command(PTY, &arguments, PTY);
+        let environment = isolation::environment("parent-death-pty");
+        let mut command = intermediary_command(PTY, &arguments, &environment);
 
         let cargo_val = Cell::new(0);
         supervised(&mut command, fixture_deadline(), async |leader, announcements, lifeline, exit| {
@@ -287,8 +291,9 @@ fn a_run_without_the_setting_survives_its_parent_being_sigkilled_and_finishes() 
         let held = Box::new(ChildStream::new(OwnedFd::from(open_reader(&directory.join("held")))));
         let stdout_file = directory.join("stdout.txt");
         let arguments = format!("--manifest-path\n{}\n--lib\nunit_blocks_when_requested", fixture_manifest("blocked_test").display());
-        warm_fixture(&arguments, DETACHED).await;
-        let mut command = intermediary_command(DETACHED, &arguments, DETACHED);
+        let environment = isolation::environment("parent-death-detached");
+        warm_fixture(&arguments, &environment).await;
+        let mut command = intermediary_command(DETACHED, &arguments, &environment);
         command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", &directory).env(STDOUT_FILE, &stdout_file);
 
         let cargo_val = Cell::new(0);

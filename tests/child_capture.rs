@@ -1,6 +1,8 @@
 use std::process::{Command, Output};
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -26,13 +28,13 @@ fn echo_command() -> Command {
 
 fn version_command() -> Command {
     let mut command = binary::command();
-    command.arg("--version");
+    command.arg("--version").envs(isolation::environment("child-capture-version"));
     command
 }
 
 fn help_command() -> Command {
     let mut command = binary::command();
-    command.arg("--help");
+    command.arg("--help").envs(isolation::environment("child-capture-help"));
     command
 }
 

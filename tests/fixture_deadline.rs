@@ -16,6 +16,8 @@ use proxima_primitives::pipe::Pipe;
 use cargo_val::edge_stream_unix::ChildStream;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -66,7 +68,7 @@ fn blocked_test_command(directory: Option<&Path>) -> Command {
         .env_remove("RUST_TEST_THREADS")
         .env_remove("CARGO_VAL_JOBS")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-deadline-target"));
+        .envs(isolation::environment("fixture-deadline"));
     if let Some(directory) = directory {
         command.env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", directory);
     }

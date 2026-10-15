@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use memchr::memmem;
 
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/binary.rs"]
 mod binary;
 
@@ -67,7 +69,7 @@ fn spawn_in(fixture: &str, (label, process, jobs): (&str, &str, &str), environme
         .env("CARGO_VAL_OUTPUT", "plain")
         .env("CARGO_VAL_PROCESS", process)
         .env("CARGO_VAL_JOBS", jobs)
-        .env("CARGO_TARGET_DIR", directory(&format!("{label}-target")).join("target"))
+        .envs(isolation::environment(&format!("output-backpressure-{label}")))
         .stdout(Stdio::piped())
         .stderr(stderr);
     command.envs(environment.iter().cloned());
@@ -207,12 +209,8 @@ fn settled_in_order(output: &[u8]) -> Vec<usize> {
         .collect()
 }
 
-fn target_of(label: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("output-backpressure-{label}-target-{}", std::process::id())).join("target")
-}
-
-fn store_bytes(label: &str) -> Vec<u8> {
-    let runs = target_of(label).join("cargo-val/run");
+fn store_bytes(target: &Path) -> Vec<u8> {
+    let runs = target.join("cargo-val/run");
     let run = std::fs::read_dir(&runs).expect("the run store directory exists").next().expect("one run directory").expect("the run directory reads");
     std::fs::read(run.path().join("data")).expect("the run store data file reads")
 }
@@ -236,8 +234,9 @@ fn release_and_count(go: &Path, done: &Path, count: usize) -> (File, mpsc::Recei
 #[test]
 fn two_thousand_settlers_finish_behind_an_unread_eight_mebibyte_block_and_print_in_order_after_it_from_the_store() {
     let scratch = directory("flood");
+    let isolated = isolation::environment("output-backpressure-flood-store");
     let (go, done) = (fifo(&scratch, "go"), fifo(&scratch, "done"));
-    let environment = [("VIEWS_FLOOD_BIG_BYTES", (8 * MEBIBYTE).to_string()), ("VIEWS_FLOOD_GO", go.display().to_string()), ("VIEWS_FLOOD_DONE", done.display().to_string())];
+    let environment = [("VIEWS_FLOOD_BIG_BYTES", (8 * MEBIBYTE).to_string()), ("VIEWS_FLOOD_GO", go.display().to_string()), ("VIEWS_FLOOD_DONE", done.display().to_string()), ("CARGO_TARGET_DIR", isolated[0].1.display().to_string())];
     let mut child = spawn_in("views_flood", ("flood", "test", "1"), &environment, Stdio::null());
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let head = read_until(&mut stdout, &fail_line_in("views_flood", "fails_big"));
@@ -256,7 +255,7 @@ fn two_thousand_settlers_finish_behind_an_unread_eight_mebibyte_block_and_print_
     assert_eq!(digests_in("views_flood", &output, "fails_big", (3, 8 * MEBIBYTE)), (expected, expected), "the block prints whole");
     assert_eq!(settled_in_order(&output), (0..SETTLERS).collect::<Vec<_>>(), "every settle line printed once, in the order the tests settled");
     assert!(at(&output, "fixture::settle_0000") > at(&output, STDERR_HEADER) + STDERR_HEADER.len() + 8 * MEBIBYTE, "the settle lines print after the block they settled behind");
-    let kept = store_bytes("flood");
+    let kept = store_bytes(&isolated[0].1);
     let in_store = memmem::find_iter(&kept, b"PASS views_flood fixture::settle_").count();
     println!("settle lines found in the run store scrollback: {in_store} of {SETTLERS}");
     assert!(in_store > 0, "the lines the ring had no room for were sealed into the run store");
