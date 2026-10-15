@@ -52,7 +52,7 @@ jobs:
           TOTAL: ${{ steps.val.outputs.total }}
         run: |
           echo "$TOTAL"
-          passed="$(sed -nE 's/.*passed ([0-9]+).*/\1/p' <<<"$TOTAL")"
-          failed="$(sed -nE 's/.*failed ([0-9]+).*/\1/p' <<<"$TOTAL")"
+          passed="$(sed -nE 's/.*passed=([0-9]+).*/\1/p' <<<"$TOTAL")"
+          failed="$(sed -nE 's/.*failed=([0-9]+).*/\1/p' <<<"$TOTAL")"
           test -n "$passed" && test "$passed" -gt 0
           test -n "$failed" && test "$failed" -eq 0
