@@ -48,7 +48,7 @@ fn fixture_manifest(fixture: &str) -> PathBuf {
 
 // the noisy fixture is the one run that keeps the default selection, which launches the doc cargo beside the test binaries
 fn selection_of(fixture: &str) -> &'static [&'static str] {
-    if fixture == "rich_pty_noisy" { &[] } else { &["--tests"] }
+    if fixture == "rich_pty_noisy" || fixture == "rich_pty_doc" { &[] } else { &["--tests"] }
 }
 
 fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
@@ -1969,9 +1969,8 @@ async fn a_held_build_lock_shows_in_the_state_row_and_writes_nothing_above_the_f
 
 const QUIT_BOUND_MS: u128 = 500;
 
-async fn quit_during_build(master: &ChildStream, mut keys: File, (leader, session, elapsed): (u32, &std::cell::Cell<u32>, &std::cell::Cell<Option<std::time::Duration>>)) -> String {
-    let (mut output, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains("compile units")).await;
-    session.set(leader);
+async fn quit_when(master: &ChildStream, mut keys: File, (leader, session, elapsed): (u32, &std::cell::Cell<u32>, &std::cell::Cell<Option<std::time::Duration>>), ready: impl Fn(&str) -> bool) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| ready(&without_sgr(&String::from_utf8_lossy(bytes)))).await;    session.set(leader);
     keys.write_all(b"qq").expect("the quit keys are writable");
     let pressed = Instant::now();
     let (rest, _) = drain::drain_until(master, |_| false).await;
@@ -1989,11 +1988,29 @@ fn session_members(session: u32) -> String {
 async fn quitting_mid_build_with_q_then_q_exits_within_the_bound_with_the_terminal_restored_and_no_child_left() {
     let elapsed = std::cell::Cell::new(None);
     let session = std::cell::Cell::new(0);
-    let (output, status) = run_driven("rich_pty_noisy", "rich", &NO_COLOR, async |master, keys, _release, leader| quit_during_build(master, keys, (leader, &session, &elapsed)).await).await;
+    let (output, status) = run_driven("rich_pty_noisy", "rich", &NO_COLOR, async |master, keys, _release, leader| quit_when(master, keys, (leader, &session, &elapsed), |screen| screen.contains("compile units")).await).await;
 
     let taken = elapsed.get().expect("the drive measured the quit").as_millis();
     println!("quit from the second q to exit: {taken} ms, status {status}");
     assert!(taken < QUIT_BOUND_MS, "q then q mid-build took {taken} ms, bound {QUIT_BOUND_MS} ms:\n{}", shown(&output));
+    assert!(output.ends_with(SHOW_CURSOR), "the last bytes of a quit show the cursor:\n{}", shown(&output));
+    let survivors = session_members(session.get());
+    assert!(survivors.trim().is_empty(), "children of the quit run survive in its session {}: {survivors}", session.get());
+}
+
+#[proxima::test]
+async fn quitting_while_doc_tests_execute_with_q_then_q_exits_within_the_bound_with_the_terminal_restored_and_no_child_left() {
+    let elapsed = std::cell::Cell::new(None);
+    let session = std::cell::Cell::new(0);
+    let (output, status) = run_driven("rich_pty_doc", "rich", &NO_COLOR, async |master, keys, release, leader| {
+        let started = release.with_extension("started");
+        quit_when(master, keys, (leader, &session, &elapsed), |_| started.exists()).await
+    })
+    .await;
+
+    let taken = elapsed.get().expect("the drive measured the quit").as_millis();
+    println!("quit from the second q to exit: {taken} ms, status {status}");
+    assert!(taken < QUIT_BOUND_MS, "q then q while doc tests execute took {taken} ms, bound {QUIT_BOUND_MS} ms:\n{}", shown(&output));
     assert!(output.ends_with(SHOW_CURSOR), "the last bytes of a quit show the cursor:\n{}", shown(&output));
     let survivors = session_members(session.get());
     assert!(survivors.trim().is_empty(), "children of the quit run survive in its session {}: {survivors}", session.get());
