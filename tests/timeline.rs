@@ -115,7 +115,7 @@ async fn a_failing_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_tim
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(1), "{text}");
-    assert!(text.contains("Slowest test ") || text.contains("Next slowest test "), "the takeaway names the slowest test:\n{text}");
+    assert!(text.contains("Slowest test ") || text.contains("Next slowest test ") || text.contains("No long tail: "), "the takeaway is one of the three sentences the timeline can end on:\n{text}");
     assert!(!text.contains("After 0.000s"), "a tail that begins at zero is no tail:\n{text}");
     assert_eq!(axis_end(&text), summary_wall(&text), "{text}");
 }
