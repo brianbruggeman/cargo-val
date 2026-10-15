@@ -108,6 +108,7 @@ const LINKED_CAPACITY: usize = 32768;
 const BUILD_SCRIPT_CAPACITY: usize = 65536;
 const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
 const LISTING_SLOTS: usize = 8;
+const SIGNAL_HOLDERS: usize = 2;
 const LIBDIR_CAPACITY: usize = 1024;
 const SOURCE_CAPACITY: usize = 8192;
 const FRAME_CAPACITY: usize = 131_072;
@@ -1478,6 +1479,12 @@ fn spawn_list(
 
 fn slot_range(slot: usize) -> Range<usize> {
     slot * ENVIRONMENT_CAPACITY..(slot + 1) * ENVIRONMENT_CAPACITY
+}
+
+// each listing holds up to two signal slots (the list and the ignored-list child) beside every running test, the build cargo and the doc test group, so the table is never asked for more than it has
+fn listing_limit(jobs: usize) -> usize {
+    let headroom = SIGNAL_SLOTS.saturating_sub(jobs + SIGNAL_HOLDERS) / 2;
+    jobs.clamp(2, LISTING_SLOTS).min(headroom).max(1)
 }
 
 fn listings_in_flight(active: Option<&PendingListing>, pending: &VecDeque<PendingListing>) -> usize {
@@ -3898,7 +3905,7 @@ fn new_driver(
         environments,
         active: None,
         pending_listings: VecDeque::with_capacity(LISTING_SLOTS),
-        listing_limit: jobs.clamp(2, LISTING_SLOTS),
+        listing_limit: listing_limit(jobs),
         cargo_backlog: None,
         cargo_eof: false,
         finishing: false,
@@ -5207,6 +5214,16 @@ mod tests {
         listing.extend_from_slice(b"\n");
 
         assert!(matches!(collected(64, &listing), Err(RunError::ListingStream)));
+    }
+
+    #[proxima::test]
+    async fn running_tests_plus_listing_children_never_pass_the_signal_table_at_any_jobs_value() {
+        for jobs in 1..=super::LIVE_CAPACITY {
+            let children = 2 * super::listing_limit(jobs);
+            assert!(jobs + super::SIGNAL_HOLDERS + children <= super::SIGNAL_SLOTS, "jobs {jobs} with {children} listing children overflows {} slots", super::SIGNAL_SLOTS);
+        }
+        assert_eq!(super::listing_limit(64), 3, "the default 72 slots leave room for three listings beside 64 tests");
+        assert_eq!(super::listing_limit(10), 8, "the default jobs keep the full listing width");
     }
 
     #[proxima::test]
