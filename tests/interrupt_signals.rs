@@ -295,7 +295,7 @@ async fn interrupted_rich_run(label: &str, launch: Launch) -> Observed {
     let (ready, master) = (Box::new(ready), Box::new(ChildStream::new(OwnedFd::from(master))));
     let leader = fixture.child.id();
     let work = join(interrupt_once_in_flight(&mut fixture, &ready, launch.2), drain::drain_until(&master, |_| false));
-    let (groups, (bytes, _)) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", work).await {
+    let (groups, (bytes, _)) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, work).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("{report}"),
     };

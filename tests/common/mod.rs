@@ -47,7 +47,7 @@ use group::bounded;
 pub async fn output_within(command: &mut Command, deadline: Duration, setting: &str) -> Result<Output, String> {
     let (leader, stdout, stderr, exit) = launch(command)?;
     let collect = join3(drain(&stdout), drain(&stderr), exit.call(()));
-    let settled = bounded(leader, deadline, setting, collect).await;
+    let settled = bounded(leader, deadline, setting, Some(command), collect).await;
     release_group(leader);
     match settled {
         Ok(finished) => finish(command, leader, finished, None),

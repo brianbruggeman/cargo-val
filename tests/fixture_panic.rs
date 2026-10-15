@@ -216,3 +216,67 @@ async fn a_missed_deadline_persists_its_report_and_names_the_path_last() {
     assert!(report.contains("uptime: "), "{report}");
     assert!(report.contains("deadline: 50ms"), "{report}");
 }
+
+fn take_persisted_report(message: &str, test: &str, deadline: &str) -> String {
+    let path = message
+        .lines()
+        .find_map(|line| line.strip_prefix("deadline report: "))
+        .map_or_else(|| panic!("the failure must name its report: {message}"), PathBuf::from);
+    let report = fs::read_to_string(&path).expect("the named log file exists");
+    fs::remove_file(&path).expect("the test removes its own log");
+    assert!(report.contains(&format!("test: {test}\n")), "{report}");
+    assert!(report.contains(&format!("deadline: {deadline}\n")), "{report}");
+    assert!(report.contains("lock holders at the deadline:"), "{report}");
+    assert!(report.contains("uptime: "), "{report}");
+    report
+}
+
+#[proxima::test(timeout = "60s")]
+async fn a_bounded_fixture_run_that_misses_its_deadline_persists_its_report() {
+    let directory = probe_directory("bounded-persisted-report");
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "read line < \"$BLOCK\""]).env("BLOCK", directory.join("block"));
+
+    let failure = common::output_within(&mut command, Duration::from_millis(50), "FIXTURE_DEADLINE")
+        .await
+        .expect_err("a child blocked on a fifo must miss the deadline");
+
+    let report = take_persisted_report(&failure, "a_bounded_fixture_run_that_misses_its_deadline_persists_its_report", "50ms");
+    assert!(report.contains("/bin/sh") || report.contains("sh -c"), "the group listing names the blocked shell: {report}");
+}
+
+// settings::bound counts whole seconds, so 1 s is the shortest fifo deadline; nextest gives each test its own process, which is what makes the variable safe to set
+fn with_one_second_fifo_deadline() {
+    // safety: set once before any other thread of this test process reads it
+    unsafe { std::env::set_var("CARGO_VAL_TEST_FIFO_DEADLINE", "1") };
+}
+
+fn hold_fifo_open_without_writing(directory: &Path) -> (ChildStream, File) {
+    let reader = ChildStream::new(OwnedFd::from(open_ready(&directory.join("ready"))));
+    let writer = OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(directory.join("ready")).expect("the fifo has a reader, so a nonblocking write open succeeds");
+    (reader, writer)
+}
+
+#[proxima::test(timeout = "60s")]
+async fn a_fifo_that_never_delivers_a_line_persists_its_report() {
+    with_one_second_fifo_deadline();
+    let directory = probe_directory("fifo-line-persisted-report");
+    let (ready, _writer) = hold_fifo_open_without_writing(&directory);
+
+    let unwound = AssertUnwindSafe(fifo::first_line(&ready, "the child never wrote its pid")).catch_unwind().await;
+
+    let message = panic_text(&*unwound.expect_err("a fifo nobody writes to must miss the deadline"));
+    take_persisted_report(&message, "a_fifo_that_never_delivers_a_line_persists_its_report", "1s");
+}
+
+#[proxima::test(timeout = "60s")]
+async fn a_fifo_that_never_reaches_eof_persists_its_report() {
+    with_one_second_fifo_deadline();
+    let directory = probe_directory("fifo-eof-persisted-report");
+    let (held, _writer) = hold_fifo_open_without_writing(&directory);
+
+    let unwound = AssertUnwindSafe(fifo::until_eof(&held, "the held fifo")).catch_unwind().await;
+
+    let message = panic_text(&*unwound.expect_err("a fifo whose writer stays open must miss the deadline"));
+    take_persisted_report(&message, "a_fifo_that_never_reaches_eof_persists_its_report", "1s");
+}

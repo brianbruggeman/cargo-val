@@ -4,6 +4,7 @@ use core::future::ready;
 use core::pin::pin;
 #[cfg(unix)]
 use std::io;
+use std::process::Command;
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -21,6 +22,10 @@ pub mod settings {
     include!("settings.rs");
 }
 
+pub mod deadline_report {
+    include!("deadline_report.rs");
+}
+
 pub(crate) fn interrupt_grace() -> Duration {
     settings::bound("INTERRUPT_GRACE")
 }
@@ -35,17 +40,18 @@ fn taskkill_deadline() -> Duration {
 /// # Errors
 ///
 /// The expiry report and the output `work` finished with once the group was gone.
-pub async fn bounded<Work: Future>(leader: u32, deadline: Duration, setting: &str, work: Work) -> Result<Work::Output, (String, Work::Output)> {
+pub async fn bounded<Work: Future>(leader: u32, deadline: Duration, setting: &str, command: Option<&Command>, work: Work) -> Result<Work::Output, (String, Work::Output)> {
     let mut work = pin!(work);
     if let Ok(done) = timeout(deadline, work.as_mut()).await {
         return Ok(done);
     }
+    let (snapshot, path) = deadline_report::persist_deadline_report(deadline, Some(leader), command, &[], &[]);
     let expiry = Signal::new();
     expiry.fire();
     expiry.fired().await;
     let (drained, failures) = interrupt_then_kill(leader, work.as_mut()).await;
     Err((
-        format!("pid {leader} outlived {deadline:?} and its process group was killed (signal failures: {failures:?})\nraise CARGO_VAL_TEST_{setting} if the work is only slow"),
+        format!("pid {leader} outlived {deadline:?} and its process group was killed (signal failures: {failures:?})\nraise CARGO_VAL_TEST_{setting} if the work is only slow\n{snapshot}\n{path}"),
         drained,
     ))
 }
@@ -111,6 +117,9 @@ pub async fn kill_process_group(leader: u32) -> Result<(), String> {
         Ok(Ok(Ok(status))) => Err(format!("taskkill for pid {leader} exited {status}")),
         Ok(Ok(Err(error))) => Err(format!("taskkill for pid {leader} could not be waited on: {error}")),
         Ok(Err(_)) => Err(format!("taskkill for pid {leader}: the exit source was already spent")),
-        Err(_) => Err(format!("taskkill for pid {leader} did not exit within {:?}", taskkill_deadline())),
+        Err(_) => {
+            let (_, path) = deadline_report::persist_deadline_report(taskkill_deadline(), Some(leader), None, &[], &[]);
+            Err(format!("taskkill for pid {leader} did not exit within {:?}\n{path}", taskkill_deadline()))
+        }
     }
 }
