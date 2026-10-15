@@ -13,12 +13,15 @@ pub fn open_pty() -> Pty {
     open_pty_at(COLUMNS)
 }
 
+// openpty leaves both ends inheritable, so a child another test thread spawns would keep the slave open and the master would never read EOF
 // a ChildStream parks on WouldBlock, so a blocking master would stall the whole reactor thread until the child next writes
 pub fn open_pty_at(columns: u16) -> Pty {
     let mut size = libc::winsize { ws_row: ROWS, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
     let (mut master, mut slave) = (0, 0);
     let opened = unsafe { libc::openpty(&raw mut master, &raw mut slave, core::ptr::null_mut(), core::ptr::null_mut(), &raw mut size) };
     assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+    let sealed = [master, slave].into_iter().all(|end| unsafe { libc::fcntl(end, libc::F_SETFD, libc::FD_CLOEXEC) } == 0);
+    assert!(sealed, "the pty ends turn close-on-exec: {}", std::io::Error::last_os_error());
     let flagged = unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK) };
     assert_eq!(flagged, 0, "the pty master turns nonblocking: {}", std::io::Error::last_os_error());
     unsafe { Pty { master: File::from(OwnedFd::from_raw_fd(master)), slave: OwnedFd::from_raw_fd(slave) } }
