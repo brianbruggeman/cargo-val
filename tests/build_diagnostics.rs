@@ -157,6 +157,7 @@ const NOISE: [&str; 3] = ["Compiling ", "Blocking ", "cargo-val: waiting for "];
 fn normalised(text: &str) -> String {
     let kept: Vec<String> = text.lines()
         .filter(|line| !NOISE.iter().any(|prefix| line.trim_start().starts_with(prefix)))
+        .map(|line| if line.contains("--> ") { line.replace('\\', "/") } else { line.to_owned() })
         .map(|line| {
             let words: Vec<String> = line
                 .split(' ')
@@ -188,7 +189,7 @@ async fn plain_and_agent_build_error_output_is_byte_identical_to_the_committed_c
     command
         .arg("--manifest-path")
         .arg(manifest())
-        .args(["--lib", "--output", mode])
+        .args(["--lib", "--output", mode, "--process", "test"])
         .env_remove("CI")
         .env_remove("CARGO_VAL_COLOR")
         .env("NO_COLOR", "1")
