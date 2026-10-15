@@ -17,6 +17,7 @@ pub mod review;
 
 use memchr::memchr;
 
+use crate::edge_store::View;
 use crate::line::Line;
 use crate::failure_class::{Absent, Class, Enforcer, Exit, Location, Record, Reject, classify};
 use crate::hyperlink::write_linked;
@@ -295,6 +296,7 @@ pub struct State<'storage, const RERUN: usize> {
     passed: usize,
     skipped: usize,
     warnings: usize,
+    held: View,
     key_carry: [u8; review::CARRY],
     mouse: Option<bool>,
     hover: bool,
@@ -367,6 +369,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             passed: 0,
             skipped: 0,
             warnings: 0,
+            held: (0, 0, 0, 0),
             key_carry: [0; review::CARRY],
             mouse: None,
             hover: false,
@@ -510,6 +513,16 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     #[must_use]
     pub fn oldest(&self) -> Option<(Identity<'_>, u64, Option<u32>)> {
         (self.inflight_count != 0).then(|| self.inflight_at(0)).map(|(start, limit, id, _)| (id, start, limit))
+    }
+
+    /// The chain in the run store that holds the warning text a rich run keeps for its closing block; the state keeps only this reference.
+    #[must_use]
+    pub const fn held(&self) -> View {
+        self.held
+    }
+
+    pub const fn hold(&mut self, chain: View) {
+        self.held = chain;
     }
 
     /// Failures that arrived after the ledger or the name arena was full; the closing block says how many.
