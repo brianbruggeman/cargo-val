@@ -42,7 +42,7 @@ struct BuildDefaults {
     spawn_environment_pointers: usize,
     #[setting(default = 65536)]
     status_queue_bytes: usize,
-    #[setting(default = 72)]
+    #[setting(default = 73)]
     signal_slots: usize,
 }
 

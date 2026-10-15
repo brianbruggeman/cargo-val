@@ -5292,7 +5292,7 @@ mod tests {
             let children = 2 * super::listing_limit(jobs);
             assert!(jobs + super::SIGNAL_HOLDERS + children <= super::SIGNAL_SLOTS, "jobs {jobs} with {children} listing children overflows {} slots", super::SIGNAL_SLOTS);
         }
-        assert_eq!(super::listing_limit(64), 2, "the default 72 slots leave room for two listings beside 64 tests, the build cargo, the doc test group and the editor");
+        assert_eq!(super::listing_limit(64), 3, "the default 73 slots leave room for three listings beside 64 tests, the build cargo, the doc test group and the editor");
         assert_eq!(super::listing_limit(10), 8, "the default jobs keep the full listing width");
     }
 
