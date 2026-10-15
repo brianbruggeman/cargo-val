@@ -40,7 +40,40 @@ pub fn at_deadline(group: u32, announced: Option<LockKind>) -> Exit {
 fn holder_of(group: u32, kind: LockKind) -> Option<u32> {
     let members = group_members(&run("ps", &["-axo", "pgid=,pid="]), group);
     let opened = run("lsof", &["-nP", "-Fn", "-p", &join(&members)]);
-    lock_files(&opened, kind).into_iter().find_map(|file| holder_outside(&openers(&run("lsof", &["-nP", "-Fpl", "--", &file])), &members))
+    lock_files(&opened, kind).into_iter().find_map(|file| holder_outside(&openers_of(Path::new(&file)), &members))
+}
+
+/// Every process with `file` open, each with whether `lsof` marks it as holding a lock on the file; empty when `lsof` does not run or nothing has it open. Where the platform reports no lock state (macOS for `flock`) no entry is marked, so a caller can say "has open" and not "holds".
+#[must_use]
+pub fn openers_of(file: &Path) -> Vec<(u32, bool)> {
+    openers(&run("lsof", &["-nP", "-Fpl", "--", &file.to_string_lossy()]))
+}
+
+/// [`openers_of`] for many files in one `lsof` read, each entry the file, the pid and whether `lsof` marks the pid as holding a lock on it; one read because `lsof` walks every process per call.
+#[must_use]
+pub fn openers_among(files: &[String]) -> Vec<(String, u32, bool)> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let mut arguments: Vec<&str> = Vec::from(["-nP", "-Fpln", "--"]);
+    arguments.extend(files.iter().map(String::as_str));
+    openers_by_file(&run("lsof", &arguments))
+}
+
+fn openers_by_file(listing: &str) -> Vec<(String, u32, bool)> {
+    let mut found: Vec<(String, u32, bool)> = Vec::new();
+    let (mut pid, mut held) = (0_u32, false);
+    for line in listing.lines() {
+        if let Some(next) = line.strip_prefix('p').and_then(|text| text.parse::<u32>().ok()) {
+            pid = next;
+        } else if let Some(state) = line.strip_prefix('l') {
+            held = state.chars().next().is_some_and(|mark| HELD.contains(mark));
+        } else if let Some(name) = line.strip_prefix('n') {
+            found.push((name.to_owned(), pid, held));
+            held = false;
+        }
+    }
+    found
 }
 
 fn join(pids: &[u32]) -> String {
