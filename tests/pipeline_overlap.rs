@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/exit_wait.rs"]
@@ -32,7 +34,7 @@ const CHILD_BUDGET: Duration = Duration::from_secs(250);
 const LISTERS: [&str; 10] = ["-p", "pipeline_listed", "--test", "lister_one", "--test", "lister_two", "--test", "lister_three", "--test", "lister_four"];
 
 fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
 fn make_fifo(label: &str) -> PathBuf {
@@ -56,7 +58,7 @@ fn command(label: &str, arguments: &[&str]) -> Command {
         .args(arguments)
         .env("CARGO_VAL_LOG", "debug")
         .env("CARGO_VAL_JOBS", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join(format!("pipeline-overlap-{label}")));
+        .envs(isolation::environment(&format!("pipeline-overlap-{label}")));
     for key in ["CI", "GITHUB_ACTIONS", "NO_COLOR", "TERM", "CARGO_VAL_OUTPUT", "CARGO_VAL_PROCESS", "CARGO_VAL_FILTERSET", "RUST_TEST_THREADS"] {
         command.env_remove(key);
     }

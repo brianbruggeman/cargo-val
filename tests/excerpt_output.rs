@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -33,7 +35,7 @@ async fn run_manifest(manifest: &Path, mode: &str, target: &str, arguments: &[&s
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
         .env("CARGO_VAL_LOG", "debug")
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(target));
+        .envs(isolation::environment(target));
     fixture_output(&mut command).await
 }
 
