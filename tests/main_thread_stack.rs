@@ -2,6 +2,9 @@
 
 use std::path::Path;
 
+#[path = "common/isolation.rs"]
+mod isolation;
+
 use cargo_val::run::drive;
 use proxima_runtime::CoreId;
 
@@ -18,10 +21,11 @@ fn fixture_arguments(target: &Path) -> Vec<Vec<u8>> {
 
 #[proxima::test]
 async fn drive_completes_on_a_one_mebibyte_stack() {
-    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("main-thread-stack");
+    let environment = isolation::environment("main-thread-stack");
+    let target = environment[0].1.clone();
     let arguments = fixture_arguments(&target);
 
-    let summary = std::thread::Builder::new()
+    let summary = temp_env::with_var("CARGO_HOME", Some(&environment[1].1), || std::thread::Builder::new()
         .stack_size(WINDOWS_MAIN_THREAD_STACK)
         .spawn(move || {
             prime::os::core_shard::run_on_this_thread_as::<prime::os::reactor::Hangup, _>(CoreId(0), drive(arguments))
@@ -30,7 +34,7 @@ async fn drive_completes_on_a_one_mebibyte_stack() {
         })
         .expect("thread spawns")
         .join()
-        .expect("drive does not overflow or panic");
+        .expect("drive does not overflow or panic"));
 
     let _ = std::fs::remove_dir_all(&target);
     assert_eq!((summary.passed, summary.failed), (2, 0));

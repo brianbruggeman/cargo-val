@@ -5,6 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -17,10 +19,7 @@ use fixture::fixture_output;
 
 
 fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
-        PathBuf::from,
-    )
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
 fn rendezvous_directory() -> PathBuf {
@@ -59,10 +58,7 @@ async fn same_test_name_in_two_test_binaries_runs_while_the_first_is_live() {
         .env("CARGO_VAL_JOBS", "4")
         .env("NO_COLOR", "1")
         .env("CARGO_VAL_RENDEZVOUS_DIR", &directory)
-        .env(
-            "CARGO_TARGET_DIR",
-            target_directory().join("same-name-fixture"),
-        );
+        .envs(isolation::environment("same-name"));
     let output = fixture_output(&mut command).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
