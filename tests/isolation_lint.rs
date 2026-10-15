@@ -84,5 +84,5 @@ fn the_scan_flags_a_hand_set_target_and_an_unbounded_output() {
 
     assert_eq!(hand_set_environment_key(violation), [1]);
     assert_eq!(unbounded_output(violation), [1]);
-    assert!(hand_set_environment_key("command.envs(isolation::environment(\"label\"));").is_empty());
+    assert_eq!(hand_set_environment_key("command.envs(isolation::environment(\"label\"));"), Vec::<usize>::new());
 }
