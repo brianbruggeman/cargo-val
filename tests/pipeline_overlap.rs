@@ -169,3 +169,25 @@ async fn every_held_listing_is_in_flight_at_once_up_to_the_jobs_limit() {
     assert!(!held.contains("step=test-launched"), "a test launched while every listing was held:\n{held}");
     assert!(stdout_text.contains("passed=4"), "the four listed tests pass once the listings are released:\n{stdout_text}");
 }
+
+#[proxima::test(timeout = "500s")]
+async fn at_sixty_four_jobs_listings_stop_short_of_the_signal_table_and_the_run_still_passes() {
+    let list_fifo = make_fifo("sixty-four");
+    let mut invocation = command("sixty-four", &["-p", "pipeline_listed", "--tests"]);
+    invocation.env("CARGO_VAL_FIXTURE_LIST_FIFO", &list_fifo).env("CARGO_VAL_JOBS", "64");
+
+    let (held, stdout_text, stderr_text) = supervised(&mut invocation, fixture_deadline(), async |_, stdout, stderr, _| {
+        let (held, fault) = drain_until(stderr, |bytes| String::from_utf8_lossy(bytes).matches("step=listing-spawned").count() >= 3).await;
+        assert!(fault.is_none(), "stderr failed before three listings were in flight: {fault:?}");
+        let writer = release(&list_fifo);
+        let (rest, _) = drain(stderr).await;
+        let (printed, _) = drain(stdout).await;
+        drop(writer);
+        (String::from_utf8_lossy(&held).into_owned(), String::from_utf8_lossy(&printed).into_owned(), String::from_utf8_lossy(&rest).into_owned())
+    })
+    .await;
+
+    assert_eq!(held.matches("step=listing-spawned").count(), 3, "72 signal slots less 64 tests and the build and doc groups leave three listings:\n{held}");
+    assert!(stdout_text.contains("passed=4"), "all four listed tests pass once released:\n{stdout_text}\n{stderr_text}");
+    assert!(!stderr_text.contains("signal table"), "no signal-table refusal:\n{stderr_text}");
+}
