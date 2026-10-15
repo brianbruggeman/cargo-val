@@ -24,7 +24,7 @@ use crate::edge_store::Store;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, editor_running, emit, keep_editor_running, keys_raw, monotonic_millis, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, editor_running, emit, keep_editor_running, keys_raw, monotonic_millis, quit_step, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
@@ -823,8 +823,11 @@ pub async fn drive(arguments: Vec<Vec<u8>>) -> Result<RunSummary, RunError> {
         previous(info);
     }));
     let outcome = run_body(&parser).await;
+    quit_step(b"flush-start", 0);
     status_queue::flush_bounded().await;
+    quit_step(b"flush-end", 0);
     restore_cursor();
+    quit_step(b"terminal-restored", 0);
     outcome
 }
 

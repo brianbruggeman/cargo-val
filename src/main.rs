@@ -57,6 +57,7 @@ fn run_arguments(arguments: Vec<Vec<u8>>) -> ExitCode {
         proxima_runtime::CoreId(0),
         cargo_val::run::drive(arguments),
     );
+    cargo_val::driver::quit_step(b"process-exit", 0);
     match root {
         Ok(Ok(summary)) => exit_status(summary.exit_code()),
         Ok(Err(error)) => {
