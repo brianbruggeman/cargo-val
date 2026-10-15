@@ -6,3 +6,8 @@ publish = false
 
 [dependencies]
 eta_text = { path = "../eta_text" }
+
+[[bin]]
+name = "eta_route_probe"
+path = "src/probe.rs"
+test = false
