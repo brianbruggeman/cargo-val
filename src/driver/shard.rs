@@ -93,7 +93,9 @@ impl ShardWatch {
         if self.keeping {
             self.keeping = false;
             let closing = projected(render, &Event::BlockClosed);
-            keep_failure_line(&mut self.failures, &mut self.failure_length, (render, closing.bytes().trim_ascii_end()))?;
+            if !closing.bytes().is_empty() {
+                keep_failure_line(&mut self.failures, &mut self.failure_length, (render, closing.bytes().trim_ascii_end()))?;
+            }
         }
         flush(&self.failures, &mut self.failure_length, render)
     }
@@ -129,13 +131,17 @@ fn keep_block_edge(
     let render = run.render();
     if was_open {
         let closing = projected(render, &Event::BlockClosed);
-        keep_failure_line(failures, failure_length, (render, closing.bytes().trim_ascii_end()))?;
+        if !closing.bytes().is_empty() {
+            keep_failure_line(failures, failure_length, (render, closing.bytes().trim_ascii_end()))?;
+        }
     }
     if keeping {
         let targets = run.targets.borrow();
         let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
         let opening = projected(render, &Event::BlockOpened { id });
-        keep_failure_line(failures, failure_length, (render, opening.bytes().trim_ascii_end()))?;
+        if !opening.bytes().is_empty() {
+            keep_failure_line(failures, failure_length, (render, opening.bytes().trim_ascii_end()))?;
+        }
     }
     Ok(())
 }

@@ -13,6 +13,8 @@ use crate::view_defaults::{OUTPUT_BYTES, OUTPUT_HEAD_BYTES};
 pub(super) const ESCAPE: u8 = 0x1b;
 pub(super) const CARRIAGE_RETURN: u8 = b'\r';
 const CONTINUATION: &[u8] = b"         ";
+const EXCERPT_ROWS: usize = 5;
+const EXCERPT_BEFORE: usize = 2;
 pub(super) const TRUNCATION_MARK: &[u8] = b"...\n";
 const SECTION_OPEN: &[u8] = b"---- ";
 const SECTION_CLOSE: &[u8] = b" stdout ----";
@@ -21,9 +23,8 @@ const FAILURES_LIST: &[u8] = b"\nfailures:\n";
 impl<const RERUN: usize> State<'_, RERUN> {
     pub(super) fn project_agent<const FRAME: usize>(&self, event: &Event<'_>, frame: &mut Line<FRAME>) {
         match *event {
-            Event::Begin { version, why: Some(why), .. } => header(frame, version, why),
             Event::Captured { id, stdout, stderr, exit, excerpt } => failure_block(frame, id, [stdout, stderr], exit, excerpt),
-            Event::BuildFailed { diagnostic, exit, .. } => build_failed(frame, diagnostic, exit),
+            Event::BuildFailed { diagnostic, .. } => frame.text(diagnostic),
             Event::Interrupted { signal, groups } => super::interrupted(frame, signal, groups),
             Event::Running { id, .. } => super::text_pair(frame, b"RUNNING", id),
             Event::Exited { code } => exit_line(frame, code),
@@ -31,8 +32,7 @@ impl<const RERUN: usize> State<'_, RERUN> {
                 if passed + failed == 0 {
                     no_tests_note(frame, [discovered, filtered, ignored]);
                 }
-                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, Some([discovered, filtered]));
-                exit_line(frame, exit);
+                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, (Some([discovered, filtered]), Some(exit)));
             }
             Event::Begin { .. }
             | Event::Waiting { .. }
@@ -55,14 +55,6 @@ impl<const RERUN: usize> State<'_, RERUN> {
     }
 }
 
-fn header<const FRAME: usize>(frame: &mut Line<FRAME>, version: &[u8], why: &[u8]) {
-    frame.text(b"cargo-val ");
-    frame.text(version);
-    frame.text(b"  output=agent why=");
-    frame.text(why);
-    frame.text(b"  schema=1\n");
-}
-
 pub(super) fn exit_word(code: u8) -> &'static [u8] {
     match code {
         0 => b"green",
@@ -73,15 +65,6 @@ pub(super) fn exit_word(code: u8) -> &'static [u8] {
         128..=255 => b"interrupted",
         _ => b"exited",
     }
-}
-
-fn build_failed<const FRAME: usize>(frame: &mut Line<FRAME>, diagnostic: &[u8], exit: u8) {
-    label(frame, b"BUILD");
-    frame.text(b"failed  exit=");
-    frame.number(usize::from(exit));
-    frame.text(b"  ");
-    frame.text(diagnostic);
-    frame.text(b"\n");
 }
 
 pub(super) fn exit_line<const FRAME: usize>(frame: &mut Line<FRAME>, code: u8) {
@@ -111,25 +94,22 @@ fn failure_block<const FRAME: usize>(
     excerpt: ExcerptRows<'_>,
 ) {
     let (capture, dropped) = if stdout.0.is_empty() { stderr } else { stdout };
-    let record = located(stdout, stderr, exit);
     label(frame, b"FAIL");
     frame.text(id.0);
     frame.text(b"  ");
     frame.text(id.1);
     frame.text(b"\n");
-    match record {
-        Ok(found) => classified(frame, &found),
-        Err(_) => unclassified(frame),
+    match located(stdout, stderr, exit) {
+        Ok(found) => {
+            classified(frame, &found);
+            excerpt_rows(frame, excerpt);
+        }
+        Err(_) => {
+            unclassified(frame);
+            excerpt_rows(frame, excerpt);
+            output(frame, capture, dropped);
+        }
     }
-    excerpt_rows(frame, excerpt);
-    output(frame, capture, dropped);
-    label(frame, b"END");
-    frame.text(b"rerun: cargo val --no-fail-fast -E '(binary(=");
-    frame.text(id.0);
-    frame.text(b") & test(=");
-    frame.text(id.1);
-    frame.text(b"))'");
-    frame.text(if dropped != 0 { b"  full: cargo test -- --exact --nocapture\n" } else { b"\n" });
 }
 
 fn classified<const FRAME: usize>(frame: &mut Line<FRAME>, record: &Record<'_>) {
@@ -142,14 +122,11 @@ fn classified<const FRAME: usize>(frame: &mut Line<FRAME>, record: &Record<'_>) 
         Err(Absent::NoPanicSite) => frame.text(b"location=absent:no_panic_site"),
     }
     frame.text(b"\n");
-    for (position, line) in record.message.split(|byte| *byte == b'\n').enumerate() {
-        if position != 0 {
-            frame.text(b"\n");
-        }
+    for line in record.message.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
         frame.text(CONTINUATION);
         frame.text(line);
+        frame.text(b"\n");
     }
-    frame.text(b"\n");
 }
 
 fn excerpt_rows<const FRAME: usize>(frame: &mut Line<FRAME>, excerpt: ExcerptRows<'_>) {
@@ -157,7 +134,9 @@ fn excerpt_rows<const FRAME: usize>(frame: &mut Line<FRAME>, excerpt: ExcerptRow
         Ok(rows) => {
             label(frame, b"EXCERPT");
             frame.text(b"\n");
-            for row in rows.split_inclusive(|byte| *byte == b'\n') {
+            let marked = rows.split_inclusive(|byte| *byte == b'\n').position(|row| row.starts_with(b">"));
+            let first = marked.map_or(0, |at| at.saturating_sub(EXCERPT_BEFORE));
+            for row in rows.split_inclusive(|byte| *byte == b'\n').skip(first).take(EXCERPT_ROWS) {
                 frame.text(CONTINUATION);
                 frame.text(row);
             }
@@ -175,8 +154,6 @@ fn excerpt_rows<const FRAME: usize>(frame: &mut Line<FRAME>, excerpt: ExcerptRow
 fn unclassified<const FRAME: usize>(frame: &mut Line<FRAME>) {
     frame.text(CONTINUATION);
     frame.text(b"UNCLASSIFIED  location=absent:no_panic_in_capture\n");
-    frame.text(CONTINUATION);
-    frame.text(b"message=absent:no_panic_in_capture\n");
 }
 
 fn class_words<const FRAME: usize>(frame: &mut Line<FRAME>, class: Class) {

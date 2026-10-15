@@ -76,11 +76,11 @@ fn directory_wait(line: &str) -> bool {
 fn passed(stdout: &str) -> usize {
     let total = stdout
         .lines()
-        .find(|line| line.starts_with("total: "))
-        .unwrap_or_else(|| panic!("a total line is printed:\n{stdout}"));
+        .find(|line| line.starts_with("SUMMARY  "))
+        .unwrap_or_else(|| panic!("a summary line is printed:\n{stdout}"));
     let counted = total
-        .split(", ")
-        .find_map(|part| part.strip_prefix("passed "))
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("passed="))
         .unwrap_or_else(|| panic!("the total line carries passed: {total}"));
     counted.parse().expect("passed is a count")
 }
@@ -228,7 +228,7 @@ async fn the_doc_cargo_starts_only_after_the_test_build_has_output() {
     assert_eq!(building, 1, "the test build is the child that waits on the held lock: {lines:?}");
     assert_eq!(documenting, 0, "no doc cargo exists while the test build has produced nothing: {lines:?}");
     assert_eq!(status.code(), Some(0), "{stdout}{lines:?}");
-    assert!(stdout.lines().any(|line| line.starts_with("doc-tests: ")), "the doc tests ran after the build: {stdout}");
+    assert!(stdout.lines().any(|line| line.starts_with("PASS     doc-tests  ") || line.starts_with("cargo-val: doc tests: ")), "the doc tests ran after the build: {stdout}");
     assert!(!lines.iter().any(|line| package_cache_wait(line)), "cargo val's own children never contended for the package cache: {lines:?}");
 }
 

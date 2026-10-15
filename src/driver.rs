@@ -57,7 +57,7 @@ use std::time::Instant;
 use std::vec::Vec;
 use crate::parked_artifacts::{OwnedArtifact, ParkFault, ParkedArtifacts};
 use crate::status_queue::{self, EVENT_RESERVE};
-use crate::summary::{Counts, Tally, TargetTable, render as render_counts};
+use crate::summary::{Counts, Tally, TargetTable};
 use crate::edge_signal::{
     SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group, abandon_slot, reserve_slot, TABLE_FULL,
 };
@@ -1738,7 +1738,7 @@ impl ListingRun<'_> {
         ];
         let windows = ((&first[..lengths[0]], seen[0] - lengths[0] as u64), (&second[..lengths[1]], seen[1] - lengths[1] as u64));
         let (stdout_window, stderr_window) = shape(windows.0, windows.1);
-        let queued = self.settings.output == OutputMode::Plain && windows.0 == stdout_window && windows.1 == stderr_window && tails.iter().all(|tail| tail.is_empty()) && views.iter().any(|view| view.3 != 0);
+        let queued = self.settings.output == OutputMode::Plain && windows.0 == stdout_window && windows.1 == stderr_window && tails.iter().all(|tail| tail.is_empty()) && views.iter().any(|view| view.3 > SYNC_WINDOW_BYTES as u64);
         let resume = self.emit_windows(id, (stdout_window, stderr_window), exit, (views, queued))?;
         drop(reads);
         if resume { self.resume_failures() } else { Ok(()) }
@@ -2578,6 +2578,7 @@ pub(crate) struct CargoDriver<'buffer> {
     dropped: usize,
     lock_watch: LockWatch,
     diagnostics: Vec<u8>,
+    agent_report: (Vec<u8>, Vec<u8>),
     workspace_root: PathBuf,
     stderr_held: Vec<u8>,
     diagnostics_reported: bool,
@@ -2666,11 +2667,36 @@ fn keep_reported(held: &mut Vec<u8>, (settings, root): (&Settings, &Path), (leve
     }
 }
 
-const CARGO_PROGRESS: [&[u8]; 4] = [b"Compiling ", b"Finished ", b"Running ", b"Fresh "];
+const CARGO_PROGRESS: [&[u8]; 5] = [b"Compiling ", b"Finished ", b"Running ", b"Fresh ", b"Doc-tests "];
 
 fn is_cargo_progress(line: &[u8]) -> bool {
     let trimmed = line.trim_ascii_start();
     CARGO_PROGRESS.iter().any(|prefix| trimmed.starts_with(prefix))
+}
+
+// an agent build failure is one block per rustc error and a rollup line for each, both built where the rendered text is still in hand
+fn keep_agent_error((blocks, rollup): &mut (Vec<u8>, Vec<u8>), level: &str, (package_id, rendered, span): (Option<&str>, &str, Option<(&str, u32, u32, u32, Option<&str>)>)) {
+    if level != "error" {
+        return;
+    }
+    let package = package_id.map_or("build", package_name);
+    let headline = rendered.lines().next().unwrap_or_default();
+    let site = span.map_or_else(|| String::from("absent"), |(file, line, column, ..)| format!("{file}:{line}:{column}"));
+    blocks.extend_from_slice(format!("ERROR    {package}  {site}\n         {headline}\n").as_bytes());
+    if let Some(label) = span.and_then(|(.., label)| label).filter(|label| !label.is_empty()) {
+        blocks.extend_from_slice(format!("         {label}\n").as_bytes());
+    }
+    let line = span.map_or_else(|| String::from("absent"), |(file, line, ..)| format!("{file}:{line}"));
+    rollup.extend_from_slice(format!("FAILED   {package} - {line}  {headline}\n").as_bytes());
+}
+
+// `path+file:///repo/parser#0.3.1` names its package by the directory, `registry+...#serde@1.0.228` and newer path ids by the fragment
+fn package_name(package_id: &str) -> &str {
+    let (source, fragment) = package_id.split_once('#').unwrap_or((package_id, ""));
+    match fragment.split_once('@') {
+        Some((name, _)) => name,
+        None => source.rsplit('/').next().unwrap_or(source),
+    }
 }
 
 fn keep_diagnostic(held: &mut Vec<u8>, level: &str, rendered: &str) {
@@ -3104,9 +3130,12 @@ impl CargoDriver<'_> {
                     self.reason = b"bin-built";
                     self.release_parked(run, ledger, lanes)?;
                 }
-                CargoSourceStep::Diagnostic { level, rendered, span } => {
+                CargoSourceStep::Diagnostic { level, rendered, span, package_id } => {
                     let position = span.map_or(("", 0, 0), |(file, line, column, ..)| (file, line, column));
                     if admit_diagnostic(&mut self.seen_diagnostics, self.output.is_agent_like(), (level, rendered), position) {
+                        if self.output == OutputMode::Agent {
+                            keep_agent_error(&mut self.agent_report, level, (package_id, rendered, span));
+                        }
                         keep_reported(&mut self.diagnostics, (run.settings, &self.workspace_root), (level, rendered), span);
                         count_error(&mut self.errors, level, run)?;
                         count_warning(level, rendered, run)?;
@@ -3168,6 +3197,11 @@ impl CargoDriver<'_> {
 
     fn report_diagnostics(&mut self, success: bool, render: &Render<'_>) -> Result<(), RunError> {
         let held = core::mem::take(&mut self.diagnostics);
+        let (mut blocks, rollup) = core::mem::take(&mut self.agent_report);
+        if !success && !blocks.is_empty() {
+            blocks.extend_from_slice(&rollup);
+            emit(render, &Event::BuildFailed { diagnostic: &blocks, exit: u8::try_from(BUILD_FAILED_EXIT_CODE).unwrap_or(u8::MAX), errors: self.errors, built: self.binaries_built, of: None })?;
+        }
         if success {
             hold_warnings(render, &held);
         }
@@ -3873,6 +3907,7 @@ fn new_driver(
         dropped: 0,
         lock_watch,
         diagnostics: Vec::new(),
+        agent_report: (Vec::new(), Vec::new()),
         workspace_root,
         stderr_held: Vec::new(),
         diagnostics_reported: false,
@@ -4184,8 +4219,10 @@ fn finish_run(
         let error = if build_reported { RunError::CargoFailed } else { RunError::CargoRefused };
         match (build_reported, run.settings.output.is_agent_like()) {
             (true, true) => {
-                let exit = u8::try_from(error.exit_code()).unwrap_or(u8::MAX);
-                emit(run.render(), &Event::BuildFailed { diagnostic: b"diagnostics on stderr", exit, errors: 0, built: 0, of: None })?;
+                if run.settings.output == OutputMode::Json {
+                    let exit = u8::try_from(error.exit_code()).unwrap_or(u8::MAX);
+                    emit(run.render(), &Event::BuildFailed { diagnostic: b"diagnostics on stderr", exit, errors: 0, built: 0, of: None })?;
+                }
                 agent_exit(run, error.exit_code())?;
                 write_fd(2, CARGO_FAILED_LINE)?;
             }
@@ -4485,7 +4522,7 @@ impl DocRun {
             return Ok(DocFinish::NoLibrary);
         }
         if render.0 != OutputMode::Rich {
-            write_fd(2, stderr)?;
+            write_doc_stderr(stderr, render.0.is_agent_like())?;
         }
         Ok(DocFinish::Ran)
     }
@@ -4507,6 +4544,11 @@ impl DocRun {
         let exit = Exit::Code(self.exit_code.unwrap_or(1));
         emit(observation.render, &Event::Captured { id, stdout: (lines.as_slice(), 0), stderr: (stderr, 0), exit, excerpt: Err(b"") })
     }
+}
+
+fn write_doc_stderr(stderr: &[u8], agent_like: bool) -> Result<(), RunError> {
+    let repeated = |line: &[u8]| if agent_like { is_cargo_progress(line) } else { line.trim_ascii_start().starts_with(b"Finished ") };
+    stderr.split_inclusive(|byte| *byte == b'\n').filter(|line| !repeated(line)).try_for_each(|line| write_fd(2, line))
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -4566,21 +4608,22 @@ fn report_doc_result(
     emit(observation.render, &Event::Settled { id, outcome: rendered(terminal), at_ms: None, solo: false })
 }
 
-fn write_doc_notice(totals: &DocTotals) -> Result<(), RunError> {
+fn write_doc_notice(totals: &DocTotals, agent_like: bool) -> Result<(), RunError> {
     let mut line = LineBuffer::new();
     match totals.finish {
         DocFinish::NoLibrary => line.text(b"cargo-val: doc tests: no library target to test\n"),
         DocFinish::Stopped => line.text(b"cargo-val: doc tests: stopped before executing\n"),
+        DocFinish::Ran if agent_like => return Ok(()),
         DocFinish::Ran if totals.passed + totals.failed + totals.ignored == 0 => {
             line.text(b"cargo-val: doc tests: running 0 tests (");
         }
         DocFinish::Ran => return Ok(()),
     }
     if totals.finish == DocFinish::Ran {
-        line.number(totals.blocks);
-        line.text(b" doc test run(s) reported, ");
         line.number(totals.empty_blocks);
-        line.text(b" with zero tests)\n");
+        line.text(b" of ");
+        line.number(totals.blocks);
+        line.text(b" runs empty)\n");
     }
     line.write(1)
 }
@@ -4630,15 +4673,10 @@ fn doc_counts(doc: &DocTotals) -> Counts {
 fn write_summary(
     targets: &TargetTable,
     doc_tests: Option<&DocTotals>,
-    started_millis: u64,
-    print: bool,
 ) -> Result<Counts, RunError> {
     let mut total = Counts::default();
     for target in 0..targets.len() {
         let counts = targets.counts(target);
-        if print {
-            write_fd(1, render_counts(targets.id(target), &counts, None).bytes())?;
-        }
         if !counts.balanced() {
             let mut line = Line::<CONTEXT_CAPACITY>::new();
             line.text(b"cargo-val: ");
@@ -4650,15 +4688,7 @@ fn write_summary(
         total = total.plus(&counts);
     }
     if let Some(doc) = doc_tests {
-        let counts = doc_counts(doc);
-        if print {
-            write_fd(1, render_counts(b"doc-tests", &counts, None).bytes())?;
-        }
-        total = total.plus(&counts);
-    }
-    let wall = monotonic_millis().saturating_sub(started_millis);
-    if print {
-        write_fd(1, render_counts(b"total", &total, Some(wall)).bytes())?;
+        total = total.plus(&doc_counts(doc));
     }
     Ok(total)
 }
@@ -4676,9 +4706,9 @@ fn conclude(
         write_stop_trailer(&report, settings.process == ProcessMode::Shard)?;
     }
     if let Some(doc) = &doc_tests {
-        write_doc_notice(doc)?;
+        write_doc_notice(doc, settings.output.is_agent_like())?;
     }
-    let total = write_summary(targets, doc_tests.as_ref(), started_millis, !settings.output.is_agent_like())?;
+    let total = write_summary(targets, doc_tests.as_ref())?;
     let empty = total.passed + total.failed == 0;
     let exit = match (total.failed, empty, settings.no_tests) {
         (0, true, NoTestsPolicy::Fail) => NO_TESTS_EXIT_CODE,
@@ -4715,6 +4745,7 @@ fn close_interrupted(parser: &CliParser<'_>, run: &ListingRun<'_>, exit: i32) ->
     let settled = (0..targets.len()).fold(Counts::default(), |sum, target| sum.plus(&targets.counts(target)));
     // a withdrawn name left the discovered count when its child was ended, so the interrupted run puts it back as not_run
     let total = Counts { discovered: settled.discovered + not_run, ..settled };
+    run.render().1.borrow_mut().apply(&Event::Listed { binaries: targets.len(), of: Some(targets.len()), tests: total.discovered });
     erase_frame(run.render())?;
     emit_finished(run.render(), &total, not_run, (run.started_millis, parser.manifest_path(), exit))?;
     close_cursor()

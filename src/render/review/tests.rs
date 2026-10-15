@@ -493,9 +493,9 @@ fn the_quit_receipt_is_the_plain_closing_block_whatever_the_width_or_colour() {
     for key in *b"fqq" {
         state.apply(&Event::Key(Key::Char(key)));
     }
-    let expected = "SUMMARY  passed=381 failed=2 ignored=0 not_run=0  wall=138.205s\n\
-        FAILED   sched_records the_host_binary_format_yields_every_declared_record_with_flags_and_group\n\
-        FAILED   shard_process a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly\n\
+    let expected = "FAILED   sched_records the_host_binary_format_yields_every_declared_record_with_flags_and_group - absent\n\
+        FAILED   shard_process a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly - absent\n\
+        SUMMARY  passed=381 failed=2 ignored=0 not_run=0  wall=138.205s\n\
         RERUN    cargo val --manifest-path '/w/Cargo.toml' --no-fail-fast -E '(binary(=sched_records) & test(=the_host_binary_format_yields_every_declared_record_with_flags_and_group)) | (binary(=shard_process) & test(=a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly))'\n";
     let mut frame = Line::<8192>::new();
 
@@ -1018,7 +1018,7 @@ fn the_closing_block_counts_a_failure_that_passed_alone_as_flaky_and_lists_the_r
     state.project(&finished, &mut block).expect("the closing block fits");
 
     let text = String::from_utf8(block.bytes().to_vec()).expect("a closing block is utf-8");
-    assert!(text.starts_with("SUMMARY  passed=381 failed=1 flaky=1 ignored=0"), "{text}");
+    assert!(text.lines().any(|line| line.starts_with("SUMMARY  passed=381 failed=1 flaky=1 ignored=0")), "{text}");
     assert_eq!(text.lines().filter(|line| line.starts_with("FAILED")).count(), 1, "{text}");
     assert!(text.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly")), "{text}");
     assert!(!text.contains("a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly'"), "the flaky test leaves the rerun command: {text}");

@@ -235,10 +235,10 @@ async fn an_interrupted_agent_run_names_the_signal_and_the_blocked_test_and_clos
 
     assert_eq!(status.code(), Some(SIGINT_STATUS), "{report}");
     let lines: Vec<&str> = report.lines().collect();
-    assert_eq!(lines.len(), 4, "header, INTERRUPTED, RUNNING, EXIT:\n{report}");
-    assert_eq!(lines[1], "INTERRUPTED  signal=2  forwarded_groups=1", "{report}");
-    assert_eq!(lines[2], "RUNNING  cargo_val_blocked_fixture tests::unit_blocks_when_requested", "{report}");
-    assert_eq!(lines[3], "EXIT     130  interrupted", "{report}");
+    assert_eq!(lines.len(), 3, "INTERRUPTED, RUNNING, EXIT:\n{report}");
+    assert_eq!(lines[0], "INTERRUPTED  signal=2  forwarded_groups=1", "{report}");
+    assert_eq!(lines[1], "RUNNING  cargo_val_blocked_fixture tests::unit_blocks_when_requested", "{report}");
+    assert_eq!(lines[2], "EXIT     130  interrupted", "{report}");
 }
 
 struct Observed {

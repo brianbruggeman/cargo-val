@@ -53,16 +53,15 @@ fn assert_no_escape(output: &Output) {
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_green_run_is_three_lines_within_the_byte_budget_with_no_per_test_lines() {
+async fn a_green_run_is_one_summary_line_within_the_byte_budget_with_no_per_test_lines() {
     let output = run("cli_run", &[], &["--output", "agent"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(0), "{text}");
-    assert_eq!(text.lines().count(), 3, "header, SUMMARY, EXIT:\n{text}");
+    assert_eq!(text.lines().count(), 1, "SUMMARY alone:\n{text}");
     assert!(text.len() <= GREEN_BUDGET_BYTES, "{} bytes:\n{text}", text.len());
-    assert!(text.lines().next().expect("a header").contains("output=agent why=flag"), "{text}");
-    assert!(text.contains("discovered=3 run=2 filtered=0"), "{text}");
-    assert!(text.ends_with("EXIT     0  green\n"), "{text}");
+    assert!(text.starts_with("SUMMARY  passed=2 failed=0 ignored=1 not_run=0  wall="), "{text}");
+    assert!(text.ends_with(" discovered=3 run=2 filtered=0 binaries=1 exit=0 outcome=green schema=1\n"), "{text}");
     assert!(!text.lines().any(|line| line.starts_with("PASS ") || line.starts_with("START ")), "{text}");
     assert_no_escape(&output);
 }
@@ -78,11 +77,16 @@ async fn an_assert_failure_block_names_the_user_file_the_message_and_the_exact_r
     assert!(lines[block].ends_with(FAILING_TEST), "{text}");
     assert_eq!(lines[block + 1].replace('\\', "/"), "         PANIC  src/lib.rs:12:13", "{text}");
     assert_eq!(lines[block + 2], "         requested fixture failure", "{text}");
-    assert!(text.contains("OUTPUT   bytes="), "{text}");
+    assert_eq!(lines.iter().filter(|line| line.trim() == "requested fixture failure").count(), 1, "the message prints once:\n{text}");
+    assert!(!text.lines().any(|line| line.starts_with("OUTPUT ") || line.starts_with("END ")), "a parsed panic leaves no raw output block:\n{text}");
+    let rollup = format!("FAILED   cli_run {FAILING_TEST} - src/lib.rs:12");
+    assert!(lines.iter().any(|line| line.replace('\\', "/") == rollup), "{text}");
     let rerun = format!("RERUN    cargo val --manifest-path '{}' --no-fail-fast -E '(binary(=cli_run) & test(={FAILING_TEST}))'", fixture("cli_run").display());
     assert!(text.lines().any(|line| line == rerun), "{text}");
     assert_eq!(text.lines().filter(|line| line.starts_with("FAILED   ")).count(), 1, "{text}");
-    assert!(text.ends_with("EXIT     1  failed\n"), "{text}");
+    assert_eq!(text.lines().filter(|line| line.starts_with("RERUN ")).count(), 1, "one rerun:\n{text}");
+    assert!(lines[lines.len() - 2].contains(" exit=1 outcome=failed schema=1"), "the summary carries the exit code and sits before the rerun:\n{text}");
+    assert!(lines[lines.len() - 1].starts_with("RERUN "), "{text}");
     assert_no_escape(&output);
 }
 
@@ -96,9 +100,12 @@ async fn a_build_error_prints_the_rustc_diagnostic_and_exits_three() {
     assert!(stderr.replace('\\', "/").contains("src/lib.rs:4:5"), "{stderr}");
     let report = stdout_of(&output);
     let lines: Vec<&str> = report.lines().collect();
-    assert_eq!(lines.len(), 3, "header, BUILD, EXIT:\n{report}");
-    assert_eq!(lines[1], "BUILD    failed  exit=3  diagnostics on stderr", "{report}");
-    assert_eq!(lines[2], "EXIT     3  build_failed", "{report}");
+    assert_eq!(lines.len(), 5, "ERROR block, rollup, EXIT:\n{report}");
+    assert_eq!(lines[0].replace('\\', "/"), "ERROR    build_error  src/lib.rs:4:5", "{report}");
+    assert_eq!(lines[1], "         error[E0308]: mismatched types", "{report}");
+    assert_eq!(lines[2], "         expected `u32`, found `&str`", "{report}");
+    assert_eq!(lines[3].replace('\\', "/"), "FAILED   build_error - src/lib.rs:4  error[E0308]: mismatched types", "{report}");
+    assert_eq!(lines[4], "EXIT     3  build_failed", "{report}");
     assert_no_escape(&output);
 }
 
@@ -110,25 +117,25 @@ async fn zero_tests_exit_four_with_a_loud_note_and_counts() {
     assert_eq!(output.status.code(), Some(4), "{text}");
     assert!(text.contains("NOTE     no tests ran: discovered=3 filtered=3 ignored=0\n"), "{text}");
     assert!(text.contains("run=0 filtered=3"), "{text}");
-    assert!(text.ends_with("EXIT     4  no_tests\n"), "{text}");
+    assert!(text.contains(" exit=4 outcome=no_tests schema=1\n"), "{text}");
     assert_no_escape(&output);
 }
 
 #[proxima::test(timeout = "310s")]
-async fn the_claude_code_marker_selects_agent_in_auto_mode_and_says_why() {
+async fn the_claude_code_marker_selects_agent_in_auto_mode() {
     let output = run("cli_run", &[("CLAUDECODE", "1")], &[]).await;
     let text = stdout_of(&output);
 
-    assert!(text.lines().next().expect("a header").contains("output=agent why=env:CLAUDECODE"), "{text}");
+    assert!(text.starts_with("SUMMARY  ") && text.contains(" schema=1"), "{text}");
     assert_no_escape(&output);
 }
 
 #[proxima::test(timeout = "310s")]
-async fn the_environment_setting_selects_agent_and_names_itself() {
+async fn the_environment_setting_selects_agent() {
     let output = run("cli_run", &[("CARGO_VAL_OUTPUT", "agent")], &[]).await;
     let text = stdout_of(&output);
 
-    assert!(text.lines().next().expect("a header").contains("output=agent why=env:CARGO_VAL_OUTPUT"), "{text}");
+    assert!(text.starts_with("SUMMARY  ") && text.contains(" schema=1"), "{text}");
 }
 
 async fn failure_class_line(fixture_name: &str, test: &str, environment: &[(&str, &str)]) -> (Output, String) {
@@ -164,77 +171,53 @@ async fn a_proxima_test_harness_timeout_is_a_timeout_enforced_by_the_harness() {
 }
 
 #[proxima::test(timeout = "310s")]
-async fn the_output_record_counts_every_byte_the_capture_buffer_dropped() {
-    let noise_lines = 200;
-    let noise_bytes = noise_lines * "worker 0000 flushed segment 0000 to disk\n".len();
+async fn a_parsed_panic_prints_its_message_once_and_no_raw_output_block_however_much_the_child_wrote() {
     let output = run("failure_class", &[("CLASSIFY_NOISE_LINES", "200")], &["--output", "agent", "-E", "test(=failing::plain_panic)"]).await;
     let report = stdout_of(&output);
 
-    let record = report.lines().find(|line| line.starts_with("OUTPUT   ")).unwrap_or_else(|| panic!("an OUTPUT record:\n{report}"));
-    let field = |key: &str| -> usize {
-        let tail = record.split(&format!("{key}=")).nth(1).unwrap_or_else(|| panic!("{key} in {record}"));
-        tail.split(' ').next().expect("a value").parse().unwrap_or_else(|_| panic!("{key} is a number in {record}"))
-    };
-    let (total, shown, dropped, capture_dropped) = (field("bytes"), field("shown"), field("dropped"), field("capture_dropped"));
-
-    assert!(total >= noise_bytes, "the child wrote at least its noise: {record}");
-    let window = total - capture_dropped;
-    assert!(window > 0 && window <= 8192, "the event carries at most one bounded window of the stream: {record}");
-    assert_eq!(dropped, total - shown, "{record}");
-    assert!(capture_dropped >= noise_bytes - 4096, "{record}");
-}
-
-fn output_section(report: &str) -> Vec<&str> {
-    let lines: Vec<&str> = report.lines().collect();
-    let begin = lines.iter().position(|line| line.starts_with("OUTPUT   ")).unwrap_or_else(|| panic!("an OUTPUT record:\n{report}"));
-    let end = lines.iter().position(|line| line.starts_with("END      ")).unwrap_or_else(|| panic!("an END record:\n{report}"));
-    lines[begin + 1..end].to_vec()
+    assert!(!report.lines().any(|line| line.starts_with("OUTPUT ") || line.starts_with("END ")), "{report}");
+    assert!(report.len() < 1200, "{} bytes of agent output for a child that wrote 8000 bytes of noise:\n{report}", report.len());
+    assert!(!report.contains("flushed segment"), "the child's noise is not echoed:\n{report}");
 }
 
 #[proxima::test(timeout = "310s")]
-async fn the_output_section_keeps_the_panic_text_and_drops_libtest_framing() {
+async fn a_panic_message_appears_exactly_once_in_a_failure_block() {
     let output = run("cli_run", &[("CARGO_VAL_C52D_FAIL", "1")], &["--output", "agent"]).await;
     let report = stdout_of(&output);
 
-    let section = output_section(&report);
+    let message_lines = report.lines().filter(|line| line.trim() == "requested fixture failure").count();
 
-    assert!(section.iter().any(|line| line.replace('\\', "/").contains("panicked at src/lib.rs:12:13")), "{section:?}");
-    assert!(section.contains(&"requested fixture failure"), "{section:?}");
-    for framing in ["running 1 test", "failures:", "test result:"] {
-        assert!(!section.iter().any(|line| line.starts_with(framing)), "{framing} leaked into {section:?}");
+    assert_eq!(message_lines, 1, "{report}");
+    for framing in ["running 1 test", "failures:", "test result:", "thread '"] {
+        assert!(!report.lines().any(|line| line.trim_start().starts_with(framing)), "{framing} leaked into {report}");
     }
-    assert!(!section.iter().any(|line| line.starts_with("---- ") || line.starts_with("test ")), "{section:?}");
 }
 
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
-async fn a_crash_that_died_before_printing_a_result_leaves_an_empty_output_section() {
+async fn a_crash_that_died_before_printing_a_result_has_a_block_with_no_output_record() {
     let output = run("failure_class", &[], &["--output", "agent", "-E", "test(=failing::segfault_crash)"]).await;
     let report = stdout_of(&output);
 
-    let section = output_section(&report);
-
-    assert!(section.is_empty(), "{section:?}");
+    assert!(report.lines().any(|line| line.starts_with("FAIL     ")), "{report}");
+    assert!(!report.lines().any(|line| line.starts_with("OUTPUT ")), "{report}");
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_failing_assert_prints_an_excerpt_block_of_seven_source_rows_and_a_caret_row_before_the_output_record() {
+async fn a_failing_assert_prints_an_excerpt_block_of_five_rows_around_the_marker_before_the_rollup() {
     let output = run("cli_run", &[("CARGO_VAL_C52D_FAIL", "1")], &["--output", "agent"]).await;
     let text = stdout_of(&output);
 
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.iter().position(|line| line.trim_end() == "EXCERPT").expect("an EXCERPT record");
     let expected = [
-        "              9 |             print!(\"{}\", \"X\".repeat(5000));",
         "             10 |         }",
         "             11 |         if std::env::var_os(\"CARGO_VAL_C52D_FAIL\").is_some() {",
         "         >   12 |             panic!(\"requested fixture failure\");",
         "               |             ^^^^^ panicked here",
         "             13 |         }",
-        "             14 |         if std::env::var_os(\"CARGO_VAL_C52D_ESCAPES\").is_some() {",
-        "             15 |             panic!(\"path \\\"C:\\\\tmp\\\\out\\\" is missing\\nsecond line\");",
     ];
     assert_eq!(lines[start + 1..start + 1 + expected.len()], expected, "{text}");
-    assert!(lines[start + 1 + expected.len()].starts_with("OUTPUT   bytes="), "{text}");
+    assert!(lines[start + 1 + expected.len()].starts_with("FAILED   "), "{text}");
     assert_no_escape(&output);
 }

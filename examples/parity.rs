@@ -99,12 +99,11 @@ fn parse_val(output: &str) -> Report {
     let mut report = Report::default();
     for line in output.lines().map(strip_escapes) {
         if let Some(settled) = line.strip_prefix("PASS ") {
-            report.names.extend(settled.split_whitespace().nth(1).map(str::to_string));
-        } else if let Some((label, counts)) = line.split_once(": discovered ") {
-            let passed = counts.split("passed ").nth(1).and_then(|rest| rest.split(',').next());
-            if let (Some(passed), false) = (passed.and_then(|text| text.parse::<usize>().ok()), label == "total") {
-                report.passed_per_binary.insert(val_key(label), passed);
+            let mut fields = settled.split_whitespace();
+            if let Some(binary) = fields.next() {
+                *report.passed_per_binary.entry(val_key(binary)).or_default() += 1;
             }
+            report.names.extend(fields.next().map(str::to_string));
         }
     }
     report.names.sort();

@@ -64,6 +64,7 @@ const FILTER_JOIN: &[u8] = b" | ";
 pub(crate) const STDOUT_STREAM: &[u8] = b"stdout";
 pub(crate) const STDERR_STREAM: &[u8] = b"stderr";
 const SOURCE_STREAM: &[u8] = b"source";
+const BACKTRACE_HINT: &[u8] = b"note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace";
 
 // the stream that holds the panic site is the one the kept record is read from, so `detail` and `e` find the location the excerpt was cut from;
 // with no site in either stream the stdout-first rule of `located` stands
@@ -1290,22 +1291,19 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         }
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
-            Event::Listed { binaries, tests, .. } => listed(frame, binaries, tests),
             Event::Exited { code } if self.mode == Mode::BuildError => agent::exit_line(frame, code),
-            Event::Built { .. } | Event::Failing { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Notice { .. } => {}
-            Event::Started { id, solo, .. } => event_line(frame, b"START", id, None, solo),
+            Event::Built { .. } | Event::Failing { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Notice { .. } | Event::Started { .. } | Event::Listed { .. } => {}
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
             Event::Captured { id, stdout, stderr, exit, excerpt } => self.captured(frame, id, (stdout, stderr, exit), excerpt),
             Event::Warned { id, what } => warned(frame, id, what),
-            Event::BlockOpened { id } => block_open(frame, id, STDOUT_STREAM),
-            Event::BlockClosed => block_close(frame, STDOUT_STREAM),
+            Event::BlockOpened { .. } | Event::BlockClosed => {}
             Event::BuildFailed { errors, built, of, .. } => build_failed(frame, errors, (built, of)),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
             Event::Running { id, group, age_ms } => killed(frame, id, group, age_ms),
             Event::Finished { passed, failed, ignored, not_run, wall_ms, manifest, discovered, filtered, .. } => {
-                let extras = matches!(self.mode, Mode::Interrupted { .. } | Mode::BuildError).then_some([discovered, filtered]);
-                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, extras);
+                let extras = (matches!(self.mode, Mode::Interrupted { .. } | Mode::BuildError) || filtered != 0).then_some([discovered, filtered]);
+                self.closing(frame, [passed, failed, ignored, not_run], wall_ms, manifest, (extras, None));
             }
         }
         Self::checked(frame)
@@ -1350,7 +1348,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Outcome::Failed => b"FAIL",
             Outcome::Ignored => b"IGNORED",
         };
-        event_line(frame, label, id, millis, solo);
+        event_line(frame, label, id, millis.filter(|_| outcome != Outcome::Passed), solo);
         if outcome == Outcome::Failed && self.github {
             frame.text(b"::error title=cargo val::");
             frame.text(id.0);
@@ -1369,9 +1367,12 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     ) {
         self.captured_open(frame, id);
         let links = self.stream_links((stdout, stderr), exit);
-        stream(frame, id, STDOUT_STREAM, stdout, links);
-        stream(frame, id, STDERR_STREAM, stderr, links);
-        self.captured_close(frame, id, excerpt);
+        failure_stream(frame, STDOUT_STREAM, stdout, links);
+        failure_stream(frame, STDERR_STREAM, stderr, links);
+        source_rows(frame, excerpt);
+        if self.github {
+            frame.text(b"::endgroup::\n");
+        }
     }
 
     /// Opens a failure block: the GitHub group line when the run asked for annotations.
@@ -1412,10 +1413,11 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         [passed, failed, ignored, not_run]: [usize; 4],
         wall_ms: u64,
         manifest: Option<&[u8]>,
-        extras: Option<[usize; 2]>,
+        (extras, exit): (Option<[usize; 2]>, Option<u8>),
     ) {
         let flaky = (0..self.stored).filter(|index| self.passed_alone(*index)).count();
         let failed = failed.saturating_sub(flaky);
+        self.rollup(frame);
         label(frame, b"SUMMARY");
         for (key, value) in [(&b"passed="[..], passed), (b" failed=", failed)] {
             frame.text(key);
@@ -1438,20 +1440,44 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             frame.number(passed + failed);
             frame.text(b" filtered=");
             frame.number(filtered);
+            frame.text(b" binaries=");
+            frame.number(self.listed_binaries);
+        }
+        if let Some(code) = exit {
+            frame.text(b" exit=");
+            frame.number(usize::from(code));
+            frame.text(b" outcome=");
+            frame.text(agent::exit_word(code));
+            frame.text(b" schema=1");
         }
         frame.text(b"\n");
-        for (target, name) in self.unresolved() {
-            label(frame, b"FAILED");
-            frame.text(target);
-            frame.text(b" ");
-            frame.text(name);
-            frame.text(b"\n");
-        }
         for (target, name) in (0..self.stored).filter(|index| self.passed_alone(*index)).map(|index| self.resolve(self.failures[index]).0) {
             label(frame, b"FLAKY");
             frame.text(target);
             frame.text(b" ");
             frame.text(name);
+            frame.text(b"\n");
+        }
+        self.rerun(frame, manifest);
+    }
+
+    // one line per unresolved failure ahead of the counts: where it panicked, so a reader can open the file without the block
+    fn rollup<const FRAME: usize>(&self, frame: &mut Line<FRAME>) {
+        for index in (0..self.stored).filter(|index| !self.passed_alone(*index)) {
+            let (target, name) = self.resolve(self.failures[index]).0;
+            label(frame, b"FAILED");
+            frame.text(target);
+            frame.text(b" ");
+            frame.text(name);
+            frame.text(b" - ");
+            match self.detail_at(index).1 {
+                Some(site) => {
+                    frame.text(site.file);
+                    frame.text(b":");
+                    frame.number(site.line as usize);
+                }
+                None => frame.text(b"absent"),
+            }
             frame.text(b"\n");
         }
         if self.unstored != 0 {
@@ -1460,7 +1486,6 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             frame.number(self.unstored);
             frame.text(b" failures not listed\n");
         }
-        self.rerun(frame, manifest);
     }
 
     fn rerun<const FRAME: usize>(&self, frame: &mut Line<FRAME>, manifest: Option<&[u8]>) {
@@ -1573,15 +1598,6 @@ fn header<const FRAME: usize>(frame: &mut Line<FRAME>, version: &[u8], shard: bo
     frame.text(b"\n");
 }
 
-fn listed<const FRAME: usize>(frame: &mut Line<FRAME>, binaries: usize, tests: usize) {
-    label(frame, b"LISTED");
-    frame.text(b"binaries=");
-    frame.number(binaries);
-    frame.text(b"  tests=");
-    frame.number(tests);
-    frame.text(b"\n");
-}
-
 fn warned<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, what: &[u8]) {
     label(frame, b"WARN");
     frame.text(id.0);
@@ -1676,13 +1692,42 @@ fn source_block<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, e
     block_close(frame, SOURCE_STREAM);
 }
 
-fn stream<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8], (bytes, dropped): Stream<'_>, links: (&[u8], &[u8], Option<Location<'_>>)) {
+fn source_rows<const FRAME: usize>(frame: &mut Line<FRAME>, excerpt: ExcerptRows<'_>) {
+    match excerpt {
+        Ok(rows) => frame.text(rows),
+        Err(reason) if reason.is_empty() => {}
+        Err(reason) => {
+            frame.text(b"source absent: ");
+            frame.text(reason);
+            frame.text(b"\n");
+        }
+    }
+}
+
+// libtest's failure text once, without its header (the FAIL line above names the test) and without the backtrace hint it prints on every panic
+fn failure_stream<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], (bytes, dropped): Stream<'_>, links: (&[u8], &[u8], Option<Location<'_>>)) {
     if bytes.is_empty() {
         return;
     }
-    stream_open(frame, id, name);
-    stream_page(frame, bytes, links);
-    stream_close(frame, name, (bytes.last() == Some(&b'\n'), dropped));
+    let block = if name == STDERR_STREAM {
+        frame.text(b"---- stderr ----\n");
+        bytes
+    } else {
+        let body = agent::libtest_body(bytes);
+        body.strip_suffix(BACKTRACE_HINT).unwrap_or(body).trim_ascii()
+    };
+    if block.is_empty() {
+        return;
+    }
+    stream_page(frame, block, links);
+    if block.last() != Some(&b'\n') {
+        frame.text(b"\n");
+    }
+    if dropped != 0 {
+        frame.text(b"[output truncated: ");
+        frame.number(usize::try_from(dropped).unwrap_or(usize::MAX));
+        frame.text(b" bytes dropped]\n");
+    }
 }
 
 /// Opens the fenced block of one stream; the pages follow through [`stream_page`] and [`stream_close`] ends it.
@@ -1809,17 +1854,18 @@ mod tests {
         assert!(fail.ends_with("::error title=cargo val::cli_run::fixture::fails_when_requested failed\n"), "{fail}");
         assert_eq!(
             block,
-            "::group::cli_run fixture::fails_when_requested\n------ stdout: cli_run fixture::fails_when_requested ------\nrequested fixture failure\n------ end stdout ------\n::endgroup::\n"
+            "::group::cli_run fixture::fails_when_requested\nrequested fixture failure\n::endgroup::\n"
         );
     }
 
     #[test]
     fn the_closing_block_lists_every_failure_and_one_command_that_reruns_them() {
-        let mut arena = [0_u8; 512];
+        let mut arena = [0_u8; 2048];
         let mut ledger = [0_u32; 2];
         let mut state = Small::new(&mut arena, &mut ledger);
         settle(&mut state, PASSING, Outcome::Passed);
         settle(&mut state, FAILING, Outcome::Failed);
+        state.apply(&Event::Captured { id: FAILING, stdout: (b"thread 'fixture::fails_when_requested' panicked at src/lib.rs:12:13:\nrequested fixture failure\n", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
         let finished = Event::Finished { passed: 1, failed: 1, ignored: 0, not_run: 0, wall_ms: 8400, manifest: Some(b"/w/Cargo.toml"), discovered: 0, filtered: 0, exit: 0 };
         state.apply(&finished);
 
@@ -1827,11 +1873,76 @@ mod tests {
 
         assert_eq!(
             block,
-            "SUMMARY  passed=1 failed=1 ignored=0 not_run=0  wall=8.400s\n\
-             FAILED   cli_run fixture::fails_when_requested\n\
+            "FAILED   cli_run fixture::fails_when_requested - src/lib.rs:12\n\
+             SUMMARY  passed=1 failed=1 ignored=0 not_run=0  wall=8.400s\n\
              RERUN    cargo val --manifest-path '/w/Cargo.toml' --no-fail-fast -E '(binary(=cli_run) & test(=fixture::fails_when_requested))'\n"
         );
         assert_eq!(state.mode(), Mode::Done { wall_ms: 8400 }, "a finish with failures closes the screen too, so no tick redraws a frame under the closing block");
+    }
+
+    const SECOND_FAILING: Identity<'static> = (b"sched_records", b"the_host_binary_format_yields_every_declared_record");
+
+    fn two_failures<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [u32], why: Option<&'static [u8]>) -> Small<'storage> {
+        let mut state = Small::new(arena, ledger);
+        state.apply(&Event::Begin { version: b"0.1.0", shard: false, jobs: 8, github: false, why, json: false, at_ms: 0 });
+        let panics: [(Identity<'static>, &[u8]); 2] = [
+            (FAILING, b"thread 'a' panicked at src/lib.rs:12:13:\nrequested fixture failure\n"),
+            (SECOND_FAILING, b"thread 'b' panicked at src/main.rs:7:5:\nassertion `left == right` failed\n  left: 1\n right: 2\n"),
+        ];
+        for (id, panic) in panics {
+            settle(&mut state, id, Outcome::Failed);
+            state.apply(&Event::Captured { id, stdout: (panic, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD });
+        }
+        state
+    }
+
+    #[test]
+    fn two_failures_close_with_one_located_rollup_line_each_ahead_of_one_summary_and_one_rerun() {
+        let mut arena = [0_u8; 4096];
+        let mut ledger = [0_u32; 4];
+        let state = two_failures(&mut arena, &mut ledger, None);
+        let finished = Event::Finished { passed: 5, failed: 2, ignored: 0, not_run: 0, wall_ms: 1500, manifest: None, discovered: 7, filtered: 0, exit: 1 };
+
+        let block = projected(&state, &finished);
+
+        assert_eq!(
+            block,
+            "FAILED   cli_run fixture::fails_when_requested - src/lib.rs:12\n\
+             FAILED   sched_records the_host_binary_format_yields_every_declared_record - src/main.rs:7\n\
+             SUMMARY  passed=5 failed=2 ignored=0 not_run=0  wall=1.500s\n\
+             RERUN    cargo val --no-fail-fast -E '(binary(=cli_run) & test(=fixture::fails_when_requested)) | (binary(=sched_records) & test(=the_host_binary_format_yields_every_declared_record))'\n"
+        );
+    }
+
+    #[test]
+    fn agent_blocks_hold_each_message_once_and_the_summary_carries_the_exit_before_the_single_rerun() {
+        let mut arena = [0_u8; 4096];
+        let mut ledger = [0_u32; 4];
+        let state = two_failures(&mut arena, &mut ledger, Some(b"flag"));
+        let second = Event::Captured { id: SECOND_FAILING, stdout: (b"\nthread 'b' panicked at src/main.rs:7:5:\nassertion `left == right` failed\n  left: 1\n right: 2\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n", 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: UNREAD };
+        let finished = Event::Finished { passed: 5, failed: 2, ignored: 0, not_run: 0, wall_ms: 1500, manifest: None, discovered: 7, filtered: 0, exit: 1 };
+
+        let block = projected(&state, &second);
+        let closing = projected(&state, &finished);
+
+        assert_eq!(block, "FAIL     sched_records  the_host_binary_format_yields_every_declared_record\n         ASSERT  src/main.rs:7:5\n         assertion `left == right` failed\n           left: 1\n          right: 2\n");
+        assert_eq!(closing.matches("RERUN").count(), 1, "{closing}");
+        assert!(closing.contains("SUMMARY  passed=5 failed=2 ignored=0 not_run=0  wall=1.500s discovered=7 run=7 filtered=0 binaries=0 exit=1 outcome=failed schema=1\n"), "{closing}");
+        assert!(closing.starts_with("FAILED   cli_run fixture::fails_when_requested - src/lib.rs:12\nFAILED   sched_records "), "{closing}");
+        assert!(!closing.contains("EXIT"), "{closing}");
+    }
+
+    #[test]
+    fn plain_prints_a_failure_as_libtests_panic_text_once_without_its_framing_fences_or_backtrace_hint() {
+        let mut arena = [0_u8; 2048];
+        let mut ledger = [0_u32; 2];
+        let mut state = Small::new(&mut arena, &mut ledger);
+        settle(&mut state, FAILING, Outcome::Failed);
+        let capture = b"\nrunning 1 test\ntest fixture::fails_when_requested ... FAILED\n\nfailures:\n\n---- fixture::fails_when_requested stdout ----\n\nthread 'fixture::fails_when_requested' (7) panicked at src/lib.rs:12:13:\nrequested fixture failure\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    fixture::fails_when_requested\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n\n";
+
+        let block = projected(&state, &Event::Captured { id: FAILING, stdout: (capture, 0), stderr: (b"", 0), exit: Exit::Code(101), excerpt: Err(b"external") });
+
+        assert_eq!(block, "thread 'fixture::fails_when_requested' (7) panicked at src/lib.rs:12:13:\nrequested fixture failure\nsource absent: external\n");
     }
 
     #[test]
@@ -1851,7 +1962,7 @@ mod tests {
 
         assert_eq!(build, "BUILD    FAILED  errors=1  built=5/19\n");
         assert_eq!(build_without_total, "BUILD    FAILED  errors=2  built=5\n");
-        assert_eq!(summary, "SUMMARY  passed=0 failed=0 ignored=0 not_run=57  wall=14.200s discovered=341 run=0 filtered=0\n");
+        assert_eq!(summary, "SUMMARY  passed=0 failed=0 ignored=0 not_run=57  wall=14.200s discovered=341 run=0 filtered=0 binaries=0\n");
         assert_eq!(exit, "EXIT     3  build_failed\n");
         assert_eq!(state.mode(), Mode::BuildError);
     }
@@ -1924,9 +2035,9 @@ mod tests {
         let state = Small::new(&mut arena, &mut ledger);
         let mut frame = Line::<16>::new();
 
-        let result = state.project(&Event::Started { id: FAILING, solo: false, at_ms: 0, limit_ms: None }, &mut frame);
+        let result = state.project(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false }, &mut frame);
 
-        assert_eq!(result, Err(b"START    cli_run  fixture::fails_when_requested\n".len() - 16));
+        assert_eq!(result, Err(b"FAIL     cli_run  fixture::fails_when_requested\n".len() - 16));
     }
 
     #[test]
@@ -2210,7 +2321,7 @@ mod tests {
         assert_eq!(projections, 20_000, "the loop ran every projection, so a zero is not an empty loop");
         assert_eq!(allocations, 0);
         assert!(!frame.bytes().contains(&0x1b), "the last projection holds no escape byte");
-        assert!(frame.bytes().ends_with(b"EXIT     1  failed\n"));
+        assert!(String::from_utf8_lossy(frame.bytes()).contains(" exit=1 outcome=failed schema=1\n"));
     }
 
     #[test]
@@ -2287,7 +2398,7 @@ mod tests {
 
         assert_eq!(frames, 10_000, "the loop ran every frame, so a zero is not an empty loop");
         assert_eq!(allocations, 0);
-        assert!(frame.bytes().starts_with(b"SUMMARY  passed=9 failed=64"), "the last frame is the closing block");
+        assert!(String::from_utf8_lossy(frame.bytes()).contains("SUMMARY  passed=9 failed=64"), "the last frame is the closing block");
     }
     const SLOW: Identity<'static> = (b"shard_process", b"a_per_test_interrupt_ends_a_blocked_child");
     const HOURS: Identity<'static> = (b"sched_records", b"the_host_binary_format_yields_every_declared_record");
@@ -2357,7 +2468,7 @@ mod tests {
         let fail = Event::Settled { id: SLOW, outcome: Outcome::Failed, at_ms: Some(37_001), solo: false };
         state.apply(&fail);
 
-        assert_eq!(pass_line, "PASS     sched_records  the_host_binary_format_yields_every_declared_record  3.123s\n");
+        assert_eq!(pass_line, "PASS     sched_records  the_host_binary_format_yields_every_declared_record\n");
         assert_eq!(
             state.failure_records().collect::<Vec<_>>(),
             [(SLOW, Some(30_001))],
@@ -2439,7 +2550,7 @@ mod tests {
             "INTERRUPTED  signal=2  forwarded_groups=2\n\
              RUNNING  shard_process  a_per_test_interrupt  56.825s  killed group=48213\n\
              RUNNING  sched_records  the_host_binary_format  40.904s  killed group=48230\n\
-             SUMMARY  passed=381 failed=0 ignored=0 not_run=2  wall=75.000s discovered=383 run=381 filtered=0\n"
+             SUMMARY  passed=381 failed=0 ignored=0 not_run=2  wall=75.000s discovered=383 run=381 filtered=0 binaries=0\n"
         );
     }
 
