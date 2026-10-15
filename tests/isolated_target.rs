@@ -228,7 +228,7 @@ async fn the_doc_cargo_starts_only_after_the_test_build_has_output() {
     assert_eq!(building, 1, "the test build is the child that waits on the held lock: {lines:?}");
     assert_eq!(documenting, 0, "no doc cargo exists while the test build has produced nothing: {lines:?}");
     assert_eq!(status.code(), Some(0), "{stdout}{lines:?}");
-    assert!(stdout.lines().any(|line| line.starts_with("PASS     doc-tests  ") || line.starts_with("cargo-val: doc tests: ")), "the doc tests ran after the build: {stdout}");
+    assert!(stdout.lines().any(|line| line.starts_with("PASS doc-tests ") || line.starts_with("cargo-val: doc tests: ")), "the doc tests ran after the build: {stdout}");
     assert!(!lines.iter().any(|line| package_cache_wait(line)), "cargo val's own children never contended for the package cache: {lines:?}");
 }
 

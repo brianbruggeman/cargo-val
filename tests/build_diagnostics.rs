@@ -29,7 +29,7 @@ fn manifest() -> PathBuf {
 }
 
 async fn run_build_error() -> Run {
-    run_with(&["--lib", "--output", "agent"]).await
+    run_with(&["--lib", "--output", "plain"]).await
 }
 
 async fn run_with(arguments: &[&str]) -> Run {
@@ -51,7 +51,7 @@ async fn run_with(arguments: &[&str]) -> Run {
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_type_error_shows_rustcs_diagnostic_before_the_build_failed_line() {
+async fn a_type_error_shows_rustcs_diagnostic_and_its_location_in_plain_output() {
     let result = run_build_error().await;
     let location_text = format!("{}:4", Path::new("src").join("lib.rs").display());
 
@@ -63,34 +63,25 @@ async fn a_type_error_shows_rustcs_diagnostic_before_the_build_failed_line() {
         .text
         .find(&location_text)
         .unwrap_or_else(|| panic!("the file:line {location_text} of the type error is missing:\n{}", result.text));
-    let failed = result
-        .text
-        .find("cargo-val: cargo test build failed")
-        .unwrap_or_else(|| panic!("the build-failed line is missing:\n{}", result.text));
 
-    assert!(error < failed, "{}", result.text);
-    assert!(location < failed, "{}", result.text);
+    assert!(error < location, "{}", result.text);
 }
 
 #[proxima::test(timeout = "310s")]
-async fn rustcs_diagnostics_precede_cargos_summary_which_precedes_cargo_vals_line() {
+async fn plain_output_prints_rustcs_diagnostic_once_without_cargos_restating_summary_or_a_trailer() {
     let result = run_build_error().await;
 
-    let diagnostic = result
-        .text
-        .find("error[E0308]: mismatched types")
-        .unwrap_or_else(|| panic!("rustc's E0308 line is missing:\n{}", result.text));
-    let summary = result
-        .text
-        .find("error: could not compile")
-        .unwrap_or_else(|| panic!("cargo's summary line is missing:\n{}", result.text));
-    let failed = result
-        .text
-        .find("cargo-val: cargo test build failed")
-        .unwrap_or_else(|| panic!("the build-failed line is missing:\n{}", result.text));
+    assert_eq!(result.text.matches("error[E0308]: mismatched types").count(), 1, "{}", result.text);
+    assert!(!result.text.contains("error: could not compile"), "{}", result.text);
+    assert!(!result.text.contains("cargo-val: cargo test build failed"), "{}", result.text);
+}
 
-    assert!(diagnostic < summary, "{}", result.text);
-    assert!(summary < failed, "{}", result.text);
+#[proxima::test(timeout = "310s")]
+async fn agent_output_leaves_stderr_empty_because_the_error_block_is_on_stdout() {
+    let result = run_with(&["--lib", "--output", "agent"]).await;
+
+    assert_eq!(result.status, Some(3), "{}", result.text);
+    assert!(!result.text.contains("E0308") && !result.text.contains("could not compile") && !result.text.contains("cargo test build failed"), "rustc's rendering is not duplicated on stderr:\n{}", result.text);
 }
 
 #[proxima::test(timeout = "310s")]
@@ -298,7 +289,12 @@ async fn an_error_in_both_the_lib_and_the_lib_test_target_prints_one_diagnostic_
 
     let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert_eq!(output.status.code(), Some(3), "{stderr}");
-    assert_eq!(stderr.matches("error[E0308]: mismatched types").count(), 1, "the lib and lib-test targets share one diagnostic:\n{stderr}");
-    assert_eq!(stderr.matches("warning: unused doc comment").count(), 1, "the shared warning prints once too:\n{stderr}");
+    if mode == "agent" {
+        assert_eq!(stdout.matches("ERROR    ").count(), 1, "the lib and lib-test targets share one error block:\n{stdout}");
+        assert!(!stderr.contains("E0308"), "{stderr}");
+    } else {
+        assert_eq!(stderr.matches("error[E0308]: mismatched types").count(), 1, "the lib and lib-test targets share one diagnostic:\n{stderr}");
+        assert_eq!(stderr.matches("warning: unused doc comment").count(), 1, "the shared warning prints once too:\n{stderr}");
+    }
     assert!(mode == "agent" || stdout.contains("BUILD    FAILED  errors=1  "), "the error counts once:\n{stdout}");
 }

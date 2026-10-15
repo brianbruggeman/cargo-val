@@ -1826,23 +1826,23 @@ impl ListingRun<'_> {
                 self.cursor.set([1, 0, 0, 0, 1]);
             }
             7 => {
-                state.captured_close(frame, id, excerpt);
+                state.captured_close(frame, excerpt);
                 flush(frame, Ok(()))?;
                 return Ok(true);
             }
-            _ => self.step_stream(frame, id, (section, views[usize::try_from((section - 1) / 3).unwrap_or(0)]), links)?,
+            _ => self.step_stream(frame, (section, views[usize::try_from((section - 1) / 3).unwrap_or(0)]), links)?,
         }
         flush(frame, Ok(()))?;
         Ok(false)
     }
 
-    fn step_stream(&self, frame: &mut Line<FRAME_BYTES>, id: (&[u8], &[u8]), (stage, (_, first, last, total)): (u64, edge_store::View), links: (&[u8], &[u8], Option<Location<'_>>)) -> Result<(), RunError> {
+    fn step_stream(&self, frame: &mut Line<FRAME_BYTES>, (stage, (_, first, last, total)): (u64, edge_store::View), links: (&[u8], &[u8], Option<Location<'_>>)) -> Result<(), RunError> {
         let [_, previous, position, printed, newline_ended] = self.cursor.get();
         let name = if stage < 4 { STDOUT_STREAM } else { STDERR_STREAM };
         match (stage - 1) % 3 {
             0 if total == 0 => self.cursor.set([stage + 3, 0, 0, 0, 1]),
             0 => {
-                stream_open(frame, id, name);
+                stream_open(frame, name);
                 self.cursor.set([stage + 1, 0, first, 0, 1]);
             }
             1 => {
@@ -1859,7 +1859,7 @@ impl ListingRun<'_> {
                 }
             }
             _ => {
-                stream_close(frame, name, (newline_ended != 0, total.saturating_sub(printed)));
+                stream_close(frame, (newline_ended != 0, total.saturating_sub(printed)));
                 self.cursor.set([stage + 1, 0, 0, 0, 1]);
             }
         }
@@ -2674,8 +2674,16 @@ fn is_cargo_progress(line: &[u8]) -> bool {
     CARGO_PROGRESS.iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
+fn keep_for_mode(output: OutputMode, (held, report): (&mut Vec<u8>, &mut (Vec<u8>, Vec<u8>)), context: (&Settings, &Path), (level, rendered, package_id): (&str, &str, Option<&str>), span: Option<(&str, u32, u32, u32, Option<&str>)>) {
+    if output == OutputMode::Agent {
+        keep_agent_error(report, level, package_id, rendered, span);
+    } else {
+        keep_reported(held, context, (level, rendered), span);
+    }
+}
+
 // an agent build failure is one block per rustc error and a rollup line for each, both built where the rendered text is still in hand
-fn keep_agent_error((blocks, rollup): &mut (Vec<u8>, Vec<u8>), level: &str, (package_id, rendered, span): (Option<&str>, &str, Option<(&str, u32, u32, u32, Option<&str>)>)) {
+fn keep_agent_error((blocks, rollup): &mut (Vec<u8>, Vec<u8>), level: &str, package_id: Option<&str>, rendered: &str, span: Option<(&str, u32, u32, u32, Option<&str>)>) {
     if level != "error" {
         return;
     }
@@ -3133,10 +3141,7 @@ impl CargoDriver<'_> {
                 CargoSourceStep::Diagnostic { level, rendered, span, package_id } => {
                     let position = span.map_or(("", 0, 0), |(file, line, column, ..)| (file, line, column));
                     if admit_diagnostic(&mut self.seen_diagnostics, self.output.is_agent_like(), (level, rendered), position) {
-                        if self.output == OutputMode::Agent {
-                            keep_agent_error(&mut self.agent_report, level, (package_id, rendered, span));
-                        }
-                        keep_reported(&mut self.diagnostics, (run.settings, &self.workspace_root), (level, rendered), span);
+                        keep_for_mode(self.output, (&mut self.diagnostics, &mut self.agent_report), (run.settings, &self.workspace_root), (level, rendered, package_id), span);
                         count_error(&mut self.errors, level, run)?;
                         count_warning(level, rendered, run)?;
                     }
@@ -3218,7 +3223,7 @@ impl CargoDriver<'_> {
     }
 
     fn emit_stderr(&mut self, bytes: &[u8], render: &Render<'_>) -> Result<(), RunError> {
-        let restated = self.errors != 0 && !self.output.is_agent_like();
+        let restated = self.errors != 0 && self.output != OutputMode::Json;
         for line in bytes.split_inclusive(|byte| *byte == b'\n').filter(|line| !(restated && is_failure_restatement(line))) {
             if render.0 == OutputMode::Rich {
                 summarize_status_lines(line, render)?;
@@ -4224,7 +4229,9 @@ fn finish_run(
                     emit(run.render(), &Event::BuildFailed { diagnostic: b"diagnostics on stderr", exit, errors: 0, built: 0, of: None })?;
                 }
                 agent_exit(run, error.exit_code())?;
-                write_fd(2, CARGO_FAILED_LINE)?;
+                if run.settings.output == OutputMode::Json {
+                    write_fd(2, CARGO_FAILED_LINE)?;
+                }
             }
             (true, false) => close_failed_build(parser, run, error.exit_code())?,
             (false, _) => agent_exit(run, error.exit_code())?,

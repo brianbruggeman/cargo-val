@@ -63,7 +63,6 @@ const FILTER_OVERHEAD: usize = b"(binary(=) & test(=))".len();
 const FILTER_JOIN: &[u8] = b" | ";
 pub(crate) const STDOUT_STREAM: &[u8] = b"stdout";
 pub(crate) const STDERR_STREAM: &[u8] = b"stderr";
-const SOURCE_STREAM: &[u8] = b"source";
 const BACKTRACE_HINT: &[u8] = b"note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace";
 
 // the stream that holds the panic site is the one the kept record is read from, so `detail` and `e` find the location the excerpt was cut from;
@@ -1292,12 +1291,11 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         match *event {
             Event::Begin { version, shard, jobs, .. } => header(frame, version, shard, jobs),
             Event::Exited { code } if self.mode == Mode::BuildError => agent::exit_line(frame, code),
-            Event::Built { .. } | Event::Failing { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Notice { .. } | Event::Started { .. } | Event::Listed { .. } => {}
+            Event::Built { .. } | Event::Failing { .. } | Event::Resize { .. } | Event::Waiting { .. } | Event::Previous { .. } | Event::Exited { .. } | Event::Key(_) | Event::Retried { .. } | Event::Reran { .. } | Event::Notice { .. } | Event::Started { .. } | Event::Listed { .. } | Event::BlockOpened { .. } | Event::BlockClosed => {}
             Event::Settled { id, outcome, solo, .. } => self.settled(frame, id, outcome, self.settled_ms, solo),
             Event::Tick { .. } => self.heartbeat(frame),
             Event::Captured { id, stdout, stderr, exit, excerpt } => self.captured(frame, id, (stdout, stderr, exit), excerpt),
             Event::Warned { id, what } => warned(frame, id, what),
-            Event::BlockOpened { .. } | Event::BlockClosed => {}
             Event::BuildFailed { errors, built, of, .. } => build_failed(frame, errors, (built, of)),
             Event::Interrupted { signal, groups } => interrupted(frame, signal, groups),
             Event::Running { id, group, age_ms } => killed(frame, id, group, age_ms),
@@ -1387,8 +1385,8 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
     }
 
     /// Ends a failure block with its source excerpt and the GitHub group end.
-    pub(crate) fn captured_close<const FRAME: usize>(&self, frame: &mut Line<FRAME>, id: Identity<'_>, excerpt: ExcerptRows<'_>) {
-        source_block(frame, id, excerpt);
+    pub(crate) fn captured_close<const FRAME: usize>(&self, frame: &mut Line<FRAME>, excerpt: ExcerptRows<'_>) {
+        source_rows(frame, excerpt);
         if self.github {
             frame.text(b"::endgroup::\n");
         }
@@ -1573,10 +1571,12 @@ fn seconds<const FRAME: usize>(frame: &mut Line<FRAME>, millis: u64) {
     frame.text(b"s");
 }
 
+// one space between fields: a binary id has none, so the name is the rest of the line, and cargo test's own per-test overhead is the yardstick
 fn event_line<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], id: Identity<'_>, millis: Option<u64>, solo: bool) {
-    label(frame, name);
+    frame.text(name);
+    frame.text(b" ");
     frame.text(id.0);
-    frame.text(b"  ");
+    frame.text(b" ");
     frame.text(id.1);
     if let Some(millis) = millis {
         frame.text(b"  ");
@@ -1660,42 +1660,10 @@ fn shows_stderr((stdout, stderr): (Stream<'_>, Stream<'_>), exit: Exit) -> bool 
     }
 }
 
-fn block_open<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8]) {
-    frame.text(b"------ ");
-    frame.text(name);
-    frame.text(b": ");
-    frame.text(id.0);
-    frame.text(b" ");
-    frame.text(id.1);
-    frame.text(b" ------\n");
-}
-
-fn block_close<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8]) {
-    frame.text(b"------ end ");
-    frame.text(name);
-    frame.text(b" ------\n");
-}
-
-fn source_block<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, excerpt: ExcerptRows<'_>) {
-    if excerpt == UNREAD {
-        return;
-    }
-    block_open(frame, id, SOURCE_STREAM);
-    match excerpt {
-        Ok(rows) => frame.text(rows),
-        Err(reason) => {
-            frame.text(b"source absent: ");
-            frame.text(reason);
-            frame.text(b"\n");
-        }
-    }
-    block_close(frame, SOURCE_STREAM);
-}
-
 fn source_rows<const FRAME: usize>(frame: &mut Line<FRAME>, excerpt: ExcerptRows<'_>) {
     match excerpt {
         Ok(rows) => frame.text(rows),
-        Err(reason) if reason.is_empty() => {}
+        Err([]) => {}
         Err(reason) => {
             frame.text(b"source absent: ");
             frame.text(reason);
@@ -1730,9 +1698,11 @@ fn failure_stream<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], (byt
     }
 }
 
-/// Opens the fenced block of one stream; the pages follow through [`stream_page`] and [`stream_close`] ends it.
-pub(crate) fn stream_open<const FRAME: usize>(frame: &mut Line<FRAME>, id: Identity<'_>, name: &[u8]) {
-    block_open(frame, id, name);
+/// Opens one stream of a paged failure block; the pages follow through [`stream_page`] and [`stream_close`] ends it. stdout needs no header (the FAIL line names the test); stderr gets libtest-style `---- stderr ----`.
+pub(crate) fn stream_open<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8]) {
+    if name == STDERR_STREAM {
+        frame.text(b"---- stderr ----\n");
+    }
 }
 
 /// Writes one page of a stream's bytes, linking the panic site when the run has an editor template.
@@ -1743,8 +1713,8 @@ pub(crate) fn stream_page<const FRAME: usize>(frame: &mut Line<FRAME>, bytes: &[
     }
 }
 
-/// Ends the fenced block: a newline when the last byte was not one, and the count of bytes the run could not keep.
-pub(crate) fn stream_close<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[u8], (newline_ended, dropped): (bool, u64)) {
+/// Ends a paged stream: a newline when the last byte was not one, and the count of bytes the run could not keep.
+pub(crate) fn stream_close<const FRAME: usize>(frame: &mut Line<FRAME>, (newline_ended, dropped): (bool, u64)) {
     if !newline_ended {
         frame.text(b"\n");
     }
@@ -1753,7 +1723,6 @@ pub(crate) fn stream_close<const FRAME: usize>(frame: &mut Line<FRAME>, name: &[
         frame.number(usize::try_from(dropped).unwrap_or(usize::MAX));
         frame.text(b" bytes dropped]\n");
     }
-    block_close(frame, name);
 }
 
 #[cfg(test)]
@@ -1797,7 +1766,7 @@ mod tests {
 
         let line = settle(&mut state, FAILING, Outcome::Failed);
 
-        assert_eq!(line, "FAIL     cli_run  fixture::fails_when_requested  3.123s\n");
+        assert_eq!(line, "FAIL cli_run fixture::fails_when_requested  3.123s\n");
         assert_eq!(state.failures().collect::<Vec<_>>(), [FAILING]);
     }
 
@@ -2037,7 +2006,7 @@ mod tests {
 
         let result = state.project(&Event::Settled { id: FAILING, outcome: Outcome::Failed, at_ms: None, solo: false }, &mut frame);
 
-        assert_eq!(result, Err(b"FAIL     cli_run  fixture::fails_when_requested\n".len() - 16));
+        assert_eq!(result, Err(b"FAIL cli_run fixture::fails_when_requested\n".len() - 16));
     }
 
     #[test]
@@ -2468,7 +2437,7 @@ mod tests {
         let fail = Event::Settled { id: SLOW, outcome: Outcome::Failed, at_ms: Some(37_001), solo: false };
         state.apply(&fail);
 
-        assert_eq!(pass_line, "PASS     sched_records  the_host_binary_format_yields_every_declared_record\n");
+        assert_eq!(pass_line, "PASS sched_records the_host_binary_format_yields_every_declared_record\n");
         assert_eq!(
             state.failure_records().collect::<Vec<_>>(),
             [(SLOW, Some(30_001))],
@@ -2490,8 +2459,8 @@ mod tests {
         state.apply(&ignored);
 
         assert_eq!(state.untracked(), 1, "no in-flight storage, so the start is counted instead of stored");
-        assert_eq!(projected(&state, &overflowed), "FAIL     shard_process  a_per_test_interrupt_ends_a_blocked_child\n");
-        assert_eq!(projected(&state, &ignored), "IGNORED  sched_records  the_host_binary_format_yields_every_declared_record\n");
+        assert_eq!(projected(&state, &overflowed), "FAIL shard_process a_per_test_interrupt_ends_a_blocked_child\n");
+        assert_eq!(projected(&state, &ignored), "IGNORED sched_records the_host_binary_format_yields_every_declared_record\n");
         assert_eq!(state.failure_records().collect::<Vec<_>>(), [(SLOW, None)]);
     }
 

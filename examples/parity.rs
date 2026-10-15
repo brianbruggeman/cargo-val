@@ -126,7 +126,10 @@ fn parse_cargo_test(stdout: &str, stderr: &str) -> Report {
             report.names.push(name.to_string());
         } else if let Some(rest) = line.strip_prefix("test result: ok. ") {
             let passed = rest.split(' ').next().and_then(|text| text.parse::<usize>().ok());
-            report.passed_per_binary.insert(binaries.next().unwrap_or_default(), passed.unwrap_or(0));
+            let binary = binaries.next().unwrap_or_default();
+            if let Some(count) = passed.filter(|count| *count != 0) {
+                report.passed_per_binary.insert(binary, count);
+            }
         }
     }
     report.names.sort();

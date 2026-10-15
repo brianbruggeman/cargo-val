@@ -140,10 +140,10 @@ async fn a_piped_run_prints_one_plain_line_per_event_with_stable_columns() {
         "header: {header}"
     );
     assert!(!text.lines().any(|line| line.starts_with("START ")), "a test prints one line, at completion:\n{text}");
-    assert!(text.lines().any(|line| line == "IGNORED  cli_run  fixture::ignored_by_default"));
-    assert!(text.lines().any(|line| line == "PASS     cli_run  fixture::passes"), "a pass is one line with no time, as cargo test prints it:\n{text}");
-    let fail = line_starting(&text, "FAIL     ");
-    assert!(fail.starts_with(&format!("FAIL     cli_run  {FAILING_TEST}  ")), "fail: {fail}");
+    assert!(text.lines().any(|line| line == "IGNORED cli_run fixture::ignored_by_default"));
+    assert!(text.lines().any(|line| line == "PASS cli_run fixture::passes"), "a pass is one line with no time, as cargo test prints it:\n{text}");
+    let fail = line_starting(&text, "FAIL ");
+    assert!(fail.starts_with(&format!("FAIL cli_run {FAILING_TEST}  ")), "fail: {fail}");
     let counted = fail.strip_suffix(SOLO_MARK).unwrap_or(fail);
     assert!(has_three_decimal_seconds(counted.rsplit("  ").next().expect("seconds column")), "fail: {fail}");
 }
@@ -153,7 +153,7 @@ async fn a_failure_prints_libtests_panic_text_once_right_after_its_fail_line_wit
     let text = stdout_of(&run(&[], &[]).await);
     let lines: Vec<&str> = text.lines().collect();
 
-    let fail = lines.iter().position(|line| line.starts_with("FAIL     ")).expect("a FAIL line");
+    let fail = lines.iter().position(|line| line.starts_with("FAIL ")).expect("a FAIL line");
     assert!(lines[fail + 1].starts_with("thread 'fixture::fails_when_requested' ("), "the panic text follows the FAIL line:\n{text}");
     assert_eq!(lines.iter().filter(|line| **line == "requested fixture failure").count(), 1, "the panic message prints once:\n{text}");
     for noise in ["------ ", "running 1 test", "test result:", "failures:", "---- "] {
@@ -261,7 +261,7 @@ async fn rich_forced_on_a_pipe_draws_the_frame_in_colour_and_no_color_keeps_the_
     assert!(contains(&bare.stdout, "\u{2591}".as_bytes()), "no colour draws the bar as glyph textures");
     for output in [&colored, &bare] {
         assert!(contains(&output.stdout, HIDE_CURSOR) && last_cursor_up(&output.stdout).is_some(), "the frame hides the cursor and redraws in place");
-        assert!(!stdout_of(output).contains("PASS     "), "rich output is the frame, not the plain lines");
+        assert!(!stdout_of(output).contains("PASS "), "rich output is the frame, not the plain lines");
     }
 }
 
@@ -281,7 +281,7 @@ async fn shard_mode_reruns_a_shard_failure_alone_and_tags_those_lines() {
     let text = stdout_of(&run(&[], &["--process", "shard"]).await);
 
     assert!(!text.lines().any(|line| line.starts_with("START ")), "{text}");
-    let fail = line_starting(&text, "FAIL     cli_run  fixture::fails_when_requested  ");
+    let fail = line_starting(&text, "FAIL cli_run fixture::fails_when_requested  ");
     assert!(fail.ends_with("(solo rerun)"), "{text}");
     assert!(!text.as_bytes().contains(&ESCAPE));
 }
@@ -436,7 +436,7 @@ async fn rich_on_a_pty_draws_the_frame_ends_with_the_closing_block_and_shows_the
 }
 
 #[cfg(unix)]
-const RESULT_PREFIXES: [&str; 3] = ["PASS     ", "FAIL     ", "IGNORED  "];
+const RESULT_PREFIXES: [&str; 3] = ["PASS ", "FAIL ", "IGNORED "];
 
 #[cfg(unix)]
 fn settled_result_lines(drawn: &str) -> Vec<&str> {
@@ -524,9 +524,9 @@ async fn plain_through_a_pipe_emits_zero_escape_bytes_on_both_streams() {
 async fn a_shard_run_settles_its_failure_on_the_solo_rerun_line_with_the_seconds_column_before_the_mark() {
     let text = stdout_of(&run(&[("CARGO_VAL_PROCESS", "shard")], &[]).await);
 
-    let fail = line_starting(&text, "FAIL     ");
+    let fail = line_starting(&text, "FAIL ");
     let counted = fail.strip_suffix(SOLO_MARK).expect("a shard failure is decided by its solo rerun");
-    assert!(counted.starts_with(&format!("FAIL     cli_run  {FAILING_TEST}  ")), "fail: {fail}");
+    assert!(counted.starts_with(&format!("FAIL cli_run {FAILING_TEST}  ")), "fail: {fail}");
     assert!(has_three_decimal_seconds(counted.rsplit("  ").next().expect("seconds column")), "fail: {fail}");
 }
 
@@ -580,9 +580,9 @@ mod plain_grammar {
     use crate::plain_summary::summary;
 
     const RUN: &str = "cargo-val 0.1.0  process=test  jobs=10\n\
-        IGNORED  cli_run  fixture::ignored_by_default\n\
-        PASS     cli_run  fixture::passes\n\
-        FAIL     doc  src/lib.rs - subtract (line 12)  1.250s  (solo rerun)\n\
+        IGNORED cli_run fixture::ignored_by_default\n\
+        PASS cli_run fixture::passes\n\
+        FAIL doc src/lib.rs - subtract (line 12)  1.250s  (solo rerun)\n\
         FAILED   cli_run fixture::passes - absent\n\
         SUMMARY  passed=1 failed=1 ignored=1 not_run=0  wall=0.409s\n";
 
@@ -610,7 +610,7 @@ mod plain_grammar {
 
         assert_eq!(counts["passed"], 1);
         assert_eq!(counts["not_run"], 0);
-        assert!(summary("PASS     cli_run  fixture::passes\n").is_none());
+        assert!(summary("PASS cli_run fixture::passes\n").is_none());
     }
 }
 
