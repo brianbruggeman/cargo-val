@@ -2,6 +2,9 @@ use core::time::Duration;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static REPORTS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 
 const REPORT_TAIL: usize = 64 * 1024;
 
@@ -27,7 +30,7 @@ fn tail(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(REPORT_TAIL)..]).into_owned()
 }
 
-// nextest runs one test per process as `--exact <name>`; libtest names its thread after the test; the executable stem is the last resort
+// nextest runs one test per process as `--exact <name>`; under plain cargo test the body runs on a runtime worker thread, so the name is the worker or the executable stem and never the test fn
 fn current_test_name() -> String {
     let arguments = std::env::args().collect::<Vec<_>>();
     let exact = arguments.iter().position(|argument| argument == "--exact").and_then(|index| arguments.get(index + 1)).cloned();
@@ -61,7 +64,8 @@ fn write_report(name: &str, report: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&directory)?;
     let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
     let safe = name.chars().map(|character| if character.is_ascii_alphanumeric() || character == '-' || character == '_' { character } else { '_' }).collect::<String>();
-    let path = directory.join(format!("{seconds}-{}-{safe}.log", std::process::id()));
+    let sequence = REPORTS_WRITTEN.fetch_add(1, Ordering::Relaxed);
+    let path = directory.join(format!("{seconds}-{}-{sequence}-{safe}.log", std::process::id()));
     std::fs::write(&path, report)?;
     Ok(path)
 }
