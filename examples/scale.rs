@@ -244,7 +244,7 @@ fn build_command(arm: Arm, context: &Context) -> Command {
         command.env("CARGO_VAL_JOBS", children.to_string());
     }
     if !matches!(arm, Arm::Test | Arm::Nextest) {
-        command.env("CARGO_VAL_OUTPUT", "rich");
+        command.env("CARGO_VAL_OUTPUT", "plain");
     }
     command.current_dir(&context.fixture).env_remove("CARGO_TARGET_DIR");
     command
@@ -289,10 +289,8 @@ fn classify(arm: Arm, line: &str) -> Option<(String, bool)> {
                 _ => return None,
             }
         }
-        Arm::Nextest if text.starts_with("PASS ") => true,
-        Arm::Nextest if text.starts_with("FAIL ") => false,
-        Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo if text.ends_with(" PASS") => true,
-        Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo if text.ends_with(" FAIL") => false,
+        Arm::Nextest | Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo if text.starts_with("PASS ") => true,
+        Arm::Nextest | Arm::Val | Arm::ValTest | Arm::ValShardHalf | Arm::ValShardOne | Arm::ValShardTwo if text.starts_with("FAIL ") => false,
         _ => return None,
     };
     Some((case_name(text)?, passed))
