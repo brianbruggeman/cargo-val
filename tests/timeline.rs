@@ -15,15 +15,19 @@ const AXIS_LABEL: &str = " seconds";
 const SHOW_CURSOR: &str = "\x1b[?25h";
 const REFUSAL: &str = "--timeline is a terminal view; use --output plain or rich";
 
-fn manifest() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cli_run/Cargo.toml")
+fn manifest(fixture: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
 }
 
 async fn run(environment: &[(&str, &str)], arguments: &[&str]) -> Output {
+    run_fixture("cli_run", environment, arguments).await
+}
+
+async fn run_fixture(fixture: &str, environment: &[(&str, &str)], arguments: &[&str]) -> Output {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
-        .arg(manifest())
+        .arg(manifest(fixture))
         .args(["--tests", "--no-fail-fast"])
         .args(arguments)
         .env_remove("CI")
@@ -111,11 +115,11 @@ async fn a_green_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time(
 
 #[proxima::test(timeout = "310s")]
 async fn a_failing_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time() {
-    let output = run(&[("CARGO_VAL_C52D_FAIL", "1"), ("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline", "-E", "test(=fixture::fails_when_requested)"]).await;
+    let output = run(&[("CARGO_VAL_C52D_FAIL", "1"), ("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(1), "{text}");
-    assert_eq!(takeaway_of(&text), "At most 1 of 1 jobs were busy at once (at <seconds>). Slowest test <seconds>.", "a run of one test never exceeds the tail limit, on any platform, so it names its slowest test:\n{text}");
+    assert_eq!(takeaway_of(&text), "At most 1 of 1 jobs were busy at once (at <seconds>). Slowest test <seconds>.", "one job in test-process mode runs one test at a time, so the run never exceeds the tail limit and names its slowest test:\n{text}");
     assert!(!text.contains("After 0.000s"), "a tail that begins at zero is no tail:\n{text}");
     assert_eq!(axis_end(&text), summary_wall(&text), "{text}");
 }
@@ -185,4 +189,36 @@ fn takeaway_of(text: &str) -> String {
         }
     };
     sentence.split_whitespace().map(blank).collect::<Vec<_>>().join(" ")
+}
+
+fn peak_busy(sentence: &str) -> usize {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    let after = |lead: &[&str]| words.windows(lead.len() + 1).find(|window| window[..lead.len()] == *lead).map(|window| window[lead.len()]);
+    after(&["At", "most"]).or_else(|| after(&["Peak", "was"])).and_then(|count| count.parse().ok()).expect("the takeaway names the peak number of busy jobs")
+}
+
+#[proxima::test(timeout = "310s")]
+async fn one_job_with_an_ignored_test_and_two_normal_tests_never_has_two_busy_at_once() {
+    let output = run(&[("CARGO_VAL_JOBS", "1"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
+    let text = stdout_of(&output);
+
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(text.lines().any(|line| line.starts_with("IGNORED ")), "the fixture's ignored test is reported, so it is in the run:\n{text}");
+    assert_eq!(takeaway_of(&text), "At most 1 of 1 jobs were busy at once (at <seconds>). Slowest test <seconds>.", "{text}");
+}
+
+#[proxima::test(timeout = "310s")]
+async fn two_jobs_with_four_tests_never_have_three_busy_at_once() {
+    let output = run_fixture("jobs_bound", &[("CARGO_VAL_JOBS", "2"), ("CARGO_VAL_PROCESS", "test")], &["--output", "plain", "--timeline"]).await;
+    let text = stdout_of(&output);
+
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(summary_passed(&text) == 4, "all four tests ran:\n{text}");
+    let peak = peak_busy(&takeaway_of(&text));
+    assert!((1..=2).contains(&peak), "the busy peak {peak} is bounded by the 2 jobs:\n{text}");
+}
+
+fn summary_passed(text: &str) -> usize {
+    let line = text.lines().find(|line| line.starts_with("SUMMARY ")).expect("a SUMMARY line is printed");
+    line.split_whitespace().find_map(|field| field.strip_prefix("passed=")).and_then(|count| count.parse().ok()).expect("SUMMARY carries passed=")
 }

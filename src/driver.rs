@@ -1266,25 +1266,43 @@ struct Reporting<'run, 'storage> {
 impl Reporting<'_, '_> {
     // a frozen child counts as a live session but not as running, so it starts the moment a job slot frees
     // once the run is stopped its scope has fired and the cancel arm ends it: resuming it would launch a test after the stop
+    // it returns the slot it resumed so its start is announced by `announce` after the finished test settles
     fn settle_ready(
         &self,
         ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
-    ) {
-        let Some(slot) = self.ready.get() else {
-            return;
-        };
+    ) -> Option<SessionSlotId> {
+        let slot = self.ready.get()?;
         let Some(session) = ledger.sessions().get(slot) else {
             self.ready.set(None);
-            return;
+            return None;
         };
         if self.run.admit(ledger).is_err() {
             self.ready.set(None);
-            return;
+            return None;
         }
-        if ledger.sessions().len().saturating_sub(1) < self.jobs {
-            resume_ready(session.child());
-            self.ready.set(None);
+        if ledger.sessions().len().saturating_sub(1) >= self.jobs {
+            return None;
         }
+        resume_ready(session.child());
+        self.ready.set(None);
+        quit_step(&[b"ready-resumed ".as_slice(), session.name_bytes()].concat(), slot.index());
+        Some(slot)
+    }
+
+    // a frozen child is created while another test still runs, so announcing its start at creation counted both as busy;
+    // the start is announced once the slot it took has settled
+    fn announce(
+        &self,
+        ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
+        resumed: Option<SessionSlotId>,
+    ) -> Result<(), RunError> {
+        let Some(session) = resumed.and_then(|slot| ledger.sessions().get(slot)) else {
+            return Ok(());
+        };
+        let targets = self.targets.borrow();
+        let id = (targets.id(session.target()), session.name_bytes());
+        emit(self.render, &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: self.run.settings.test_limit_ms })?;
+        Ok(())
     }
 }
 
@@ -1353,7 +1371,7 @@ fn deliver<'bytes>(
     })?;
     match step {
         OutcomeStep::Reported { outcome, .. } => {
-            reporting.settle_ready(ledger);
+            let resumed = reporting.settle_ready(ledger);
             let name = &report[..name_length.saturating_sub(1)];
             let targets = reporting.targets.borrow();
             let id = (target.map_or(&b""[..], |index| targets.id(index)), name);
@@ -1365,6 +1383,7 @@ fn deliver<'bytes>(
                     reporting.run.emit_failure(id, watch.streams.as_ref(), watch.status.map_or(Exit::Code(1), Exit::from_status))?;
                 }
                 emit(reporting.render, &Event::Reran { id, rerun })?;
+                reporting.announce(ledger, resumed)?;
                 return Ok(step);
             }
             let withdrawn = reporting.interrupted && reporting.render.0.is_agent_like();
@@ -1386,6 +1405,7 @@ fn deliver<'bytes>(
                     },
                 );
             }
+            reporting.announce(ledger, resumed)?;
             Ok(step)
         }
         OutcomeStep::Complete { .. }
@@ -1552,7 +1572,9 @@ fn launch_listed(
     run.targets.borrow_mut().tally(target, Tally::Launched);
     let targets = run.targets.borrow();
     let id = (targets.id(target), intent.test_name().as_bytes());
-    emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
+    if run.ready.get() != Some(slot) {
+        emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
+    }
     drop(targets);
     shard::note_group(run, watches, slot.index(), intent.test_name());
     Ok(())
