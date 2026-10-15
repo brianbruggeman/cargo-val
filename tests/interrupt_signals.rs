@@ -9,6 +9,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::collections::BTreeSet;
 use std::process::{Child, ExitStatus, Stdio};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 #[path = "common/fifo.rs"]
 mod fifo;
@@ -269,22 +271,36 @@ async fn announced_holders(ready: &ChildStream, wanted: usize) -> Vec<libc::pid_
 }
 
 // the groups are read before the signal because a killed holder has no group left to ask about
-async fn interrupt_once_in_flight(fixture: &mut Fixture, ready: &ChildStream, wanted: usize) -> BTreeSet<libc::pid_t> {
+async fn interrupt_once_in_flight(label: &str, fixture: &mut Fixture, ready: &ChildStream, wanted: usize) -> BTreeSet<libc::pid_t> {
+    stamp(label, "ready_fifo_pids", "enter");
     let holders = announced_holders(ready, wanted).await;
+    stamp(label, "ready_fifo_pids", "exit");
     let groups = holders.iter().map(|holder| unsafe { libc::getpgid(*holder) }).collect();
     fixture.holder = holders[0];
     let cargo_val = libc::pid_t::try_from(fixture.child.id()).expect("pid fits pid_t");
     assert_eq!(unsafe { libc::kill(cargo_val, libc::SIGINT) }, 0);
+    stamp(label, "sigint_sent", "exit");
     groups
+}
+
+// one json line per wait boundary, printed in the file's c74 event shape, so a timed-out run's captured output names the wait it was in
+fn stamp(label: &str, wait: &str, phase: &str) {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let elapsed_ms = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
+    println!("{{\"event\":\"c74_wait\",\"label\":\"{label}\",\"wait\":\"{wait}\",\"phase\":\"{phase}\",\"elapsed_ms\":{elapsed_ms}}}");
 }
 
 async fn interrupted_plain_run(label: &str, launch: Launch) -> Observed {
     let (mut fixture, ready) = start_as(label, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "plain", Stdio::piped());
     let ready = Box::new(ready);
-    let groups = interrupt_once_in_flight(&mut fixture, &ready, launch.2).await;
+    let groups = interrupt_once_in_flight(label, &mut fixture, &ready, launch.2).await;
+    stamp(label, "plain_exit", "enter");
     let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
+    stamp(label, "plain_exit", "exit");
     let mut output = String::new();
+    stamp(label, "plain_stdout_eof", "enter");
     fixture.child.stdout.take().expect("stdout is piped").read_to_string(&mut output).expect("plain output is UTF-8");
+    stamp(label, "plain_stdout_eof", "exit");
     let leader_group = unsafe { libc::getpgid(0) };
     Observed { output, status, groups, leader_group }
 }
@@ -294,12 +310,22 @@ async fn interrupted_rich_run(label: &str, launch: Launch) -> Observed {
     let (mut fixture, ready) = start_as(label, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "rich", Stdio::from(slave));
     let (ready, master) = (Box::new(ready), Box::new(ChildStream::new(OwnedFd::from(master))));
     let leader = fixture.child.id();
-    let work = join(interrupt_once_in_flight(&mut fixture, &ready, launch.2), drain::drain_until(&master, |_| false));
+    let drained = async {
+        stamp(label, "master_eof", "enter");
+        let finished = drain::drain_until(&master, |_| false).await;
+        stamp(label, "master_eof", "exit");
+        finished
+    };
+    let work = join(interrupt_once_in_flight(label, &mut fixture, &ready, launch.2), drained);
+    stamp(label, "rich_work", "enter");
     let (groups, (bytes, _)) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, work).await {
         Ok(finished) => finished,
         Err((report, _)) => panic!("{report}"),
     };
+    stamp(label, "rich_work", "exit");
+    stamp(label, "rich_exit", "enter");
     let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
+    stamp(label, "rich_exit", "exit");
     let leader_group = unsafe { libc::getpgid(0) };
     Observed { output: String::from_utf8_lossy(&bytes).replace('\r', ""), status, groups, leader_group }
 }
