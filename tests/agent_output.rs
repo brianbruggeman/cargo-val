@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::process::Output;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -35,7 +37,7 @@ async fn run(fixture_name: &str, environment: &[(&str, &str)], arguments: &[&str
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
         .env("VISUAL", "code")
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agent-fixture-target"))
+        .envs(isolation::environment("agent-output"))
         .env("CARGO_VAL_LOG", "debug")
         .envs(environment.iter().copied());
     let output = fixture_output(&mut command).await;
