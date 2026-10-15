@@ -81,6 +81,9 @@ jobs:
           set +e
           set -o pipefail
           : > integration-test-output.txt
+          annotate_tail() {
+            tail -c 3500 | tr -d '\r' | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/,/%2C/g' | awk '{ if (NR > 1) printf "%%0A"; printf "%s", $0 }'
+          }
           binaries_failed=0
           if [ "$RUNNER_OS" = "Linux" ]; then
             cargo test --locked --tests --no-run --message-format=json > integration-build.json
@@ -108,6 +111,7 @@ jobs:
                 printf '::error title=integration test binary timed out::%s ran past 600s\n' "$binary_name"
               fi
               if [ "$binary_status" -ne 0 ]; then
+                printf '::error title=integration failure %s::exit %s%%0A%s\n' "$binary_name" "$binary_status" "$(awk 'found || /^failures:/ { found = 1; print }' binary-output.txt | annotate_tail)"
                 binaries_failed=1
               fi
             done < integration-executables.txt
@@ -118,6 +122,17 @@ jobs:
             fi
           fi
           integration_count="$(tr -d '\r' < integration-test-output.txt | awk '/^test result: ok\./ { total += $4 } END { print total + 0 }')"
+          if [ "$binaries_failed" -ne 0 ]; then
+            failing_names="$(tr -d '\r' < integration-test-output.txt | awk '/^test .* \.\.\. FAILED$/ { sub(/^test /, ""); sub(/ \.\.\. FAILED$/, ""); print }')"
+            printf '::error title=failing tests::%s\n' "$(printf '%s\n' "$failing_names" | annotate_tail)"
+            if [ "$RUNNER_OS" != "Linux" ]; then
+              printf '%s\n' "$failing_names" | head -n 10 | while IFS= read -r failing_name; do
+                [ -n "$failing_name" ] || continue
+                block="$(tr -d '\r' < integration-test-output.txt | awk -v name="$failing_name" '$0 == "---- " name " stdout ----" { found = 1; print; next } found && /^(---- |failures:)/ { exit } found { print }')"
+                printf '::error title=integration failure %s::%s\n' "$failing_name" "$(printf '%s\n' "$block" | annotate_tail)"
+              done
+            fi
+          fi
           floor_status=0
           if [ "$integration_count" -eq 0 ] || [ "$integration_count" -lt "$INTEGRATION_TEST_FLOOR" ]; then
             printf '::error title=integration test count below floor::passed=%s floor=%s\n' "$integration_count" "$INTEGRATION_TEST_FLOOR"
