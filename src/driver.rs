@@ -1000,7 +1000,7 @@ fn hold_warnings(render: &Render<'_>, bytes: &[u8]) {
     };
     let mut state = render.1.borrow_mut();
     let chain = bytes.chunks(WARNING_PAGE_BYTES).try_fold(state.held(), |chain, page| {
-        edge_store::append(&store, (WARNINGS_STREAM, chain.1, chain.2, chain.3), page).inspect_err(|error| edge_store::lose(&store, page.len(), error))
+        edge_store::append(&store, (WARNINGS_STREAM, chain.0, chain.1, 0), page).map(|(_, first, last, _)| (first, last)).inspect_err(|error| edge_store::lose(&store, page.len(), error))
     });
     if let Ok(chain) = chain {
         state.hold(chain);
@@ -1009,7 +1009,7 @@ fn hold_warnings(render: &Render<'_>, bytes: &[u8]) {
 
 // streams what a rich run held back from the store in order, once, after the frame is gone and before the closing block
 fn release_warnings(render: &Render<'_>) -> Result<(), RunError> {
-    let (_, first, last, _) = render.1.borrow().held();
+    let (first, last) = render.1.borrow().held();
     let Some(store) = render.3.borrow().clone() else {
         return Ok(());
     };
@@ -1026,7 +1026,7 @@ fn release_warnings(render: &Render<'_>) -> Result<(), RunError> {
             break;
         }
     }
-    render.1.borrow_mut().hold((WARNINGS_STREAM, 0, 0, 0));
+    render.1.borrow_mut().hold((0, 0));
     Ok(())
 }
 
@@ -4777,11 +4777,11 @@ mod tests {
 
         let held = render.1.borrow().held();
         assert_eq!(core::mem::size_of_val(&*render.1.borrow()), footprint, "the state is the same size however many warnings it holds");
-        assert_eq!(held.3, 10_000 * warning.len() as u64, "every held byte is sealed in the chain");
+        assert_ne!(held.0, 0, "the chain has a first page");
         let file_length = store.0.as_ref().expect("the store has a file").metadata().expect("the store file has metadata").len();
-        assert!(file_length >= held.3, "the store file holds the {} held bytes, it is {file_length} long", held.3);
+        assert!(file_length >= 10_000 * warning.len() as u64, "the store file holds every held byte, it is {file_length} long");
         let mut page = [0_u8; super::WARNING_PAGE_BYTES];
-        let (_, length) = crate::edge_store::next_page(&store, (0, held.1), &mut page).expect("the first page reads back");
+        let (_, length) = crate::edge_store::next_page(&store, (0, held.0), &mut page).expect("the first page reads back");
         assert_eq!(&page[..length], warning, "the chain reads back in append order from its first page");
     }
 
