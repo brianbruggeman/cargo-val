@@ -10,7 +10,7 @@ use conflaguration::{BorrowedSettings, SettingsSource, resolve_color};
 use crate::ExecutablePath;
 use crate::build_defaults::SIGNAL_SLOTS;
 use crate::artifact_stream::{ArtifactFramer, RecordStep};
-use crate::cargo_message::TestArtifact;
+use crate::cargo_message::{BuildScript, TestArtifact};
 use crate::cargo_source::{CargoSource, CargoSourceStep};
 use crate::cli::{CliParser, DocSelection};
 use crate::config::{
@@ -1160,6 +1160,22 @@ pub fn quit_step(step: &[u8], detail: usize) {
     let _ = crate::edge_output::write(2, line.bytes());
 }
 
+/// Like [`quit_step`] for the build-and-test pipeline: one stamped line naming the target, binary or test a step concerns, so the order work started in is readable from the log alone.
+pub fn pipeline_step(step: &[u8], name: &[u8]) {
+    if !QUIT_LOG.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut line = Line::<384>::new();
+    line.text(b"cargo-val: debug: pipeline ms=");
+    line.number(usize::try_from(monotonic_millis()).unwrap_or(usize::MAX));
+    line.text(b" step=");
+    line.text(step);
+    line.text(b" name=");
+    line.text(name);
+    line.text(b"\n");
+    let _ = crate::edge_output::write(2, line.bytes());
+}
+
 /// Set once the live frame hides the cursor; [`restore_cursor`] shows it again exactly once on any exit path.
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 
@@ -1480,6 +1496,7 @@ fn spawn_listing(
     environments: &mut [u8],
 ) -> Result<PendingListing, RunError> {
     let target = run.policy.borrow_mut().target_listed();
+    pipeline_step(b"listing-spawned", artifact.target_name.as_bytes());
     let binary_id = (!artifact.is_unit_test_target()).then_some(artifact.target_name);
     if !run
         .targets
@@ -1550,6 +1567,7 @@ fn launch_listed(
         other => other,
     })?;
     run.targets.borrow_mut().tally(target, Tally::Launched);
+    pipeline_step(b"test-launched", intent.test_name().as_bytes());
     let targets = run.targets.borrow();
     let id = (targets.id(target), intent.test_name().as_bytes());
     emit(run.render(), &Event::Started { id, solo: false, at_ms: monotonic_millis(), limit_ms: run.settings.test_limit_ms })?;
@@ -2308,6 +2326,7 @@ impl ListingRun<'_> {
             return Ok(());
         }
         let mut doc = spawn()?;
+        pipeline_step(b"doc-cargo-spawned", b"");
         if let Some(child) = doc.take_child() {
             attach(&lanes[DOC_LANE], child)?;
         }
@@ -2881,6 +2900,13 @@ fn announce_built(render: &Render<'_>, (built, binaries): (u16, u16), unit_total
     emit_live(render, &Event::Built { done: built, total, exact, binaries, at_ms: monotonic_millis() })
 }
 
+fn record_build_script(linked: &mut LinkedDirectories<'_>, build_scripts: &mut BuildScriptOutputs<'_>, script: &BuildScript<'_>) -> Result<(), RunError> {
+    for reported in script.linked_paths.iter() {
+        linked.add(reported).map_err(|_| RunError::TestEnvironment)?;
+    }
+    build_scripts.add(script).map_err(|_| RunError::TestEnvironment)
+}
+
 fn note_built(built: &mut u16, binaries: &mut u16, unit_total: Option<(u16, bool)>, (run, test_binary): (&ListingRun<'_>, bool)) -> Result<(), RunError> {
     *built = built.saturating_add(1);
     *binaries = binaries.saturating_add(u16::from(test_binary));
@@ -2946,8 +2972,13 @@ impl CargoDriver<'_> {
         self.active.is_none() || self.pending_listing.is_none()
     }
 
+    // cargo's stdout is read while an artifact has somewhere to wait, so a build never stalls on a full pipe behind running tests
+    fn accepting(&self) -> bool {
+        self.has_room() || !self.parked.is_full()
+    }
+
     pub(crate) fn cargo_open(&self) -> bool {
-        self.has_room() && self.cargo_backlog.is_none()
+        self.accepting() && self.cargo_backlog.is_none()
     }
 
     pub(crate) fn listing_open(&self, run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
@@ -3035,6 +3066,7 @@ impl CargoDriver<'_> {
         (run, ledger, lanes): (&ListingRun<'_>, &Ledger<'_>, &Lanes),
     ) -> Result<(), RunError> {
         self.build_ms = monotonic_millis().saturating_sub(run.started_millis);
+        pipeline_step(if success { b"build-finished-ok" } else { b"build-finished-failed" }, b"");
         emit_live(run.render(), &Event::Built { done: self.built, total: Some(self.built), exact: true, binaries: self.binaries_built, at_ms: monotonic_millis() })?;
         let (event, reason): (&[u8], &'static [u8]) = if success {
             (b" build-finished success=true", b"build-succeeded")
@@ -3088,7 +3120,7 @@ impl CargoDriver<'_> {
         let mut context = Context::from_waker(Waker::noop());
         let mut offset = 0;
         loop {
-            if !self.has_room() {
+            if !self.accepting() {
                 return Ok(offset);
             }
             let ready_before = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
@@ -3114,11 +3146,16 @@ impl CargoDriver<'_> {
             let progressed = consumed > 0 || ready_before;
             match step {
                 CargoSourceStep::Artifact(artifact) => {
+                    pipeline_step(b"artifact-arrived", artifact.target_name.as_bytes());
                     note_built(&mut self.built, &mut self.binaries_built, self.unit_total, (run, true))?;
                     let gated = matches!(artifact.target_kind, "test" | "bench")
                         && self.discovery.waits(artifact.package_id);
-                    debug_artifact(run.settings.debug, gated, self.discovery.gate(), &artifact);
-                    if gated {
+                    let crowded = !gated && self.active.is_some() && self.pending_listing.is_some();
+                    if crowded {
+                        self.reason = b"listing-room";
+                    }
+                    debug_artifact(run.settings.debug, gated || crowded, self.discovery.gate(), &artifact);
+                    if gated || crowded {
                         self.parked.park(&artifact).map_err(RunError::Parked)?;
                     } else {
                         let started = start_listing(
@@ -3154,16 +3191,7 @@ impl CargoDriver<'_> {
                     }
                 }
                 CargoSourceStep::BuildFinished { success } => self.build_finished(success, (run, ledger, lanes))?,
-                CargoSourceStep::BuildScript(script) => {
-                    for reported in script.linked_paths.iter() {
-                        self.linked
-                            .add(reported)
-                            .map_err(|_| RunError::TestEnvironment)?;
-                    }
-                    self.build_scripts
-                        .add(&script)
-                        .map_err(|_| RunError::TestEnvironment)?;
-                }
+                CargoSourceStep::BuildScript(script) => record_build_script(&mut self.linked, &mut self.build_scripts, &script)?,
                 CargoSourceStep::Read { .. }
                 | CargoSourceStep::NeedMore
                 | CargoSourceStep::Ignored => {}
@@ -3501,13 +3529,13 @@ impl CargoDriver<'_> {
             return Ok(true);
         }
         if let Some((range, offset)) = self.cargo_backlog.clone()
-            && self.has_room()
+            && self.accepting()
         {
             self.cargo_backlog = None;
             self.cargo_chunk(lanes, range, offset, run, ledger)?;
             return Ok(self.cargo_backlog.as_ref().is_none_or(|(_, moved)| *moved > offset));
         }
-        if self.cargo_eof && !self.discovery.stdout_closed() && self.cargo_backlog.is_none() && self.has_room() {
+        if self.cargo_eof && !self.discovery.stdout_closed() && self.cargo_backlog.is_none() && self.accepting() {
             self.advance(&[], true, run, ledger, lanes)?;
             return Ok(self.discovery.stdout_closed());
         }
@@ -4579,6 +4607,7 @@ fn record_doc_event(
     match event {
         DocEvent::Running { count } => {
             if *phase == DocPhase::Starting {
+                pipeline_step(b"doc-tests-running", b"");
                 *phase = DocPhase::Executing;
             }
             observation.blocks.set(observation.blocks.get() + 1);
