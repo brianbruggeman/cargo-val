@@ -133,11 +133,13 @@ async fn run_external(mode: &str) -> String {
 fn external_reason(text: &str) -> String {
     let line = text.lines().find(|line| line.contains("panicked at ")).expect("the captured panic line");
     let site = line.split_once("panicked at ").expect("the panic marker").1;
-    let mut parts = site.splitn(2, ':');
+    let mut parts = site.trim_end().trim_end_matches(':').rsplitn(3, ':');
+    let _column = parts.next().expect("a column");
+    let line_number = parts.next().expect("a line number");
     let file = parts.next().expect("a file");
-    let line_number = parts.next().expect("a line").split(':').next().expect("a line number");
     let reason = format!("external:{file}:{line_number}");
-    assert!(reason.ends_with(BYTES_PANIC_SITE) && reason.contains("/registry/src/"), "{reason}");
+    let slashed = reason.replace('\\', "/");
+    assert!(slashed.ends_with(BYTES_PANIC_SITE) && slashed.contains("/registry/src/"), "{reason}");
     reason
 }
 
