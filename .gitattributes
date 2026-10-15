@@ -1,1 +1,3 @@
 tests/fixtures/** text eol=lf
+src/render/timeline_golden/** text eol=lf
+tests/golden/** text eol=lf
