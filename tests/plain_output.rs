@@ -11,6 +11,8 @@ use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -57,7 +59,7 @@ fn command(environment: &[(&str, &str)], arguments: &[&str]) -> Command {
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
         .env("CARGO_VAL_C52D_FAIL", "1")
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target"))
+        .envs(isolation::environment("plain-output"))
         .envs(environment.iter().copied());
     command
 }
@@ -204,16 +206,9 @@ async fn a_plain_run_never_emits_an_escape_byte_even_when_color_is_requested() {
     assert!(!output.stderr.contains(&ESCAPE), "plain stderr has no ESC");
 }
 
-fn fresh_target(name: &str) -> String {
-    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    _ = std::fs::remove_dir_all(&target);
-    target.display().to_string()
-}
-
 #[proxima::test(timeout = "310s")]
 async fn a_plain_run_asks_cargo_for_no_color_so_cargo_term_color_always_adds_no_escape_byte() {
-    let target = fresh_target("plain-color-target");
-    let output = run(&[("CARGO_TERM_COLOR", "always"), ("CARGO_TARGET_DIR", &target)], &[]).await;
+    let output = run(&[("CARGO_TERM_COLOR", "always")], &[]).await;
 
     assert!(!output.stdout.is_empty(), "the run printed its plain lines");
     assert!(!output.stdout.contains(&ESCAPE), "plain stdout has no ESC");
@@ -222,8 +217,7 @@ async fn a_plain_run_asks_cargo_for_no_color_so_cargo_term_color_always_adds_no_
 
 #[proxima::test(timeout = "310s")]
 async fn the_same_fresh_build_in_rich_mode_does_carry_cargo_color_so_the_plain_check_can_fail() {
-    let target = fresh_target("rich-color-target");
-    let output = run(&[("CARGO_TERM_COLOR", "always"), ("CARGO_TARGET_DIR", &target)], &["--output", "rich"]).await;
+    let output = run(&[("CARGO_TERM_COLOR", "always")], &["--output", "rich"]).await;
 
     assert!(output.stdout.contains(&ESCAPE) || output.stderr.contains(&ESCAPE), "rich output keeps ANSI");
 }
@@ -325,7 +319,7 @@ fn blocked_command(directory: &std::path::Path) -> Command {
         .env_remove("CARGO_VAL_COLOR")
         .env_remove("RUST_TEST_THREADS")
         .env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", directory)
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pty-sigint-fixture-target"));
+        .envs(isolation::environment("plain-output"));
     invocation
 }
 
@@ -541,7 +535,7 @@ async fn build_error_run(mode: &str) -> Output {
         .env_remove("CARGO_VAL_COLOR")
         .env("CARGO_VAL_OUTPUT", mode)
         .env("CARGO_TERM_COLOR", "always")
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{mode}-build-error-target")));
+        .envs(isolation::environment("plain-output"));
     fixture_output(&mut command).await
 }
 
