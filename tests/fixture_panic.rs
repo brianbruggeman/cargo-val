@@ -211,20 +211,20 @@ async fn a_missed_deadline_persists_its_report_and_names_the_path_last() {
     let path = PathBuf::from(last.strip_prefix("deadline report: ").unwrap_or_else(|| panic!("last line must name the log: {message}")));
     let report = fs::read_to_string(&path).expect("the named log file exists");
     fs::remove_file(&path).expect("the test removes its own log");
-    assert!(report.starts_with("test: "), "{report}");
+    assert!(report.starts_with("test: a_missed_deadline_persists_its_report_and_names_the_path_last\n"), "{report}");
     assert!(report.contains("lock holders at the deadline:"), "{report}");
     assert!(report.contains("uptime: "), "{report}");
     assert!(report.contains("deadline: 50ms"), "{report}");
 }
 
-fn take_persisted_report(message: &str, deadline: &str) -> String {
+fn take_persisted_report(message: &str, test: &str, deadline: &str) -> String {
     let path = message
         .lines()
         .find_map(|line| line.strip_prefix("deadline report: "))
         .map_or_else(|| panic!("the failure must name its report: {message}"), PathBuf::from);
     let report = fs::read_to_string(&path).expect("the named log file exists");
     fs::remove_file(&path).expect("the test removes its own log");
-    assert!(report.starts_with("test: "), "{report}");
+    assert!(report.starts_with(&format!("test: {test}\n")), "{report}");
     assert!(report.contains(&format!("deadline: {deadline}\n")), "{report}");
     assert!(report.contains("lock holders at the deadline:"), "{report}");
     assert!(report.contains("uptime: "), "{report}");
@@ -241,7 +241,7 @@ async fn a_bounded_fixture_run_that_misses_its_deadline_persists_its_report() {
         .await
         .expect_err("a child blocked on a fifo must miss the deadline");
 
-    let report = take_persisted_report(&failure, "50ms");
+    let report = take_persisted_report(&failure, "a_bounded_fixture_run_that_misses_its_deadline_persists_its_report", "50ms");
     assert!(report.contains("/bin/sh") || report.contains("sh -c"), "the group listing names the blocked shell: {report}");
 }
 
@@ -266,7 +266,7 @@ async fn a_fifo_that_never_delivers_a_line_persists_its_report() {
     let unwound = AssertUnwindSafe(fifo::first_line(&ready, "the child never wrote its pid")).catch_unwind().await;
 
     let message = panic_text(&*unwound.expect_err("a fifo nobody writes to must miss the deadline"));
-    take_persisted_report(&message, "1s");
+    take_persisted_report(&message, "a_fifo_that_never_delivers_a_line_persists_its_report", "1s");
 }
 
 #[proxima::test(timeout = "60s")]
@@ -278,5 +278,5 @@ async fn a_fifo_that_never_reaches_eof_persists_its_report() {
     let unwound = AssertUnwindSafe(fifo::until_eof(&held, "the held fifo")).catch_unwind().await;
 
     let message = panic_text(&*unwound.expect_err("a fifo whose writer stays open must miss the deadline"));
-    take_persisted_report(&message, "1s");
+    take_persisted_report(&message, "a_fifo_that_never_reaches_eof_persists_its_report", "1s");
 }
