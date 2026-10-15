@@ -13,6 +13,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use proxima_primitives::pipe::Pipe;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -32,7 +34,7 @@ const TEST: &str = "tests::unit_blocks_when_requested";
 type Blocked = (String, String, Option<i32>);
 
 fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
 fn make_fifo(path: &Path) {
@@ -80,7 +82,7 @@ fn command(directory: &Path, arguments: &[&str]) -> Command {
         .args(["--lib", "--output", "plain"])
         .args(arguments)
         .env("CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", directory)
-        .env("CARGO_TARGET_DIR", target_directory().join("running-heartbeat-fixture"));
+        .envs(isolation::environment("running-heartbeat"));
     for key in ["CI", "GITHUB_ACTIONS", "NO_COLOR", "TERM", "CARGO_VAL_OUTPUT", "CARGO_VAL_PROCESS", "CARGO_VAL_TEST_TIMEOUT", "CARGO_VAL_HEARTBEAT", "RUST_TEST_THREADS"] {
         command.env_remove(key);
     }

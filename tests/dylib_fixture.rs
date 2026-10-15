@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -26,10 +28,9 @@ fn fixture_manifest() -> PathBuf {
 }
 
 fn scrubbed(mut command: Command) -> Command {
-    let target_directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dylib_env_target");
     command
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("CARGO_TARGET_DIR", target_directory)
+        .envs(isolation::environment("dylib-fixture"))
         .env("NO_COLOR", "1")
         .env_remove("CARGO_MANIFEST_DIR");
     for variable in LOADER_VARIABLES {

@@ -16,6 +16,8 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::path::Path;
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[cfg(unix)]
 #[path = "common/exit_wait.rs"]
 mod exit_wait;
@@ -72,16 +74,11 @@ impl Run {
 }
 
 fn scratch(label: &str) -> PathBuf {
-    let base = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from);
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let directory = base.join("shard-process").join(format!("{label}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).expect("scratch directory is creatable under the target directory");
     directory
-}
-
-fn fixture_target() -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fixture-target")
 }
 
 async fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
@@ -104,7 +101,7 @@ async fn run_fixture(fixture: &str, label: &str, arguments: &[&str], environment
         .env_remove("CARGO_VAL_PROCESS")
         .env("NO_COLOR", "1")
         .env("CARGO_VAL_SHARD_LOG", &log)
-        .env("CARGO_TARGET_DIR", fixture_target())
+        .envs(isolation::environment(&format!("shard-{label}")))
         .envs(environment.iter().copied()),
     ).await;
     let log = fs::read_to_string(&log).unwrap_or_default();
@@ -553,8 +550,6 @@ async fn a_per_test_interrupt_ends_a_blocked_child_and_cargo_val_exits_promptly(
 // libc::kill and fifos
 #[cfg(unix)]
 async fn interrupt_ends_blocked_child(process: &str, label: &str) {
-    // the shared target queues this build behind other fixtures' dependency builds, past the pid deadline
-    let interrupt_target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{label}-target"));
     let directory = scratch(label);
     let ready = directory.join("ready");
     let hold = directory.join("hold");
@@ -580,7 +575,7 @@ async fn interrupt_ends_blocked_child(process: &str, label: &str) {
         .env("CARGO_VAL_SHARD_READY", &ready)
         .env("CARGO_VAL_SHARD_HOLD", &hold)
         .env("CARGO_VAL_SHARD_IGNORE_INT", "1")
-        .env("CARGO_TARGET_DIR", &interrupt_target);
+        .envs(isolation::environment(label));
     let (shard_pid, signalled, exit, stderr) = supervised(&mut command, fixture_deadline() * 2, async |leader, stdout, stderr, exit| {
         let cargo_val = libc::pid_t::try_from(leader).expect("pid fits pid_t");
         let reporting = drain_until(&ready_stream, |bytes| bytes.contains(&b'\n'));
