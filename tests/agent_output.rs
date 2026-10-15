@@ -91,13 +91,12 @@ async fn an_assert_failure_block_names_the_user_file_the_message_and_the_exact_r
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_build_error_prints_the_rustc_diagnostic_and_exits_three() {
+async fn a_build_error_prints_one_error_block_and_a_rollup_on_stdout_nothing_on_stderr_and_exits_three() {
     let output = run("build_error", &[], &["--output", "agent"]).await;
     let stderr = String::from_utf8(output.stderr.clone()).expect("diagnostics are UTF-8");
 
     assert_eq!(output.status.code(), Some(3), "{stderr}");
-    assert!(stderr.contains("error[E0308]: mismatched types"), "{stderr}");
-    assert!(stderr.replace('\\', "/").contains("src/lib.rs:4:5"), "{stderr}");
+    assert!(!stderr.contains("E0308") && !stderr.contains("could not compile"), "rustc's rendering is not duplicated on stderr:\n{stderr}");
     let report = stdout_of(&output);
     let lines: Vec<&str> = report.lines().collect();
     assert_eq!(lines.len(), 5, "ERROR block, rollup, EXIT:\n{report}");

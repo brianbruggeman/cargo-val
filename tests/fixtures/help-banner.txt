@@ -73,8 +73,8 @@ Output mode, highest precedence first (default: auto):
 auto is rich only when standard output is an interactive terminal (a console on Windows)
 and CI is unset or empty and TERM is not dumb; a pipe, a file, CI, or a dumb terminal gets
 plain. plain never emits ANSI escapes. NO_COLOR suppresses color in every mode.
-Plain output is append-only, one line per test at completion, labels padded to nine columns:
-  PASS/FAIL/IGNORED  <binary id>  <test>  [<secs>s on FAIL]  [(solo rerun)]
+Plain output is append-only, one line per test at completion; the closing labels are padded to nine columns:
+  PASS/FAIL/IGNORED <binary id> <test>  [<secs>s on FAIL]  [(solo rerun)]
   a failure's libtest panic text follows its FAIL line once, then its source excerpt. The end:
   one FAILED <binary id> <test> - <file>:<line> line per failure, SUMMARY passed=P failed=F
   ignored=I not_run=N wall=S (plus discovered= run= filtered= binaries= when tests were

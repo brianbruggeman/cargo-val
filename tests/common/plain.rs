@@ -1,12 +1,11 @@
 use cargo_val::render::Outcome;
 
-const LABEL_WIDTH: usize = 9;
 const FIELD_GAP: &str = "  ";
 const SOLO_MARK: &str = "  (solo rerun)";
 
 /// Every settled test in a `--output plain` stdout, as `(binary, test, outcome)` in print order.
 ///
-/// The grammar is `src/render.rs` `event_line`: a label padded to nine columns, the binary, two spaces, the test, then an optional `  <seconds>s` and `  (solo rerun)`. Test names may contain single spaces (doctests do).
+/// The grammar is `src/render.rs` `event_line`: a label, the binary, the test (each after one space), then an optional `  <seconds>s` and `  (solo rerun)`. Test names may contain single spaces (doctests do).
 #[must_use]
 pub fn settled(stdout: &str) -> Vec<(String, String, Outcome)> {
     stdout.lines().filter_map(settled_line).collect()
@@ -19,14 +18,15 @@ pub fn names(stdout: &str, outcome: Outcome) -> Vec<String> {
 }
 
 fn settled_line(line: &str) -> Option<(String, String, Outcome)> {
-    let outcome = match line.get(..LABEL_WIDTH)?.trim_end() {
+    let (label, line) = line.split_once(' ')?;
+    let outcome = match label {
         "PASS" => Outcome::Passed,
         "FAIL" => Outcome::Failed,
         "IGNORED" => Outcome::Ignored,
         _ => return None,
     };
-    let identity = line[LABEL_WIDTH..].trim_end().trim_end_matches(SOLO_MARK);
-    let (binary, rest) = identity.split_once(FIELD_GAP)?;
+    let identity = line.trim_end().trim_end_matches(SOLO_MARK);
+    let (binary, rest) = identity.split_once(' ')?;
     Some((binary.to_owned(), without_seconds(rest).to_owned(), outcome))
 }
 

@@ -19,16 +19,15 @@ const MEBIBYTE: usize = 1_048_576;
 const STALL_BOUND: Duration = Duration::from_secs(120);
 const SIGINT_STATUS: i32 = 130;
 
-fn open(stream: &str, test: &str) -> String {
-    open_in("views_pair", stream, test)
+const STDERR_HEADER: &str = "---- stderr ----\n";
+
+// a paged block has no fences: it follows its FAIL line, stdout first, then libtest-style `---- stderr ----` and stderr
+fn fail_line(test: &str) -> String {
+    fail_line_in("views_pair", test)
 }
 
-fn open_in(binary: &str, stream: &str, test: &str) -> String {
-    format!("------ {stream}: {binary} fixture::{test} ------\n")
-}
-
-fn close(stream: &str) -> String {
-    format!("------ end {stream} ------\n")
+fn fail_line_in(binary: &str, test: &str) -> String {
+    format!("FAIL {binary} fixture::{test}")
 }
 
 fn pattern(seed: usize, total: usize) -> Vec<u8> {
@@ -84,12 +83,6 @@ fn read_until(stdout: &mut impl Read, marker: &str) -> Vec<u8> {
     seen
 }
 
-fn fenced<'a>(output: &'a [u8], opening: &str, closing: &str) -> &'a [u8] {
-    let start = memmem::find(output, opening.as_bytes()).unwrap_or_else(|| panic!("{opening:?} is printed")) + opening.len();
-    let length = memmem::find(&output[start..], closing.as_bytes()).unwrap_or_else(|| panic!("{closing:?} follows {opening:?}"));
-    &output[start..start + length]
-}
-
 fn at(output: &[u8], needle: &str) -> usize {
     memmem::find(output, needle.as_bytes()).unwrap_or_else(|| panic!("{needle:?} is printed"))
 }
@@ -110,8 +103,10 @@ fn stream_digests(output: &[u8], test: &str, seed: usize, total: usize) -> (u64,
 
 fn digests_in(binary: &str, output: &[u8], test: &str, (seed, total): (usize, usize)) -> (u64, u64) {
     let expected = pattern(seed, total);
-    let (stdout, stderr) = (fenced(output, &open_in(binary, "stdout", test), &close("stdout")), fenced(output, &open_in(binary, "stderr", test), &close("stderr")));
-    let begin = |block: &[u8]| memmem::find(block, &expected[..4096]).unwrap_or_else(|| panic!("the {test} pattern starts inside its fence"));
+    let start = at(output, &fail_line_in(binary, test));
+    let header = start + at(&output[start..], STDERR_HEADER);
+    let (stdout, stderr) = (&output[start..header], &output[header + STDERR_HEADER.len()..]);
+    let begin = |block: &[u8]| memmem::find(block, &expected[..4096]).unwrap_or_else(|| panic!("the {test} pattern starts inside its block"));
     let (from_stdout, from_stderr) = (begin(stdout), begin(stderr));
     (digest(&stdout[from_stdout..from_stdout + total]), digest(&stderr[from_stderr..from_stderr + total]))
 }
@@ -127,10 +122,9 @@ fn two_failures_settling_in_one_shard_item_each_print_complete_in_settle_order()
     assert_eq!(code, Some(1));
     assert_eq!(stream_digests(&output, "fails_a", 0, MEBIBYTE), (expected, expected), "the first block is whole and not repeated");
     assert_eq!(stream_digests(&output, "fails_b", 7, MEBIBYTE), (shifted, shifted), "the second block is whole and not repeated");
-    assert_eq!((count(&output, "------ stdout: views_pair"), count(&output, &close("stdout"))), (2, 2), "stdout fences balance");
-    assert_eq!((count(&output, "------ stderr: views_pair"), count(&output, &close("stderr"))), (2, 2), "stderr fences balance");
-    assert!(at(&output, &open("stdout", "fails_a")) < at(&output, &open("stdout", "fails_b")), "blocks print in settle order");
-    assert!(at(&output, &close("stderr")) < at(&output, &open("stdout", "fails_b")), "the first block closes before the second opens");
+    assert_eq!((count(&output, "FAIL views_pair"), count(&output, STDERR_HEADER)), (2, 2), "one stderr header per failure block");
+    assert!(at(&output, &fail_line("fails_a")) < at(&output, &fail_line("fails_b")), "blocks print in settle order");
+    assert!(at(&output, STDERR_HEADER) < at(&output, &fail_line("fails_b")), "the first block is mid-print before the second failure line");
 }
 
 #[test]
@@ -140,9 +134,9 @@ fn the_summary_follows_every_block_and_no_block_opens_after_it() {
     let (output, _) = finish(child, Vec::new());
 
     let summary = at(&output, "SUMMARY");
-    let last_close = memmem::rfind(&output, close("stderr").as_bytes()).expect("a block closed");
-    assert!(last_close < summary, "the closing block comes after the last failure block");
-    assert_eq!(memmem::rfind(&output, b"------ stdout: views_pair").filter(|opened| *opened > summary), None, "no block opens after the summary");
+    let last_header = memmem::rfind(&output, STDERR_HEADER.as_bytes()).expect("a block printed");
+    assert!(last_header < summary, "the closing block comes after the last failure block");
+    assert_eq!(memmem::rfind(&output, b"FAIL views_pair").filter(|opened| *opened > summary), None, "no block opens after the summary");
 }
 
 fn fifo(directory: &Path, name: &str) -> PathBuf {
@@ -157,7 +151,7 @@ fn a_producer_finishes_four_mebibytes_while_a_sixteen_mebibyte_block_waits_on_an
     let (go, done) = (fifo(&scratch, "go"), fifo(&scratch, "done"));
     let mut child = spawn("throttle", "test", &[("VIEWS_PAIR_BIG_BYTES", (8 * MEBIBYTE).to_string()), ("VIEWS_PAIR_GO", go.display().to_string()), ("VIEWS_PAIR_DONE", done.display().to_string())]);
     let mut stdout = child.stdout.take().expect("stdout is piped");
-    let head = read_until(&mut stdout, &open("stdout", "fails_big"));
+    let head = read_until(&mut stdout, &fail_line("fails_big"));
 
     File::options().write(true).open(&go).expect("the producer is waiting on the go fifo").write_all(b"g").expect("the producer is released");
     let (sender, receiver) = mpsc::channel();
@@ -183,7 +177,7 @@ fn a_producer_finishes_four_mebibytes_while_a_sixteen_mebibyte_block_waits_on_an
 fn an_interrupt_during_a_block_prints_it_whole_then_the_interrupted_block_then_the_summary() {
     let mut child = spawn("interrupt", "shard", &[("VIEWS_PAIR_BYTES", (2 * MEBIBYTE).to_string())]);
     let mut stdout = child.stdout.take().expect("stdout is piped");
-    let head = read_until(&mut stdout, &open("stdout", "fails_a"));
+    let head = read_until(&mut stdout, &fail_line("fails_a"));
 
     assert_eq!(unsafe { libc::kill(child.id().cast_signed(), libc::SIGINT) }, 0, "the interrupt lands");
     child.stdout = Some(stdout);
@@ -192,9 +186,9 @@ fn an_interrupt_during_a_block_prints_it_whole_then_the_interrupted_block_then_t
     let text = String::from_utf8_lossy(&output).into_owned();
     let expected = digest(&pattern(0, 2 * MEBIBYTE));
     assert_eq!(stream_digests(&output, "fails_a", 0, 2 * MEBIBYTE), (expected, expected), "the pending block prints in full");
-    assert_eq!(count(&output, "------ stdout: views_pair"), count(&output, &close("stdout")), "stdout fences balance:\n{}", &text[text.len().saturating_sub(600)..]);
+    assert_eq!(count(&output, "FAIL views_pair"), count(&output, STDERR_HEADER), "every printed block is whole:\n{}", &text[text.len().saturating_sub(600)..]);
     let (interrupted, summary) = (at(&output, "INTERRUPTED"), at(&output, "SUMMARY"));
-    assert!(memmem::rfind(&output, close("stderr").as_bytes()).is_some_and(|closed| closed < interrupted), "every block closes before INTERRUPTED");
+    assert!(memmem::rfind(&output, STDERR_HEADER.as_bytes()).is_some_and(|header| header < interrupted), "every block prints before INTERRUPTED");
     assert!(interrupted < summary, "INTERRUPTED precedes SUMMARY");
     assert_eq!(code, Some(SIGINT_STATUS));
 }
@@ -246,7 +240,7 @@ fn two_thousand_settlers_finish_behind_an_unread_eight_mebibyte_block_and_print_
     let environment = [("VIEWS_FLOOD_BIG_BYTES", (8 * MEBIBYTE).to_string()), ("VIEWS_FLOOD_GO", go.display().to_string()), ("VIEWS_FLOOD_DONE", done.display().to_string())];
     let mut child = spawn_in("views_flood", ("flood", "test", "1"), &environment, Stdio::null());
     let mut stdout = child.stdout.take().expect("stdout is piped");
-    let head = read_until(&mut stdout, &open_in("views_flood", "stdout", "fails_big"));
+    let head = read_until(&mut stdout, &fail_line_in("views_flood", "fails_big"));
 
     let (_release, receiver) = release_and_count(&go, &done, SETTLERS);
     let settlers_finished = receiver.recv_timeout(STALL_BOUND);
@@ -261,9 +255,9 @@ fn two_thousand_settlers_finish_behind_an_unread_eight_mebibyte_block_and_print_
     assert_eq!(code, Some(1));
     assert_eq!(digests_in("views_flood", &output, "fails_big", (3, 8 * MEBIBYTE)), (expected, expected), "the block prints whole");
     assert_eq!(settled_in_order(&output), (0..SETTLERS).collect::<Vec<_>>(), "every settle line printed once, in the order the tests settled");
-    assert!(at(&output, "fixture::settle_0000") > at(&output, &close("stderr")), "the settle lines print after the block they settled behind");
+    assert!(at(&output, "fixture::settle_0000") > at(&output, STDERR_HEADER) + STDERR_HEADER.len() + 8 * MEBIBYTE, "the settle lines print after the block they settled behind");
     let kept = store_bytes("flood");
-    let in_store = memmem::find_iter(&kept, b"PASS     views_flood  fixture::settle_").count();
+    let in_store = memmem::find_iter(&kept, b"PASS views_flood fixture::settle_").count();
     println!("settle lines found in the run store scrollback: {in_store} of {SETTLERS}");
     assert!(in_store > 0, "the lines the ring had no room for were sealed into the run store");
     assert!(memmem::find(&kept, b"fixture::settle_1999").is_some(), "the last settle line is in the store");
@@ -280,8 +274,7 @@ fn forty_failing_tests_with_sixty_four_kibibytes_each_all_print_in_full() {
         let expected = digest(&pattern(index, BULK_BYTES));
         assert_eq!(digests_in("views_flood", &output, &format!("bulk_{index:02}"), (index, BULK_BYTES)), (expected, expected), "block {index} is whole, not a bounded window");
     }
-    assert_eq!((count(&output, "------ stdout: views_flood"), count(&output, &close("stdout"))), (BULK_FAILURES, BULK_FAILURES), "stdout fences balance");
-    assert_eq!((count(&output, "------ stderr: views_flood"), count(&output, &close("stderr"))), (BULK_FAILURES, BULK_FAILURES), "stderr fences balance");
+    assert_eq!((count(&output, "FAIL views_flood"), count(&output, STDERR_HEADER)), (BULK_FAILURES, BULK_FAILURES), "one stderr header per failure block");
 }
 
 #[test]
@@ -300,6 +293,6 @@ fn a_read_only_target_pauses_with_one_notice_and_loses_no_line_or_order() {
 
     assert_eq!(code, Some(1));
     assert_eq!(count(&seen, PAUSE_NOTICE), 1, "the pause says so once");
-    assert_eq!(count(&output, "FAIL     views_flood"), 1, "the failure block prints once, from the capture window the memory-only run kept");
+    assert_eq!(count(&output, "FAIL views_flood"), 1, "the failure block prints once, from the capture window the memory-only run kept");
     assert_eq!(settled_in_order(&output), (0..SETTLERS).collect::<Vec<_>>(), "nothing was lost and the order held while the run paused");
 }
