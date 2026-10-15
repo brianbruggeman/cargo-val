@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [workspace]
-exclude = ["crates/eta_core", "crates/eta_text", "crates/eta_route"]
+members = ["crates/eta_core", "crates/eta_text", "crates/eta_route"]
 
 [dependencies]
 eta_core = { path = "crates/eta_core" }
