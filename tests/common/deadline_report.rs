@@ -30,13 +30,15 @@ fn tail(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(REPORT_TAIL)..]).into_owned()
 }
 
-// nextest runs one test per process as `--exact <name>`; under plain cargo test the body runs on a runtime worker thread, so the name is the worker or the executable stem and never the test fn
+// the body runs on a runtime worker whose thread name is not the test and only nextest passes `--exact`; the macro-generated `__proxima_inner` frame is on the stack of every poll of the body, so it names the test under every runner
 fn current_test_name() -> String {
+    let frames = std::backtrace::Backtrace::force_capture().to_string();
+    let inner = frames.lines().find_map(|line| line.split_once("::__proxima_inner").and_then(|(path, _)| path.rsplit("::").next())).map(str::to_owned);
     let arguments = std::env::args().collect::<Vec<_>>();
     let exact = arguments.iter().position(|argument| argument == "--exact").and_then(|index| arguments.get(index + 1)).cloned();
     let thread = std::thread::current().name().filter(|name| *name != "main").map(str::to_owned);
     let executable = std::env::current_exe().ok().and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()));
-    exact.or(thread).or(executable).unwrap_or_else(|| "unknown-test".to_string())
+    inner.or(exact).or(thread).or(executable).unwrap_or_else(|| "unknown-test".to_string())
 }
 
 fn sccache_stats() -> String {
