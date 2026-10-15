@@ -139,11 +139,9 @@ async fn a_piped_run_prints_one_plain_line_per_event_with_stable_columns() {
         header.starts_with(&format!("cargo-val {}  process=", env!("CARGO_PKG_VERSION"))) && header.contains("  jobs="),
         "header: {header}"
     );
-    assert!(text.lines().any(|line| line == "START    cli_run  fixture::passes"));
-    assert!(text.lines().any(|line| line == format!("START    cli_run  {FAILING_TEST}")));
+    assert!(!text.lines().any(|line| line.starts_with("START ")), "a test prints one line, at completion:\n{text}");
     assert!(text.lines().any(|line| line == "IGNORED  cli_run  fixture::ignored_by_default"));
-    let pass = line_starting(&text, "PASS     cli_run  fixture::passes  ");
-    assert!(has_three_decimal_seconds(pass.rsplit("  ").next().expect("seconds column")), "pass: {pass}");
+    assert!(text.lines().any(|line| line == "PASS     cli_run  fixture::passes"), "a pass is one line with no time, as cargo test prints it:\n{text}");
     let fail = line_starting(&text, "FAIL     ");
     assert!(fail.starts_with(&format!("FAIL     cli_run  {FAILING_TEST}  ")), "fail: {fail}");
     let counted = fail.strip_suffix(SOLO_MARK).unwrap_or(fail);
@@ -151,20 +149,16 @@ async fn a_piped_run_prints_one_plain_line_per_event_with_stable_columns() {
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_failure_prints_its_captured_output_between_delimiters_right_after_its_fail_line() {
+async fn a_failure_prints_libtests_panic_text_once_right_after_its_fail_line_with_no_fences_or_framing() {
     let text = stdout_of(&run(&[], &[]).await);
     let lines: Vec<&str> = text.lines().collect();
 
     let fail = lines.iter().position(|line| line.starts_with("FAIL     ")).expect("a FAIL line");
-    assert_eq!(lines[fail + 1], format!("------ stdout: cli_run {FAILING_TEST} ------"));
-    let end = lines[fail + 1..]
-        .iter()
-        .position(|line| *line == "------ end stdout ------")
-        .map(|offset| fail + 1 + offset)
-        .expect("the block closes");
-    let block = lines[fail + 2..end].join("\n");
-    assert!(block.contains("requested fixture failure"), "panic message is verbatim in the block:\n{block}");
-    assert!(block.contains("test result: FAILED. 0 passed; 1 failed"), "libtest summary is verbatim:\n{block}");
+    assert!(lines[fail + 1].starts_with("thread 'fixture::fails_when_requested' ("), "the panic text follows the FAIL line:\n{text}");
+    assert_eq!(lines.iter().filter(|line| **line == "requested fixture failure").count(), 1, "the panic message prints once:\n{text}");
+    for noise in ["------ ", "running 1 test", "test result:", "failures:", "---- "] {
+        assert!(!text.lines().any(|line| line.starts_with(noise)), "{noise} is framing, not content:\n{text}");
+    }
 }
 
 #[proxima::test(timeout = "310s")]
@@ -174,7 +168,9 @@ async fn the_closing_lines_count_list_every_failure_and_give_the_command_that_re
     let summary = line_starting(&text, "SUMMARY  ");
     assert!(summary.starts_with("SUMMARY  passed=1 failed=1 ignored=1 not_run=0  wall="), "summary: {summary}");
     assert!(has_three_decimal_seconds(summary.rsplit("wall=").next().expect("wall column")), "summary: {summary}");
-    assert_eq!(line_starting(&text, "FAILED   "), format!("FAILED   cli_run {FAILING_TEST}"));
+    let rollup = line_starting(&text, "FAILED   ");
+    assert_eq!(rollup.replace('\\', "/"), format!("FAILED   cli_run {FAILING_TEST} - src/lib.rs:12"));
+    assert!(text.find(rollup) < text.find(summary), "the rollup sits just before the summary:\n{text}");
     let rerun = line_starting(&text, "RERUN    ");
     assert_eq!(
         rerun,
@@ -183,7 +179,8 @@ async fn the_closing_lines_count_list_every_failure_and_give_the_command_that_re
             manifest().display()
         )
     );
-    assert!(text.lines().any(|line| line.starts_with("total: discovered 3, passed 1, failed 1, ignored 1")));
+    assert_eq!(text.lines().filter(|line| line.starts_with("SUMMARY ")).count(), 1, "one summary:\n{text}");
+    assert!(!text.lines().any(|line| line.starts_with("total: ") || line.starts_with("LISTED ") || line.starts_with("cli_run: discovered")), "{text}");
 }
 
 #[proxima::test(timeout = "310s")]
@@ -239,7 +236,7 @@ async fn github_actions_wraps_each_failure_block_in_a_group_and_annotates_it() {
     let group = lines.iter().position(|line| *line == format!("::group::cli_run {FAILING_TEST}")).expect("a group opens");
     let end = lines.iter().position(|line| *line == "::endgroup::").expect("the group closes");
     assert!(group < end);
-    assert_eq!(lines[group + 1], format!("------ stdout: cli_run {FAILING_TEST} ------"));
+    assert!(lines[group + 1].starts_with("thread 'fixture::fails_when_requested' ("), "the panic text opens the group:\n{text}");
     assert_eq!(
         lines.iter().filter(|line| **line == format!("::error title=cargo val::cli_run::{FAILING_TEST} failed")).count(),
         1
@@ -264,7 +261,7 @@ async fn rich_forced_on_a_pipe_draws_the_frame_in_colour_and_no_color_keeps_the_
     assert!(contains(&bare.stdout, "\u{2591}".as_bytes()), "no colour draws the bar as glyph textures");
     for output in [&colored, &bare] {
         assert!(contains(&output.stdout, HIDE_CURSOR) && last_cursor_up(&output.stdout).is_some(), "the frame hides the cursor and redraws in place");
-        assert!(!stdout_of(output).contains("START"), "rich output is the frame, not the plain lines");
+        assert!(!stdout_of(output).contains("PASS     "), "rich output is the frame, not the plain lines");
     }
 }
 
@@ -283,10 +280,9 @@ async fn an_unknown_output_value_is_refused_naming_its_source() {
 async fn shard_mode_reruns_a_shard_failure_alone_and_tags_those_lines() {
     let text = stdout_of(&run(&[], &["--process", "shard"]).await);
 
-    assert!(text.lines().any(|line| line == "START    cli_run  fixture::passes"));
-    let start = line_starting(&text, "START    cli_run  fixture::fails_when_requested  (solo rerun)");
+    assert!(!text.lines().any(|line| line.starts_with("START ")), "{text}");
     let fail = line_starting(&text, "FAIL     cli_run  fixture::fails_when_requested  ");
-    assert!(start.ends_with("(solo rerun)") && fail.ends_with("(solo rerun)"), "{text}");
+    assert!(fail.ends_with("(solo rerun)"), "{text}");
     assert!(!text.as_bytes().contains(&ESCAPE));
 }
 
@@ -532,7 +528,6 @@ async fn a_shard_run_settles_its_failure_on_the_solo_rerun_line_with_the_seconds
     let counted = fail.strip_suffix(SOLO_MARK).expect("a shard failure is decided by its solo rerun");
     assert!(counted.starts_with(&format!("FAIL     cli_run  {FAILING_TEST}  ")), "fail: {fail}");
     assert!(has_three_decimal_seconds(counted.rsplit("  ").next().expect("seconds column")), "fail: {fail}");
-    assert!(text.lines().any(|line| line == format!("START    cli_run  {FAILING_TEST}{SOLO_MARK}")), "{text}");
 }
 
 async fn build_error_run(mode: &str) -> Output {
@@ -585,15 +580,14 @@ mod plain_grammar {
     use crate::plain_summary::summary;
 
     const RUN: &str = "cargo-val 0.1.0  process=test  jobs=10\n\
-        START    cli_run  fixture::passes\n\
         IGNORED  cli_run  fixture::ignored_by_default\n\
-        PASS     cli_run  fixture::passes  0.003s\n\
+        PASS     cli_run  fixture::passes\n\
         FAIL     doc  src/lib.rs - subtract (line 12)  1.250s  (solo rerun)\n\
-        FAILED   cli_run fixture::passes\n\
+        FAILED   cli_run fixture::passes - absent\n\
         SUMMARY  passed=1 failed=1 ignored=1 not_run=0  wall=0.409s\n";
 
     #[test]
-    fn settled_parses_binary_test_and_outcome_and_skips_start_and_failed_lines() {
+    fn settled_parses_binary_test_and_outcome_and_skips_failed_rollup_lines() {
         assert_eq!(
             settled(RUN),
             [
@@ -616,17 +610,16 @@ mod plain_grammar {
 
         assert_eq!(counts["passed"], 1);
         assert_eq!(counts["not_run"], 0);
-        assert!(summary("START    cli_run  fixture::passes\n").is_none());
+        assert!(summary("PASS     cli_run  fixture::passes\n").is_none());
     }
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_failure_prints_the_seven_line_source_excerpt_with_a_marker_and_a_caret_row_and_no_escape_byte() {
+async fn a_failure_prints_the_seven_line_source_excerpt_once_with_a_marker_and_a_caret_row_and_no_escape_byte() {
     let output = run(&[("VISUAL", "code")], &[]).await;
     let text = stdout_of(&output);
 
     let expected = [
-        "------ source: cli_run fixture::fails_when_requested ------",
         "     9 |             print!(\"{}\", \"X\".repeat(5000));",
         "    10 |         }",
         "    11 |         if std::env::var_os(\"CARGO_VAL_C52D_FAIL\").is_some() {",
@@ -635,7 +628,6 @@ async fn a_failure_prints_the_seven_line_source_excerpt_with_a_marker_and_a_care
         "    13 |         }",
         "    14 |         if std::env::var_os(\"CARGO_VAL_C52D_ESCAPES\").is_some() {",
         "    15 |             panic!(\"path \\\"C:\\\\tmp\\\\out\\\" is missing\\nsecond line\");",
-        "------ end source ------",
     ]
     .join("\n");
     assert!(text.contains(&expected), "the excerpt block is exact:\n{text}");

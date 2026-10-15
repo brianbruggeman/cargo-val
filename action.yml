@@ -26,7 +26,7 @@ inputs:
 
 outputs:
   total:
-    description: the cargo val total line
+    description: the cargo val SUMMARY line
     value: ${{ steps.run.outputs.total }}
   sha:
     description: the cargo-val commit that was installed, or empty when installed from crates.io
@@ -116,12 +116,12 @@ runs:
         cargo val "${arguments[@]}" $EXTRA_ARGS 2>&1 | tee "$output_file"
         status=$?
         set -e
-        total="$(grep -E '^total:' "$output_file" | tail -n 1 || true)"
+        total="$(grep -E '^SUMMARY ' "$output_file" | tail -n 1 || true)"
         echo "total=$total" >> "$GITHUB_OUTPUT"
         {
           echo "### cargo val"
           echo
-          if [ -n "$total" ]; then echo "\`$total\`"; else echo "no total line was printed (exit status $status)"; fi
+          if [ -n "$total" ]; then echo "\`$total\`"; else echo "no SUMMARY line was printed (exit status $status)"; fi
         } >> "$GITHUB_STEP_SUMMARY"
         rm -f "$output_file"
         if [ "$status" -ne 0 ]; then

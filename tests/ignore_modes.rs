@@ -40,14 +40,17 @@ impl Run {
     }
 
     fn total_without_wall(&self) -> String {
-        let total = self.lines_with("total: ");
-        assert_eq!(total.len(), 1, "{}{}", self.stdout, self.stderr);
-        let (counts, wall) = total[0].split_once(", wall ").expect("total carries wall time");
-        assert!(
-            wall.ends_with('s') && wall.contains('.'),
-            "wall time shape: {wall}"
-        );
-        counts.to_string()
+        let summary = self.lines_with("SUMMARY  ");
+        assert_eq!(summary.len(), 1, "{}{}", self.stdout, self.stderr);
+        let field = |key: &str| -> usize {
+            let prefix = format!("{key}=");
+            summary[0].split_whitespace().find_map(|word| word.strip_prefix(prefix.as_str())).map_or(0, |value| value.parse().unwrap_or_else(|_| panic!("{key} is a number in {}", summary[0])))
+        };
+        let wall = summary[0].split("wall=").nth(1).and_then(|rest| rest.split_whitespace().next()).expect("summary carries wall time");
+        assert!(wall.ends_with('s') && wall.contains('.'), "wall time shape: {wall}");
+        let (passed, failed, ignored, filtered) = (field("passed"), field("failed"), field("ignored"), field("filtered"));
+        let discovered = passed + failed + ignored + filtered + field("not_run");
+        format!("total: discovered {discovered}, passed {passed}, failed {failed}, ignored {ignored}, filtered {filtered}")
     }
 }
 
@@ -107,7 +110,6 @@ async fn with_environment(mode: &str, arguments: &[&str], environment: &[(&str, 
     run(&manifest("ignore_modes"), &full, &with_mode).await
 }
 
-const BINARY: &str = "ignore_modes: discovered";
 #[cfg(unix)]
 const TEST_NAME: &str = "the_bin_target_exists_when_the_test_starts";
 
@@ -130,11 +132,6 @@ async fn default_reports_the_ignored_test_as_ignored_and_never_launches_it_in(mo
         "{context}"
     );
     assert!(!result.has("fixture::ignored_with_reason", Outcome::Passed), "{context}");
-    assert_eq!(
-        result.lines_with(BINARY),
-        ["ignore_modes: discovered 3, passed 1, failed 1, ignored 1, filtered 0"],
-        "{context}"
-    );
     assert_eq!(
         result.total_without_wall(),
         "total: discovered 3, passed 1, failed 1, ignored 1, filtered 0"
@@ -159,11 +156,6 @@ async fn ignored_flag_runs_only_the_ignored_test_and_filters_the_rest_in(mode: &
         "{context}"
     );
     assert_eq!(
-        result.lines_with(BINARY),
-        ["ignore_modes: discovered 3, passed 1, failed 0, ignored 0, filtered 2"],
-        "{context}"
-    );
-    assert_eq!(
         result.total_without_wall(),
         "total: discovered 3, passed 1, failed 0, ignored 0, filtered 2"
     );
@@ -181,11 +173,6 @@ async fn include_ignored_flag_runs_every_test_in(mode: &str) {
     let context = format!("{mode}: {}{}", result.stdout, result.stderr);
 
     assert_eq!(result.status, Some(1), "{context}");
-    assert_eq!(
-        result.lines_with(BINARY),
-        ["ignore_modes: discovered 3, passed 2, failed 1, ignored 0, filtered 0"],
-        "{context}"
-    );
     assert_eq!(
         result.total_without_wall(),
         "total: discovered 3, passed 2, failed 1, ignored 0, filtered 0"
@@ -519,7 +506,7 @@ async fn help_prints_the_banner_file_and_documents_the_new_options() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stdout), banner);
-    for needle in ["-E, --filterset <EXPR>", "--include-ignored", "CARGO_VAL_IGNORED", "total: discovered", "CARGO_VAL_BIN_GATE"] {
+    for needle in ["-E, --filterset <EXPR>", "--include-ignored", "CARGO_VAL_IGNORED", "SUMMARY  passed=P", "CARGO_VAL_BIN_GATE"] {
         assert!(banner.contains(needle), "{needle}");
     }
 }

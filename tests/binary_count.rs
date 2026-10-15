@@ -35,8 +35,8 @@ async fn run(manifest: &str, flags: &[&str], target: &str) -> Output {
     fixture_output(&mut command).await
 }
 
-// the up-front count is the debug line the metadata read prints; the listed count is the closing block's `LISTED binaries=` line, cross-checked against its per-binary lines
-fn counts(output: &Output) -> (usize, usize, usize) {
+// the up-front count is the debug line the metadata read prints; the listed count is the `binaries=` field of the one SUMMARY line
+fn counts(output: &Output) -> (usize, usize) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let up_front = stderr
@@ -46,25 +46,20 @@ fn counts(output: &Output) -> (usize, usize, usize) {
         .unwrap_or_else(|| panic!("no up-front count\n{stdout}{stderr}"));
     let listed = stdout
         .lines()
-        .find_map(|line| line.strip_prefix("LISTED   binaries="))
-        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|line| line.starts_with("SUMMARY  "))
+        .find_map(|line| line.split_whitespace().find_map(|field| field.strip_prefix("binaries=")))
         .and_then(|found| found.parse().ok())
-        .unwrap_or_else(|| panic!("no LISTED line\n{stdout}{stderr}"));
-    let per_binary = stdout
-        .lines()
-        .filter(|line| line.contains(": discovered ") && !line.starts_with("total: ") && !line.starts_with("doc-tests: "))
-        .count();
-    (up_front, listed, per_binary)
+        .unwrap_or_else(|| panic!("no SUMMARY binaries= field\n{stdout}{stderr}"));
+    (up_front, listed)
 }
 
 async fn assert_up_front_matches_listed(manifest: &str, flags: &[&str], target: &str, expected: usize) {
     let output = run(manifest, flags, target).await;
 
-    let (up_front, listed, per_binary) = counts(&output);
+    let (up_front, listed) = counts(&output);
     let context = format!("{manifest} {flags:?}\n{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert_eq!(up_front, expected, "{context}");
     assert_eq!(listed, up_front, "{context}");
-    assert_eq!(per_binary, listed, "{context}");
 }
 
 const DEMO: &str = "examples/demo/Cargo.toml";

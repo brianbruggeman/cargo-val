@@ -44,8 +44,8 @@ async fn demo_fixture_reports_the_counts_the_readme_recording_depends_on() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let totals: Vec<&str> = stdout.lines().filter(|line| line.starts_with("total: ")).collect();
-    let expected = format!("total: discovered {}, passed {PASSED}, failed {FAILED}, ignored {IGNORED}, filtered 0, wall ", PASSED + FAILED + IGNORED);
+    let totals: Vec<&str> = stdout.lines().filter(|line| line.starts_with("SUMMARY  ")).collect();
+    let expected = format!("SUMMARY  passed={PASSED} failed={FAILED} ignored={IGNORED} not_run=0  wall=");
     assert_eq!(totals.len(), 1, "{stdout}{stderr}");
     assert!(totals[0].starts_with(&expected), "{}\n{stdout}{stderr}", totals[0]);
     assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");

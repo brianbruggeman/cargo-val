@@ -199,7 +199,7 @@ fn an_interrupt_during_a_block_prints_it_whole_then_the_interrupted_block_then_t
     assert_eq!(code, Some(SIGINT_STATUS));
 }
 
-const SETTLERS: usize = 2000;
+const SETTLERS: usize = 4000;
 const BULK_FAILURES: usize = 40;
 const BULK_BYTES: usize = 64 * 1024;
 const PAUSE_NOTICE: &str = "tests pause until it catches up\n";
@@ -300,6 +300,6 @@ fn a_read_only_target_pauses_with_one_notice_and_loses_no_line_or_order() {
 
     assert_eq!(code, Some(1));
     assert_eq!(count(&seen, PAUSE_NOTICE), 1, "the pause says so once");
-    assert_eq!((count(&output, "------ stdout: views_flood"), count(&output, &close("stdout"))), (1, 1), "the failure block opens and closes, from the capture window the memory-only run kept");
+    assert_eq!(count(&output, "FAIL     views_flood"), 1, "the failure block prints once, from the capture window the memory-only run kept");
     assert_eq!(settled_in_order(&output), (0..SETTLERS).collect::<Vec<_>>(), "nothing was lost and the order held while the run paused");
 }

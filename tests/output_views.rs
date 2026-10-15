@@ -18,6 +18,7 @@ use fixture::fixture_output;
 const MEBIBYTE: usize = 1_048_576;
 const STDOUT_OPEN: &str = "------ stdout: cli_run fixture::fails_when_requested ------\n";
 const STDOUT_CLOSE: &str = "------ end stdout ------\n";
+const STDERR_HEADER: &str = "---- stderr ----\n";
 const STDERR_OPEN: &str = "------ stderr: cli_run fixture::fails_when_requested ------\n";
 const STDERR_CLOSE: &str = "------ end stderr ------\n";
 
@@ -107,25 +108,24 @@ async fn an_unwritable_run_store_degrades_to_the_resident_tail_and_counts_what_i
 
     writable_again("memory");
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr_block = fenced(&output.stdout, (STDERR_OPEN, STDERR_CLOSE));
-    let dropped = number_after(&text[text.find(STDERR_OPEN).expect("the stderr fence opens")..], "[output truncated: ");
+    let opened = text.find(STDERR_HEADER).expect("the stderr header is printed") + STDERR_HEADER.len();
+    let dropped = number_after(&text[opened..], "[output truncated: ");
     assert_eq!(output.status.code(), Some(1), "the exit code is the failing test's, store or not");
     let marker = format!("[output truncated: {dropped} bytes dropped]\n");
-    let shown = stderr_block.len() - marker.len();
-    assert!(stderr_block.ends_with(marker.as_bytes()), "the dropped count closes the block");
+    let closed = text[opened..].find(&marker).expect("the dropped count closes the stream");
+    let shown = closed;
     assert!(shown < MEBIBYTE, "only the resident tail is shown: {shown}");
     assert_eq!(dropped + shown, MEBIBYTE, "dropped plus shown is the stream total");
 }
 
 #[proxima::test(timeout = "310s")]
-async fn agent_output_keeps_its_bound_and_counts_dropped_bytes_from_the_stream_total() {
+async fn agent_output_for_a_one_mebibyte_failure_is_the_pinpoint_alone_with_no_raw_output_block() {
     let output = fixture_output(&mut command("agent", "agent", MEBIBYTE)).await;
 
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let (total, shown, dropped) = (number_after(&text, "bytes="), number_after(&text, " shown="), number_after(&text, " dropped="));
-    assert!(total >= MEBIBYTE, "the total counts the whole stream, not the window: {total}");
-    assert_eq!(dropped, total - shown);
-    assert!(shown < total, "the bound cuts the 1 MiB stream: shown {shown}");
+    assert!(text.contains("requested fixture failure"), "the parsed message is kept:\n{text}");
+    assert!(!text.lines().any(|line| line.starts_with("OUTPUT ")), "a parsed panic needs no raw block:\n{text}");
+    assert!(text.len() < 4096, "{} bytes of agent output for a 1 MiB stream:\n{text}", text.len());
 }
 
 #[proxima::test(timeout = "310s")]

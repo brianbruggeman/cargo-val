@@ -210,7 +210,6 @@ async fn a_test_that_aborts_inside_a_shard_fails_alone_and_every_unsettled_name_
     .map(str::to_owned)
     .into();
     assert_eq!(passed, expected);
-    assert!(run.stdout.contains("test suite::b_aborts_the_process"), "solo run prints its own output: {}", run.stdout);
     assert_eq!(run.pids.len(), 5, "one shard child, then one solo child for each of the four names it did not settle");
 }
 
@@ -225,9 +224,9 @@ async fn a_failing_test_prints_its_own_libtest_block_and_no_other_name_does() {
 
     assert_eq!(run.status, Some(1));
     assert_eq!(run.names(Outcome::Failed), ["suite::d_panics_on_request"]);
-    assert!(run.stdout.contains("---- suite::d_panics_on_request stdout ----"), "{}", run.stdout);
     assert!(run.stdout.contains("requested shard failure in d"), "{}", run.stdout);
-    assert_eq!(run.stdout.matches("---- suite::").count(), 1, "{}", run.stderr);
+    assert_eq!(run.stdout.lines().filter(|line| *line == "requested shard failure in d").count(), 1, "the panic text prints once: {}", run.stderr);
+    assert_eq!(run.stdout.matches("---- suite::").count(), 0, "libtest's header is the FAIL line's job: {}", run.stderr);
 }
 
 // the held test blocks on a fifo open
@@ -444,7 +443,6 @@ async fn a_crash_inside_a_should_panic_test_fails_that_test_alone_like_per_test_
 
     assert_eq!(statuses(&shard), statuses(&per_test), "shard:\n{}\nper-test:\n{}", shard.stdout, per_test.stdout);
     assert!(shard.stdout.contains("suite::panics_then_aborts"), "{}", shard.stdout);
-    assert!(shard.stdout.contains("test suite::panics_then_aborts"), "solo run prints its own output: {}", shard.stdout);
     assert!(!shard.stderr.contains("ended without a result line"), "{}", shard.stderr);
     assert_eq!(shard.names(Outcome::Passed).len(), 4, "{}", shard.stdout);
 }
@@ -484,9 +482,8 @@ async fn a_failing_test_in_fail_fast_still_prints_its_libtest_block() {
 
     assert_eq!(run.status, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
     let full = format!("stdout: {}\nstderr: {}", run.stdout, run.stderr);
-    let frame = run.stdout.split("------ stdout: cargo_val_shard_fixture suite::d_panics_on_request ------\n").nth(1).and_then(|rest| rest.split_once("------ end stdout ------\n")).map(|(body, _)| body);
-    let body = frame.unwrap_or_default();
-    assert!(body.starts_with("\nthread 'suite::d_panics_on_request' ("), "{full}");
+    let body = run.stdout.split_once("thread 'suite::d_panics_on_request' (").map_or("", |(_, rest)| rest);
+    assert!(!body.is_empty() && !run.stdout.contains("------ "), "the panic text prints with no fences: {full}");
     let site = format!("panicked at {}:40:13:\nrequested shard failure in d\n", PathBuf::from("src").join("lib.rs").display());
     assert!(body.contains(&site), "{full}");
     assert!(!run.stdout.contains("---- suite::d_panics_on_request stdout ----"), "libtest's raw header must not print: {full}");

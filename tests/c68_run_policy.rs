@@ -802,7 +802,7 @@ async fn c97_one_live_child_drains_every_listed_test_and_ends_the_listing() {
     assert_eq!(run.count(Outcome::Passed), TEST_COUNT, "{}", run.stdout);
     assert!(
         run.stdout.contains(&format!(
-            "total: discovered {TEST_COUNT}, passed {TEST_COUNT}, failed 0, ignored 0"
+            "SUMMARY  passed={TEST_COUNT} failed=0 ignored=0 not_run=0"
         )),
         "{}",
         run.stdout
