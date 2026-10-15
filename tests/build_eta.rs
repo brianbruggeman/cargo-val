@@ -28,7 +28,7 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-async fn run_demo(manifest: &Path, target: &Path) -> Output {
+async fn run_fixture(manifest: &Path, target: &Path) -> Output {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -66,15 +66,15 @@ fn private_target(label: &str) -> PathBuf {
 }
 
 #[proxima::test(timeout = "900s")]
-async fn a_cold_demo_build_is_predicted_within_tolerance_then_recognised_exactly_until_its_manifest_changes() {
+async fn a_cold_workspace_build_is_predicted_within_tolerance_then_recognised_exactly_until_its_manifest_changes() {
     let scratch = tempfile::tempdir().expect("scratch directory is creatable");
-    let demo = scratch.path().join("demo");
-    copy_tree(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/demo"), &demo);
-    let manifest = demo.join("Cargo.toml");
-    let target = private_target("demo");
+    let workspace = scratch.path().join("build_eta");
+    copy_tree(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/build_eta"), &workspace);
+    let manifest = workspace.join("Cargo.toml");
+    let target = private_target("fixture");
     let _ = fs::remove_dir_all(&target);
 
-    let cold = run_demo(&manifest, &target).await;
+    let cold = run_fixture(&manifest, &target).await;
     let (_, _, _, fingerprint, actual, build_ms) = record_of(&target);
     let predicted = predicted_units(&stderr_of(&cold));
     let error = predicted.abs_diff(actual);
@@ -84,14 +84,14 @@ async fn a_cold_demo_build_is_predicted_within_tolerance_then_recognised_exactly
     assert!(!stderr_of(&cold).contains(MATCHED_YES), "{}", stderr_of(&cold));
     assert!(error * 100 <= actual * TOLERANCE_PERCENT, "predicted {predicted} against actual {actual} is off by more than {TOLERANCE_PERCENT}%");
 
-    let warm = run_demo(&manifest, &target).await;
+    let warm = run_fixture(&manifest, &target).await;
     assert!(stderr_of(&warm).contains(MATCHED_YES), "an unchanged manifest and lock match the recorded fingerprint:\n{}", stderr_of(&warm));
     assert_eq!(record_of(&target).3, fingerprint);
 
     let mut changed = fs::read_to_string(&manifest).expect("the manifest is readable");
     changed.push_str("# touched\n");
     fs::write(&manifest, changed).expect("the manifest is writable");
-    let touched = run_demo(&manifest, &target).await;
+    let touched = run_fixture(&manifest, &target).await;
     assert!(stderr_of(&touched).contains(MATCHED_NO), "a changed manifest falls back to the prediction:\n{}", stderr_of(&touched));
     assert_ne!(record_of(&target).3, fingerprint);
     let _ = fs::remove_dir_all(&target);
