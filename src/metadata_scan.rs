@@ -1,6 +1,6 @@
 //! Each package's targets, which are workspace members, which the resolve graph reaches, plus the workspace root and target directory, read from
 //! `cargo metadata --filter-platform <triple> --format-version 1` one byte at a time over fixed storage, so the scan allocates only its package table
-//! once and keeps no whole-document buffer.
+//! and one entry per resolve dependency edge, and keeps no whole-document buffer.
 
 use std::boxed::Box;
 use std::vec;
