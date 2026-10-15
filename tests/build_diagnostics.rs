@@ -240,7 +240,7 @@ async fn a_span_outside_the_workspace_shows_rustcs_diagnostic_with_no_excerpt_an
     let text = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(3), "{text}");
     assert!(text.contains("error[E0308]: mismatched types"), "{text}");
-    assert!(text.contains("dep/src/lib.rs:3:5"), "the span must be the dependency's, outside the workspace:\n{text}");
+    assert!(text.contains(&format!("{}:3:5", Path::new("dep").join("src").join("lib.rs").display())), "the span must be the dependency's, outside the workspace:\n{text}");
     assert_eq!(text.lines().filter(|line| is_excerpt_marker_row(line)).count(), 0, "{text}");
     assert!(!text.contains("source not found"), "{text}");
 }
@@ -273,7 +273,7 @@ async fn a_failing_member_below_the_workspace_root_shows_its_excerpt_with_the_la
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(output.status.code(), Some(3), "{text}");
     let header = lines.iter().position(|line| *line == "error[E0308]: mismatched types").unwrap_or_else(|| panic!("no E0308 header:\n{text}"));
-    assert_eq!(lines[header + 1], " --> crates/leaf/src/lib.rs:3:5", "{text}");
+    assert_eq!(lines[header + 1], format!(" --> {}:3:5", Path::new("crates").join("leaf").join("src").join("lib.rs").display()), "{text}");
     assert_eq!(lines[header + 2..=header + 6], ["     1 | pub fn answer() -> u32 {", "     2 |     let scale = 6;", ">    3 |     \"forty-two\"", "      |     ^^^^^^^^^^^ expected `u32`, found `&str`", "     4 | }"][..], "{text}");
     assert!(!lines.contains(&"3 |     \"forty-two\""), "rustc's own snippet row survived:\n{text}");
     assert!(!text.contains("source not found"), "{text}");
