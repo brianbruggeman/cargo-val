@@ -615,6 +615,53 @@ async fn a_green_rich_run_on_a_terminal_never_shows_review_and_exits_zero() {
     assert!(!output.contains(REVIEW_HEADER), "a green run must not open review:\n{}", shown(&output));
 }
 
+const WARNING_TEXT: &str = "unused variable: `unused_scale`";
+
+fn assert_warning_once_before_the_closing_block(output: &str) {
+    let scrollback = final_scrollback(output);
+    let text = scrollback.join("\n");
+    let warning = scrollback.iter().position(|line| line.contains(WARNING_TEXT)).unwrap_or_else(|| panic!("the warning never reached scrollback:\n{text}"));
+    let summary = scrollback.iter().position(|line| line.starts_with("SUMMARY")).unwrap_or_else(|| panic!("no SUMMARY line:\n{text}"));
+    assert_eq!(text.matches(WARNING_TEXT).count(), 1, "the warning prints once:\n{text}");
+    assert!(warning < summary, "the warning follows the closing block instead of preceding SUMMARY:\n{text}");
+    for live_row in ["compile units", "test binaries", "cargo val  "] {
+        assert!(scrollback.iter().all(|line| !line.contains(live_row)), "live-frame row {live_row:?} reached scrollback:\n{text}");
+    }
+}
+
+#[proxima::test]
+async fn a_green_rich_run_with_a_compiler_warning_writes_nothing_above_the_frame_and_prints_the_warning_once_before_the_closing_block() {
+    let (output, status) = run_on_pty("rich_pty_warn").await;
+
+    assert!(status.success(), "a green run exits 0: {status}");
+    assert_each_frame_replaces_the_last(&output);
+    assert_warning_once_before_the_closing_block(&output);
+}
+
+#[proxima::test]
+async fn a_failing_rich_run_with_a_compiler_warning_counts_it_in_review_and_prints_it_once_before_the_closing_block() {
+    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let (output, status) = run_sized("rich_pty_warn", "rich", &[FAILING_RUN, ("NO_COLOR", "1")], (true, &target_run, pty::COLUMNS), async |master, keys, release, _leader| release_then_quit(master, keys, release).await).await;
+
+    assert_eq!(status.code(), Some(1), "a run with a failure exits 1: {status}");
+    assert_each_frame_replaces_the_last(&output);
+    assert!(without_sgr(&output).contains("1 warnings"), "review did not count the compiler warning:\n{}", shown(&output));
+    assert_warning_once_before_the_closing_block(&output);
+}
+
+#[proxima::test]
+async fn a_plain_run_with_a_compiler_warning_prints_the_closing_block_and_never_holds_the_warning_for_it() {
+    let (plain, status) = run_driven("rich_pty_warn", "plain", &NO_COLOR, async |master, _keys, release, _leader| {
+        File::create(release).expect("the release file is creatable");
+        read_plain(master).await
+    })
+    .await;
+
+    assert!(status.success(), "a green plain run exits 0: {status}");
+    assert!(plain.contains("SUMMARY"), "plain still prints the closing block:\n{plain}");
+    assert_eq!(plain.matches(WARNING_TEXT).count(), 0, "plain output gained the compiler warning text:\n{plain}");
+}
+
 #[proxima::test]
 async fn a_failing_rich_run_with_piped_stdin_prints_the_closing_block_without_review_and_exits_one() {
     let (output, status) = run_with("rich_pty_fail", "rich", &NO_COLOR, false, async |master, _keys, _release, _leader| read_plain(master).await).await;
