@@ -34,7 +34,7 @@ pub fn editor_command(visual: Option<&str>, editor: Option<&str>) -> Vec<u8> {
 pub fn editor_argv(command: &[u8], file: &[u8], line: u32, col: u32) -> Vec<Vec<u8>> {
     let mut words = command.split(u8::is_ascii_whitespace).filter(|word| !word.is_empty());
     let program = words.next().unwrap_or(DEFAULT_EDITOR);
-    let name = program.rsplit(|byte| *byte == b'/').next().unwrap_or(program);
+    let name = crate::hyperlink::program_name(program);
     let mut argv: Vec<Vec<u8>> = core::iter::once(program).chain(words).map(<[u8]>::to_vec).collect();
     argv.extend(location_arguments(name, file, line, col));
     argv
