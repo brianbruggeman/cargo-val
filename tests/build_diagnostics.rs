@@ -148,7 +148,7 @@ const NOISE: [&str; 3] = ["Compiling ", "Blocking ", "cargo-val: waiting for "];
 fn normalised(text: &str) -> String {
     let kept: Vec<String> = text.lines()
         .filter(|line| !NOISE.iter().any(|prefix| line.trim_start().starts_with(prefix)))
-        .map(|line| if line.contains("--> ") { line.replace('\\', "/") } else { line.to_owned() })
+        .map(|line| if line.contains("--> ") || line.starts_with("ERROR    ") || line.starts_with("FAILED   ") { line.replace('\\', "/") } else { line.to_owned() })
         .map(|line| {
             let words: Vec<String> = line
                 .split(' ')
