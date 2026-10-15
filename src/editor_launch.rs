@@ -224,6 +224,19 @@ pub fn reclaim_terminal() {
     crate::edge_spawn::reclaim_terminal(libc::STDIN_FILENO);
 }
 
+/// The terminal's foreground process group as the kernel reports it, or zero where there is none; the stamp after a hand-back reads it to show who owns the terminal.
+#[must_use]
+pub fn foreground_group() -> i32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 /// Ends a running editor because cargo-val is going away: hangs up its group, then takes the terminal back.
 pub fn abandon(group: u32) {
     #[cfg(unix)]
