@@ -147,3 +147,25 @@ async fn an_unheld_run_stamps_every_binary_the_build_and_the_doc_tests() {
     assert!(has_step(&stderr, "doc-cargo-spawned", "") && has_step(&stderr, "doc-tests-running", ""), "{}", String::from_utf8_lossy(&stderr));
     assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stdout));
 }
+
+#[proxima::test(timeout = "500s")]
+async fn every_held_listing_is_in_flight_at_once_up_to_the_jobs_limit() {
+    let list_fifo = make_fifo("listing");
+    let mut invocation = command("listing", &["-p", "pipeline_listed", "--tests"]);
+    invocation.env("CARGO_VAL_FIXTURE_LIST_FIFO", &list_fifo).env("CARGO_VAL_JOBS", "4");
+    let binaries = ["lister_one", "lister_two", "lister_three", "lister_four"];
+
+    let (held, stdout_text) = supervised(&mut invocation, fixture_deadline(), async |_, stdout, stderr, _| {
+        let (held, fault) = drain_until(stderr, |bytes| binaries.iter().all(|name| has_step(bytes, "listing-spawned", name))).await;
+        assert!(fault.is_none(), "stderr failed before every listing was in flight: {fault:?}");
+        let writer = release(&list_fifo);
+        let (_, _) = drain(stderr).await;
+        let (printed, _) = drain(stdout).await;
+        drop(writer);
+        (String::from_utf8_lossy(&held).into_owned(), String::from_utf8_lossy(&printed).into_owned())
+    })
+    .await;
+
+    assert!(!held.contains("step=test-launched"), "a test launched while every listing was held:\n{held}");
+    assert!(stdout_text.contains("passed=4"), "the four listed tests pass once the listings are released:\n{stdout_text}");
+}
