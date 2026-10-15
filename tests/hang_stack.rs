@@ -15,6 +15,8 @@ use cargo_val::edge_stream_unix::ChildStream;
 use cargo_val::stack_frames::{Class, Frame, frames};
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/exit_wait.rs"]
 mod exit_wait;
 #[path = "common/fixture.rs"]
@@ -33,7 +35,7 @@ use supervise::supervised;
 const WORKSPACE: [&str; 1] = ["cargo_val_blocked_fixture"];
 
 fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
 fn make_fifo(path: &Path) {
@@ -76,7 +78,7 @@ async fn build_fixture_test_binary() -> PathBuf {
     command
         .args(["test", "--lib", "--no-run", "--message-format=json", "--manifest-path"])
         .arg(manifest)
-        .env("CARGO_TARGET_DIR", target_directory().join("hang-stack-fixture"));
+        .envs(isolation::environment("hang-stack"));
     let output = fixture_output(&mut command).await;
     assert!(output.status.success(), "fixture build failed: {}", String::from_utf8_lossy(&output.stderr));
     let text = String::from_utf8(output.stdout).expect("cargo json is text");

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/fixture.rs"]
@@ -11,10 +13,6 @@ use fixture::fixture_output;
 const PASSED: usize = 40;
 const FAILED: usize = 3;
 const IGNORED: usize = 2;
-
-fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
-}
 
 #[proxima::test(timeout = "310s")]
 async fn demo_fixture_reports_the_counts_the_readme_recording_depends_on() {
@@ -38,7 +36,7 @@ async fn demo_fixture_reports_the_counts_the_readme_recording_depends_on() {
         .env_remove("CARGO_VAL_FAIL_FAST")
         .env_remove("CARGO_VAL_MAX_FAIL")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join("demo-fixture"));
+        .envs(isolation::environment("demo-fixture"));
 
     let output = fixture_output(&mut command).await;
 

@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::process::Output;
 
 mod common;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/binary.rs"]
@@ -39,7 +41,7 @@ async fn run_fixture(fixture: &str, environment: &[(&str, &str)], arguments: &[&
         .env_remove("CARGO_VAL_COLOR")
         .env_remove("CARGO_VAL_PROCESS")
         .env_remove("RUST_TEST_THREADS")
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("timeline-fixture-target"))
+        .envs(isolation::environment("timeline"))
         .envs(environment.iter().copied());
     fixture_output(&mut command).await
 }
