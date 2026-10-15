@@ -1917,6 +1917,7 @@ impl ListingRun<'_> {
                 status_queue::defer();
                 return Ok(());
             }
+            abandon_editor();
             emit(self.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups: live().count() })?;
             self.interrupt_reported.set(1);
         }
@@ -4747,6 +4748,7 @@ fn name_interrupt(run: &ListingRun<'_>) -> Result<(), RunError> {
     if run.interrupt_reported.get() != 0 {
         return Ok(());
     }
+    abandon_editor();
     emit(run.render(), &Event::Interrupted { signal: u8::try_from(signal).unwrap_or(u8::MAX), groups: 0 })?;
     run.interrupt_reported.set(1);
     Ok(())
