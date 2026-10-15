@@ -45,7 +45,7 @@ use prime::os::readiness::Readiness;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::SignalSource;
 use std::boxed::Box;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::format;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -107,7 +107,7 @@ const BUILD_WAITING_PREFIX: &[u8] = b"warning: build failed, waiting for other j
 const LINKED_CAPACITY: usize = 32768;
 const BUILD_SCRIPT_CAPACITY: usize = 65536;
 const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
-const LISTING_SLOTS: usize = 2;
+const LISTING_SLOTS: usize = 8;
 const LIBDIR_CAPACITY: usize = 1024;
 const SOURCE_CAPACITY: usize = 8192;
 const FRAME_CAPACITY: usize = 131_072;
@@ -1480,8 +1480,14 @@ fn slot_range(slot: usize) -> Range<usize> {
     slot * ENVIRONMENT_CAPACITY..(slot + 1) * ENVIRONMENT_CAPACITY
 }
 
-fn free_slot(active: Option<&PendingListing>) -> usize {
-    usize::from(active.is_some_and(|listing| listing.slot == 0))
+fn listings_in_flight(active: Option<&PendingListing>, pending: &VecDeque<PendingListing>) -> usize {
+    usize::from(active.is_some()) + pending.len()
+}
+
+fn free_slot(active: Option<&PendingListing>, pending: &VecDeque<PendingListing>) -> usize {
+    (0..LISTING_SLOTS)
+        .find(|slot| active.is_none_or(|listing| listing.slot != *slot) && pending.iter().all(|listing| listing.slot != *slot))
+        .unwrap_or(0)
 }
 
 fn spawn_listing(
@@ -2586,7 +2592,8 @@ pub(crate) struct CargoDriver<'buffer> {
     ignored: &'buffer mut IgnoredSet,
     environments: &'buffer mut [u8],
     active: Option<PendingListing>,
-    pending_listing: Option<PendingListing>,
+    pending_listings: VecDeque<PendingListing>,
+    listing_limit: usize,
     cargo_backlog: Option<(Range<u32>, usize)>,
     cargo_eof: bool,
     finishing: bool,
@@ -2879,7 +2886,7 @@ impl CargoDriver<'_> {
     fn drained(&self, unaccounted: usize) -> bool {
         self.discovery.drained(unaccounted, self.parked.is_empty())
             && self.active.is_none()
-            && self.pending_listing.is_none()
+            && self.pending_listings.is_empty()
     }
 
     /// Launches each failure the review marked RERUN that has no child yet, as a solo exact-test child through [`spawn_exact`],
@@ -2907,7 +2914,7 @@ impl CargoDriver<'_> {
         };
         let (_, owned) = self.listed.iter().find(|(listed, _)| *listed == target).ok_or(RunError::Outcome)?;
         let artifact = owned.as_artifact();
-        let environment = &mut self.environments[slot_range(free_slot(self.active.as_ref()))];
+        let environment = &mut self.environments[slot_range(free_slot(self.active.as_ref(), &self.pending_listings))];
         let input = TestEnvironmentInput {
             artifact,
             linked_directories: self.linked.as_str(),
@@ -2928,7 +2935,7 @@ impl CargoDriver<'_> {
     }
 
     fn has_room(&self) -> bool {
-        self.active.is_none() || self.pending_listing.is_none()
+        listings_in_flight(self.active.as_ref(), &self.pending_listings) < self.listing_limit
     }
 
     // cargo's stdout is read while an artifact has somewhere to wait, so a build never stalls on a full pipe behind running tests
@@ -2957,7 +2964,7 @@ impl CargoDriver<'_> {
         };
         self.listed.push((next.target, *kept));
         if self.active.is_some() {
-            self.pending_listing = Some(next);
+            self.pending_listings.push_back(next);
             return Ok(());
         }
         self.begin_listing(next, lanes)
@@ -3001,7 +3008,7 @@ impl CargoDriver<'_> {
                 &artifact,
                 &self.linked,
                 &self.build_scripts,
-                free_slot(self.active.as_ref()),
+                free_slot(self.active.as_ref(), &self.pending_listings),
                 &mut *self.environments,
             )?;
             let kept = OwnedArtifact::copy_of(&artifact).map_err(RunError::Parked)?;
@@ -3109,7 +3116,7 @@ impl CargoDriver<'_> {
                     note_built(&mut self.built, &mut self.binaries_built, self.unit_total, (run, true))?;
                     let gated = matches!(artifact.target_kind, "test" | "bench")
                         && self.discovery.waits(artifact.package_id);
-                    let crowded = !gated && self.active.is_some() && self.pending_listing.is_some();
+                    let crowded = !gated && listings_in_flight(self.active.as_ref(), &self.pending_listings) >= self.listing_limit;
                     if crowded {
                         self.reason = b"listing-room";
                     }
@@ -3123,7 +3130,7 @@ impl CargoDriver<'_> {
                             &artifact,
                             &self.linked,
                             &self.build_scripts,
-                            free_slot(self.active.as_ref()),
+                            free_slot(self.active.as_ref(), &self.pending_listings),
                             &mut *self.environments,
                         )?;
                         let kept = OwnedArtifact::copy_of(&artifact).map_err(RunError::Parked)?;
@@ -3536,7 +3543,7 @@ impl CargoDriver<'_> {
         }
         self.active = None;
         self.note_listed(run)?;
-        if let Some(next) = self.pending_listing.take() {
+        if let Some(next) = self.pending_listings.pop_front() {
             self.begin_listing(next, lanes)?;
         }
         Ok(true)
@@ -3727,7 +3734,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
     } = start_children(parser, &settings, target_mode, (inherited, environment.get(b"RUSTC"))).await?;
     let units = open_units(&render, &settings, location, [explicit_root(target_mode), utf8_variable(&environment, b"CARGO_TARGET_DIR")?.map(str::as_bytes), metadata_directory.as_deref()], eta)?;
     let shared_directory = lock_watch.directory().to_vec();
-    let mut driver = new_driver(cargo_storage, cargo_child.process_id(), (bins, gate, test_targets), lock_watch, (workspace_root, settings.output))?;
+    let mut driver = new_driver(cargo_storage, cargo_child.process_id(), (bins, gate, test_targets), lock_watch, (workspace_root, settings.output, settings.jobs))?;
     announce_start(&render, &mut driver, units)?;
     let mut ledger = OutcomeLedger::new(sessions).map_err(|_| RunError::Outcome)?;
     let (library_directories, directory_count) = resolve_libdirs(queries, libdir_bytes)
@@ -3875,7 +3882,7 @@ fn new_driver(
     process_id: u32,
     (bins, gate, test_targets): (BinCounts, BinGate, Option<usize>),
     lock_watch: LockWatch,
-    (workspace_root, output): (PathBuf, OutputMode),
+    (workspace_root, output, jobs): (PathBuf, OutputMode, usize),
 ) -> Result<Box<CargoDriver<'_>>, RunError> {
     Ok(Box::new(CargoDriver {
         process_id,
@@ -3890,7 +3897,8 @@ fn new_driver(
         ignored,
         environments,
         active: None,
-        pending_listing: None,
+        pending_listings: VecDeque::with_capacity(LISTING_SLOTS),
+        listing_limit: jobs.clamp(2, LISTING_SLOTS),
         cargo_backlog: None,
         cargo_eof: false,
         finishing: false,
