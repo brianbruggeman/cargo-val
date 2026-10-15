@@ -8,6 +8,8 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/group.rs"]
@@ -22,7 +24,7 @@ use proxima_primitives::pipe::Pipe;
 const FILL_CHUNK: [u8; 4096] = [b'x'; 4096];
 
 fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
 fn set_flags(descriptor: libc::c_int, nonblocking: bool) {
@@ -52,7 +54,7 @@ async fn an_error_exit_with_stdout_on_an_unread_pipe_exits_within_the_bound_and_
         .arg(manifest)
         .arg("--lib")
         .env("NO_COLOR", "1")
-        .env("CARGO_TARGET_DIR", target_directory().join("build-diagnostics-fixture"))
+        .envs(isolation::environment("error-exit-unread-stdout"))
         .stdin(Stdio::null())
         .stdout(Stdio::from(writer))
         .stderr(fs::File::create(&stderr_path).expect("stderr log is creatable"))

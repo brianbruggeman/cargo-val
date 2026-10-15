@@ -25,6 +25,8 @@ use futures::future::join;
 use proxima_core::time::timeout;
 use proxima_primitives::pipe::Pipe;
 
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/binary.rs"]
 mod binary;
 #[path = "common/drain.rs"]
@@ -71,7 +73,7 @@ fn selection_of(fixture: &str) -> &'static [&'static str] {
     if fixture == "rich_pty_noisy" || fixture == "rich_pty_doc" { &[] } else { &["--tests"] }
 }
 
-fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, run): (&Path, &str), environment: &[(&str, &str)]) -> std::process::Child {
+fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, target): (&Path, &[(&str, PathBuf); 2]), environment: &[(&str, &str)]) -> std::process::Child {
     let stream = || Stdio::from(slave.try_clone().expect("the slave descriptor duplicates"));
     let mut command = binary::command();
     // the slave becomes the controlling terminal, so a background-group child reading stdin would get SIGTTIN here as it does in a shell
@@ -98,7 +100,7 @@ fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, 
         .env_remove("TERM_PROGRAM")
         .env_remove("CARGO_VAL_EDITOR_URL")
         .env("CARGO_VAL_FIXTURE_RELEASE_FILE", release)
-        .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-{fixture}-{run}")))
+        .envs(target.clone())
         .envs(environment.iter().copied())
         .stdin(stdin)
         .stdout(stream())
@@ -220,18 +222,18 @@ async fn run_with<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)]
 where
     Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
 {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     run_targeting(fixture, mode, environment, (tty_stdin, &target_run), drive).await
 }
 
-async fn run_targeting<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], (tty_stdin, target_run): (bool, &str), drive: Drive) -> (String, ExitStatus)
+async fn run_targeting<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], (tty_stdin, target_run): (bool, &[(&str, PathBuf); 2]), drive: Drive) -> (String, ExitStatus)
 where
     Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
 {
     run_sized(fixture, mode, environment, (tty_stdin, target_run, pty::COLUMNS), drive).await
 }
 
-async fn run_sized<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], (tty_stdin, target_run, columns): (bool, &str, u16), drive: Drive) -> (String, ExitStatus)
+async fn run_sized<Drive>(fixture: &str, mode: &str, environment: &[(&str, &str)], (tty_stdin, target_run, columns): (bool, &[(&str, PathBuf); 2], u16), drive: Drive) -> (String, ExitStatus)
 where
     Drive: AsyncFnOnce(&ChildStream, File, PathBuf, u32) -> String,
 {
@@ -280,7 +282,7 @@ async fn run_failing_on_pty(environment: &[(&str, &str)]) -> (String, ExitStatus
 }
 
 async fn run_failing_at_width(columns: u16, environment: &[(&str, &str)]) -> (String, ExitStatus) {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     run_sized("rich_pty", "rich", environment, (true, &target_run, columns), async |master, keys, release, _leader| release_then_quit(master, keys, release).await).await
 }
 
@@ -678,7 +680,7 @@ async fn a_green_rich_run_with_a_compiler_warning_writes_nothing_above_the_frame
 
 #[proxima::test]
 async fn a_failing_rich_run_with_a_compiler_warning_counts_it_in_review_and_prints_it_once_before_the_closing_block() {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     let (output, status) = run_sized("rich_pty_warn", "rich", &[FAILING_RUN, ("NO_COLOR", "1")], (true, &target_run, pty::COLUMNS), async |master, keys, release, _leader| release_then_quit(master, keys, release).await).await;
 
     assert_eq!(status.code(), Some(1), "a run with a failure exits 1: {status}");
@@ -819,7 +821,7 @@ async fn resize_after_first_frame(master: &ChildStream, keys: File, release: Pat
 }
 
 async fn run_at_width(columns: u16) -> (String, ExitStatus) {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     run_sized("rich_pty", "rich", &NO_COLOR, (true, &target_run, columns), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await
 }
 
@@ -857,7 +859,7 @@ async fn every_pinned_and_review_frame_at_each_terminal_width_leaves_exactly_one
 #[case::eighty(80)]
 #[case::one_ninety(190)]
 async fn cargo_warnings_and_build_script_stderr_never_reach_the_terminal_between_frames(#[case] columns: u16) {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     let (output, status) = run_sized("rich_pty_noisy", "rich", &NO_COLOR, (true, &target_run, columns), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
 
     assert!(status.success(), "cargo-val exited {status} at {columns} columns");
@@ -876,7 +878,7 @@ async fn cargo_warnings_and_build_script_stderr_never_reach_the_terminal_between
 #[case::eighty(80)]
 #[case::one_ninety(190)]
 async fn with_debug_logging_every_redraw_reports_the_rows_it_erased_and_the_rows_the_frame_wrote(#[case] columns: u16) {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     let environment = [("NO_COLOR", "1"), ("CARGO_VAL_LOG", "debug")];
     let (output, status) = run_sized("rich_pty", "rich", &environment, (true, &target_run, columns), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
 
@@ -897,7 +899,7 @@ async fn with_debug_logging_every_redraw_reports_the_rows_it_erased_and_the_rows
 #[case::one_twenty_to_one_ninety_one(120, 191)]
 #[case::one_ninety_to_one_ninety_one(190, 191)]
 async fn a_terminal_widened_mid_run_leaves_exactly_one_header_on_screen_row_zero_in_every_frame(#[case] from: u16, #[case] to: u16) {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     let (output, status) = run_sized("rich_pty", "rich", &NO_COLOR, (true, &target_run, from), async |master, keys, release, leader| resize_after_first_frame(master, keys, release, (leader, to)).await).await;
 
     assert!(status.success(), "cargo-val exited {status} after widening {from} to {to} columns");
@@ -967,7 +969,7 @@ fn second_run_row_is_valid(row: &str, total: &str) -> bool {
 
 #[proxima::test]
 async fn a_second_run_shows_no_count_before_a_binary_is_known_and_ends_exact() {
-    let target_run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
+    let target_run = isolation::environment("rich-pty");
     let (first, first_status) = run_targeting("rich_pty", "rich", &NO_COLOR, (true, &target_run), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
     let (second, second_status) = run_targeting("rich_pty", "rich", &NO_COLOR, (true, &target_run), async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
 
@@ -993,7 +995,7 @@ async fn a_test_that_reads_stdin_under_a_controlling_terminal_completes_without_
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let release = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-stdin-{run}"));
     let Pty { master, slave } = open_pty();
-    let mut child = spawn_on(&slave, Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")), "stdin_reader", "rich", (&release, &run), &NO_COLOR);
+    let mut child = spawn_on(&slave, Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")), "stdin_reader", "rich", (&release, &isolation::environment("rich-pty-stdin")), &NO_COLOR);
     drop(slave);
     let leader = child.id();
     let exit = ExitSource::new(NonZeroI32::new(leader.cast_signed()).expect("a spawned child has a nonzero pid"));
@@ -1913,7 +1915,7 @@ async fn master_until(waits: &Log, wait: &str, (master, (leader, terminal)): (&C
     let verdict = match proxima_core::time::timeout(WAIT_BUDGET, reading).await {
         Ok((seen, _)) if String::from_utf8_lossy(&seen).contains(text) => Ok(seen),
         Ok(_) => Err("the pty closed before it appeared".to_owned()),
-        Err(elapsed) => Err(format!("no output within {WAIT_BUDGET:?} ({elapsed:?})")),
+        Err(elapsed) => Err(format!("no output within {WAIT_BUDGET:?} ({elapsed:?})\nlock holders at the budget:\n{}", group::deadline_report::lock_report::lock_holders(None))),
     };
     stamp(waits, wait, "exit");
     let Err(why) = verdict else {
@@ -2165,11 +2167,10 @@ async fn a_held_build_lock_shows_in_the_state_row_and_writes_nothing_above_the_f
     let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-lock-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).expect("scratch directory is creatable");
-    let target_run = format!("held-{}", std::process::id());
-    let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-target-rich_pty-{target_run}"));
+    let target_run = isolation::environment("rich-pty-held");
+    let shared = target_run[0].1.clone();
     let mut holder = lock_holder::hold_build_lock(&scratch, &shared);
-    let cargo_home = scratch.join("cargo-home");
-    let environment = [("NO_COLOR", "1"), ("CARGO_VAL_TARGET_DIR", "shared"), ("CARGO_HOME", cargo_home.to_str().expect("utf-8 path"))];
+    let environment = [("NO_COLOR", "1"), ("CARGO_VAL_TARGET_DIR", "shared")];
 
     let (output, status) = run_targeting("rich_pty", "rich", &environment, (true, &target_run), async |master, _keys, release, _leader| {
         let (mut seen, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("waiting for cargo's")).await;

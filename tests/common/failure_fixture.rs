@@ -8,21 +8,13 @@ pub struct Captured {
     pub exit: Exit,
 }
 
-fn target_directory(name: &str) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"), PathBuf::from)
-        .join("failure-class-fixture")
-        .join(name)
-}
-
 pub fn build_command(fixture: &str) -> Command {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml");
     let mut command = Command::new("cargo");
     command
         .args(["test", "--lib", "--locked", "--no-run", "--message-format=json", "--manifest-path"])
         .arg(&manifest)
-        .arg("--target-dir")
-        .arg(target_directory(fixture));
+        .envs(crate::isolation::environment(&format!("failure-class-{fixture}")));
     command
 }
 
