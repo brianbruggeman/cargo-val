@@ -1,0 +1,5 @@
+eta_core kind=["custom-build"] crate_types=["bin"] name=build-script-build profile.test=false
+eta_core kind=["lib"] crate_types=["lib"] name=eta_core profile.test=false
+eta_text kind=["lib"] crate_types=["lib"] name=eta_text profile.test=false
+eta_route kind=["lib"] crate_types=["lib"] name=eta_route profile.test=false
+eta_app kind=["lib"] crate_types=["lib"] name=eta_app profile.test=true
