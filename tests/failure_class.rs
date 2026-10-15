@@ -1,6 +1,8 @@
 mod common;
 #[path = "common/fixture.rs"]
 mod fixture;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/failure_fixture.rs"]
 mod failure_fixture;
 #[path = "common/failure_fixture_async.rs"]
