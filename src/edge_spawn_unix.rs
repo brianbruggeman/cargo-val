@@ -511,7 +511,7 @@ mod spawn {
     ///
     /// # Errors
     ///
-    /// Returns the `posix_spawnp` code when the program cannot start (`ENOENT` for a missing editor), or `EINVAL` for launch data holding a NUL.
+    /// Returns the `fork` or `exec` errno when the program cannot start (`ENOENT` for a missing editor), or `EINVAL` for launch data holding a NUL.
     pub fn spawn_foreground(
         program: &[u8],
         arguments: &[&[u8]],
@@ -537,46 +537,8 @@ mod spawn {
         Ok(process_id.cast_unsigned())
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn start_foreground(
-        executable: &core::ffi::CStr,
-        argv: &[*const c_char],
-        envp: &[*const c_char],
-        current_directory: Option<&core::ffi::CStr>,
-        _terminal: c_int,
-    ) -> Result<libc::pid_t, SpawnError> {
-        let mut actions = FileActions::new()?;
-        let mut attributes = SpawnAttributes::new(true)?;
-        attributes.reset_signals()?;
-        #[cfg(target_os = "macos")]
-        for descriptor in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-            add_action(unsafe { posix_spawn_file_actions_addinherit_np(actions.raw(), descriptor) })?;
-        }
-        if let Some(current_directory) = current_directory {
-            add_action(unsafe {
-                libc::posix_spawn_file_actions_addchdir_np(actions.raw(), current_directory.as_ptr())
-            })?;
-        }
-        let mut process_id = 0;
-        let result = unsafe {
-            libc::posix_spawnp(
-                &raw mut process_id,
-                executable.as_ptr(),
-                actions.raw(),
-                attributes.raw(),
-                argv.as_ptr().cast::<*mut c_char>(),
-                envp.as_ptr().cast::<*mut c_char>(),
-            )
-        };
-        if result != 0 {
-            return Err(SpawnError { os_code: result });
-        }
-        Ok(process_id)
-    }
-
     // posix_spawn cannot run code in the child, so the child could exec and look at its terminal before the parent's tcsetpgrp landed;
     // forking lets the child take the foreground itself first, and the parent's identical hand-off after it is idempotent
-    #[cfg(target_os = "linux")]
     fn start_foreground(
         executable: &core::ffi::CStr,
         argv: &[*const c_char],
@@ -584,10 +546,7 @@ mod spawn {
         current_directory: Option<&core::ffi::CStr>,
         terminal: c_int,
     ) -> Result<libc::pid_t, SpawnError> {
-        let mut report = [0 as c_int; 2];
-        if unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(SpawnError { os_code: io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) });
-        }
+        let report = report_pipe()?;
         let process_id = unsafe { libc::fork() };
         if process_id == 0 {
             unsafe { enter_foreground_and_exec(executable, argv, envp, current_directory, terminal, report[1]) };
@@ -609,8 +568,33 @@ mod spawn {
         Ok(process_id)
     }
 
-    // runs between fork and exec: raw libc calls only, no allocation, and it never returns
+    // the write end closes on a successful exec, which is how the parent reads "started" as end of file
     #[cfg(target_os = "linux")]
+    fn report_pipe() -> Result<[c_int; 2], SpawnError> {
+        let mut report = [0 as c_int; 2];
+        if unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(SpawnError { os_code: io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) });
+        }
+        Ok(report)
+    }
+
+    // macOS has no pipe2, so both ends are marked close-on-exec after the pipe exists
+    #[cfg(target_os = "macos")]
+    fn report_pipe() -> Result<[c_int; 2], SpawnError> {
+        let mut report = [0 as c_int; 2];
+        let made = unsafe { libc::pipe(report.as_mut_ptr()) } == 0
+            && report.iter().all(|end| unsafe { libc::fcntl(*end, libc::F_SETFD, libc::FD_CLOEXEC) } == 0);
+        if !made {
+            let code = io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
+            report.iter().for_each(|end| {
+                unsafe { libc::close(*end) };
+            });
+            return Err(SpawnError { os_code: code });
+        }
+        Ok(report)
+    }
+
+    // runs between fork and exec: raw libc calls only, no allocation, and it never returns
     unsafe fn enter_foreground_and_exec(
         executable: &core::ffi::CStr,
         argv: &[*const c_char],
@@ -635,13 +619,45 @@ mod spawn {
             libc::tcsetpgrp(terminal, libc::getpid());
             libc::sigprocmask(libc::SIG_SETMASK, &raw const empty, core::ptr::null_mut());
             let changed = current_directory.is_none_or(|directory| libc::chdir(directory.as_ptr()) == 0);
-            if changed {
-                libc::execvpe(executable.as_ptr(), argv.as_ptr(), envp.as_ptr());
-            }
-            let code = *libc::__errno_location();
+            let code = if changed { exec_searching_path(executable, argv, envp) } else { io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) };
             libc::write(report, (&raw const code).cast(), core::mem::size_of::<c_int>());
             libc::_exit(127)
         }
+    }
+
+    // returns only when the exec failed, with the errno that says why
+    #[cfg(target_os = "linux")]
+    unsafe fn exec_searching_path(executable: &core::ffi::CStr, argv: &[*const c_char], envp: &[*const c_char]) -> c_int {
+        unsafe { libc::execvpe(executable.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+        io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)
+    }
+
+    // macOS has no execvpe: this walks this process's PATH the way posix_spawnp did, building each candidate on the stack because the child may not allocate
+    #[cfg(target_os = "macos")]
+    unsafe fn exec_searching_path(executable: &core::ffi::CStr, argv: &[*const c_char], envp: &[*const c_char]) -> c_int {
+        let name = executable.to_bytes();
+        if name.contains(&b'/') {
+            unsafe { libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+            return io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
+        }
+        let path = unsafe { libc::getenv(c"PATH".as_ptr()) };
+        let search = if path.is_null() { c"/usr/bin:/bin" } else { unsafe { core::ffi::CStr::from_ptr(path) } };
+        let mut denied = false;
+        let mut candidate = [0_u8; libc::PATH_MAX as usize];
+        for directory in search.to_bytes().split(|byte| *byte == b':') {
+            let directory = if directory.is_empty() { b".".as_slice() } else { directory };
+            let length = directory.len() + 1 + name.len();
+            if length >= candidate.len() {
+                continue;
+            }
+            candidate[..directory.len()].copy_from_slice(directory);
+            candidate[directory.len()] = b'/';
+            candidate[directory.len() + 1..length].copy_from_slice(name);
+            candidate[length] = 0;
+            unsafe { libc::execve(candidate.as_ptr().cast(), argv.as_ptr(), envp.as_ptr()) };
+            denied |= io::Error::last_os_error().raw_os_error() == Some(libc::EACCES);
+        }
+        if denied { libc::EACCES } else { libc::ENOENT }
     }
 
     /// Gives the terminal on `terminal` back to this process's group once the foreground child has gone.
@@ -951,26 +967,6 @@ mod spawn {
 
         fn raw(&mut self) -> *const libc::posix_spawnattr_t {
             &raw const self.0
-        }
-
-        // a child inherits this process's blocked signals and ignored dispositions; an editor must start with neither
-        #[cfg(not(target_os = "linux"))]
-        fn reset_signals(&mut self) -> Result<(), SpawnError> {
-            let mut blocked: libc::sigset_t = unsafe { core::mem::zeroed() };
-            let mut defaulted: libc::sigset_t = unsafe { core::mem::zeroed() };
-            unsafe {
-                libc::sigemptyset(&raw mut blocked);
-                libc::sigfillset(&raw mut defaulted);
-                libc::sigdelset(&raw mut defaulted, libc::SIGKILL);
-                libc::sigdelset(&raw mut defaulted, libc::SIGSTOP);
-            }
-            add_action(unsafe { libc::posix_spawnattr_setsigmask(&raw mut self.0, &raw const blocked) })?;
-            add_action(unsafe { libc::posix_spawnattr_setsigdefault(&raw mut self.0, &raw const defaulted) })?;
-            let mut flags: libc::c_short = 0;
-            add_action(unsafe { libc::posix_spawnattr_getflags(&raw const self.0, &raw mut flags) })?;
-            let wanted = libc::c_int::from(libc::POSIX_SPAWN_SETSIGMASK) | libc::c_int::from(libc::POSIX_SPAWN_SETSIGDEF);
-            let flags = libc::c_short::try_from(libc::c_int::from(flags) | wanted).map_err(|_| SpawnError { os_code: libc::EINVAL })?;
-            add_action(unsafe { libc::posix_spawnattr_setflags(&raw mut self.0, flags) })
         }
     }
 

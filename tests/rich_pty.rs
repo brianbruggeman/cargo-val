@@ -1822,6 +1822,15 @@ async fn an_editor_that_stops_itself_is_continued_within_a_tick_and_the_run_stil
 }
 
 #[proxima::test]
+async fn an_editor_already_owns_the_terminal_at_its_first_instruction() {
+    let (output, status, log) = edit_failure(&fake_editor_named("vim"), &[], (false, "")).await;
+
+    let lines = recorded(&log);
+    assert!(lines.contains(&"first_foreground=true".to_owned()), "tcgetpgrp(0) was not the editor's own pid on its first instruction: {lines:?}");
+    assert_review_resumed_and_quit(&output, status);
+}
+
+#[proxima::test]
 async fn the_cursor_is_hidden_again_only_after_the_editor_exits() {
     let (output, status, _) = edit_failure(&fake_editor_named("vim"), &[], (false, "")).await;
 
