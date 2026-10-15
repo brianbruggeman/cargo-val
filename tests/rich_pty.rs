@@ -133,11 +133,29 @@ fn without_sgr(text: &str) -> String {
     plain
 }
 
-async fn read_until_exit(master: &ChildStream, release: &Path) -> String {
-    let (mut output, _) = drain::drain_until(master, |bytes| {
+// a failing run is ready only once its failure is pinned: a frame can show a settled test and an elapsed clock while the failing test is still in flight, and a release at that frame lets the run end with no frame that ever pinned the failure
+fn failure_pinned_frame(frame: &str) -> bool {
+    released_frame(frame) && frame.contains(" FAIL 1")
+}
+
+async fn drain_until_frame(master: &ChildStream, ready: fn(&str) -> bool) -> Vec<u8> {
+    let (output, _) = drain::drain_until(master, |bytes| {
         let screen = without_sgr(&String::from_utf8_lossy(bytes));
-        live_frames(&screen).iter().any(|frame| released_frame(frame))
+        live_frames(&screen).iter().any(|frame| ready(frame))
     }).await;
+    output
+}
+
+async fn read_until_exit(master: &ChildStream, release: &Path) -> String {
+    read_until_exit_when(master, release, released_frame).await
+}
+
+async fn read_failing_until_exit(master: &ChildStream, release: &Path) -> String {
+    read_until_exit_when(master, release, failure_pinned_frame).await
+}
+
+async fn read_until_exit_when(master: &ChildStream, release: &Path, ready: fn(&str) -> bool) -> String {
+    let mut output = drain_until_frame(master, ready).await;
     File::create(release).expect("the release file is creatable");
     let (rest, _) = drain::drain_until(master, |_| false).await;
     output.extend_from_slice(&rest);
@@ -217,10 +235,7 @@ where
 }
 
 async fn release_then_quit(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
-    let (mut output, _) = drain::drain_until(master, |bytes| {
-        let screen = without_sgr(&String::from_utf8_lossy(bytes));
-        live_frames(&screen).iter().any(|frame| released_frame(frame))
-    }).await;
+    let mut output = drain_until_frame(master, failure_pinned_frame).await;
     File::create(release).expect("the release file is creatable");
     let (review, _) = drain::drain_until(master, |bytes| without_sgr(&String::from_utf8_lossy(bytes)).contains(REVIEW_HEADER)).await;
     output.extend_from_slice(&review);
@@ -414,10 +429,7 @@ async fn the_live_pinned_review_and_receipt_screens_of_a_failing_run_each_replac
 }
 
 async fn release_open_detail_quit(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
-    let (mut output, _) = drain::drain_until(master, |bytes| {
-        let screen = without_sgr(&String::from_utf8_lossy(bytes));
-        live_frames(&screen).iter().any(|frame| released_frame(frame))
-    }).await;
+    let mut output = drain_until_frame(master, failure_pinned_frame).await;
     File::create(release).expect("the release file is creatable");
     let (review, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
     output.extend_from_slice(&review);
@@ -1972,7 +1984,7 @@ async fn s_opens_the_timeline_mid_run_and_a_q_then_any_other_key_leaves_the_run_
 
 #[proxima::test]
 async fn with_stdin_piped_the_live_frame_shows_no_key_row_and_no_review_hint() {
-    let (output, status) = run_with("rich_pty", "rich", &[FAILING_RUN, ("NO_COLOR", "1")], false, async |master, _keys, release, _leader| read_until_exit(master, &release).await).await;
+    let (output, status) = run_with("rich_pty", "rich", &[FAILING_RUN, ("NO_COLOR", "1")], false, async |master, _keys, release, _leader| read_failing_until_exit(master, &release).await).await;
 
     let screen = without_sgr(&output);
     let frames = live_frames(&screen);
@@ -2078,4 +2090,42 @@ async fn quitting_while_doc_tests_execute_with_q_then_q_exits_130_within_the_bou
 
     assert_quit_is_prompt_and_clean(&doc, "while doc tests execute");
     assert_eq!(closing_block_shape(&doc.output), closing_block_shape(&build.output), "the doc quit's closing block differs in shape from the mid-build quit's:\n{}\n---\n{}", shown(&doc.output), shown(&build.output));
+}
+
+const FRAME_WITH_FAILING_TEST_STILL_RUNNING: &str = " cargo val  10 jobs                                             eta ~0:03  0:01
+
+ build ██████████████████████████████  1/1 test binaries                  built
+ ──────────────────────────────────────────────────────────────────────────────
+ test  ███████▌▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒      1/4 tests  0 failed
+
+ running 3 tests  ·  up to 10 at once
+   0.0s               cargo_val_rich_pty_fixture::tests::fails_when_requested
+   0.0s               cargo_val_rich_pty_fixture::tests::held_until_released
+   0.0s               cargo_val_rich_pty_fixture::tests::settles_at_once
+";
+
+const FRAME_PINNING_THE_FAILURE: &str = " cargo val  10 jobs                                             eta ~0:01  0:01
+ FAIL 1  cargo_val_rich_pty_…::fails_when_requested  requested fixture failure
+     27 |         if std::env::var_os(\"CARGO_VAL_FIXTURE_FAIL\").is_some() {
+ >   28 |             panic!(\"requested fixture failure\");
+       |             ^^^^^ panicked here
+
+ build ██████████████████████████████  1/1 test binaries                  built
+ ──────────────────────────────────────────────────────────────────────────────
+ test  ███████████████▒▒▒▒▒▒▒▒░░░░░░░      3/4 tests  1 failed
+ failed at            ╳              
+
+ running 1 test  ·  up to 10 at once
+   0.1s               cargo_val_rich_pty_fixture::tests::held_until_released
+";
+
+#[test]
+fn a_failing_run_is_not_released_on_an_elapsed_clock_while_its_failing_test_is_still_running() {
+    assert!(released_frame(FRAME_WITH_FAILING_TEST_STILL_RUNNING), "the plain gate fires on a frame that settled one test");
+    assert!(!failure_pinned_frame(FRAME_WITH_FAILING_TEST_STILL_RUNNING), "a release here lets the run end before any frame pins the failure");
+}
+
+#[test]
+fn a_failing_run_is_released_once_a_frame_pins_the_failure_after_the_clock_elapsed() {
+    assert!(failure_pinned_frame(FRAME_PINNING_THE_FAILURE));
 }
