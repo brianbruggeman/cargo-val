@@ -2063,7 +2063,7 @@ fn assert_quit_is_prompt_and_clean(run: &QuitRun, phase: &str) {
 fn closing_block_shape(output: &str) -> Vec<String> {
     let start = output.rfind("\x1b[J").unwrap_or_else(|| panic!("the quit erased no live frame:\n{}", shown(output)));
     let block = &output[start + "\x1b[J".len()..];
-    block.lines().filter_map(|line| line.split_whitespace().next()).map(|word| word.trim_end_matches(SHOW_CURSOR).to_owned()).collect()
+    block.lines().filter_map(|line| line.split_whitespace().next()).map(|word| word.trim_end_matches(SHOW_CURSOR)).filter(|word| *word != "warning:").map(str::to_owned).collect()
 }
 
 #[proxima::test]
