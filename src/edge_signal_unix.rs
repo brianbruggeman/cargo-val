@@ -240,6 +240,11 @@ impl SignalPipe {
         self.forward(libc::SIGINT);
     }
 
+    /// Asks every tracked child to stop without recording a received signal, for a quit key: the run ends as a quit, not as an interrupt.
+    pub fn stop_children(&self) {
+        signal_children(libc::SIGINT);
+    }
+
     fn forward(&self, signal: c_int) {
         if self.received.get().is_none() {
             self.received.set(Some(signal));
