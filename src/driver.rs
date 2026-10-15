@@ -233,7 +233,7 @@ impl RunError {
             Self::IgnoredSet(_) => b"cargo-val: a test binary lists more ignored tests than the fixed set holds\n",
             Self::NothingRan => b"cargo-val: an exact test launch ran no test body\n",
             Self::SummaryMismatch => b"cargo-val: test counts do not balance\n",
-            Self::Parked(_) => b"cargo-val: too many test executables are waiting for their package bin targets, or a path is too long to hold\n",
+            Self::Parked(_) => b"cargo-val: a test executable path, package id, target name or kind is too long to hold\n",
             Self::TargetTable => b"cargo-val: more test binaries than the fixed table or a binary id is too long\n",
             Self::TestThreads(error) => error.message(),
             Self::FailFast(error) => error.message(),
@@ -3008,13 +3008,9 @@ impl CargoDriver<'_> {
         listings_in_flight(self.active.as_ref(), &self.pending_listings) < self.listing_limit
     }
 
-    // cargo's stdout is read while an artifact has somewhere to wait, so a build never stalls on a full pipe behind running tests
-    fn accepting(&self) -> bool {
-        self.has_room() || !self.parked.is_full()
-    }
-
+    // cargo's stdout is never held back for parked artifacts: the bin message that releases them travels the same pipe
     pub(crate) fn cargo_open(&self) -> bool {
-        self.accepting() && self.cargo_backlog.is_none()
+        self.cargo_backlog.is_none()
     }
 
     pub(crate) fn listing_open(&self, run: &ListingRun<'_>, ledger: &Ledger<'_>) -> bool {
@@ -3156,9 +3152,6 @@ impl CargoDriver<'_> {
         let mut context = Context::from_waker(Waker::noop());
         let mut offset = 0;
         loop {
-            if !self.accepting() {
-                return Ok(offset);
-            }
             let ready_before = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
             let (step, consumed) = if eof {
                 match CargoSource::poll_lent_eof(&mut self.framer, &mut *self.scratch, 16, &mut context) {
@@ -3564,14 +3557,12 @@ impl CargoDriver<'_> {
         if self.parked.len() != parked {
             return Ok(true);
         }
-        if let Some((range, offset)) = self.cargo_backlog.clone()
-            && self.accepting()
-        {
+        if let Some((range, offset)) = self.cargo_backlog.clone() {
             self.cargo_backlog = None;
             self.cargo_chunk(lanes, range, offset, run, ledger)?;
             return Ok(self.cargo_backlog.as_ref().is_none_or(|(_, moved)| *moved > offset));
         }
-        if self.cargo_eof && !self.discovery.stdout_closed() && self.cargo_backlog.is_none() && self.accepting() {
+        if self.cargo_eof && !self.discovery.stdout_closed() && self.cargo_backlog.is_none() {
             self.advance(&[], true, run, ledger, lanes)?;
             return Ok(self.discovery.stdout_closed());
         }
