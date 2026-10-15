@@ -36,8 +36,9 @@ the Proxima repository.
   `IGNORED`. `-- --ignored` runs only them and `-- --include-ignored` runs everything.
   A child is classified by its libtest result line, so zero executed bodies never reads
   as PASS.
-- The run ends with `<binary>: discovered N, passed P, failed F, ignored I, filtered X`
-  for each test binary and a `total:` line with the wall time.
+- The run ends with one `SUMMARY` line (`passed= failed= ignored= not_run= wall=`, plus
+  `discovered= run= filtered=` when a filter removed tests), preceded by one
+  `FAILED <binary> <test> - <file>:<line>` line per failure.
 - Integration tests and benches wait until their package's `bin` targets are built.
 
 ## GitHub Action
@@ -60,7 +61,7 @@ release from crates.io with `cargo install --locked cargo-val --version`, cached
 version. Anything else is a git ref: it is resolved to a commit with `git ls-remote`,
 installed with `cargo install --locked --git`, and cached per commit. With the default,
 `uses: brianbruggeman/cargo-val@v0.1.0` installs the registry 0.1.0 while `@main` or a
-sha installs from git. The action then runs `cargo val --tests`, writes the `total:`
+sha installs from git. The action then runs `cargo val --tests`, writes the `SUMMARY`
 line to the job summary and fails the step when cargo val fails. On Windows, pass
 `args: -- --test-threads=1` when the suite asserts process-wide handle counts.
 
@@ -72,4 +73,4 @@ line to the job summary and fails the step when cargo val fails. On Windows, pas
 | `filterset` | empty | passed as `-E` |
 | `no-fail-fast` | `false` | passed as `--no-fail-fast` |
 
-Outputs: `total` (the `total:` line) and `sha` (the installed commit; empty for a crates.io install).
+Outputs: `total` (the `SUMMARY` line) and `sha` (the installed commit; empty for a crates.io install).

@@ -10,7 +10,6 @@ mod binary;
 use fixture::fixture_output;
 
 const WIDE_LINE_BYTES: usize = 200 * 1024 + 1;
-const PLAIN_CLOSE: &str = "------ end source ------";
 const ROW_BUDGET: usize = 1024;
 
 fn fixture(name: &str) -> PathBuf {
@@ -74,13 +73,8 @@ async fn run_wide(mode: &str) -> String {
 async fn a_failure_with_no_panic_site_prints_the_exact_source_absent_reason_in_plain_output() {
     let text = run_abort("plain").await;
 
-    let expected = [
-        "------ source: cargo_val_failure_class_fixture failing::abort_crash ------",
-        "source absent: no_panic_site",
-        PLAIN_CLOSE,
-    ]
-    .join("\n");
-    assert!(text.contains(&expected), "{text}");
+    assert!(text.lines().any(|line| line == "source absent: no_panic_site"), "{text}");
+    assert!(!text.contains("------ "), "{text}");
 }
 
 #[proxima::test(timeout = "310s")]
@@ -93,10 +87,10 @@ async fn a_failure_with_no_panic_site_reports_excerpt_absent_with_a_null_excerpt
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_source_line_over_200_kb_is_cut_and_marked_so_the_plain_closing_fence_still_prints() {
+async fn a_source_line_over_200_kb_is_cut_and_marked_so_the_plain_closing_block_still_prints() {
     let text = run_wide("plain").await;
 
-    assert!(text.lines().any(|line| line == PLAIN_CLOSE), "no closing fence in {} bytes", text.len());
+    assert!(text.lines().any(|line| line.starts_with("SUMMARY  ")), "no closing block in {} bytes", text.len());
     let marked = text.lines().find(|line| line.starts_with(">  ")).expect("the failing row");
     assert!(marked.ends_with('…') && marked.len() < ROW_BUDGET, "{} bytes", marked.len());
 }
@@ -110,7 +104,7 @@ async fn a_source_line_over_200_kb_is_cut_and_marked_so_the_agent_record_after_t
     let rerun = lines.iter().position(|line| line.starts_with("RERUN")).expect("the RERUN record after the excerpt");
     assert!(rerun > excerpt && lines[excerpt..rerun].iter().all(|line| line.len() < ROW_BUDGET));
     assert!(lines[excerpt..rerun].iter().any(|line| line.ends_with('…')));
-    assert!(text.ends_with("EXIT     1  failed\n"), "{} bytes", text.len());
+    assert!(text.contains(" exit=1 outcome=failed schema=1\n"), "{} bytes", text.len());
 }
 
 #[proxima::test(timeout = "310s")]
@@ -156,13 +150,8 @@ async fn a_panic_inside_a_registry_dependency_prints_the_exact_external_reason_i
     let text = run_external("plain").await;
 
     let reason = external_reason(&text);
-    let expected = [
-        "------ source: cargo_val_failure_class_fixture failing::registry_panic_under_user_call ------".to_string(),
-        format!("source absent: {reason}"),
-        PLAIN_CLOSE.to_string(),
-    ]
-    .join("\n");
-    assert!(text.contains(&expected), "{text}");
+    assert!(text.lines().any(|line| line == format!("source absent: {reason}")), "{text}");
+    assert!(!text.contains("------ "), "{text}");
 }
 
 #[proxima::test(timeout = "310s")]
@@ -179,7 +168,10 @@ async fn a_panic_inside_a_registry_dependency_reports_the_exact_external_reason_
 async fn a_panic_inside_a_registry_dependency_prints_the_exact_external_record_in_agent_output() {
     let text = run_external("agent").await;
 
-    let reason = external_reason(&text);
+    let classified = text.lines().find(|line| line.contains("  external:")).unwrap_or_else(|| panic!("the external site is on the class line:\n{text}"));
+    let site = classified.split_once("external:").expect("the external marker").1;
+    let reason = format!("external:{}", site.rsplit_once(':').expect("a column").0);
+    assert!(reason.replace('\\', "/").contains("/registry/src/") && reason.replace('\\', "/").ends_with(BYTES_PANIC_SITE), "{reason}");
     let records: Vec<&str> = text.lines().filter(|line| line.starts_with("EXCERPT")).collect();
     assert_eq!(records, [format!("EXCERPT  absent:{reason}")], "{text}");
 }
