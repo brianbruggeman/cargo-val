@@ -173,6 +173,15 @@ async fn read_until_exit_when(master: &ChildStream, release: &Path, ready: fn(&s
     String::from_utf8_lossy(&output).into_owned()
 }
 
+// the held test keeps the run in flight, so the clock is read ticking before the run is allowed to end instead of hoping the run lasts a second
+async fn release_once_the_clock_ticks(master: &ChildStream, release: &Path) -> String {
+    let (mut output, _) = drain::drain_until(master, |bytes| live_frames(&without_sgr(&String::from_utf8_lossy(bytes))).iter().any(|frame| clock_shows_elapsed(frame))).await;
+    File::create(release).expect("the release file is creatable");
+    let (rest, _) = drain::drain_until(master, |_| false).await;
+    output.extend_from_slice(&rest);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
 async fn run_on_pty(fixture: &str) -> (String, ExitStatus) {
     run_on_pty_with(fixture, &NO_COLOR).await
 }
@@ -309,7 +318,7 @@ async fn a_later_live_frame_shows_nonzero_built_and_settled_counts() {
 
 #[proxima::test]
 async fn a_later_live_frame_clock_shows_elapsed_time_from_the_run_start() {
-    let (output, status) = run_on_pty("rich_pty").await;
+    let (output, status) = run_driven("rich_pty", "rich", &NO_COLOR, async |master, _keys, release, _leader| release_once_the_clock_ticks(master, &release).await).await;
 
     let frames = live_frames(&output);
     assert!(status.success(), "cargo-val exited {status}");
@@ -1148,12 +1157,15 @@ async fn r_in_review_reruns_the_selected_failure_with_a_rerun_row_then_its_resul
 #[proxima::test]
 async fn capital_r_in_review_reruns_every_failure_and_the_receipt_counts_the_one_that_passed_as_flaky() {
     let scratch = rerun_scratch("all");
-    let (output, status) = run_rerun_fixture(&rerun_environment(&scratch, false), async |master, keys, _release, _leader| press_then_quit(master, keys, b"R", flaky_cleared).await).await;
+    let mut environment = rerun_environment(&scratch, false);
+    environment.push(("CARGO_VAL_LOG".to_owned(), "debug".to_owned()));
+    let (stamped, status) = run_rerun_fixture(&environment, async |master, keys, _release, _leader| press_then_quit(master, keys, b"R", flaky_cleared).await).await;
+    let output = without_debug_stamps(&stamped);
     let receipt = assert_receipt_after_review(&output, status);
     assert!(receipt.lines().any(|line| line.starts_with("SUMMARY  passed=0 failed=3 flaky=1 ")), "3 failures stay and 1 is flaky:\n{}", shown(receipt));
     assert_eq!(receipt.lines().filter(|line| line.starts_with("FAILED")).count(), 3, "{}", shown(receipt));
     assert!(receipt.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("fails_once_then_passes")), "{}", shown(receipt));
-    assert_eq!(run_counts(&scratch).len(), 8, "4 first runs plus exactly 4 reruns\n{}", run_count_evidence(&scratch, &output, status));
+    assert_eq!(run_counts(&scratch).len(), 8, "4 first runs plus exactly 4 reruns\n{}", run_count_evidence(&scratch, &stamped, status));
 }
 
 fn process_alive(pid: i32) -> bool {
@@ -1819,7 +1831,7 @@ async fn terminate_while_editing(master: &ChildStream, mut keys: File, leader: u
     let (interrupted, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("INTERRUPTED  signal=15")).await;
     output.extend_from_slice(&interrupted);
     let foreground = unsafe { libc::tcgetpgrp(keys.as_raw_fd()) };
-    assert_eq!(foreground, leader.cast_signed(), "the terminal's foreground group is cargo-val's again once it reports the interrupt");
+    assert_eq!(foreground, leader.cast_signed(), "the terminal's foreground group is cargo-val's again once it reports the interrupt:\n{}", shown(&String::from_utf8_lossy(&output)));
     let (rest, _) = drain::drain_until(master, |_| false).await;
     output.extend_from_slice(&rest);
     String::from_utf8_lossy(&output).into_owned()
@@ -1829,10 +1841,11 @@ async fn terminate_while_editing(master: &ChildStream, mut keys: File, leader: u
 async fn sigterm_while_the_editor_is_open_restores_the_terminal_and_exits_143() {
     let log = editor_log();
     let visual = fake_editor_named("vim").display().to_string();
-    let environment = [("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_WAIT", "1"), ("FAKE_EDITOR_STOP_ONCE", "1")];
+    let environment = [("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_WAIT", "1"), ("FAKE_EDITOR_STOP_ONCE", "1"), ("CARGO_VAL_LOG", "debug")];
     let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, leader| terminate_while_editing(master, keys, leader).await).await;
 
-    let screen = without_sgr(&output);
+    output.lines().filter(|line| line.contains("step=editor") || line.contains("signal-received")).for_each(|line| println!("{}", line.trim_end()));
+    let screen = without_sgr(&without_debug_stamps(&output));
     let ready = screen.find(EDITOR_READY).expect("the editor ran");
     assert_eq!(status.code(), Some(143), "a terminated cargo-val exits 143: {status}\n{}", shown(&screen));
     assert!(screen[ready..].contains("INTERRUPTED  signal=15"), "the interrupted block names the signal:\n{}", shown(&screen[ready..]));
@@ -2059,6 +2072,21 @@ async fn a_held_build_lock_shows_in_the_state_row_and_writes_nothing_above_the_f
 
 const QUIT_BOUND_MS: u128 = 500;
 
+// the bound is cargo-val's own interval between reading the second q and exiting, both stamped by its clock: the test's write reaches a pty cargo-val has not started reading yet, so the test's clock would also time the scheduler
+fn stamped_ms(output: &str, step: &str) -> u128 {
+    output
+        .lines()
+        .filter_map(|line| line.split_once("cargo-val: debug: quit ms=").map(|(_, rest)| rest))
+        .filter_map(|rest| rest.split_once(" step="))
+        .find(|(_, tail)| tail.split_whitespace().next() == Some(step))
+        .and_then(|(milliseconds, _)| milliseconds.parse().ok())
+        .unwrap_or_else(|| panic!("cargo-val stamped no quit step {step}:\n{}", shown(output)))
+}
+
+fn without_debug_stamps(output: &str) -> String {
+    output.split_inclusive('\n').map(|line| line.find("cargo-val: debug: ").map_or(line, |at| &line[..at])).collect()
+}
+
 async fn quit_when(master: &ChildStream, mut keys: File, (leader, session, elapsed): (u32, &std::cell::Cell<u32>, &std::cell::Cell<Option<std::time::Duration>>), ready: impl Fn(&str) -> bool) -> String {
     let (mut output, _) = drain::drain_until(master, |bytes| ready(&without_sgr(&String::from_utf8_lossy(bytes)))).await;
     session.set(leader);
@@ -2079,22 +2107,25 @@ struct QuitRun {
     output: String,
     status: ExitStatus,
     elapsed_ms: u128,
+    written_to_eof_ms: u128,
     session: u32,
 }
 
 async fn quit_run(fixture: &str, doc_started: bool) -> QuitRun {
     let elapsed = std::cell::Cell::new(None);
     let session = std::cell::Cell::new(0);
-    let (output, status) = run_driven(fixture, "rich", &NO_COLOR, async |master, keys, release, leader| {
+    let (output, status) = run_driven(fixture, "rich", &[("NO_COLOR", "1"), ("CARGO_VAL_LOG", "debug")], async |master, keys, release, leader| {
         let started = release.with_extension("started");
         quit_when(master, keys, (leader, &session, &elapsed), |screen| if doc_started { started.exists() } else { screen.contains("test binaries") }).await
     })
     .await;
-    QuitRun { output, status, elapsed_ms: elapsed.get().expect("the drive measured the quit").as_millis(), session: session.get() }
+    let written_to_eof_ms = elapsed.get().expect("the drive measured the quit").as_millis();
+    let (read, exited) = (stamped_ms(&output, "second-q"), stamped_ms(&output, "process-exit"));
+    QuitRun { output: without_debug_stamps(&output), status, elapsed_ms: u128::from(exited.saturating_sub(read)), written_to_eof_ms, session: session.get() }
 }
 
 fn assert_quit_is_prompt_and_clean(run: &QuitRun, phase: &str) {
-    println!("quit {phase}: {} ms from the second q to exit, status {}", run.elapsed_ms, run.status);
+    println!("quit {phase}: {} ms from cargo-val reading the second q to its exit, {} ms from the test writing the keys to the pty closing, status {}", run.elapsed_ms, run.written_to_eof_ms, run.status);
     assert!(run.elapsed_ms < QUIT_BOUND_MS, "q then q {phase} took {} ms, bound {QUIT_BOUND_MS} ms:\n{}", run.elapsed_ms, shown(&run.output));
     assert_eq!(run.status.code(), Some(130), "a quit {phase} is an interrupt: {}\n{}", run.status, shown(&run.output));
     assert!(run.output.ends_with(SHOW_CURSOR), "the last bytes of a quit show the cursor:\n{}", shown(&run.output));
