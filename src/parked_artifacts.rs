@@ -118,6 +118,12 @@ impl ParkedArtifacts {
         self.count == 0
     }
 
+    /// Whether every place is taken, so one more [`park`](Self::park) would fault.
+    #[must_use]
+    pub const fn is_full(&self) -> bool {
+        self.count == CAPACITY
+    }
+
     /// Holds a copy of `artifact` behind everything already parked.
     ///
     /// # Errors

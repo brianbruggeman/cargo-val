@@ -24,7 +24,7 @@ use crate::edge_store::Store;
 use crate::edge_stream::ChildStream;
 use crate::driver::{
     CargoDriver, DocObservation, DocRun, LIVE_CAPACITY, Ledger, ListingRun, RunError, RunSummary,
-    Watches, editor_running, emit, keep_editor_running, keys_raw, monotonic_millis, quit_step, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
+    Watches, editor_running, emit, keep_editor_running, keys_raw, monotonic_millis, pipeline_step, quit_step, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
 use crate::render::Event;
@@ -750,7 +750,10 @@ pub(crate) async fn observe_cargo(
             run.with_doc(|doc, observation| resume_doc(&lanes, doc, observation))?;
             resume_sessions(&lanes, run, ledger, watches)?;
             run.resume_failures()?;
-            lanes[CARGO_LANE].3.set(driver.cargo_open());
+            let reading = driver.cargo_open();
+            if lanes[CARGO_LANE].3.replace(reading) != reading {
+                pipeline_step(if reading { b"cargo-read-resumed" } else { b"cargo-read-paused" }, b"");
+            }
             lanes[LISTING_LANE].3.set(driver.listing_open(run, ledger));
             Ok(if run.edit_pending() || (driver.finished(run, ledger) && !run.failures_pending() && !editor_running()) {
                 ControlFlow::Break(())
