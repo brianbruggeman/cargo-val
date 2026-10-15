@@ -44,8 +44,8 @@ const IGNORED_FLOOD_COUNT: usize = 2500;
 const PIPE_CEILING_BYTES: usize = 65_536;
 const FLOOD_PIPE_BYTES: libc::c_int = 4096;
 const RUN_PIPE_BYTES: libc::c_int = 65_536;
-// measured from a plain run of the fixture: 408_422 stdout bytes over 3000 tests (one START and one PASS line each) is 136.1
-const PLAIN_BYTES_PER_TEST: usize = 137;
+// measured from a plain run of the fixture: 102_550 stdout bytes over 1600 tests, one PASS line each, is 64.1
+const PLAIN_BYTES_PER_TEST: usize = 65;
 const RUN_HOLDS_BYTES: usize = RUN_PIPE_BYTES as usize + UNPAUSED_QUEUE_BYTES;
 // the pump pauses once pipe plus queue are full, so the fixture is the most tests whose whole stdout both can hold
 const FIXTURE_TEST_COUNT: usize = RUN_HOLDS_BYTES / PLAIN_BYTES_PER_TEST;
@@ -328,15 +328,15 @@ fn spawn_shard_many(directory: &Path, stdout: PipeWriter) -> Child {
         .expect("cargo-val binary is spawnable")
 }
 
-fn start_names(text: &str) -> Vec<&str> {
+fn passed_names(text: &str) -> Vec<&str> {
     text.lines()
-        .filter_map(|line| line.strip_prefix("START "))
+        .filter_map(|line| line.strip_prefix("PASS "))
         .filter_map(|rest| rest.split_whitespace().nth(1))
         .collect()
 }
 
 #[proxima::test(timeout = "310s")]
-async fn a_start_burst_larger_than_the_status_queue_pauses_on_a_full_stdout_and_loses_no_start() {
+async fn a_pass_burst_larger_than_the_status_queue_pauses_on_a_full_stdout_and_loses_no_pass() {
     let directory = target_directory()
         .join("full-stdout")
         .join(format!("starts-{}", std::process::id()));
@@ -358,10 +358,9 @@ async fn a_start_burst_larger_than_the_status_queue_pauses_on_a_full_stdout_and_
     let stderr = fs::read_to_string(directory.join("stderr.log")).expect("stderr log reads");
     assert_eq!(status.code(), Some(0), "cargo-val exit status; stderr tail: {}", stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n"));
     let text = String::from_utf8(output).expect("stdout is text");
-    let starts = start_names(&text);
-    let distinct: BTreeSet<&str> = starts.iter().copied().collect();
-    let passed = text.lines().filter(|line| line.starts_with("PASS ")).count();
-    assert_eq!(distinct.len(), SHARD_MANY_NAMES, "every name is announced");
-    assert_eq!(starts.len(), 2 * SHARD_MANY_NAMES, "one START from the shard child and one from the solo rerun per name");
-    assert_eq!(passed, SHARD_MANY_NAMES, "every name settles once");
+    let passes = passed_names(&text);
+    let distinct: BTreeSet<&str> = passes.iter().copied().collect();
+    assert!(!text.lines().any(|line| line.starts_with("START ")), "plain prints a test once, at completion");
+    assert_eq!(distinct.len(), SHARD_MANY_NAMES, "every name settles");
+    assert_eq!(passes.len(), SHARD_MANY_NAMES, "every name settles once");
 }

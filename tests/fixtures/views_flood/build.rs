@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-const SETTLERS: usize = 2000;
+const SETTLERS: usize = 4000;
 const BULK: usize = 40;
 
 fn main() {

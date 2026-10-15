@@ -40,7 +40,18 @@ const FRAME_START: &str = "\x1b[?25l";
 static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
 const REVIEW_HEADER: &str = "cargo val  review";
 const SHOW_CURSOR: &str = "\x1b[?25h";
-const CLOSING_START: &str = "cargo_val_rich_pty_fail_fixture: discovered";
+
+// the closing block opens with its failure rollup, or with SUMMARY when nothing failed
+fn closing_start(text: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("FAILED   ") || line.starts_with("SUMMARY  ") {
+            return Some(at);
+        }
+        at += line.len();
+    }
+    None
+}
 
 fn fixture_manifest(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture).join("Cargo.toml")
@@ -268,8 +279,6 @@ fn without_wall_values(text: &str) -> String {
     text.replace('\r', "").lines().map(blanked).collect::<Vec<_>>().join("\n")
 }
 
-const LISTED_LINE: &str = "LISTED   binaries=1  tests=2\n";
-
 #[proxima::test]
 async fn a_later_live_frame_shows_nonzero_built_and_settled_counts() {
     let (output, status) = run_on_pty("rich_pty").await;
@@ -329,7 +338,6 @@ const FAILING_RUN: (&str, &str) = ("CARGO_VAL_FIXTURE_FAIL", "1");
 #[cfg(feature = "highlight")]
 const KEYWORD_SGR: &str = "\x1b[35mif\x1b[0m";
 const FENCE_TEXT: [&str; 4] = ["------ stdout:", "------ stderr:", "------ source:", "panicked at"];
-const TRIO_CLOSING_START: &str = "cargo_val_rich_pty_fail_trio_fixture: discovered";
 
 fn screens_before_each_erase(output: &str, columns: usize) -> Vec<Vec<String>> {
     let starts = output.match_indices("\r\x1b[J").filter_map(|(at, _)| output[..at].rfind("\x1b["));
@@ -385,9 +393,9 @@ async fn a_rich_run_with_three_failures_writes_nothing_above_its_frame_and_scrol
     let scrollback = final_scrollback(&output);
     let receipt = receipt_of(&scrollback);
     let plain = plain.replace('\r', "");
-    let plain_receipt = plain[plain.find(TRIO_CLOSING_START).expect("the plain run prints the closing block")..].replacen("LISTED   binaries=1  tests=4\n", "", 1);
+    let plain_receipt = &plain[closing_start(&plain).expect("the plain run prints the closing block")..];
     assert_eq!((status.code(), plain_status.code()), (Some(1), Some(1)), "both runs exit 1");
-    assert!(plain.contains("------ stderr:") || plain.contains("------ stdout:"), "plain still prints the failure fences:\n{plain}");
+    assert!(plain.contains("panicked at") && !plain.contains("------ "), "plain prints the panic text with no fences:\n{plain}");
     assert_eq!(plain_receipt.matches("\nFAILED   ").count() + usize::from(plain_receipt.starts_with("FAILED   ")), 3, "{plain_receipt}");
     assert!(scrollback.iter().all(|line| FENCE_TEXT.iter().all(|fence| !line.contains(fence))), "the final scrollback holds failure text:\n{receipt}");
     assert_eq!(settle_order_free(&receipt), settle_order_free(plain_receipt.trim()), "rich scrollback differs from the plain closing block");
@@ -410,7 +418,7 @@ async fn the_live_pinned_review_and_receipt_screens_of_a_failing_run_each_replac
     println!("PINNED SCREEN\n{}\nREVIEW SCREEN\n{}\nRECEIPT\n{receipt}", pinned.join("\n"), review.join("\n"));
     assert!(!status.success(), "a failing test must fail the run");
     assert_eq!(pinned.iter().filter(|line| line.trim_start().starts_with("test ")).count(), 1, "one test row per frame:\n{}", pinned.join("\n"));
-    assert!(receipt.starts_with("cargo_val_rich_pty_fixture: discovered"), "{receipt}");
+    assert!(closing_start(&receipt).is_some_and(|at| receipt[at..].starts_with("FAILED   cargo_val_rich_pty_fixture tests::fails_when_requested - ")), "{receipt}");
 }
 
 async fn release_open_detail_quit(master: &ChildStream, mut keys: File, release: PathBuf) -> String {
@@ -573,12 +581,11 @@ async fn quitting_review_with_q_then_q_restores_the_terminal_and_prints_the_plai
     assert!(output.ends_with(SHOW_CURSOR), "the last bytes of the run show the cursor:\n{}", shown(&output));
     let after_frame = output.rsplit_once("\x1b[J").map_or("", |(_, tail)| tail);
     let after_frame = after_frame.strip_suffix(SHOW_CURSOR).unwrap_or(after_frame);
-    assert!(after_frame.starts_with(CLOSING_START), "the bytes after the last frame erase must open the closing block:\n{}", shown(after_frame));
+    assert!(closing_start(after_frame) == Some(0), "the bytes after the last frame erase must open the closing block:\n{}", shown(after_frame));
     let plain_receipt = plain.replace('\r', "");
-    let plain_receipt = &plain_receipt[plain_receipt.find(CLOSING_START).expect("the plain run prints the closing block")..];
-    assert!(plain_receipt.contains(LISTED_LINE), "plain no longer prints the LISTED line:\n{plain_receipt}");
-    assert!(!after_frame.contains("LISTED"), "rich must not print the LISTED line:\n{}", shown(after_frame));
-    assert_eq!(without_wall_values(after_frame), without_wall_values(&plain_receipt.replacen(LISTED_LINE, "", 1)), "rich receipt differs from the plain closing block after the final erase");
+    let plain_receipt = &plain_receipt[closing_start(&plain_receipt).expect("the plain run prints the closing block")..];
+    assert!(!plain_receipt.contains("LISTED") && !after_frame.contains("LISTED"), "neither mode prints a LISTED line:\n{plain_receipt}");
+    assert_eq!(without_wall_values(after_frame), without_wall_values(plain_receipt), "rich receipt differs from the plain closing block after the final erase");
 }
 
 async fn interrupt_in_review(master: &ChildStream, mut keys: File, leader: u32, via_key: bool) -> String {
@@ -1086,13 +1093,27 @@ fn run_count_evidence(scratch: &Path, output: &str, status: ExitStatus) -> Strin
     format!("run log ({} lines):\n{log_lines}\nexit status: {status}\nreceipt:\n{}\nframes from the review open (the key follows it) to the end:\n{}", log.lines().count(), shown(receipt), shown(&output[review_open..]))
 }
 
+// the rollup lines precede SUMMARY, and the first of them may follow the frame erase on its own line
+fn rollup_start(output: &str, summary: usize) -> usize {
+    let mut start = summary;
+    while start > 0 {
+        let line_start = output[..start - 1].rfind('\n').map_or(0, |at| at + 1);
+        let line = &output[line_start..start - 1];
+        match line.find("FAILED   ") {
+            Some(at) if line[..at].is_empty() || line[..at].ends_with("\x1b[J") => start = line_start + at,
+            _ => break,
+        }
+    }
+    start
+}
+
 fn assert_receipt_after_review(output: &str, status: ExitStatus) -> &str {
     assert_eq!(status.code(), Some(1), "a receipt with unresolved failures exits 1: {status}\n{}", shown(output));
-    let receipt = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(output)));
+    let summary = output.rfind("SUMMARY").unwrap_or_else(|| panic!("no receipt was printed:\n{}", shown(output)));
     let shown_cursor = output.rfind(SHOW_CURSOR).unwrap_or_else(|| panic!("the cursor was never shown again:\n{}", shown(output)));
-    assert!(receipt < shown_cursor, "the cursor returns only after the receipt: receipt at {receipt}, cursor at {shown_cursor}");
+    assert!(summary < shown_cursor, "the cursor returns only after the receipt: receipt at {summary}, cursor at {shown_cursor}");
     assert!(output.ends_with(SHOW_CURSOR), "the last bytes of the run show the cursor:\n{}", shown(output));
-    &output[receipt..]
+    &output[rollup_start(output, summary)..]
 }
 
 #[proxima::test]
@@ -1108,7 +1129,7 @@ async fn r_in_review_reruns_the_selected_failure_with_a_rerun_row_then_its_resul
     let settled = frames[running..].iter().find(|frame| !frame.contains("RERUN")).unwrap_or_else(|| panic!("review never left the RERUN state:\n{}", shown(&output)));
     assert!(settled.contains("ASSERT") || settled.contains("PANIC"), "a failing rerun leaves the row with its class:\n{}", shown(settled));
     let receipt = assert_receipt_after_review(&output, status);
-    assert!(receipt.starts_with("SUMMARY  passed=0 failed=4 "), "one rerun that failed again leaves all 4 failures:\n{}", shown(receipt));
+    assert!(receipt.lines().any(|line| line.starts_with("SUMMARY  passed=0 failed=4 ")), "one rerun that failed again leaves all 4 failures:\n{}", shown(receipt));
     assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun\n{}", run_count_evidence(&scratch, &output, status));
 }
 
@@ -1117,7 +1138,7 @@ async fn capital_r_in_review_reruns_every_failure_and_the_receipt_counts_the_one
     let scratch = rerun_scratch("all");
     let (output, status) = run_rerun_fixture(&rerun_environment(&scratch, false), async |master, keys, _release, _leader| press_then_quit(master, keys, b"R", flaky_cleared).await).await;
     let receipt = assert_receipt_after_review(&output, status);
-    assert!(receipt.starts_with("SUMMARY  passed=0 failed=3 flaky=1 "), "3 failures stay and 1 is flaky:\n{}", shown(receipt));
+    assert!(receipt.lines().any(|line| line.starts_with("SUMMARY  passed=0 failed=3 flaky=1 ")), "3 failures stay and 1 is flaky:\n{}", shown(receipt));
     assert_eq!(receipt.lines().filter(|line| line.starts_with("FAILED")).count(), 3, "{}", shown(receipt));
     assert!(receipt.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("fails_once_then_passes")), "{}", shown(receipt));
     assert_eq!(run_counts(&scratch).len(), 8, "4 first runs plus exactly 4 reruns\n{}", run_count_evidence(&scratch, &output, status));
@@ -1189,7 +1210,7 @@ async fn r_on_the_row_that_fails_only_on_its_first_run_shows_pass_and_the_receip
     let passed = frames.iter().find(|frame| frame.contains("PASS ")).unwrap_or_else(|| panic!("no frame showed a PASS row:\n{}", shown(&output)));
     assert!(passed.contains("fails_once_then_passes"), "the PASS row names the flaky test:\n{}", shown(passed));
     let receipt = assert_receipt_after_review(&output, status);
-    assert!(receipt.starts_with("SUMMARY  passed=3 failed=0 flaky=1 "), "the test that passed alone is flaky, not passed and not failed:\n{}", shown(receipt));
+    assert!(receipt.lines().any(|line| line.starts_with("SUMMARY  passed=3 failed=0 flaky=1 ")), "the test that passed alone is flaky, not passed and not failed:\n{}", shown(receipt));
     assert!(receipt.lines().any(|line| line.starts_with("FLAKY") && line.ends_with("tests::fails_once_then_passes")), "{}", shown(receipt));
     assert_eq!(receipt.lines().filter(|line| line.starts_with("FAILED")).count(), 0, "{}", shown(receipt));
     assert_eq!(run_counts(&scratch).len(), 5, "4 first runs plus exactly 1 rerun\n{}", run_count_evidence(&scratch, &output, status));
@@ -1224,7 +1245,7 @@ async fn a_rerun_that_cannot_launch_restores_the_row_says_why_on_the_footer_and_
     assert!(!notice.contains("RERUN"), "the row left RERUN when the launch was refused:\n{}", shown(&notice));
     assert!(frames[refused].contains("r rerun"), "review is still open with its keys:\n{}", shown(&frames[refused]));
     let receipt = assert_receipt_after_review(&output, status);
-    assert!(receipt.starts_with("SUMMARY  passed=0 failed=4 "), "a refused rerun leaves every failure standing:\n{}", shown(receipt));
+    assert!(receipt.lines().any(|line| line.starts_with("SUMMARY  passed=0 failed=4 ")), "a refused rerun leaves every failure standing:\n{}", shown(receipt));
     assert_eq!(run_counts(&scratch).len(), 4, "4 first runs and no rerun, because none could launch");
 }
 
@@ -1933,11 +1954,11 @@ async fn f_opens_review_while_a_test_is_held_escape_returns_to_the_live_frame_an
     println!("PINNED ROW\n{pinned}\nKEY ROW\n{KEY_ROW}\nlive frame {live_after} bytes after the review header");
     assert!(pinned.ends_with(PINNED_HINT.trim_end()) && pinned.contains("f review"), "the pinned row ends with the review hint: {pinned}");
     let plain = plain.replace('\r', "");
-    let closing = "cargo_val_rich_pty_fixture: discovered";
-    let plain_receipt: String = plain[plain.find(closing).expect("the plain run prints the closing block")..].lines().filter(|line| !line.starts_with("LISTED")).collect::<Vec<_>>().join("\n");
+    let plain_receipt = &plain[closing_start(&plain).expect("the plain run prints the closing block")..];
     let receipt = receipt_of(&final_scrollback(&output));
+    let receipt = &receipt[closing_start(&receipt).expect("the rich run prints the closing block")..];
     assert_eq!((status.code(), plain_status.code()), (Some(1), Some(1)), "both runs exit 1");
-    assert_eq!(settle_order_free(&receipt), settle_order_free(plain_receipt.trim()), "rich receipt after mid-run review differs from the plain closing block");
+    assert_eq!(settle_order_free(receipt), settle_order_free(plain_receipt.trim()), "rich receipt after mid-run review differs from the plain closing block");
 }
 
 async fn timeline_and_a_cancelled_quit_mid_run(master: &ChildStream, mut keys: File, release: PathBuf) -> String {

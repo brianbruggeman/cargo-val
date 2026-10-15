@@ -128,6 +128,8 @@ pub enum CargoMessage<'text> {
         rendered: &'text str,
         /// the primary span as (file as rustc printed it, 1-based line, 1-based column, caret width, label); the width is `column_end - column_start` on a single-line span and 1 on a multi-line one; the label is `None` when rustc gave null. `None` when the message has no primary span.
         span: Option<(&'text str, u32, u32, u32, Option<&'text str>)>,
+        /// the owning package id such as `path+file:///repo/parser#0.3.1`, when cargo named one.
+        package_id: Option<&'text str>,
     },
     /// A valid message that carries nothing a test launch needs.
     Ignored,
@@ -645,6 +647,7 @@ pub fn parse_cargo_message<'text>(
                     .span
                     .map(|(file, line, column, width, label)| Ok((resolve(scratch, file)?, line, column, width, label.map(|slot| resolve(scratch, slot)).transpose()?)))
                     .transpose()?,
+                package_id: fields.package_id.map(|slot| resolve(scratch, slot)).transpose()?,
             }),
             _ => Ok(CargoMessage::Ignored),
         },

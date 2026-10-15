@@ -73,13 +73,13 @@ Output mode, highest precedence first (default: auto):
 auto is rich only when standard output is an interactive terminal (a console on Windows)
 and CI is unset or empty and TERM is not dumb; a pipe, a file, CI, or a dumb terminal gets
 plain. plain never emits ANSI escapes. NO_COLOR suppresses color in every mode.
-Plain output is append-only, one line per event, labels padded to nine columns:
-  START/PASS/FAIL/IGNORED  <binary id>  <test>  [<secs>s]  [(solo rerun)]
-  a failure's captured streams follow its FAIL line between "------ stdout: <id> <test> ------"
-  and "------ end stdout ------" (stderr likewise), then at the end: the total: line,
-  SUMMARY passed=P failed=F ignored=I not_run=N wall=S, one FAILED line per failure, and
-  RERUN, a cargo val command that reruns only the failures. GITHUB_ACTIONS=true also wraps
-  each block in ::group::/::endgroup:: and prints one ::error annotation per failure.
+Plain output is append-only, one line per test at completion, labels padded to nine columns:
+  PASS/FAIL/IGNORED  <binary id>  <test>  [<secs>s on FAIL]  [(solo rerun)]
+  a failure's libtest panic text follows its FAIL line once, then its source excerpt. The end:
+  one FAILED <binary id> <test> - <file>:<line> line per failure, SUMMARY passed=P failed=F
+  ignored=I not_run=N wall=S (plus discovered= run= filtered= binaries= when tests were
+  filtered), and RERUN, a cargo val command that reruns only the failures. GITHUB_ACTIONS=true
+  also wraps each block in ::group::/::endgroup:: and prints one ::error annotation per failure.
 
 Test timeout, highest precedence first (default: none):
   1. --test-timeout <secs|none>
@@ -135,9 +135,8 @@ cache lock lives in CARGO_HOME and cannot be isolated. Isolated compiles depende
 once more per workspace than plain `cargo test`, and the doc build compiles the library
 a second time.
 
-Summary: after the results, one line per test binary, then a total line with wall time:
-  <binary>: discovered N, passed P, failed F, ignored I, filtered X
-  total: discovered N, passed P, failed F, ignored I, filtered X, wall S.mmms
+Summary: after the results, one SUMMARY line with wall time:
+  SUMMARY  passed=P failed=F ignored=I not_run=N  wall=S.mmms
 The binary id is the package name for a library and package::target otherwise. A binary
 whose counts do not add up is an error naming it. A run that executed no test (passed +
 failed = 0) follows --no-tests.
