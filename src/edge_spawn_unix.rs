@@ -531,6 +531,20 @@ mod spawn {
         let lowered = storage.lowered();
         let (executable, current_directory) = (lowered.program()?, lowered.directory()?);
         let (argv, envp) = (lowered.argv(), lowered.envp());
+        let process_id = start_foreground(executable, argv, envp, current_directory, terminal)?;
+        hand_terminal(terminal, process_id);
+        unsafe { libc::kill(-process_id, libc::SIGCONT) };
+        Ok(process_id.cast_unsigned())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn start_foreground(
+        executable: &core::ffi::CStr,
+        argv: &[*const c_char],
+        envp: &[*const c_char],
+        current_directory: Option<&core::ffi::CStr>,
+        _terminal: c_int,
+    ) -> Result<libc::pid_t, SpawnError> {
         let mut actions = FileActions::new()?;
         let mut attributes = SpawnAttributes::new(true)?;
         attributes.reset_signals()?;
@@ -557,9 +571,76 @@ mod spawn {
         if result != 0 {
             return Err(SpawnError { os_code: result });
         }
-        hand_terminal(terminal, process_id);
-        unsafe { libc::kill(-process_id, libc::SIGCONT) };
-        Ok(process_id.cast_unsigned())
+        Ok(process_id)
+    }
+
+    // posix_spawn cannot run code in the child, so the child could exec and look at its terminal before the parent's tcsetpgrp landed;
+    // forking lets the child take the foreground itself first, and the parent's identical hand-off after it is idempotent
+    #[cfg(target_os = "linux")]
+    fn start_foreground(
+        executable: &core::ffi::CStr,
+        argv: &[*const c_char],
+        envp: &[*const c_char],
+        current_directory: Option<&core::ffi::CStr>,
+        terminal: c_int,
+    ) -> Result<libc::pid_t, SpawnError> {
+        let mut report = [0 as c_int; 2];
+        if unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(SpawnError { os_code: io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO) });
+        }
+        let process_id = unsafe { libc::fork() };
+        if process_id == 0 {
+            unsafe { enter_foreground_and_exec(executable, argv, envp, current_directory, terminal, report[1]) };
+        }
+        unsafe { libc::close(report[1]) };
+        let forked = process_id > 0;
+        let mut code: c_int = 0;
+        let received = if forked { unsafe { libc::read(report[0], (&raw mut code).cast(), core::mem::size_of::<c_int>()) } } else { 0 };
+        unsafe { libc::close(report[0]) };
+        if !forked {
+            return Err(SpawnError { os_code: io::Error::last_os_error().raw_os_error().unwrap_or(libc::EAGAIN) });
+        }
+        if received > 0 {
+            unsafe { libc::waitpid(process_id, core::ptr::null_mut(), 0) };
+            return Err(SpawnError { os_code: code });
+        }
+        unsafe { libc::setpgid(process_id, process_id) };
+        Ok(process_id)
+    }
+
+    // runs between fork and exec: raw libc calls only, no allocation, and it never returns
+    #[cfg(target_os = "linux")]
+    unsafe fn enter_foreground_and_exec(
+        executable: &core::ffi::CStr,
+        argv: &[*const c_char],
+        envp: &[*const c_char],
+        current_directory: Option<&core::ffi::CStr>,
+        terminal: c_int,
+        report: c_int,
+    ) -> ! {
+        unsafe {
+            libc::setpgid(0, 0);
+            let mut default: libc::sigaction = core::mem::zeroed();
+            default.sa_sigaction = libc::SIG_DFL;
+            for signal in 1..=64 {
+                libc::sigaction(signal, &raw const default, core::ptr::null_mut());
+            }
+            let mut held: libc::sigset_t = core::mem::zeroed();
+            let mut empty: libc::sigset_t = core::mem::zeroed();
+            libc::sigemptyset(&raw mut held);
+            libc::sigemptyset(&raw mut empty);
+            libc::sigaddset(&raw mut held, libc::SIGTTOU);
+            libc::sigprocmask(libc::SIG_SETMASK, &raw const held, core::ptr::null_mut());
+            libc::tcsetpgrp(terminal, libc::getpid());
+            libc::sigprocmask(libc::SIG_SETMASK, &raw const empty, core::ptr::null_mut());
+            let changed = current_directory.is_none_or(|directory| libc::chdir(directory.as_ptr()) == 0);
+            if changed {
+                libc::execvpe(executable.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            }
+            let code = *libc::__errno_location();
+            libc::write(report, (&raw const code).cast(), core::mem::size_of::<c_int>());
+            libc::_exit(127)
+        }
     }
 
     /// Gives the terminal on `terminal` back to this process's group once the foreground child has gone.
@@ -872,6 +953,7 @@ mod spawn {
         }
 
         // a child inherits this process's blocked signals and ignored dispositions; an editor must start with neither
+        #[cfg(not(target_os = "linux"))]
         fn reset_signals(&mut self) -> Result<(), SpawnError> {
             let mut blocked: libc::sigset_t = unsafe { core::mem::zeroed() };
             let mut defaulted: libc::sigset_t = unsafe { core::mem::zeroed() };
