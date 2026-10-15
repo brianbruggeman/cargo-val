@@ -42,12 +42,21 @@ pub fn editor_template<'source>(editor_url: Option<&'source str>, settings: &'so
         .unwrap_or(FILE_URL)
 }
 
+/// The editor program's identity: the last path segment under either separator, without a Windows `.exe` or `.cmd` suffix.
+pub(crate) fn program_name(program: &[u8]) -> &[u8] {
+    let base = program.rsplit(|byte| matches!(byte, b'/' | b'\\')).next().unwrap_or(program);
+    [b".exe".as_slice(), b".cmd".as_slice()]
+        .iter()
+        .find_map(|suffix| base.len().checked_sub(suffix.len()).filter(|start| base[*start..].eq_ignore_ascii_case(suffix)).map(|start| &base[..start]))
+        .unwrap_or(base)
+}
+
 fn editor_named(command: Option<&str>) -> Option<&'static [u8]> {
-    let program = command?.split_whitespace().next()?.rsplit('/').next()?;
+    let program = program_name(command?.split_whitespace().next()?.as_bytes());
     match program {
-        "code" => Some(VSCODE_URL),
-        "cursor" => Some(CURSOR_URL),
-        "zed" => Some(ZED_URL),
+        b"code" => Some(VSCODE_URL),
+        b"cursor" => Some(CURSOR_URL),
+        b"zed" => Some(ZED_URL),
         _ => None,
     }
 }
@@ -166,7 +175,7 @@ const fn is_path_safe(byte: u8) -> bool {
 mod tests {
     use conflaguration::BorrowedSettings;
 
-    use super::{editor_template, links_enabled, write_link};
+    use super::{editor_template, links_enabled, program_name, write_link};
     use crate::config::OutputMode;
     use crate::line::Line;
 
@@ -197,6 +206,14 @@ mod tests {
     fn editor_zed_with_a_path_and_flags_links_to_a_zed_url() {
         let out = rendered(&[("EDITOR", "/opt/homebrew/bin/zed --wait")], FILE);
         assert!(out.bytes().starts_with(b"\x1b]8;;zed://file/Users/brian/repos/cargo-val/tests/shard_process.rs:575:31\x1b\\"));
+    }
+
+    #[test]
+    fn a_windows_editor_path_with_backslashes_and_an_exe_suffix_names_the_same_editor() {
+        let out = rendered(&[("VISUAL", "C:\\Users\\runneradmin\\AppData\\Local\\Programs\\vscode\\bin\\code.exe")], FILE);
+        assert!(out.bytes().starts_with(b"\x1b]8;;vscode://file/"));
+        assert_eq!(program_name(b"C:\\tools\\zed.exe"), b"zed");
+        assert_eq!(program_name(b"/opt/homebrew/bin/zed"), b"zed");
     }
 
     #[test]
