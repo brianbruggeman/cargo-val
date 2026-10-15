@@ -602,6 +602,7 @@ mod spawn {
         }
         if received > 0 {
             unsafe { libc::waitpid(process_id, core::ptr::null_mut(), 0) };
+            hand_terminal(terminal, unsafe { libc::getpgrp() });
             return Err(SpawnError { os_code: code });
         }
         unsafe { libc::setpgid(process_id, process_id) };
