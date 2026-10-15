@@ -18,7 +18,7 @@ pub async fn wait_within(child: &Child, setting: &str) -> Result<ExitStatus, Str
     let pid = child.id();
     let target = NonZeroI32::new(pid.cast_signed()).ok_or("a spawned child has a nonzero pid")?;
     let exit = ExitSource::new(target);
-    match group::bounded(pid, settings::bound(setting), setting, exit.call(())).await {
+    match group::bounded(pid, settings::bound(setting), setting, None, exit.call(())).await {
         Ok(waited) => waited.map_err(|Exhausted| format!("pid {pid}: the exit source was already spent"))?.map_err(|error| format!("wait for pid {pid} failed: {error}")),
         Err((report, _)) => Err(report),
     }
