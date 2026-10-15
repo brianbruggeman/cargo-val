@@ -318,7 +318,7 @@ mod bin_gate_hold {
     const FIFO_HELD_UNITS: usize = 2;
     // the bin and its unit-test target both block on the fifo, each holding a job slot, so the integration test unit needs one more or it never links and the park line never comes; an ambient build.jobs, CARGO_BUILD_JOBS or jobserver of FIFO_HELD_UNITS or fewer would stall the run until its deadline
     const FIXTURE_BUILD_JOBS: usize = FIFO_HELD_UNITS + 1;
-    const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park kind=test target=uses_bin";
+    const GATE_PARKED_LINE: &str = "cargo-val: debug: gate park why=bin-gate kind=test target=uses_bin";
     const GATE_DROPPED_LINE: &str = "cargo-val: debug: gate drop reason=build-failed target=uses_bin";
 
     /// What proves the bin-less window was observed, so the bin build may be released.
@@ -458,7 +458,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
     assert_eq!(result.status, Some(3), "{context}");
     assert!(result.stdout.contains("BUILD    FAILED"), "{context}");
     assert!(
-        result.stderr.contains("cargo-val: debug: gate park kind=test target=uses_bin"),
+        result.stderr.contains("cargo-val: debug: gate park why=bin-gate kind=test target=uses_bin"),
         "{context}"
     );
     assert!(
@@ -552,7 +552,7 @@ async fn gate_debug_lines_for_park_then_bin_built_then_release_are_byte_exact() 
         gate_lines(&result.stderr),
         [
             "cargo-val: debug: gate metadata spawned=yes bin-packages=1",
-            "cargo-val: debug: gate park kind=test target=uses_bin gate=metadata package=<fixture>#0.1.0",
+            "cargo-val: debug: gate park why=bin-gate kind=test target=uses_bin gate=metadata package=<fixture>#0.1.0",
             "cargo-val: debug: gate bin-built on-disk=yes executable=<target>/debug/gate-bin package=<fixture>#0.1.0",
             "cargo-val: debug: gate release reason=bin-built target=uses_bin package=<fixture>#0.1.0",
             "cargo-val: debug: gate build-finished success=true parked=0",
@@ -576,7 +576,7 @@ async fn gate_debug_lines_for_park_then_failed_build_then_drop_are_byte_exact() 
         gate_lines(&result.stderr),
         [
             "cargo-val: debug: gate metadata spawned=yes bin-packages=1",
-            "cargo-val: debug: gate park kind=test target=uses_bin gate=metadata package=<fixture>#0.1.0",
+            "cargo-val: debug: gate park why=bin-gate kind=test target=uses_bin gate=metadata package=<fixture>#0.1.0",
             "cargo-val: debug: gate build-finished success=false parked=1",
             "cargo-val: debug: gate drop reason=build-failed target=uses_bin package=<fixture>#0.1.0",
             "cargo-val: debug: gate stdout-eof parked=0",

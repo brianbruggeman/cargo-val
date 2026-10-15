@@ -55,7 +55,7 @@ use std::process::ExitStatus;
 use std::sync::OnceLock;
 use std::time::Instant;
 use std::vec::Vec;
-use crate::parked_artifacts::{OwnedArtifact, ParkFault, ParkedArtifacts};
+use crate::parked_artifacts::{OwnedArtifact, ParkedArtifacts};
 use crate::status_queue::{self, EVENT_RESERVE};
 use crate::summary::{Counts, Tally, TargetTable};
 use crate::edge_signal::{
@@ -186,7 +186,6 @@ pub enum RunError {
     NothingRan,
     SummaryMismatch,
     TargetTable,
-    Parked(ParkFault),
     TestThreads(ThreadsError),
     FailFast(FailFastError),
     DocTests,
@@ -233,7 +232,6 @@ impl RunError {
             Self::IgnoredSet(_) => b"cargo-val: a test binary lists more ignored tests than the fixed set holds\n",
             Self::NothingRan => b"cargo-val: an exact test launch ran no test body\n",
             Self::SummaryMismatch => b"cargo-val: test counts do not balance\n",
-            Self::Parked(_) => b"cargo-val: a test executable path, package id, target name or kind is too long to hold\n",
             Self::TargetTable => b"cargo-val: more test binaries than the fixed table or a binary id is too long\n",
             Self::TestThreads(error) => error.message(),
             Self::FailFast(error) => error.message(),
@@ -2845,9 +2843,13 @@ fn exists(path: &str) -> bool {
     std::path::Path::new(path).exists()
 }
 
-fn debug_artifact(enabled: bool, gated: bool, gate: BinGate, artifact: &TestArtifact<'_>) {
+fn debug_artifact(enabled: bool, parked_for: Option<&[u8]>, gate: BinGate, artifact: &TestArtifact<'_>) {
     gate_debug(enabled, |line| {
-        line.text(if gated { b" park" } else { b" launch" });
+        line.text(if parked_for.is_some() { b" park" } else { b" launch" });
+        if let Some(why) = parked_for {
+            line.text(b" why=");
+            line.text(why);
+        }
         line.text(b" kind=");
         line.text(artifact.target_kind.as_bytes());
         line.text(b" target=");
@@ -2901,6 +2903,18 @@ fn resolve_bin_gate(settings: &Settings, spawned: bool, facts: Option<Box<Metada
             None => line.text(b"unavailable"),
         }
     });
+    if let Some(found) = &counts {
+        let (unknown, reason) = found.unknown_feature_packages();
+        if unknown > 0 {
+            gate_debug(settings.debug, |line| {
+                line.text(b" bin-features unknown-packages=");
+                line.number(unknown);
+                line.text(b" reason=");
+                line.text(reason.as_bytes());
+                line.text(b" wait=build-finished");
+            });
+        }
+    }
     match (settings.bin_gate, counts) {
         (false, _) => (BinCounts::new(), BinGate::Off),
         (true, Some(found)) => (found, BinGate::Metadata),
@@ -3031,7 +3045,7 @@ impl CargoDriver<'_> {
         let Some(next) = started else {
             return Ok(());
         };
-        self.listed.push((next.target, *kept));
+        self.listed.push((next.target, kept.clone()));
         if self.active.is_some() {
             self.pending_listings.push_back(next);
             return Ok(());
@@ -3080,7 +3094,7 @@ impl CargoDriver<'_> {
                 free_slot(self.active.as_ref(), &self.pending_listings),
                 &mut *self.environments,
             )?;
-            let kept = OwnedArtifact::copy_of(&artifact).map_err(RunError::Parked)?;
+            let kept = OwnedArtifact::copy_of(&artifact);
             self.queue_listing(started, &kept, lanes)?;
         }
         Ok(())
@@ -3186,9 +3200,10 @@ impl CargoDriver<'_> {
                     if crowded {
                         self.reason = b"listing-room";
                     }
-                    debug_artifact(run.settings.debug, gated || crowded, self.discovery.gate(), &artifact);
+                    let parked_for: Option<&[u8]> = if gated { Some(b"bin-gate") } else if crowded { Some(b"listing-room") } else { None };
+                    debug_artifact(run.settings.debug, parked_for, self.discovery.gate(), &artifact);
                     if gated || crowded {
-                        self.parked.park(&artifact).map_err(RunError::Parked)?;
+                        self.parked.park(&artifact);
                     } else {
                         let started = start_listing(
                             run,
@@ -3199,7 +3214,7 @@ impl CargoDriver<'_> {
                             free_slot(self.active.as_ref(), &self.pending_listings),
                             &mut *self.environments,
                         )?;
-                        let kept = OwnedArtifact::copy_of(&artifact).map_err(RunError::Parked)?;
+                        let kept = OwnedArtifact::copy_of(&artifact);
                         self.queue_listing(started, &kept, lanes)?;
                     }
                 }
@@ -4110,7 +4125,7 @@ async fn start_children(
         (None, None) => {}
     }
     let workspace_root = facts.as_deref().and_then(MetadataFacts::workspace_root).and_then(|bytes| core::str::from_utf8(bytes).ok()).map_or_else(|| settings.source_root.clone(), PathBuf::from);
-    let test_targets = facts.as_deref().and_then(|found| found.test_targets);
+    let test_targets = facts.as_deref().map(|found| found.test_targets);
     test_binaries_debug(settings.debug, test_targets);
     let metadata_directory = facts.as_deref().and_then(MetadataFacts::target_directory).map(Box::from);
     let predicted_units = facts.as_deref().and_then(|found| found.bins.predicted_units()).and_then(|units| u16::try_from(units).ok());

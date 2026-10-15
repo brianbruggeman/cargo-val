@@ -2,14 +2,11 @@
 //! never the ones another cargo process holds, and the lock-wait detector for the one lock
 //! that cannot be isolated.
 
-use crate::metadata_scan::PATH_CAPACITY;
+use std::vec::Vec;
 
 const OPTION: &[u8] = b"--target-dir=";
 const SUBTREE: &[u8] = b"/cargo-val/";
 const KEY_LENGTH: usize = 16;
-const LEAF_CAPACITY: usize = 5;
-const ARGUMENT_CAPACITY: usize =
-    OPTION.len() + PATH_CAPACITY + SUBTREE.len() + KEY_LENGTH + 1 + LEAF_CAPACITY + 1;
 const HEX: [u8; 16] = *b"0123456789abcdef";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -30,37 +27,27 @@ pub fn workspace_key(workspace_root: &[u8]) -> [u8; KEY_LENGTH] {
 
 /// One child's `--target-dir=<directory>` argument.
 pub struct ChildDirectory {
-    bytes: [u8; ARGUMENT_CAPACITY],
-    length: usize,
+    bytes: Vec<u8>,
 }
 
 impl ChildDirectory {
     fn assemble(parts: &[&[u8]]) -> Option<Self> {
-        let mut directory = Self {
-            bytes: [0; ARGUMENT_CAPACITY],
-            length: 0,
-        };
-        for part in parts {
-            let end = directory.length + part.len();
-            if end >= ARGUMENT_CAPACITY || part.contains(&0) {
-                return None;
-            }
-            directory.bytes[directory.length..end].copy_from_slice(part);
-            directory.length = end;
+        if parts.iter().any(|part| part.contains(&0)) {
+            return None;
         }
-        Some(directory)
+        Some(Self { bytes: parts.concat() })
     }
 
     /// The whole `--target-dir=<directory>` argument.
     #[must_use]
     pub fn argument(&self) -> &[u8] {
-        &self.bytes[..self.length]
+        &self.bytes
     }
 
     /// The directory alone, for messages.
     #[must_use]
     pub fn directory(&self) -> &[u8] {
-        &self.bytes[OPTION.len()..self.length]
+        &self.bytes[OPTION.len()..]
     }
 }
 
@@ -140,8 +127,7 @@ pub struct LockWatch {
     capture: [u8; WHICH_CAPACITY],
     capture_length: usize,
     announced: u8,
-    directory: [u8; PATH_CAPACITY],
-    directory_length: usize,
+    directory: Vec<u8>,
 }
 
 impl LockWatch {
@@ -155,21 +141,19 @@ impl LockWatch {
             capture: [0; WHICH_CAPACITY],
             capture_length: 0,
             announced: 0,
-            directory: [0; PATH_CAPACITY],
-            directory_length: 0,
+            directory: Vec::new(),
         }
     }
 
-    /// Records the target directory the child builds in; a longer path than the storage is cut.
+    /// Records the target directory the child builds in.
     pub fn set_directory(&mut self, directory: &[u8]) {
-        let taken = directory.len().min(PATH_CAPACITY);
-        self.directory[..taken].copy_from_slice(&directory[..taken]);
-        self.directory_length = taken;
+        self.directory.clear();
+        self.directory.extend_from_slice(directory);
     }
 
     #[must_use]
     pub fn directory(&self) -> &[u8] {
-        &self.directory[..self.directory_length]
+        &self.directory
     }
 
     /// The lock name as cargo printed it, such as `build directory`.
@@ -284,10 +268,12 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn a_path_longer_than_the_storage_or_holding_nul_is_refused() {
-        let long = [b'd'; super::PATH_CAPACITY + 64];
+    async fn a_path_holding_nul_is_refused_and_a_long_one_is_kept_whole() {
+        let long = [b'd'; 1500];
 
-        assert!(BuildDirectories::isolated(&long, b"/w").is_none());
+        let kept = BuildDirectories::isolated(&long, b"/w").expect("a long path has no cap");
+        assert!(kept.test.directory().starts_with(&long));
+        assert!(BuildDirectories::isolated(b"a\0b", b"/w").is_none());
         assert!(BuildDirectories::under(b"a\0b").is_none());
     }
 
@@ -339,12 +325,12 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn the_directory_is_kept_for_the_message_and_cut_at_the_storage() {
+    async fn the_directory_is_kept_whole_for_the_message() {
         let mut watch = LockWatch::new();
         watch.set_directory(b"/tmp/cargo_target");
         assert_eq!(watch.directory(), b"/tmp/cargo_target");
 
-        watch.set_directory(&[b'x'; super::PATH_CAPACITY + 9]);
-        assert_eq!(watch.directory().len(), super::PATH_CAPACITY);
+        watch.set_directory(&[b'x'; 1500]);
+        assert_eq!(watch.directory().len(), 1500);
     }
 }

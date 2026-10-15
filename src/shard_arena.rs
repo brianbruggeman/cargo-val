@@ -1,9 +1,9 @@
 //! One test binary's selected names, held until the listing ends so shards can be sized from the whole count.
 
 use crate::build_defaults::{SCHED_RECORD_BYTES, SHARD_COMMAND_UNITS, SHARD_NAMES, SHARD_RETRY_SLOTS};
-use crate::metadata_scan::PATH_CAPACITY;
 use crate::sched_binary::RECORD_BYTES;
 
+const PATH_CAPACITY: usize = 512;
 const MAX_RESERVE: usize = 8193;
 const FLAG_WORDS: usize = SHARD_NAMES.div_ceil(64);
 
