@@ -271,13 +271,14 @@ async fn announced_holders(ready: &ChildStream, wanted: usize) -> Vec<libc::pid_
 }
 
 // the groups are read before the signal because a killed holder has no group left to ask about
-async fn interrupt_once_in_flight(label: &str, fixture: &mut Fixture, ready: &ChildStream, wanted: usize) -> BTreeSet<libc::pid_t> {
+async fn interrupt_once_in_flight(label: &str, fixture: &mut Fixture, ready: &ChildStream, (wanted, streams): (usize, &[(&str, &ChildStream)])) -> BTreeSet<libc::pid_t> {
+    let cargo_val = libc::pid_t::try_from(fixture.child.id()).expect("pid fits pid_t");
+    let exit = ExitSource::new(NonZeroI32::new(cargo_val).expect("a spawned pid is nonzero"));
     stamp(label, "ready_fifo_pids", "enter");
-    let holders = announced_holders(ready, wanted).await;
+    let holders = until_exit(announced_holders(ready, wanted), "the blocked tests never all reached the rendezvous", &exit, streams).await;
     stamp(label, "ready_fifo_pids", "exit");
     let groups = holders.iter().map(|holder| unsafe { libc::getpgid(*holder) }).collect();
     fixture.holder = holders[0];
-    let cargo_val = libc::pid_t::try_from(fixture.child.id()).expect("pid fits pid_t");
     assert_eq!(unsafe { libc::kill(cargo_val, libc::SIGINT) }, 0);
     stamp(label, "sigint_sent", "exit");
     groups
@@ -293,7 +294,7 @@ fn stamp(label: &str, wait: &str, phase: &str) {
 async fn interrupted_plain_run(label: &str, launch: Launch) -> Observed {
     let (mut fixture, ready) = start_as(label, "blocked_pair", &spawned_arguments(launch), "CARGO_VAL_FIXTURE_TEST_BLOCK_DIR", "plain", Stdio::piped());
     let ready = Box::new(ready);
-    let groups = interrupt_once_in_flight(label, &mut fixture, &ready, launch.2).await;
+    let groups = interrupt_once_in_flight(label, &mut fixture, &ready, (launch.2, &[])).await;
     stamp(label, "plain_exit", "enter");
     let status = wait::wait_within(&fixture.child, "SYNC_DEADLINE").await.unwrap_or_else(|failure| panic!("cargo-val did not exit after the signal: {failure}"));
     stamp(label, "plain_exit", "exit");
@@ -316,7 +317,8 @@ async fn interrupted_rich_run(label: &str, launch: Launch) -> Observed {
         stamp(label, "master_eof", "exit");
         finished
     };
-    let work = join(interrupt_once_in_flight(label, &mut fixture, &ready, launch.2), drained);
+    let streams = [("pty", &*master)];
+    let work = join(interrupt_once_in_flight(label, &mut fixture, &ready, (launch.2, &streams)), drained);
     stamp(label, "rich_work", "enter");
     let (groups, (bytes, _)) = match group::bounded(leader, group::settings::bound("SYNC_DEADLINE"), "SYNC_DEADLINE", None, work).await {
         Ok(finished) => finished,
