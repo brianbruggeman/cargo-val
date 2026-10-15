@@ -2167,11 +2167,15 @@ struct QuitRun {
 }
 
 async fn quit_run(fixture: &str, doc_started: bool) -> QuitRun {
+    quit_run_when(fixture, move |started, screen| if doc_started { started.exists() } else { screen.contains("test binaries") }).await
+}
+
+async fn quit_run_when(fixture: &str, ready: impl Fn(&Path, &str) -> bool) -> QuitRun {
     let elapsed = std::cell::Cell::new(None);
     let session = std::cell::Cell::new(0);
     let (output, status) = run_driven(fixture, "rich", &[("NO_COLOR", "1"), ("CARGO_VAL_LOG", "debug")], async |master, keys, release, leader| {
         let started = release.with_extension("started");
-        quit_when(master, keys, (leader, &session, &elapsed), |screen| if doc_started { started.exists() } else { screen.contains("test binaries") }).await
+        quit_when(master, keys, (leader, &session, &elapsed), |screen| ready(&started, screen)).await
     })
     .await;
     let written_to_eof_ms = elapsed.get().expect("the drive measured the quit").as_millis();
@@ -2206,6 +2210,17 @@ async fn quitting_while_doc_tests_execute_with_q_then_q_exits_130_within_the_bou
 
     assert_quit_is_prompt_and_clean(&doc, "while doc tests execute");
     assert_eq!(closing_block_shape(&doc.output), closing_block_shape(&build.output), "the doc quit's closing block differs in shape from the mid-build quit's:\n{}\n---\n{}", shown(&doc.output), shown(&build.output));
+}
+
+#[proxima::test]
+async fn quitting_while_a_test_runs_with_q_then_q_exits_4_with_the_no_tests_block_and_no_child_left() {
+    let run = quit_run_when("rich_pty", |_, screen| screen.contains("running") && screen.contains("held_until_released")).await;
+
+    assert_eq!(run.status.code(), Some(4), "today a quit with a test running exits as a run that matched nothing: {}\n{}", run.status, shown(&run.output));
+    assert!(run.output.contains("passed=0 failed=0 ignored=0 not_run=0"), "the closing block counts nothing:\n{}", shown(&run.output));
+    assert!(run.output.contains("cargo-val: no tests to run"), "the block ends with the no-tests line:\n{}", shown(&run.output));
+    let survivors = session_members(run.session);
+    assert!(survivors.trim().is_empty(), "children of the quit run survive in its session {}: {survivors}", run.session);
 }
 
 const FRAME_WITH_FAILING_TEST_STILL_RUNNING: &str = " cargo val  10 jobs                                             eta ~0:03  0:01
