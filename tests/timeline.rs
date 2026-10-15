@@ -111,11 +111,11 @@ async fn a_green_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time(
 
 #[proxima::test(timeout = "310s")]
 async fn a_failing_plain_run_with_timeline_ends_its_axis_at_the_summary_wall_time() {
-    let output = run(&[("CARGO_VAL_C52D_FAIL", "1")], &["--output", "plain", "--timeline"]).await;
+    let output = run(&[("CARGO_VAL_C52D_FAIL", "1"), ("CARGO_VAL_JOBS", "1")], &["--output", "plain", "--timeline"]).await;
     let text = stdout_of(&output);
 
     assert_eq!(output.status.code(), Some(1), "{text}");
-    assert!(text.contains("Slowest test ") || text.contains("Next slowest test ") || text.contains("No long tail: "), "the takeaway is one of the three sentences the timeline can end on:\n{text}");
+    assert_eq!(takeaway_of(&text), "At most 1 of 1 jobs were busy at once (at <seconds>). Slowest test <seconds>.", "one job runs one test at a time, so the run never exceeds the tail limit and names its slowest test:\n{text}");
     assert!(!text.contains("After 0.000s"), "a tail that begins at zero is no tail:\n{text}");
     assert_eq!(axis_end(&text), summary_wall(&text), "{text}");
 }
@@ -172,4 +172,17 @@ async fn a_no_color_rich_run_prints_the_timeline_after_the_receipt_with_no_colou
     let last_show = text.rfind(SHOW_CURSOR).expect("the rich run shows the cursor again");
     assert!(title < last_show, "the cursor returns after the timeline, never ahead of it:\n{text}");
     assert_eq!(text[last_show + SHOW_CURSOR.len()..].trim(), "", "the show-cursor is the last thing written:\n{text}");
+}
+
+// the sentence between the legend and the longest-tests list, with every duration blanked: the durations are the run's own timing, the words around them are the outcome under test
+fn takeaway_of(text: &str) -> String {
+    let sentence = text.lines().skip_while(|line| !line.starts_with(" \u{2588} ")).skip(1).take_while(|line| !line.starts_with(" longest")).map(str::trim).collect::<Vec<_>>().join(" ");
+    let blank = |token: &str| {
+        let bare = token.trim_end_matches([')', '.']);
+        match bare.strip_suffix('s').filter(|seconds| seconds.parse::<f64>().is_ok()) {
+            Some(_) => format!("<seconds>{}", &token[bare.len()..]),
+            None => token.to_owned(),
+        }
+    };
+    sentence.split_whitespace().map(blank).collect::<Vec<_>>().join(" ")
 }
