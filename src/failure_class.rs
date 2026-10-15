@@ -37,10 +37,17 @@ pub enum Exit {
 
 impl Exit {
     /// Reads the driver's session status: on unix a negative status is the negated number of the signal that ended
-    /// the child (`session_exit_code` in `run.rs`); elsewhere every status is an exit code.
+    /// the child (`session_exit_code` in `run.rs`); on windows a status with the NTSTATUS error bits set (`0xC000_0000`,
+    /// as `abort` and an access violation exit with) is a crash and keeps the raw status as its number; every other status is an exit code.
     #[must_use]
     pub const fn from_status(status: i32) -> Self {
-        if cfg!(unix) && status < 0 { Self::Signal(status.saturating_neg()) } else { Self::Code(status) }
+        if cfg!(unix) && status < 0 {
+            Self::Signal(status.saturating_neg())
+        } else if cfg!(windows) && status.cast_unsigned() & 0xC000_0000 == 0xC000_0000 {
+            Self::Signal(status)
+        } else {
+            Self::Code(status)
+        }
     }
 }
 
