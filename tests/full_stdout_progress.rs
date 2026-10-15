@@ -13,6 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/binary.rs"]
 mod binary;
 
@@ -80,10 +82,7 @@ impl Drop for Running {
 }
 
 fn target_directory() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
-        PathBuf::from,
-    )
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
 fn make_fifo(path: &Path) {
@@ -156,10 +155,7 @@ fn spawn_cargo_val(directory: &Path, fixture: &str, stdout: PipeWriter) -> Child
         .env("NO_COLOR", "1")
         .env(CASE_COUNT_VARIABLE, FIXTURE_TEST_COUNT.to_string())
         .env("CARGO_VAL_DONE_LOG", directory.join("done"))
-        .env(
-            "CARGO_TARGET_DIR",
-            target_directory().join(format!("{fixture}-fixture")),
-        )
+        .envs(isolation::environment(&format!("full-stdout-{fixture}")))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -317,7 +313,7 @@ fn spawn_shard_many(directory: &Path, stdout: PipeWriter) -> Child {
         .env_remove("CARGO_VAL_MAX_FAIL")
         .env_remove("CARGO_VAL_FAIL_FAST")
         .env_remove("CARGO_VAL_PROCESS")
-        .env("CARGO_TARGET_DIR", target_directory().join("shard-many-fixture"))
+        .envs(isolation::environment("full-stdout-progress"))
         .arg("--manifest-path")
         .arg(manifest)
         .args(["--process", "shard", "--no-fail-fast"])
