@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn a_failure_with_no_panic_site_reports_the_classifiers_absent_reason() {
-        let reason = rows_for(b"", Exit::DeadlineKilled, &cli_run_root(), false).expect_err("a deadline kill has no location");
+        let reason = rows_for(b"", Exit::DeadlineKilled { waiting: None }, &cli_run_root(), false).expect_err("a deadline kill has no location");
 
         assert_eq!(reason, b"no_panic_site");
     }

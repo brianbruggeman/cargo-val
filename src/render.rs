@@ -20,6 +20,7 @@ use memchr::memchr;
 use crate::line::Line;
 use crate::failure_class::{Absent, Class, Enforcer, Exit, Location, Record, Reject, classify};
 use crate::hyperlink::write_linked;
+use crate::isolated_target::LockKind;
 use crate::view_defaults::{HEARTBEAT_SECS, REASON_BYTES};
 use review::{Key, Rerun, Verdict};
 
@@ -897,7 +898,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
         let (tag, value) = match exit {
             Exit::Code(code) => (0, code),
             Exit::Signal(signal) => (1, signal),
-            Exit::DeadlineKilled => (2, 0),
+            Exit::DeadlineKilled { waiting } => (2, waiting.map_or(0, |(_, holder)| holder.cast_signed())),
         };
         self.arena[start] = tag;
         self.arena[start + 1..start + EXIT_HEAD].copy_from_slice(&value.to_le_bytes());
@@ -926,6 +927,7 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             Class::Timeout { enforced_by: Enforcer::Val } => (2, 0),
             Class::Timeout { enforced_by: Enforcer::Harness } => (3, 0),
             Class::Hang => (4, 0),
+            Class::LockWait { lock, holder } => (6 + lock as u8, holder.cast_signed()),
             Class::Crash { signal } => (5, signal),
         };
         let (kind, site) = match found.location {
@@ -1126,6 +1128,9 @@ impl<'storage, const RERUN: usize> State<'storage, RERUN> {
             2 => Class::Timeout { enforced_by: Enforcer::Val },
             3 => Class::Timeout { enforced_by: Enforcer::Harness },
             4 => Class::Hang,
+            6 => Class::LockWait { lock: LockKind::BuildDirectory, holder: number(1) },
+            7 => Class::LockWait { lock: LockKind::PackageCache, holder: number(1) },
+            8 => Class::LockWait { lock: LockKind::Other, holder: number(1) },
             5 => Class::Crash { signal: number(1).cast_signed() },
             _ => Class::Panic,
         };

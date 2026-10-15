@@ -248,6 +248,7 @@ fn classified<const FRAME: usize>(frame: &mut Line<FRAME>, record: &Record<'_>) 
         Class::Assert => (b"ASSERT", None, None),
         Class::Panic => (b"PANIC", None, None),
         Class::Hang => (b"HANG", None, None),
+        Class::LockWait { .. } => (b"LOCK_WAIT", None, None),
         Class::Timeout { enforced_by } => (b"TIMEOUT", Some(enforced_by), None),
         Class::Crash { signal } => (b"CRASH", None, Some(signal)),
     };
@@ -261,6 +262,16 @@ fn classified<const FRAME: usize>(frame: &mut Line<FRAME>, record: &Record<'_>) 
         Some(value) => number(frame, b"signal", usize::try_from(value).unwrap_or(0)),
         None => null(frame, b"signal"),
     }
+    match record.class {
+        Class::LockWait { lock, holder } => {
+            text(frame, b"lock", lock.word());
+            number(frame, b"holder", holder as usize);
+        }
+        Class::Assert | Class::Panic | Class::Hang | Class::Timeout { .. } | Class::Crash { .. } => {
+            null(frame, b"lock");
+            null(frame, b"holder");
+        }
+    }
     match record.location {
         Ok(site) => location(frame, site, false),
         Err(Absent::External(site)) => location(frame, site, true),
@@ -273,6 +284,8 @@ fn unclassified<const FRAME: usize>(frame: &mut Line<FRAME>) {
     text(frame, b"class", b"UNCLASSIFIED");
     null(frame, b"enforced_by");
     null(frame, b"signal");
+    null(frame, b"lock");
+    null(frame, b"holder");
     absent_location(frame, b"no_panic_in_capture");
     null(frame, b"message");
 }
@@ -387,3 +400,39 @@ fn exit<const FRAME: usize>(frame: &mut Line<FRAME>, code: u8) {
     close(frame);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use std::string::String;
+
+    use super::failure;
+    use crate::failure_class::Exit;
+    use crate::isolated_target::LockKind;
+    use crate::line::Line;
+
+    fn record(exit: Exit, stderr: &[u8]) -> String {
+        let mut frame = Line::<1024>::new();
+        failure(&mut frame, (b"doc_fixture", b"blocks_on_lock"), [(b"", 0), (stderr, 0)], exit, Err(b""));
+        String::from_utf8_lossy(frame.bytes()).into_owned()
+    }
+
+    #[test]
+    fn a_deadline_kill_behind_a_held_lock_carries_the_lock_and_the_holders_pid() {
+        let waiting = Exit::DeadlineKilled { waiting: Some((LockKind::PackageCache, 4242)) };
+
+        let text = record(waiting, b"    Blocking waiting for file lock on package cache\n");
+
+        assert!(text.contains("\"class\":\"LOCK_WAIT\""), "{text}");
+        assert!(text.contains("\"lock\":\"package_cache\""), "{text}");
+        assert!(text.contains("\"holder\":4242"), "{text}");
+    }
+
+    #[test]
+    fn a_silent_deadline_kill_with_no_holder_is_a_hang_with_null_lock_and_holder() {
+        let text = record(Exit::DeadlineKilled { waiting: None }, b"");
+
+        assert!(text.contains("\"class\":\"HANG\""), "{text}");
+        assert!(text.contains("\"lock\":null"), "{text}");
+        assert!(text.contains("\"holder\":null"), "{text}");
+    }
+}

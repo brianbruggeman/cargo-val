@@ -9,6 +9,8 @@
 
 use memchr::{memchr, memchr2, memmem, memrchr};
 
+use crate::isolated_target::LockKind;
+
 const PANIC_MARK: &[u8] = b"panicked at ";
 const THREAD_LINE: &[u8] = b"thread '";
 const BACKTRACE_MARK: &[u8] = b"stack backtrace:";
@@ -27,12 +29,13 @@ const MESSAGE_ENDS: [&[u8]; 5] = [
 const BLOCK_ENDS: [&[u8]; 2] = [b"\n---- ", b"\nfailures:"];
 
 /// How the test process ended, as the driver knows it. `DeadlineKilled` is val's own deadline,
-/// which is not a signal the test chose, so it is a variant of its own.
+/// which is not a signal the test chose, so it is a variant of its own; `waiting` is the lock and the pid of the
+/// holder the killed group was blocked behind when the deadline fell, read before the kill (`lock_wait::at_deadline`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
     Code(i32),
     Signal(i32),
-    DeadlineKilled,
+    DeadlineKilled { waiting: Option<(LockKind, u32)> },
 }
 
 impl Exit {
@@ -63,6 +66,7 @@ pub enum Class {
     Panic,
     Timeout { enforced_by: Enforcer },
     Hang,
+    LockWait { lock: LockKind, holder: u32 },
     Crash { signal: i32 },
 }
 
@@ -111,7 +115,7 @@ struct Panic<'a> {
 pub fn classify(capture: &[u8], exit: Exit, dropped: u64) -> Result<Record<'_>, Reject> {
     match exit {
         Exit::Code(0) => Err(Reject::Succeeded),
-        Exit::DeadlineKilled => Ok(deadline_record(capture, dropped)),
+        Exit::DeadlineKilled { waiting } => Ok(deadline_record(capture, waiting, dropped)),
         Exit::Code(_) | Exit::Signal(_) => match find_panic(capture) {
             Some(panic) => Ok(panic_record(capture, &panic, dropped)),
             None => silent_record(exit, dropped),
@@ -119,11 +123,11 @@ pub fn classify(capture: &[u8], exit: Exit, dropped: u64) -> Result<Record<'_>, 
     }
 }
 
-fn deadline_record(capture: &[u8], dropped: u64) -> Record<'_> {
-    let class = if capture.is_empty() {
-        Class::Hang
-    } else {
-        Class::Timeout { enforced_by: Enforcer::Val }
+fn deadline_record(capture: &[u8], waiting: Option<(LockKind, u32)>, dropped: u64) -> Record<'_> {
+    let class = match waiting {
+        Some((lock, holder)) => Class::LockWait { lock, holder },
+        None if capture.is_empty() => Class::Hang,
+        None => Class::Timeout { enforced_by: Enforcer::Val },
     };
     Record { class, location: Err(Absent::NoPanicSite), message: &capture[..0], sides: None, dropped }
 }
@@ -137,7 +141,7 @@ fn silent_record(exit: Exit, dropped: u64) -> Result<Record<'static>, Reject> {
             sides: None,
             dropped,
         }),
-        Exit::Code(_) | Exit::DeadlineKilled => Err(Reject::NoEvidence),
+        Exit::Code(_) | Exit::DeadlineKilled { .. } => Err(Reject::NoEvidence),
     }
 }
 
@@ -146,7 +150,7 @@ fn panic_record<'a>(capture: &'a [u8], panic: &Panic<'a>, dropped: u64) -> Recor
     let class = message_class(message);
     let sides = match class {
         Class::Assert => assert_sides(message),
-        Class::Panic | Class::Timeout { .. } | Class::Hang | Class::Crash { .. } => None,
+        Class::Panic | Class::Timeout { .. } | Class::Hang | Class::LockWait { .. } | Class::Crash { .. } => None,
     };
     Record { class, location: user_location(capture, panic), message, sides, dropped }
 }

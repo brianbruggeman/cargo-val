@@ -6,6 +6,7 @@ use std::vec::Vec;
 
 use super::{Action, CARRY, CURSOR_QUERY, Detail, Key, MOUSE_OFF, MOUSE_ON, Rerun, Verdict};
 use crate::failure_class::{Class, Enforcer, Exit, Location};
+use crate::isolated_target::LockKind;
 use crate::line::Line;
 use crate::render::{Event, ExcerptRows, Identity, Mode, Outcome, State, UNREAD, excerpt};
 use crate::test_alloc::measure_allocations;
@@ -61,7 +62,7 @@ fn run_with_excerpt<'storage>(arena: &'storage mut [u8], ledger: &'storage mut [
     }
     for (id, millis, output) in [(SCHED, 71_660, SCHED_OUTPUT), (SHARD, 120_030, SHARD_OUTPUT)] {
         settle(&mut state, id, Outcome::Failed, millis);
-        state.apply(&Event::Captured { id, stdout: (output, 0), stderr: (b"", 0), exit: if id == SCHED { Exit::DeadlineKilled } else { Exit::Code(101) }, excerpt: if id == SHARD { shard_rows } else { UNREAD } });
+        state.apply(&Event::Captured { id, stdout: (output, 0), stderr: (b"", 0), exit: if id == SCHED { Exit::DeadlineKilled { waiting: None } } else { Exit::Code(101) }, excerpt: if id == SHARD { shard_rows } else { UNREAD } });
         state.keep_views(id, [(if id == SCHED { 8 } else { 7 }, 1, 1, output.len() as u64), (0, 0, 0, 0)]);
         state.apply(&Event::Retried { id, verdict: NOT_RETRIED });
     }
@@ -887,8 +888,11 @@ fn the_state_classifies_a_signal_death_and_a_silent_deadline_kill_without_a_pani
     let mut checked = 0;
     for (name, exit, capture, expected) in [
         ("abort", Exit::Signal(6), ABORT_OUTPUT, Class::Crash { signal: 6 }),
-        ("deadline with output", Exit::DeadlineKilled, TIMEOUT_OUTPUT, Class::Timeout { enforced_by: Enforcer::Val }),
-        ("deadline without output", Exit::DeadlineKilled, b"", Class::Hang),
+        ("deadline with output", Exit::DeadlineKilled { waiting: None }, TIMEOUT_OUTPUT, Class::Timeout { enforced_by: Enforcer::Val }),
+        ("deadline without output", Exit::DeadlineKilled { waiting: None }, b"", Class::Hang),
+        ("deadline behind a build lock", Exit::DeadlineKilled { waiting: Some((LockKind::BuildDirectory, 4242)) }, b"", Class::LockWait { lock: LockKind::BuildDirectory, holder: 4242 }),
+        ("deadline behind the package cache", Exit::DeadlineKilled { waiting: Some((LockKind::PackageCache, 97_001)) }, TIMEOUT_OUTPUT, Class::LockWait { lock: LockKind::PackageCache, holder: 97_001 }),
+        ("deadline behind another lock", Exit::DeadlineKilled { waiting: Some((LockKind::Other, 31)) }, b"", Class::LockWait { lock: LockKind::Other, holder: 31 }),
     ] {
         let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
         let mut state = tracked(&mut arena, &mut ledger);
@@ -898,7 +902,7 @@ fn the_state_classifies_a_signal_death_and_a_silent_deadline_kill_without_a_pani
         assert_eq!(state.detail(SCHED), (expected, None, (&b""[..], None), &b""[..], &b""[..]), "{name}");
         checked += 1;
     }
-    assert_eq!(checked, 3);
+    assert_eq!(checked, 6);
 }
 
 const VSCODE: &[u8] = b"vscode://file{file}:{line}:{col}";
@@ -1382,4 +1386,19 @@ fn a_notice_wider_than_the_terminal_is_cut_to_one_row() {
     state.apply(&Event::Notice { what: b"editor failed to start: /very/long/path/to/some/editor (os error 13)" });
 
     assert_eq!(frame_of(&state, 40, false).lines().count(), before.lines().count() + 1);
+}
+
+#[test]
+fn the_detail_screen_says_which_lock_a_deadline_kill_waited_on_and_who_held_it() {
+    let (mut arena, mut ledger) = ([0_u8; 1024], [0_u32; 8]);
+    let state = scenario("detail", &mut arena, &mut ledger);
+    let lock_wait = |_: Identity<'_>| -> Detail<'static> { (Class::LockWait { lock: LockKind::BuildDirectory, holder: 4242 }, None, (b"", None), b"", b"") };
+    let mut frame = Line::<8192>::new();
+
+    state.screen(lock_wait, 120, false, &mut frame).expect("the frame holds one review screen");
+
+    let text = String::from_utf8(frame.bytes().to_vec()).expect("a review frame is utf-8");
+    assert!(text.contains("LOCK "), "{text}");
+    assert!(text.contains("killed at its deadline waiting on build directory held by pid 4242"), "{text}");
+    assert!(!text.contains("no output captured"), "{text}");
 }

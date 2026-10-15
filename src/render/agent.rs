@@ -159,6 +159,12 @@ fn class_words<const FRAME: usize>(frame: &mut Line<FRAME>, class: Class) {
         Class::Assert => frame.text(b"ASSERT"),
         Class::Panic => frame.text(b"PANIC"),
         Class::Hang => frame.text(b"HANG"),
+        Class::LockWait { lock, holder } => {
+            frame.text(b"LOCK_WAIT lock=");
+            frame.text(lock.word());
+            frame.text(b" holder=");
+            frame.number(holder as usize);
+        }
         Class::Timeout { enforced_by } => {
             frame.text(b"TIMEOUT enforced_by=");
             frame.text(match enforced_by {
@@ -299,7 +305,9 @@ mod tests {
     use std::format;
     use std::string::String;
 
-    use super::output;
+    use super::{failure_block, output};
+    use crate::failure_class::Exit;
+    use crate::isolated_target::LockKind;
     use crate::line::Line;
 
     const WINDOW: &[u8] = b"worker 0007 flushed segment 0031 to disk\nworker 0007 flushed segment 0032 to disk\n";
@@ -327,5 +335,29 @@ mod tests {
 
         assert!(text.contains(&format!("bytes={} ", WINDOW.len())), "{text}");
         assert!(!text.contains("capture_dropped"), "{text}");
+    }
+
+    #[test]
+    fn a_deadline_kill_behind_a_held_lock_is_lock_wait_with_the_lock_and_the_holders_pid() {
+        let waiting = Exit::DeadlineKilled { waiting: Some((LockKind::BuildDirectory, 4242)) };
+        let cargo_line: &[u8] = b"    Blocking waiting for file lock on build directory\n";
+        let mut frame = Line::<512>::new();
+
+        failure_block(&mut frame, (b"doc_fixture", b"blocks_on_lock"), [(b"", 0), (cargo_line, 0)], waiting, Err(b""));
+
+        let text = String::from_utf8_lossy(frame.bytes()).into_owned();
+        assert!(text.contains("LOCK_WAIT lock=build_directory holder=4242"), "{text}");
+        assert!(!text.contains("HANG"), "{text}");
+    }
+
+    #[test]
+    fn a_silent_deadline_kill_with_no_holder_is_still_a_hang() {
+        let mut frame = Line::<512>::new();
+
+        failure_block(&mut frame, (b"doc_fixture", b"sleeps_forever"), [(b"", 0), (b"", 0)], Exit::DeadlineKilled { waiting: None }, Err(b""));
+
+        let text = String::from_utf8_lossy(frame.bytes()).into_owned();
+        assert!(text.contains("HANG"), "{text}");
+        assert!(!text.contains("LOCK_WAIT"), "{text}");
     }
 }
