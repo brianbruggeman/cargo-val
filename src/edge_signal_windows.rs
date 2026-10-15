@@ -213,6 +213,11 @@ impl SignalPipe {
         terminate_children();
     }
 
+    /// Ends every child of the run without recording a received signal, for a quit key: the run ends as a quit, not as an interrupt.
+    pub fn stop_children(&self) {
+        terminate_children();
+    }
+
     /// Takes the pending control event and ends every child of the run.
     ///
     /// # Errors

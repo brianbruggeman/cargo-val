@@ -635,6 +635,7 @@ fn runtime_settings(
         Some(_) => return Err(RunError::Settings),
     };
     let exit_with_parent = resolve_exit_with_parent(&source, parser)?;
+    QUIT_LOG.store(debug, Ordering::Relaxed);
     Ok(Settings {
         bin_gate,
         debug,
@@ -844,6 +845,7 @@ pub(crate) fn session_exited(
         return Ok(());
     };
     watch.status = Some(code);
+    quit_step(b"child-reaped", watch.process_id as usize);
     release_group(watch.process_id);
     let (slot, exit) = (watch.slot, watch.exit(code));
     if watch.rerun.is_some() && exit == Err(RunError::Cancelled) {
@@ -870,6 +872,7 @@ pub(crate) fn session_cancelled(ledger: &Ledger<'_>, watches: &mut Watches, inde
         return;
     };
     if let Some(session) = ledger.sessions().get(watch.slot) {
+        quit_step(b"child-signalled", watch.process_id as usize);
         session.child().terminate();
     }
 }
@@ -1088,6 +1091,25 @@ pub(crate) fn emit_live(render: &Render<'_>, event: &Event<'_>) -> Result<(), Ru
         return emit(render, event);
     }
     Ok(())
+}
+
+/// Set from `CARGO_VAL_LOG=debug`; [`quit_step`] writes nothing while it is clear.
+static QUIT_LOG: AtomicBool = AtomicBool::new(false);
+
+/// One stamped line per step of leaving the run, written straight to descriptor 2 so the stamp is the moment the step ran, not the moment a queue drained.
+pub fn quit_step(step: &[u8], detail: usize) {
+    if !QUIT_LOG.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut line = Line::<192>::new();
+    line.text(b"cargo-val: debug: quit ms=");
+    line.number(usize::try_from(monotonic_millis()).unwrap_or(usize::MAX));
+    line.text(b" step=");
+    line.text(step);
+    line.text(b" detail=");
+    line.number(detail);
+    line.text(b"\n");
+    let _ = crate::edge_output::write(2, line.bytes());
 }
 
 /// Set once the live frame hides the cursor; [`restore_cursor`] shows it again exactly once on any exit path.
@@ -1882,12 +1904,20 @@ impl ListingRun<'_> {
             _ => None,
         };
         drop(state);
+        if leaving {
+            quit_step(if interrupting { b"interrupt-key" } else { b"second-q" }, 0);
+        }
         if interrupting {
             self.signals.raise_interrupt();
+        } else if leaving {
+            self.signals.stop_children();
+            self.stop_doc_tests();
+            quit_step(b"children-stopped", 0);
         }
         emit(self.render(), &Event::Key(key))?;
         if leaving {
             self.root.fire();
+            quit_step(b"root-fired", 0);
         }
         match editing.filter(|_| !editor_reserved()) {
             Some(_) if self.editor_in_flight() => emit(self.render(), &Event::Notice { what: "opening the editor…".as_bytes() }),
@@ -2111,6 +2141,7 @@ impl ListingRun<'_> {
     pub(crate) fn interrupted(&self) -> bool {
         let received = self.signals.received().is_some();
         if received {
+            quit_step(b"signal-received", 0);
             self.root.fire();
             abandon_editor();
         }
@@ -2190,6 +2221,19 @@ impl ListingRun<'_> {
         ledger.sessions().len() - usize::from(frozen)
     }
 
+    // the phase `stop_for_quit` leaves is the record that a quit ended the doc tests; root fired distinguishes it from a fail-fast stop
+    fn doc_stopped(&self) -> bool {
+        self.doc.try_borrow().is_ok_and(|doc| doc.as_ref().is_some_and(|doc| doc.phase == DocPhase::Interrupted))
+    }
+
+    fn stop_doc_tests(&self) {
+        if let Ok(mut doc) = self.doc.try_borrow_mut()
+            && let Some(doc) = doc.as_mut()
+        {
+            doc.stop_for_quit();
+        }
+    }
+
     fn interrupt_doc_tests(&self) -> DocAtTrip {
         self.doc
             .try_borrow_mut()
@@ -2208,7 +2252,7 @@ impl ListingRun<'_> {
             return Ok(());
         };
         self.doc_pending.set(false);
-        if self.interrupted() {
+        if self.interrupted() || self.root.is_fired() {
             return Ok(());
         }
         let mut doc = spawn()?;
@@ -3130,6 +3174,7 @@ impl CargoDriver<'_> {
     }
 
     pub(crate) fn cargo_exited(&mut self, code: i32) {
+        quit_step(b"build-cargo-exited", self.process_id as usize);
         release_child(self.process_id);
         self.discovery.exited(code);
     }
@@ -3514,9 +3559,11 @@ fn persist_last_run(location: &Located, wall_ms: u64, outcome: &Result<RunSummar
     let (Some(target), Some(record)) = (location.0.as_deref(), last_run_record(wall_ms, location.1, outcome)) else {
         return;
     };
+    quit_step(b"record-write-start", 0);
     if let Err(error) = last_run::write(target, record) {
         proxima_telemetry::warn!(error = %error, path = %target.display(), "last-run record not written");
     }
+    quit_step(b"record-write-end", 0);
 }
 
 fn begin_rich(render: &Render<'_>, mouse: bool) -> Result<(), RunError> {
@@ -3540,6 +3587,7 @@ pub(crate) async fn run_body(parser: &CliParser<'_>) -> Result<RunSummary, RunEr
     let started_millis = monotonic_millis();
     let mut location: Located = (None, [0; 3]);
     let outcome = run_located(parser, started_millis, &mut location).await;
+    quit_step(b"store-closed", 0);
     persist_last_run(&location, monotonic_millis().saturating_sub(started_millis), &outcome);
     outcome
 }
@@ -4055,18 +4103,22 @@ async fn resolve_libdirs(
     Ok((directories, 1 + usize::from(target_length > 0)))
 }
 
+const QUIT_SIGNAL: i32 = 2;
+
 fn finish_run(
     parser: &CliParser<'_>,
     run: &ListingRun<'_>,
     cargo_exit_code: Option<i32>,
     build_reported: bool,
 ) -> Result<RunSummary, RunError> {
-    if let Err(error) = interrupted(run.signals) {
+    let cargo_failed = cargo_exit_code.is_some_and(|code| code != 0);
+    let stopped = interrupted(run.signals).err().or_else(|| ((cargo_failed || run.doc_stopped()) && run.root.is_fired()).then_some(RunError::Interrupted(QUIT_SIGNAL)));
+    if let Some(error) = stopped {
         agent_exit(run, error.exit_code())?;
         close_interrupted(parser, run, error.exit_code())?;
         return Err(error);
     }
-    if cargo_exit_code.is_some_and(|code| code != 0) {
+    if cargo_failed {
         run.interrupt_doc_tests();
         let error = if build_reported { RunError::CargoFailed } else { RunError::CargoRefused };
         match (build_reported, run.settings.output.is_agent_like()) {
@@ -4330,6 +4382,7 @@ impl DocRun {
     }
 
     pub(crate) fn exited(&mut self, code: i32) {
+        quit_step(b"doc-cargo-exited", self.process_id as usize);
         release_group(self.process_id);
         self.exit_code = Some(code);
     }
@@ -4340,6 +4393,14 @@ impl DocRun {
         self.stderr_bytes[self.stderr_length..self.stderr_length + taken]
             .copy_from_slice(&bytes[..taken]);
         self.stderr_length += taken;
+    }
+
+    // a fail-fast trip leaves executing doc tests to finish, but a quit ends them: the run is being cancelled, not reported
+    fn stop_for_quit(&mut self) {
+        if self.exit_code.is_none() {
+            interrupt_group(self.process_id);
+            self.phase = DocPhase::Interrupted;
+        }
     }
 
     fn state_for_trip(&mut self) -> DocAtTrip {
