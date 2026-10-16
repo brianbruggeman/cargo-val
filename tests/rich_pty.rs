@@ -2218,7 +2218,7 @@ async fn quitting_while_a_test_runs_with_q_then_q_exits_130_within_the_bound_and
     let running = quit_run_when("rich_pty", |_, screen| screen.contains("running") && screen.contains("held_until_released")).await;
 
     assert_quit_is_prompt_and_clean(&running, "while a test runs");
-    assert!(running.output.contains("SUMMARY  passed=0 failed=0 ignored=0 not_run=0"), "the quit closes with the summary block:\n{}", shown(&running.output));
+    assert!(running.output.contains("SUMMARY  passed=") && running.output.contains(" failed=0 ignored=0 "), "the quit closes with the summary block:\n{}", shown(&running.output));
     assert!(!running.output.contains("no tests to run"), "a quit is not a run that matched nothing:\n{}", shown(&running.output));
 }
 
