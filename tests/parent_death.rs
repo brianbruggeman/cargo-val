@@ -48,7 +48,8 @@ const DETACHED: &str = "detached";
 const BLOCKED: &str = "blocked";
 const ARMED: &str = "armed";
 fn gone_report() -> String {
-    common::group::deadline_report::persist_deadline_report(gone_deadline(), None, None, &[], &[]).1
+    let (snapshot, path) = common::group::deadline_report::persist_deadline_report(gone_deadline(), None, None, &[], &[]);
+    format!("{snapshot}\n{path}")
 }
 
 fn gone_deadline() -> Duration {

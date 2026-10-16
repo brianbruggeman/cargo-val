@@ -21,7 +21,8 @@ pub async fn first_line(stream: &ChildStream, what: &str) -> String {
 }
 
 fn fifo_report() -> String {
-    deadline_report::persist_deadline_report(fifo_deadline(), None, None, &[], &[]).1
+    let (snapshot, path) = deadline_report::persist_deadline_report(fifo_deadline(), None, None, &[], &[]);
+    format!("{snapshot}\n{path}")
 }
 
 fn fifo_deadline() -> Duration {

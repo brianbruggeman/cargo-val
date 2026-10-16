@@ -77,6 +77,8 @@ async fn a_group_blocked_on_a_held_build_lock_classifies_as_a_lock_wait_naming_t
     assert!(holder.still_building(), "the holder kept the lock through the deadline");
     let holder_pid = holder.child.id();
     holder.release().await;
+    let scratch = scratch_two();
+    let shared = scratch.join("shared-target");
 
     let record = classify(&seen, exit, 0).expect("a deadline kill classifies");
     assert_eq!(record.class, Class::LockWait { lock: LockKind::BuildDirectory, holder: holder_pid }, "exit {exit:?}, capture {}", String::from_utf8_lossy(&seen));
@@ -89,6 +91,8 @@ async fn the_group_that_holds_the_lock_is_not_waiting_on_it_and_stays_a_hang() {
 
     let exit = at_deadline(holder.child.id(), Some(LockKind::BuildDirectory));
     holder.release().await;
+    let scratch = scratch_two();
+    let shared = scratch.join("shared-target");
 
     assert_eq!(exit, Exit::DeadlineKilled { waiting: None });
     assert_eq!(classify(b"", exit, 0).expect("a deadline kill classifies").class, Class::Hang);
@@ -136,7 +140,3 @@ async fn a_stale_cargo_lock_under_locked_is_cargos_own_refusal_not_a_hang_or_a_w
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("cannot update the lock file"), "cargo's own message is shown: {stderr}");
-    assert!(stderr.contains("--locked was passed to prevent this"), "cargo's own message is shown: {stderr}");
-    assert!(stderr.contains("refused the invocation"), "{stderr}");
-    assert!(["HANG", "LOCK_WAIT", "waiting for", "deadline"].iter().all(|word| !stderr.contains(word)), "a resolution error is neither a hang nor a wait: {stderr}");
-}

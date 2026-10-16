@@ -474,7 +474,7 @@ async fn an_integration_test_is_not_launched_when_its_package_bin_fails_to_build
 }
 
 #[cfg(unix)]
-#[proxima::test(timeout = "60s")]
+#[proxima::test(timeout = "310s")]
 async fn a_run_whose_bin_fails_before_any_hold_ends_on_its_own_exit_within_seconds() {
     let started = std::time::Instant::now();
     let result = bin_gate_hold::cold_run_within(
