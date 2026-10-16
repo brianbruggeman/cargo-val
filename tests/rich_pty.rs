@@ -1,8 +1,13 @@
 #![cfg(unix)]
 
+use core::cell::RefCell;
+use core::time::Duration;
+use std::ffi::CString;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::num::NonZeroI32;
@@ -17,6 +22,7 @@ use cargo_val::edge_exit_linux::LinuxExit as ExitSource;
 use cargo_val::edge_exit_macos::MacosExit as ExitSource;
 use cargo_val::edge_stream_unix::ChildStream;
 use futures::future::join;
+use proxima_core::time::timeout;
 use proxima_primitives::pipe::Pipe;
 
 #[path = "common/binary.rs"]
@@ -1538,47 +1544,108 @@ fn assert_review_resumed_and_quit(output: &str, status: ExitStatus) {
     assert_eq!(status.code(), Some(1), "q q exits with the run's code: {status}\n{}", shown(output));
 }
 
-fn wait_for_invocations(log: &Path, count: usize) -> Vec<String> {
-    let started = Instant::now();
-    loop {
-        let lines = std::fs::read_to_string(log).map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
-        if lines.iter().filter(|line| line.starts_with("pgid=")).count() >= count {
-            return lines;
-        }
-        assert!(started.elapsed().as_secs() < 30, "the detached editor never ran {count} time(s): {lines:?}");
-        std::thread::yield_now();
+const INVOCATION_BUDGET: Duration = Duration::from_secs(30);
+
+// the log is a fifo the harness holds open both ways and reads without blocking: nothing parks the executor thread a fake editor's start depends on
+fn editor_fifo() -> (PathBuf, File) {
+    let log = editor_log();
+    let name = CString::new(log.as_os_str().as_bytes()).expect("the log path has no nul byte");
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo {}: {}", log.display(), std::io::Error::last_os_error());
+    let held = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(&log).expect("the harness-made fifo opens for holding");
+    (log, held)
+}
+
+fn collect_records(mut fifo: &File, recorded: &mut Vec<u8>) {
+    let mut chunk = [0_u8; 512];
+    while let Ok(count @ 1..) = fifo.read(&mut chunk) {
+        recorded.extend_from_slice(&chunk[..count]);
     }
 }
 
-async fn open_detached_editor(master: &ChildStream, mut keys: File, (log, count, hold): (&Path, usize, Option<PathBuf>)) -> String {
-    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
-    keys.write_all(b"eq").expect("the editor and quit-arm keys are writable");
-    let (armed, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("q again to confirm")).await;
+fn editors_ran(recorded: &[u8], count: usize) -> bool {
+    String::from_utf8_lossy(recorded).lines().filter(|line| line.starts_with("foreground=")).count() >= count
+}
+
+fn record_lines(recorded: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(recorded).lines().map(str::to_owned).collect()
+}
+
+// the harness keeps the panic text of its own thread only, so a failure raised from a bounded wait prints its report first
+fn report_and_fail(report: &str) -> ! {
+    eprintln!("{report}");
+    panic!("{report}")
+}
+
+// reads the terminal until `done` accepts what it held, within the budget: cargo-val parks its work behind output nobody reads, and its own redraws are what wake this check
+async fn drain_until_within(master: &ChildStream, what: &str, before: &[u8], mut done: impl FnMut(&[u8]) -> bool) -> Vec<u8> {
+    let mut seen = Vec::new();
+    let waited = timeout(INVOCATION_BUDGET, async {
+        while !done(&seen) {
+            match master.call(()).await {
+                Ok(Ok(range)) => seen.extend_from_slice(&master.window(range).expect("the range was just read")),
+                _ => break,
+            }
+        }
+    })
+    .await;
+    if waited.is_err() {
+        report_and_fail(&format!("{what} did not happen within {INVOCATION_BUDGET:?}; the terminal held:\n{}\n{}", shown(&String::from_utf8_lossy(before)), shown(&String::from_utf8_lossy(&seen))));
+    }
+    seen
+}
+
+async fn drain_within(master: &ChildStream, what: &str, marker: &str) -> Vec<u8> {
+    drain_until_within(master, what, &[], |bytes| String::from_utf8_lossy(bytes).contains(marker)).await
+}
+
+async fn wait_for_invocations(fifo: &File, master: &ChildStream, (count, recorded): (usize, &mut Vec<u8>)) -> Vec<u8> {
+    drain_until_within(master, "the detached editor's record", &[], |_| {
+        collect_records(fifo, recorded);
+        editors_ran(recorded, count)
+    })
+    .await
+}
+
+async fn drain_to_eof_within(master: &ChildStream, what: &str, before: &[u8]) -> Vec<u8> {
+    drain_until_within(master, what, before, |_| false).await
+}
+
+// the quit key is armed only after the editor ran: the confirm window is two seconds, and a loaded box takes longer than that to start an editor
+async fn open_detached_editor(master: &ChildStream, mut keys: File, (fifo, count, hold): (&File, usize, Option<PathBuf>)) -> (String, Vec<String>) {
+    let mut recorded = Vec::new();
+    let mut output = drain_within(master, "the review header", REVIEW_HEADER).await;
+    keys.write_all(b"e").expect("the editor key is writable");
     output.extend_from_slice(b"\n--- editor opened ---\n");
-    output.extend_from_slice(&armed);
-    wait_for_invocations(log, count);
+    output.extend_from_slice(&wait_for_invocations(fifo, master, (count, &mut recorded)).await);
+    keys.write_all(b"q").expect("the quit-arm key is writable");
+    output.extend_from_slice(&drain_within(master, "the quit arm while the editor runs", "q again to confirm").await);
     if let Some(hold) = hold {
         File::create(hold).expect("the hold file releases the editor");
     }
     output.extend_from_slice(b"\n--- quitting ---\n");
     keys.write_all(b"q").expect("the quit key is writable");
-    let (rest, _) = drain::drain_until(master, |_| false).await;
+    let rest = drain_to_eof_within(master, "the quit after the detached editor", &output).await;
     output.extend_from_slice(&rest);
-    String::from_utf8_lossy(&output).into_owned()
+    (String::from_utf8_lossy(&output).into_owned(), record_lines(&recorded))
 }
 
 async fn detached_edit(editor: &Path, extra: &[(&str, &str)], count: usize, hold: bool) -> (String, ExitStatus, Vec<String>) {
-    let log = editor_log();
+    let (log, fifo) = editor_fifo();
     let release = log.with_extension("hold");
     let visual = editor.display().to_string();
-    let mut environment = vec![("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8"))];
+    let mut environment = vec![("NO_COLOR", "1"), ("CARGO_VAL_LOG", "debug"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8"))];
     environment.extend_from_slice(extra);
     if hold {
         environment.push(("FAKE_EDITOR_HOLD_FILE", release.to_str().expect("the hold path is UTF-8")));
     }
-    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| open_detached_editor(master, keys, (&log, count, hold.then_some(release.clone()))).await).await;
-    let lines = wait_for_invocations(&log, count);
-    (output, status, lines)
+    let recorded = RefCell::new(Vec::new());
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| {
+        let (output, lines) = open_detached_editor(master, keys, (&fifo, count, hold.then_some(release.clone()))).await;
+        *recorded.borrow_mut() = lines;
+        output
+    })
+    .await;
+    (output, status, recorded.into_inner())
 }
 
 const BUSY_NOTICE: &str = "opening the editor…";
@@ -1588,42 +1655,43 @@ fn process_is_gone(pid: &str) -> bool {
     unsafe { libc::kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
 }
 
-fn editors_recorded(log: &Path, (count, reaped): (usize, bool), started: Instant) -> bool {
-    let lines = std::fs::read_to_string(log).map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
-    let pids: Vec<&str> = lines.iter().filter_map(|line| line.strip_prefix("pgid=")).collect();
-    assert!(started.elapsed().as_secs() < 30, "editors {pids:?} of {count} never arrived (reaped required: {reaped})");
-    pids.len() >= count && (!reaped || pids.iter().all(|pid| process_is_gone(pid)))
+fn editors_reaped(recorded: &[u8]) -> bool {
+    record_lines(recorded).iter().filter_map(|line| line.strip_prefix("pgid=")).all(process_is_gone)
 }
 
-async fn press_e_twice(master: &ChildStream, mut keys: File, (log, count, hold): (&Path, usize, PathBuf)) -> String {
-    let (mut output, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(REVIEW_HEADER)).await;
+async fn press_e_twice(master: &ChildStream, mut keys: File, (fifo, count, hold): (&File, usize, PathBuf)) -> (String, Vec<String>) {
+    let mut recorded = Vec::new();
+    let mut output = drain_within(master, "the review header", REVIEW_HEADER).await;
     keys.write_all(b"e").expect("the first editor key is writable");
-    let started = Instant::now();
-    let (first, _) = drain::drain_until(master, |_| editors_recorded(log, (1, false), started)).await;
-    output.extend_from_slice(&first);
+    output.extend_from_slice(&wait_for_invocations(fifo, master, (1, &mut recorded)).await);
     keys.write_all(b"e").expect("the second editor key is writable");
-    let (busy, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains(BUSY_NOTICE)).await;
-    output.extend_from_slice(&busy);
+    output.extend_from_slice(&drain_within(master, "the busy notice", BUSY_NOTICE).await);
     File::create(hold).expect("the hold file releases the editor");
-    let (exited, _) = drain::drain_until(master, |_| editors_recorded(log, (count, true), started)).await;
-    output.extend_from_slice(&exited);
+    output.extend_from_slice(&wait_for_invocations(fifo, master, (count, &mut recorded)).await);
+    let reaped = drain_until_within(master, "every editor reaped", &output, |_| editors_reaped(&recorded)).await;
+    output.extend_from_slice(&reaped);
     keys.write_all(b"q").expect("the quit-arm key is writable");
-    let (armed, _) = drain::drain_until(master, |bytes| String::from_utf8_lossy(bytes).contains("q again to confirm")).await;
-    output.extend_from_slice(&armed);
+    output.extend_from_slice(&drain_within(master, "the quit arm", "q again to confirm").await);
     keys.write_all(b"q").expect("the quit key is writable");
-    let (rest, _) = drain::drain_until(master, |_| false).await;
+    let rest = drain_to_eof_within(master, "the quit after the double press", &output).await;
     output.extend_from_slice(&rest);
-    String::from_utf8_lossy(&output).into_owned()
+    (String::from_utf8_lossy(&output).into_owned(), record_lines(&recorded))
 }
 
 async fn double_press_edit(editor: &Path, extra: &[(&str, &str)], count: usize) -> (String, ExitStatus, Vec<String>) {
-    let log = editor_log();
+    let (log, fifo) = editor_fifo();
     let release = log.with_extension("hold");
     let visual = editor.display().to_string();
-    let mut environment = vec![("NO_COLOR", "1"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_HOLD_FILE", release.to_str().expect("the hold path is UTF-8"))];
+    let mut environment = vec![("NO_COLOR", "1"), ("CARGO_VAL_LOG", "debug"), ("VISUAL", visual.as_str()), ("FAKE_EDITOR_LOG", log.to_str().expect("the log path is UTF-8")), ("FAKE_EDITOR_HOLD_FILE", release.to_str().expect("the hold path is UTF-8"))];
     environment.extend_from_slice(extra);
-    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| press_e_twice(master, keys, (&log, count, release.clone())).await).await;
-    (output, status, recorded(&log))
+    let recorded = RefCell::new(Vec::new());
+    let (output, status) = run_driven("rich_pty_fail", "rich", &environment, async |master, keys, _release, _leader| {
+        let (output, lines) = press_e_twice(master, keys, (&fifo, count, release.clone())).await;
+        *recorded.borrow_mut() = lines;
+        output
+    })
+    .await;
+    (output, status, recorded.into_inner())
 }
 
 #[proxima::test]
