@@ -18,9 +18,32 @@ mod fixture;
 mod binary;
 #[path = "common/plain.rs"]
 mod plain;
+#[cfg(unix)]
+#[path = "common/supervise.rs"]
+mod supervise;
+#[cfg(unix)]
+#[path = "common/wait_log.rs"]
+mod wait_log;
+
+#[cfg(unix)]
+use core::time::Duration;
 
 use cargo_val::render::Outcome;
 use fixture::fixture_output;
+#[cfg(unix)]
+use futures::future::join3;
+#[cfg(unix)]
+use proxima_primitives::pipe::Pipe;
+#[cfg(unix)]
+use supervise::supervised;
+#[cfg(unix)]
+use wait_log::{Log, guarded, stamp};
+
+// under the 310s harness timeout, so a stall panics with the wait log and the lock holders instead of the harness's bare timeout
+#[cfg(unix)]
+const DOC_HOLD_RUN_BUDGET: Duration = Duration::from_secs(280);
+#[cfg(unix)]
+const DOC_HOLD_CHILD_BUDGET: Duration = Duration::from_secs(250);
 
 
 struct Run {
@@ -153,11 +176,21 @@ async fn run_fixture_holding_doc_child(
     }
     let _ready = open_fifo_both_ends(&directory.join("ready"));
     let _held = open_fifo_both_ends(&directory.join("held"));
-    fixture_output(
-        fixture_command(fixture, arguments, environment, None)
-            .env("CARGO_VAL_FIXTURE_BLOCK_DIR", &directory),
-    ).await
-    .into()
+    let mut command = fixture_command(fixture, arguments, environment, None);
+    command.env("CARGO_VAL_FIXTURE_BLOCK_DIR", &directory);
+    let log = Log::default();
+    guarded("the held doc child run", (&log, DOC_HOLD_RUN_BUDGET), supervised(&mut command, DOC_HOLD_CHILD_BUDGET, async |_, stdout, stderr, exit| {
+        stamp(&log, "cargo_val_to_exit", "enter");
+        let ((printed, _), (errors, _), waited) = join3(common::drain(stdout), common::drain(stderr), Pipe::call(exit, ())).await;
+        stamp(&log, "cargo_val_to_exit", "exit");
+        let status = waited.expect("the exit source is unspent").expect("cargo-val's exit is waitable");
+        Run {
+            status: status.code(),
+            stdout: String::from_utf8_lossy(&printed).into_owned(),
+            stderr: String::from_utf8_lossy(&errors).into_owned(),
+        }
+    }))
+    .await
 }
 
 fn observed_overlaps(probe: &PathBuf) -> Vec<usize> {
