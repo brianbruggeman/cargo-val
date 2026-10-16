@@ -5,6 +5,8 @@ use std::process::Command;
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/scratch.rs"]
@@ -41,8 +43,7 @@ fn cargo_val(scratch: &Path) -> Command {
         .args(["--no-fail-fast", "--tests"])
         .env("CARGO_VAL_OUTPUT", "plain")
         .env("NO_COLOR", "1")
-        .env("CARGO_HOME", scratch.join("cargo-home"))
-        .env("CARGO_TARGET_DIR", scratch.join("target"));
+        .envs(isolation::environment("long-test-name"));
     for key in ["CARGO_VAL_BIN_GATE", "CARGO_VAL_TARGET_DIR", "CARGO_VAL_JOBS", "RUST_TEST_THREADS", "CARGO_VAL_LOG"] {
         command.env_remove(key);
     }
