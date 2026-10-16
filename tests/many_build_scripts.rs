@@ -14,8 +14,9 @@ mod fixture;
 use fixture::fixture_output;
 
 const PACKAGES: usize = 300;
-const SEARCH_DIRECTORIES: usize = 3;
-const PAD: &str = "padding_so_each_search_directory_is_a_realistic_build_output_path_length";
+// one directory per package keeps the joined library path under Linux's 128 KiB limit on a single environment string, yet far past the old 32 KiB store
+const SEARCH_DIRECTORIES: usize = 1;
+const PAD: &str = "realistic_build_output_path";
 
 fn scratch(label: &str) -> PathBuf {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{label}-{}", std::process::id()));
@@ -98,4 +99,5 @@ async fn three_hundred_build_scripts_whose_output_passes_every_old_aggregate_cap
 
     assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
     assert_eq!(passed(&stdout), PACKAGES, "{stdout}{stderr}");
+    fs::remove_dir_all(&scratch).expect("the 300-package scratch tree is removable once the run passed");
 }
