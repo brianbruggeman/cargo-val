@@ -1,3 +1,6 @@
+use std::vec;
+use std::vec::Vec;
+
 use core::cell::Cell;
 
 use proxima_codec::{DelimiterCodec, FrameCodec, FrameError, FrameLimits};
@@ -64,6 +67,8 @@ pub enum RecordFault<ParseError> {
 /// Proxima's borrowed [`DelimiterCodec`](proxima_codec::DelimiterCodec).
 pub struct ArtifactFramer<'buffer> {
     buffer: &'buffer mut [u8],
+    grown: Vec<u8>,
+    ceiling: usize,
     buffered: usize,
     consumed: Cell<usize>,
     max_record_bytes: usize,
@@ -107,6 +112,8 @@ impl<'buffer> ArtifactFramer<'buffer> {
         }
         Ok(Self {
             buffer,
+            grown: Vec::new(),
+            ceiling: max_record_bytes,
             buffered: 0,
             consumed: Cell::new(0),
             max_record_bytes,
@@ -114,6 +121,32 @@ impl<'buffer> ArtifactFramer<'buffer> {
             source_state: Cell::new(SourceState::Open),
             scan_state: Cell::new(ScanState::Scanning { scanned: 0 }),
         })
+    }
+
+    /// Lets a record that fills the caller's storage grow into a larger heap buffer, up to `ceiling` bytes; the bytes already framed are copied across.
+    /// The steady state never allocates: the heap buffer exists only after a record did not fit.
+    #[must_use]
+    pub fn growing_to(mut self, ceiling: usize) -> Self {
+        self.ceiling = ceiling.max(self.max_record_bytes);
+        self
+    }
+
+    fn storage(&self) -> &[u8] {
+        if self.grown.is_empty() { &*self.buffer } else { &self.grown }
+    }
+
+    fn storage_mut(&mut self) -> &mut [u8] {
+        if self.grown.is_empty() { &mut *self.buffer } else { &mut self.grown }
+    }
+
+    // doubles the storage when a partial record fills it, so the record can finish; the codec limit follows the new size
+    fn grow(&mut self) {
+        let doubled = (self.storage().len() * 2).min(self.ceiling + 1);
+        let mut larger = vec![0; doubled];
+        larger[..self.buffered].copy_from_slice(&self.storage()[..self.buffered]);
+        self.grown = larger;
+        self.max_record_bytes = doubled - 1;
+        self.codec = DelimiterCodec::new(b"\n", FrameLimits::new(self.max_record_bytes, false));
     }
 
     /// Copies as much of a transport chunk as fits and returns bytes consumed.
@@ -128,9 +161,13 @@ impl<'buffer> ArtifactFramer<'buffer> {
             return Ok(0);
         }
         self.compact();
-        let available = self.buffer.len() - self.buffered;
+        if self.buffered == self.storage().len() && !chunk.is_empty() && self.max_record_bytes < self.ceiling {
+            self.grow();
+        }
+        let available = self.storage().len() - self.buffered;
         let copied = chunk.len().min(available);
-        self.buffer[self.buffered..self.buffered + copied].copy_from_slice(&chunk[..copied]);
+        let start = self.buffered;
+        self.storage_mut()[start..start + copied].copy_from_slice(&chunk[..copied]);
         self.buffered += copied;
         Ok(copied)
     }
@@ -178,7 +215,7 @@ impl<'buffer> ArtifactFramer<'buffer> {
         let Some((frame_start, frame_end)) = self.next_frame_bounds()? else {
             return Ok(());
         };
-        let pending = &self.buffer[self.consumed.get()..self.buffered];
+        let pending = &self.storage()[self.consumed.get()..self.buffered];
         let (_, consumed) = self.codec.parse_frame(pending)?;
         let next_consumed = self.consumed.get() + consumed;
         if frame_start + consumed != frame_end + 1 {
@@ -232,8 +269,12 @@ impl<'buffer> ArtifactFramer<'buffer> {
                 .has_complete_frame()
                 .map_err(|error| Self::framing_fault(0, error))?;
         if whole_record_possible {
-            if let Some(newline_offset) = chunk.iter().position(|byte| *byte == b'\n')
-                && newline_offset > self.max_record_bytes
+            let oversize = chunk
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .filter(|newline_offset| *newline_offset > self.max_record_bytes);
+            if let Some(newline_offset) = oversize
+                && newline_offset > self.ceiling
             {
                 return Err(Self::framing_fault(
                     0,
@@ -242,7 +283,8 @@ impl<'buffer> ArtifactFramer<'buffer> {
                     }),
                 ));
             }
-            match self.codec.parse_frame(chunk) {
+            // a record that passes the current storage but not the ceiling is staged below, where the storage grows
+            match oversize.map_or_else(|| self.codec.parse_frame(chunk), |_| Err(FrameError::Incomplete)) {
                 Ok((record, consumed_bytes)) => {
                     return self.parse_record(record, (consumed_bytes, 0), parse, hold);
                 }
@@ -270,7 +312,7 @@ impl<'buffer> ArtifactFramer<'buffer> {
             return Ok(RecordStep::NeedMore { consumed_bytes });
         };
         let step = framer.parse_record(
-            &framer.buffer[frame_start..frame_end],
+            &framer.storage()[frame_start..frame_end],
             (consumed_bytes, consumed_bytes),
             parse,
             hold,
@@ -337,7 +379,7 @@ impl<'buffer> ArtifactFramer<'buffer> {
         let ScanState::FrameReady { frame_length } = self.scan_state.get() else {
             return Err(ArtifactStreamError::Framing(FrameError::Incomplete));
         };
-        let pending = &self.buffer[self.consumed.get()..self.buffered];
+        let pending = &self.storage()[self.consumed.get()..self.buffered];
         let (_, consumed) = self.codec.parse_frame(pending)?;
         let frame_start = self.consumed.get();
         if consumed != frame_length + 1 {
@@ -355,7 +397,7 @@ impl<'buffer> ArtifactFramer<'buffer> {
         };
         let consumed = self.consumed.get();
         let scan_start = scanned.max(consumed);
-        let newline_offset = self.buffer[scan_start..self.buffered]
+        let newline_offset = self.storage()[scan_start..self.buffered]
             .iter()
             .position(|byte| *byte == b'\n')
             .map(|relative_offset| scan_start + relative_offset);
@@ -371,7 +413,7 @@ impl<'buffer> ArtifactFramer<'buffer> {
             }
         } else {
             let pending_length = self.buffered - consumed;
-            if pending_length > self.max_record_bytes {
+            if pending_length > self.ceiling {
                 return Err(ArtifactStreamError::Framing(FrameError::FrameTooLarge {
                     len: pending_length,
                 }));
@@ -421,7 +463,8 @@ impl<'buffer> ArtifactFramer<'buffer> {
             return;
         }
         let remaining = self.buffered - consumed;
-        self.buffer.copy_within(consumed..self.buffered, 0);
+        let buffered = self.buffered;
+        self.storage_mut().copy_within(consumed..buffered, 0);
         let adjusted_scan_state = match self.scan_state.get() {
             ScanState::Scanning { scanned } => ScanState::Scanning {
                 scanned: scanned.saturating_sub(consumed),

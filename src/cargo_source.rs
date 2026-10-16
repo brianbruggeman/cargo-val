@@ -217,10 +217,10 @@ impl<'buffer> CargoSource<'buffer> {
         scratch: &'call mut [u8],
         max_json_depth: usize,
     ) -> Result<(CargoSourceStep<'call>, usize), CargoSourceError<ReadError>> {
-        let max_record_bytes = framer.max_record_bytes();
+        // the framer already bounds a record, and its storage may grow inside this call, so the parse takes no tighter limit of its own
         let step = framer
             .next_record(chunk, |record| {
-                parse_selection(record, scratch, max_record_bytes, max_json_depth)
+                parse_selection(record, scratch, usize::MAX, max_json_depth)
             })
             .map_err(CargoSourceError::Record)?;
         Ok(match step {
