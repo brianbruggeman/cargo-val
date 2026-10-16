@@ -54,7 +54,21 @@ fn summary_wall(text: &str) -> String {
 }
 
 fn axis_end(text: &str) -> String {
-    let line = text.lines().find(|line| line.starts_with(AXIS_LABEL)).expect("the timeline axis label row is drawn");
+    let line = text.lines().find(|line| line.starts_with(AXIS_LABEL)).expect("the timeline axis label // interior ticks sit on whole seconds of the run's own wall time, so two separate runs legitimately differ there; the origin tick and the frame stay compared
+fn plot_shape(rows: &[&str]) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            let mut origin_seen = false;
+            row.chars()
+                .map(|glyph| match glyph {
+                    glyph if BLOCKS.contains(&glyph) => ' ',
+                    '┬' if std::mem::replace(&mut origin_seen, true) => '─',
+                    other => other,
+                })
+                .collect()
+        })
+        .collect()
+} is drawn");
     line.split_whitespace().last().expect("the axis row ends in a time").to_owned()
 }
 
@@ -93,8 +107,20 @@ fn plot_rows(text: &str) -> Vec<&str> {
     lines[first..last].to_vec()
 }
 
+// interior ticks sit on whole seconds of a run's own wall time, so two separate runs legitimately differ there; the origin tick and the frame stay compared
 fn plot_shape(rows: &[&str]) -> Vec<String> {
-    rows.iter().map(|row| row.chars().map(|glyph| if BLOCKS.contains(&glyph) { ' ' } else { glyph }).collect()).collect()
+    rows.iter()
+        .map(|row| {
+            let mut origin_seen = false;
+            row.chars()
+                .map(|glyph| match glyph {
+                    glyph if BLOCKS.contains(&glyph) => ' ',
+                    '┬' if std::mem::replace(&mut origin_seen, true) => '─',
+                    other => other,
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn summary_line_index(text: &str) -> usize {
@@ -221,4 +247,22 @@ async fn two_jobs_with_four_tests_never_have_three_busy_at_once() {
 fn summary_passed(text: &str) -> usize {
     let line = text.lines().find(|line| line.starts_with("SUMMARY ")).expect("a SUMMARY line is printed");
     line.split_whitespace().find_map(|field| field.strip_prefix("passed=")).and_then(|count| count.parse().ok()).expect("SUMMARY carries passed=")
+}
+
+#[test]
+fn runs_with_different_wall_times_share_a_plot_shape_when_only_their_interior_ticks_differ() {
+    let wall_one_second = "         ┬───────────────────────────────────────────────────────────────┬┤";
+    let wall_under_one_second = "         ┬────────────────────────────────────────────────────────────────┤";
+
+    assert_eq!(plot_shape(&[wall_one_second]), plot_shape(&[wall_under_one_second]));
+}
+
+#[test]
+fn a_plot_shape_still_tells_apart_a_missing_origin_tick_and_a_missing_end_cap() {
+    let framed = "         ┬────────────────────────────────────────────────────────────────┤";
+    let no_origin = "         ─────────────────────────────────────────────────────────────────┤";
+    let no_end_cap = "         ┬─────────────────────────────────────────────────────────────────";
+
+    assert_ne!(plot_shape(&[framed]), plot_shape(&[no_origin]));
+    assert_ne!(plot_shape(&[framed]), plot_shape(&[no_end_cap]));
 }
