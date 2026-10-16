@@ -9,20 +9,16 @@ mod common;
 mod binary;
 #[path = "common/fixture.rs"]
 mod fixture;
+#[path = "common/scratch.rs"]
+mod scratch;
 
 use fixture::fixture_output;
+use scratch::Scratch;
 
 const PATH_FLOOR: usize = 330;
 const PACKAGE: &str = "identifiers_under_a_workspace_path_that_no_fixed_buffer_was_sized_for";
 const BIN_NAME: &str = "serve_requests_from_a_binary_whose_name_is_far_longer_than_any_buffer_once_held_one";
 const TEST_NAME: &str = "a_test_function_named_at_great_length_to_prove_that_no_name_buffer_truncates_or_refuses_it";
-
-fn scratch(label: &str) -> PathBuf {
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{label}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("scratch directory is creatable");
-    directory
-}
 
 fn long_root(scratch: &Path) -> PathBuf {
     let mut root = scratch.to_path_buf();
@@ -81,7 +77,7 @@ fn passed(stdout: &str) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn a_331_character_workspace_path_with_long_binary_and_test_names_completes_with_a_summary() {
-    let scratch = scratch("long-identifiers");
+    let scratch = Scratch::new("long-identifiers");
     let root = long_root(&scratch);
     write_package(&root);
     assert!(root.as_os_str().len() > PATH_FLOOR, "the package path is {} characters", root.as_os_str().len());

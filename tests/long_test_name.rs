@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
@@ -7,18 +7,13 @@ mod common;
 mod binary;
 #[path = "common/fixture.rs"]
 mod fixture;
+#[path = "common/scratch.rs"]
+mod scratch;
 
 use fixture::fixture_output;
+use scratch::Scratch;
 
 const NAME_LENGTH: usize = 1364;
-
-fn scratch(label: &str) -> PathBuf {
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{label}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(directory.join("src")).expect("scratch directory is creatable");
-    fs::create_dir_all(directory.join("tests")).expect("tests directory is creatable");
-    directory
-}
 
 fn long_name() -> String {
     let stem = "a_test_function_whose_name_is_longer_than_any_fixed_name_buffer_once_held_";
@@ -68,7 +63,9 @@ fn passed(stdout: &str) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn a_1364_byte_test_name_runs_and_is_counted_in_the_summary() {
-    let scratch = scratch("long-test-name");
+    let scratch = Scratch::new("long-test-name");
+    fs::create_dir_all(scratch.join("src")).expect("source directory is creatable");
+    fs::create_dir_all(scratch.join("tests")).expect("tests directory is creatable");
     let name = long_name();
     assert_eq!(name.len(), NAME_LENGTH);
     write_package(&scratch, &name);

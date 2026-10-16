@@ -10,20 +10,15 @@ mod common;
 mod binary;
 #[path = "common/fixture.rs"]
 mod fixture;
+#[path = "common/scratch.rs"]
+mod scratch;
 
 use fixture::fixture_output;
+use scratch::Scratch;
 
 const PACKAGES: usize = 300;
-// one directory per package keeps the joined library path under Linux's 128 KiB limit on a single environment string, yet far past the old 32 KiB store
-const SEARCH_DIRECTORIES: usize = 1;
-const PAD: &str = "realistic_build_output_path";
-
-fn scratch(label: &str) -> PathBuf {
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{label}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("scratch directory is creatable");
-    directory
-}
+const SEARCH_DIRECTORIES: usize = 3;
+const PAD: &str = "padding_so_each_search_directory_is_a_realistic_build_output_path_length";
 
 fn package_name(number: usize) -> String {
     format!("scripted_{number:03}")
@@ -70,7 +65,8 @@ fn cargo_val(scratch: &Path, workspace: &Path) -> Command {
         .env("NO_COLOR", "1")
         .env("CARGO_HOME", scratch.join("cargo-home"))
         .env("CARGO_TARGET_DIR", scratch.join("target"));
-    for key in ["CARGO_VAL_BIN_GATE", "CARGO_VAL_TARGET_DIR", "CARGO_VAL_JOBS", "RUST_TEST_THREADS", "CARGO_VAL_LOG"] {
+    command.env("CARGO_VAL_LOG", "debug");
+    for key in ["CARGO_VAL_BIN_GATE", "CARGO_VAL_TARGET_DIR", "CARGO_VAL_JOBS", "RUST_TEST_THREADS"] {
         command.env_remove(key);
     }
     command
@@ -90,7 +86,7 @@ fn passed(stdout: &str) -> usize {
 
 #[proxima::test(timeout = "900s")]
 async fn three_hundred_build_scripts_whose_output_passes_every_old_aggregate_cap_all_reach_their_tests() {
-    let scratch = scratch("many-build-scripts");
+    let scratch = Scratch::new("many-build-scripts");
     let workspace = write_workspace(&scratch);
 
     let output = fixture_output(&mut cargo_val(&scratch, &workspace)).await;
@@ -99,5 +95,6 @@ async fn three_hundred_build_scripts_whose_output_passes_every_old_aggregate_cap
 
     assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
     assert_eq!(passed(&stdout), PACKAGES, "{stdout}{stderr}");
-    fs::remove_dir_all(&scratch).expect("the 300-package scratch tree is removable once the run passed");
+    #[cfg(target_os = "linux")]
+    assert!(stderr.contains("step=library-path-narrowed"), "the joined path passed one environment string's limit, so each binary got its own closure:\n{}", stderr.lines().take(40).collect::<Vec<_>>().join("\n"));
 }
