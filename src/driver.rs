@@ -100,6 +100,8 @@ pub(crate) const NAME_CAPACITY: usize = 1024;
 const ENV_CAPACITY: usize = 1024;
 const PATH_CAPACITY: usize = 4096;
 const SCRATCH_CAPACITY: usize = 131_072;
+// the most one cargo message or one ignored-test line may grow its framer to; past it the run reports the length instead of exhausting memory
+const MAX_GROWN_RECORD: usize = 67_108_864;
 const DIAGNOSTIC_CAPACITY: usize = 1_048_576;
 const BUILD_FAILURE_PREFIX: &[u8] = b"error: could not compile";
 const BUILD_WAITING_PREFIX: &[u8] = b"warning: build failed, waiting for other jobs to finish";
@@ -2670,7 +2672,7 @@ async fn scan_metadata(child: Child, parser: &CliParser<'_>) -> Option<Box<Metad
 pub(crate) struct CargoDriver<'buffer> {
     process_id: u32,
     framer: ArtifactFramer<'buffer>,
-    scratch: &'buffer mut [u8],
+    scratch: &'buffer mut Vec<u8>,
     linked: LinkedDirectories<'buffer>,
     build_scripts: BuildScriptOutputs<'buffer>,
     listing_framer: ArtifactFramer<'buffer>,
@@ -3228,8 +3230,13 @@ impl CargoDriver<'_> {
         let mut offset = 0;
         loop {
             let ready_before = self.framer.frame_ready().map_err(|_| RunError::CargoStream)?;
+            // one push at most doubles the framer's storage, and a record never outgrows it, so twice the current record limit is always enough for the parse
+            let scratch_needed = 2 * (self.framer.max_record_bytes() + 1);
+            if self.scratch.len() < scratch_needed {
+                self.scratch.resize(scratch_needed, 0);
+            }
             let (step, consumed) = if eof {
-                match CargoSource::poll_lent_eof(&mut self.framer, &mut *self.scratch, 16, &mut context) {
+                match CargoSource::poll_lent_eof(&mut self.framer, self.scratch.as_mut_slice(), 16, &mut context) {
                     Poll::Ready(result) => result.map(|step| (step, 0)),
                     Poll::Pending => return Err(RunError::CargoStream),
                 }
@@ -3237,7 +3244,7 @@ impl CargoDriver<'_> {
                 match CargoSource::poll_lent(
                     &mut self.framer,
                     &chunk[offset..],
-                    &mut *self.scratch,
+                    self.scratch.as_mut_slice(),
                     16,
                     &mut context,
                 ) {
@@ -3937,7 +3944,7 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
 
 type CargoStorage = (
     Box<[u8]>,
-    Box<[u8]>,
+    Vec<u8>,
     Vec<u8>,
     Vec<u8>,
     Box<[u8]>,
@@ -3966,7 +3973,7 @@ fn run_storage<'environment>(process: ProcessMode, timeline_bytes: usize) -> Run
     (
         (
             zeroed(FRAME_CAPACITY),
-            zeroed(SCRATCH_CAPACITY),
+            std::vec![0; SCRATCH_CAPACITY],
             Vec::new(),
             Vec::new(),
             zeroed(SOURCE_CAPACITY + 1),
@@ -4028,14 +4035,15 @@ fn new_driver(
 ) -> Result<Box<CargoDriver<'_>>, RunError> {
     Ok(Box::new(CargoDriver {
         process_id,
-        framer: ArtifactFramer::new(frame, FRAME_CAPACITY - 1).map_err(|_| RunError::CargoStream)?,
+        framer: ArtifactFramer::new(frame, FRAME_CAPACITY - 1).map_err(|_| RunError::CargoStream)?.growing_to(MAX_GROWN_RECORD),
         scratch,
         linked: LinkedDirectories::new(linked),
         build_scripts: BuildScriptOutputs::new(scripts),
         listing_framer: ArtifactFramer::new(listing_frame, SOURCE_CAPACITY)
             .map_err(|_| RunError::ListingStream)?,
         ignored_framer: ArtifactFramer::new(ignored_frame, RESULT_LINE_CAPACITY)
-            .map_err(|_| RunError::ListingStream)?,
+            .map_err(|_| RunError::ListingStream)?
+            .growing_to(MAX_GROWN_RECORD),
         ignored,
         environments,
         active: None,
