@@ -135,7 +135,14 @@ async fn a_workspace_path_over_300_characters_keeps_its_metadata_so_the_run_isol
     assert!(!stderr.contains("no usable target directory"), "isolation fell back to the shared directory:\n{stderr}");
     let built = stderr.lines().find(|line| line.contains("gate bin-built")).unwrap_or_else(|| panic!("a bin-built line is printed:\n{stderr}"));
     assert!(built.contains("/cargo-val/"), "the bin was built under the isolated subtree: {built}");
-    assert!(stderr.lines().any(|line| line.contains("gate launch kind=test") && line.contains("gate=metadata")), "the gate decided from metadata:\n{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let decision = lines
+        .iter()
+        .position(|line| (line.contains("gate launch kind=test") || line.contains("gate park why=bin-gate kind=test")) && line.contains("gate=metadata"))
+        .unwrap_or_else(|| panic!("the gate decided from metadata:\n{stderr}"));
+    if lines[decision].contains("gate park why=bin-gate") {
+        assert!(lines[decision..].iter().any(|line| line.contains("gate release reason=bin-built")), "a parked test was released when the bin was built:\n{stderr}");
+    }
     assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
     assert_eq!(passed(&stdout), PACKAGES.len() * 2, "{stdout}");
 }
