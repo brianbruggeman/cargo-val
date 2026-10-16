@@ -61,7 +61,7 @@ use crate::summary::{Counts, Tally, TargetTable};
 use crate::edge_signal::{
     SignalPipe, conventional_status, interrupt_group, release_child, release_group, track_child, track_group, track_group_hangup, abandon_slot, reserve_slot, TABLE_FULL,
 };
-use crate::edge_args::{DYLIB_PATH_KEY, Environment};
+use crate::edge_args::{DYLIB_PATH_KEY, Environment, PATH_SEPARATOR};
 use crate::edge_spawn::{
     ArgumentsError, Child, HeldLaunchStorage, LaunchStorage, READY_AHEAD, SpawnError, held_launch_storage, resume_ready, spawn,
     spawn_in_group, spawn_listed,
@@ -163,6 +163,7 @@ pub enum RunError {
     Arguments,
     Environment,
     TestEnvironment,
+    LibraryPathTooLong { measured: usize },
     RustcLibdir,
     Settings,
     Timeline,
@@ -210,6 +211,7 @@ impl RunError {
             Self::TestEnvironment => {
                 b"cargo-val: test environment is malformed or exceeds caller storage\n"
             }
+            Self::LibraryPathTooLong { .. } => b"cargo-val: the library search path for a test binary passes the environment string limit\n",
             Self::RustcLibdir => b"cargo-val: cannot read the rustc library directory\n",
             Self::Settings => b"cargo-val: invalid runtime settings\n",
             Self::Timeline => b"cargo-val: --timeline is a terminal view; use --output plain or rich\n",
@@ -255,6 +257,13 @@ impl RunError {
                 line.text(b"cargo-val: the signal table holds ");
                 line.number(SIGNAL_SLOTS);
                 line.text(b" children and groups and has no free slot; raise CARGO_VAL_BUILD_SIGNAL_SLOTS and rebuild\n");
+            }
+            Self::LibraryPathTooLong { measured } => {
+                line.text(b"cargo-val: the library search path for a test binary is ");
+                line.number(measured);
+                line.text(b" bytes, past the ");
+                line.number(ENV_STRING_LIMIT);
+                line.text(b"-byte limit of one environment string, even with only its own package and dependencies\n");
             }
             other => line.text(other.message()),
         }
@@ -1465,18 +1474,23 @@ fn rerun_live(run: &ListingRun<'_>, ledger: &Ledger<'_>, watches: &Watches, id: 
         .any(|session| targets.id(session.target()) == id.0 && session.name_bytes() == id.1)
 }
 
+type Overrides<'storage> = ([&'storage [u8]; MAX_ENTRIES], usize, Vec<&'storage [u8]>);
+
+// the inline array serves every launch whose environment fits MAX_ENTRIES without allocating; a wider environment is gathered whole into the second value
 fn override_entries<'storage>(
     layout: &TestEnvironmentLayout,
     environment: &'storage [u8],
-) -> Result<([&'storage [u8]; MAX_ENTRIES], usize), RunError> {
+) -> Result<Overrides<'storage>, RunError> {
     let mut entries: [&[u8]; MAX_ENTRIES] = [b""; MAX_ENTRIES];
-    for (index, entry) in entries.iter_mut().enumerate().take(layout.len()) {
-        *entry = layout
-            .entry(environment, index)
-            .ok_or(RunError::TestEnvironment)?
-            .as_bytes();
+    let entry = |index: usize| layout.entry(environment, index).map(str::as_bytes).ok_or(RunError::TestEnvironment);
+    if layout.len() > MAX_ENTRIES {
+        let wide = (0..layout.len()).map(entry).collect::<Result<Vec<_>, _>>()?;
+        return Ok((entries, 0, wide));
     }
-    Ok((entries, layout.len()))
+    for (index, slot) in entries.iter_mut().enumerate().take(layout.len()) {
+        *slot = entry(index)?;
+    }
+    Ok((entries, layout.len(), Vec::new()))
 }
 
 fn spawn_list(
@@ -1502,11 +1516,55 @@ fn spawn_list(
     Ok(child)
 }
 
+// the longest value one environment string can hold: Linux caps a string at 32 pages, Windows a variable at 32767 characters, and elsewhere the 1 MiB argument area bounds it
+const PATH_LIST_SEPARATOR: char = PATH_SEPARATOR as char;
+
+const ENV_STRING_LIMIT: usize = if cfg!(windows) {
+    32_767
+} else if cfg!(any(target_os = "linux", target_os = "android")) {
+    131_072
+} else {
+    1_048_576
+};
+
+// cargo gives every test the search directories of every build script in the run, so that join is the default; once it cannot fit one environment string, a binary gets those of its own package and the packages it depends on
+fn narrowed_directories(run: &ListingRun<'_>, discovery: &DiscoveryFsm, (linked, scripts): (&LinkedDirectories<'_>, &BuildScriptOutputs<'_>), artifact: &TestArtifact<'_>) -> Option<String> {
+    let others = artifact.executable.len() * 2 + run.inherited_dylib_path.map_or(0, str::len) + run.library_directories.iter().map(|directory| directory.len() + 1).sum::<usize>() + 256;
+    if linked.as_str().len() + others <= ENV_STRING_LIMIT {
+        return None;
+    }
+    let mut joined = String::new();
+    discovery.dependency_closure(artifact.package_id, |package| {
+        let Some(found) = core::str::from_utf8(package).ok().and_then(|id| scripts.find(id)) else {
+            return;
+        };
+        for directory in found.linked.split(PATH_LIST_SEPARATOR).filter(|directory| !directory.is_empty()) {
+            if !joined.split(PATH_LIST_SEPARATOR).any(|held| held == directory) {
+                if !joined.is_empty() {
+                    joined.push(PATH_LIST_SEPARATOR);
+                }
+                joined.push_str(directory);
+            }
+        }
+    });
+    pipeline_step(b"library-path-narrowed", artifact.target_name.as_bytes());
+    Some(joined)
+}
+
+fn checked_library_path(layout: TestEnvironmentLayout, environment: &[u8]) -> Result<TestEnvironmentLayout, RunError> {
+    let measured = layout.entry(environment, 0).map_or(0, str::len);
+    if measured > ENV_STRING_LIMIT {
+        return Err(RunError::LibraryPathTooLong { measured });
+    }
+    Ok(layout)
+}
+
 // a slot starts at ENVIRONMENT_CAPACITY and doubles when a package's variables do not fit; the grown storage is reused by every later launch
 fn build_environment(input: &TestEnvironmentInput<'_>, environment: &mut Vec<u8>) -> Result<TestEnvironmentLayout, RunError> {
     loop {
         match TestEnvironmentLayout::build(input, environment) {
             Err(TestEnvironmentError::StorageTooSmall { .. }) => environment.resize(environment.len().max(1) * 2, 0),
+            Ok(layout) => return checked_library_path(layout, environment),
             built => return built.map_err(|_| RunError::TestEnvironment),
         }
     }
@@ -1556,8 +1614,8 @@ fn spawn_listing(
     )?;
     let mut path = [0; PATH_CAPACITY];
     path[..executable.len()].copy_from_slice(executable.as_bytes());
-    let (overrides, override_count) = override_entries(&layout, environment)?;
-    let overrides = &overrides[..override_count];
+    let (narrow, narrow_count, wide) = override_entries(&layout, environment)?;
+    let overrides = if wide.is_empty() { &narrow[..narrow_count] } else { &wide[..] };
     let directory = layout.current_directory(environment);
     let mut storage = run.launch_storage.borrow_mut();
     let child = spawn_list(&mut storage, executable, false, run, overrides, directory)?;
@@ -1617,7 +1675,8 @@ fn spawn_exact(
     rerun_started: Option<u64>,
 ) -> Result<SessionSlotId, RunError> {
     let (run, target, environment, layout) = (scan.run, scan.target, scan.environment, scan.layout);
-    let (overrides, override_count) = override_entries(layout, environment)?;
+    let (narrow, narrow_count, wide) = override_entries(layout, environment)?;
+    let overrides = if wide.is_empty() { &narrow[..narrow_count] } else { &wide[..] };
     if rerun_started.is_none() && run.tripped(ledger) {
         run.policy.borrow_mut().launched();
     }
@@ -1629,7 +1688,7 @@ fn spawn_exact(
             owner: LaunchOwner::Ledger(&mut *ledger),
             intent,
             inherited_environment: run.environment,
-            child_overrides: &overrides[..override_count],
+            child_overrides: overrides,
             storage: &mut storage,
             harness_arguments: run.harness_arguments,
             current_directory: layout.current_directory(environment).as_bytes(),
@@ -2919,8 +2978,8 @@ fn start_listing(
     run: &ListingRun<'_>,
     ledger: &OutcomeLedger<'_, RunningChild<NAME_CAPACITY>, LIVE_CAPACITY>,
     artifact: &TestArtifact<'_>,
-    linked: &LinkedDirectories<'_>,
-    build_scripts: &BuildScriptOutputs<'_>,
+    (linked, build_scripts): (&LinkedDirectories<'_>, &BuildScriptOutputs<'_>),
+    discovery: &DiscoveryFsm,
     slot: usize,
     environments: &mut [Vec<u8>],
 ) -> Result<Option<PendingListing>, RunError> {
@@ -2935,7 +2994,9 @@ fn start_listing(
     let binary_id = (!artifact.is_unit_test_target()).then_some(artifact.target_name);
     run.targets.borrow_mut().begin(artifact.package_name(), binary_id);
     let identity = Identity::new(artifact.package_name(), artifact.target_name);
-    spawn_listing(artifact, run, linked.as_str(), build_script, slot, &mut environments[slot], identity).map(Some)
+    let narrowed = narrowed_directories(run, discovery, (linked, build_scripts), artifact);
+    let directories = narrowed.as_deref().unwrap_or_else(|| linked.as_str());
+    spawn_listing(artifact, run, directories, build_script, slot, &mut environments[slot], identity).map(Some)
 }
 
 
@@ -2996,9 +3057,10 @@ impl CargoDriver<'_> {
         let (_, owned) = self.listed.iter().find(|(listed, _)| *listed == target).ok_or(RunError::Outcome)?;
         let artifact = owned.as_artifact();
         let environment = &mut self.environments[free_slot(self.active.as_ref(), &self.pending_listings)];
+        let narrowed = narrowed_directories(run, &self.discovery, (&self.linked, &self.build_scripts), &artifact);
         let input = TestEnvironmentInput {
             artifact,
-            linked_directories: self.linked.as_str(),
+            linked_directories: narrowed.as_deref().unwrap_or_else(|| self.linked.as_str()),
             library_directories: run.library_directories,
             inherited_dylib_path: run.inherited_dylib_path,
             home: run.home,
@@ -3085,8 +3147,8 @@ impl CargoDriver<'_> {
                 run,
                 ledger,
                 &artifact,
-                &self.linked,
-                &self.build_scripts,
+                (&self.linked, &self.build_scripts),
+                &self.discovery,
                 free_slot(self.active.as_ref(), &self.pending_listings),
                 self.environments,
             )?;
@@ -3205,8 +3267,8 @@ impl CargoDriver<'_> {
                             run,
                             ledger,
                             &artifact,
-                            &self.linked,
-                            &self.build_scripts,
+                            (&self.linked, &self.build_scripts),
+                            &self.discovery,
                             free_slot(self.active.as_ref(), &self.pending_listings),
                             self.environments,
                         )?;

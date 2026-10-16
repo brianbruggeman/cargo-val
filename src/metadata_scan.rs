@@ -190,6 +190,31 @@ impl BinCounts {
         self.entries.iter().filter(|entry| self.is_member(entry) && entry.bins > 0).count()
     }
 
+    /// Calls `visit` with the id of `package_id` and of every package it depends on, directly or through others; an id the document did not list visits only itself.
+    pub fn dependency_closure(&self, package_id: &str, mut visit: impl FnMut(&[u8])) {
+        let Some(start) = self.find(package_id.as_bytes()) else {
+            visit(package_id.as_bytes());
+            return;
+        };
+        let mut reached = vec![false; self.entries.len()];
+        reached[start] = true;
+        loop {
+            let mut grew = false;
+            for &(from, to, _) in &self.edges {
+                if reached[from] && !reached[to] {
+                    reached[to] = true;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        for (entry, _) in self.entries.iter().zip(&reached).filter(|(_, reached)| **reached) {
+            visit(&entry.id);
+        }
+    }
+
     fn mark(&mut self, id: &[u8], member: bool) {
         if let Some(index) = self.find(id) {
             self.entries[index].marks |= if member { MEMBER } else { REACHABLE };
@@ -1000,6 +1025,35 @@ mod tests {
             assert!(counts.awaiting(APP), "{document}");
             assert_eq!(counts.unknown_feature_packages(), (1, "no-resolve-or-feature-syntax"), "{document}");
         }
+    }
+
+    #[proxima::test]
+    async fn the_dependency_closure_holds_a_package_and_what_it_reaches_but_not_its_siblings() {
+        let id = |name: &str| std::format!("path+file:///w/{name}#0.1.0");
+        let node = |name: &str, dependency: Option<&str>| {
+            let deps = dependency.map_or_else(String::new, |other| {
+                std::format!(r#"{{"name":"{other}","pkg":"{}","dep_kinds":[{{"kind":null,"target":null}}]}}"#, id(other))
+            });
+            std::format!(r#"{{"id":"{}","dependencies":[],"deps":[{deps}],"features":[]}}"#, id(name))
+        };
+        let package = |name: &str| std::format!(r#"{{"name":"{name}","version":"0.1.0","id":"{}","targets":[{{"kind":["lib"],"name":"{name}","test":true}}]}}"#, id(name));
+        let document = std::format!(
+            r#"{{"packages":[{},{},{}],"workspace_members":["{}","{}","{}"],"resolve":{{"nodes":[{},{},{}],"root":null}},"target_directory":"/w/target","version":1}}"#,
+            package("app"), package("lib"), package("sibling"), id("app"), id("lib"), id("sibling"),
+            node("app", Some("lib")), node("lib", None), node("sibling", None),
+        );
+        let mut scan = Box::new(MetadataScan::new());
+        scan.feed(document.as_bytes()).expect("document fits");
+        let counts = scan.finish().bins;
+
+        let mut visited = std::vec::Vec::new();
+        counts.dependency_closure(&id("app"), |package| visited.push(String::from_utf8_lossy(package).into_owned()));
+        visited.sort();
+
+        assert_eq!(visited, [id("app"), id("lib")]);
+        let mut alone = std::vec::Vec::new();
+        counts.dependency_closure("path+file:///w/unlisted#0.1.0", |package| alone.push(String::from_utf8_lossy(package).into_owned()));
+        assert_eq!(alone, ["path+file:///w/unlisted#0.1.0"]);
     }
 
     const BUILD_ETA_METADATA: &str = include_str!("../tests/fixtures/build_eta_metadata.json");
