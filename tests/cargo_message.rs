@@ -76,7 +76,7 @@ async fn test_artifact_carries_executable_package_and_manifest_borrowed_from_the
 #[proxima::test]
 async fn build_script_reports_search_paths_output_directory_and_environment_in_emitted_order() {
     let mut scratch = [0_u8; 1024];
-    let mut storage = [0_u8; 512];
+    let mut storage = Vec::with_capacity(512);
 
     let (observed, allocations) = count_allocations(|| {
         let message = parse(BUILD_SCRIPT, &mut scratch);

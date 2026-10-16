@@ -7,6 +7,7 @@
 
 use core::ffi::CStr;
 use core::str;
+use std::vec::Vec;
 
 use crate::cargo_message::{BuildEnvironment, BuildScript, TestArtifact};
 
@@ -80,14 +81,13 @@ impl Writer<'_> {
 /// Search directories that build scripts reported, joined by the platform separator.
 #[derive(Debug)]
 pub struct LinkedDirectories<'storage> {
-    storage: &'storage mut [u8],
-    length: usize,
+    storage: &'storage mut Vec<u8>,
 }
 
 impl<'storage> LinkedDirectories<'storage> {
-    /// Binds caller storage that holds every reported directory.
-    pub fn new(storage: &'storage mut [u8]) -> Self {
-        Self { storage, length: 0 }
+    /// Binds caller storage that grows to hold every reported directory.
+    pub const fn new(storage: &'storage mut Vec<u8>) -> Self {
+        Self { storage }
     }
 
     /// Adds one reported `-L` value such as `native=/repo/target/debug/build/ring-4a1b/out`.
@@ -97,7 +97,7 @@ impl<'storage> LinkedDirectories<'storage> {
     /// # Errors
     ///
     /// Returns [`TestEnvironmentError`] for an interior NUL, a path-list separator inside the
-    /// directory, or storage that cannot hold the directory.
+    /// directory.
     pub fn add(&mut self, reported: &str) -> Result<(), TestEnvironmentError> {
         let directory = reported
             .split_once('=')
@@ -111,21 +111,13 @@ impl<'storage> LinkedDirectories<'storage> {
         if directory.as_bytes().contains(&PATH_SEPARATOR) {
             return Err(TestEnvironmentError::SeparatorInDirectory);
         }
-        if has_component(&self.storage[..self.length], directory.as_bytes()) {
+        if has_component(self.storage, directory.as_bytes()) {
             return Ok(());
         }
-        let separator = usize::from(self.length > 0);
-        let end = self.length + separator + directory.len();
-        let available = self.storage.len();
-        let target = self
-            .storage
-            .get_mut(self.length..end)
-            .ok_or(TestEnvironmentError::StorageTooSmall { available })?;
-        if separator == 1 {
-            target[0] = PATH_SEPARATOR;
+        if !self.storage.is_empty() {
+            self.storage.push(PATH_SEPARATOR);
         }
-        target[separator..].copy_from_slice(directory.as_bytes());
-        self.length = end;
+        self.storage.extend_from_slice(directory.as_bytes());
         Ok(())
     }
 
@@ -133,7 +125,7 @@ impl<'storage> LinkedDirectories<'storage> {
     #[must_use]
     pub fn as_str(&self) -> &str {
         // safety: storage holds only whole `&str` copies and an ASCII separator.
-        unsafe { str::from_utf8_unchecked(&self.storage[..self.length]) }
+        unsafe { str::from_utf8_unchecked(self.storage) }
     }
 }
 
@@ -149,43 +141,32 @@ pub struct BuildScriptOutput<'output> {
 /// Build-script outputs recorded per package while Cargo streams its messages.
 #[derive(Debug)]
 pub struct BuildScriptOutputs<'storage> {
-    storage: &'storage mut [u8],
-    length: usize,
+    storage: &'storage mut Vec<u8>,
 }
 
 const LENGTH_PREFIX: usize = 4;
 
 impl<'storage> BuildScriptOutputs<'storage> {
-    /// Binds caller storage that holds every executed build script.
-    pub fn new(storage: &'storage mut [u8]) -> Self {
-        Self { storage, length: 0 }
+    /// Binds caller storage that grows to hold every executed build script.
+    pub const fn new(storage: &'storage mut Vec<u8>) -> Self {
+        Self { storage }
     }
 
     /// Records one executed build script; a later script for the same package replaces an earlier one at lookup.
     ///
     /// # Errors
     ///
-    /// Returns [`TestEnvironmentError::StorageTooSmall`] when the record does not fit.
+    /// Returns [`TestEnvironmentError::StorageTooSmall`] only when one record passes the four-byte length prefix.
     pub fn add(&mut self, script: &BuildScript<'_>) -> Result<(), TestEnvironmentError> {
         let environment = script.environment.separated();
         let payload = script.package_id.len() + 1 + script.out_dir.len() + 1 + environment.len();
-        let end = self.length + LENGTH_PREFIX + payload;
-        let available = self.storage.len();
-        let target = self
-            .storage
-            .get_mut(self.length..end)
-            .ok_or(TestEnvironmentError::StorageTooSmall { available })?;
-        let length = u32::try_from(payload)
-            .map_err(|_| TestEnvironmentError::StorageTooSmall { available })?;
-        target[..LENGTH_PREFIX].copy_from_slice(&length.to_le_bytes());
-        let mut offset = LENGTH_PREFIX;
+        let length = u32::try_from(payload).map_err(|_| TestEnvironmentError::StorageTooSmall { available: u32::MAX as usize })?;
+        self.storage.extend_from_slice(&length.to_le_bytes());
         for part in [script.package_id, script.out_dir] {
-            target[offset..offset + part.len()].copy_from_slice(part.as_bytes());
-            target[offset + part.len()] = 0;
-            offset += part.len() + 1;
+            self.storage.extend_from_slice(part.as_bytes());
+            self.storage.push(0);
         }
-        target[offset..].copy_from_slice(environment.as_bytes());
-        self.length = end;
+        self.storage.extend_from_slice(environment.as_bytes());
         Ok(())
     }
 
@@ -194,7 +175,7 @@ impl<'storage> BuildScriptOutputs<'storage> {
     pub fn find(&self, package_id: &str) -> Option<BuildScriptOutput<'_>> {
         let mut offset = 0;
         let mut found = None;
-        while offset < self.length {
+        while offset < self.storage.len() {
             let prefix: [u8; LENGTH_PREFIX] = self.storage[offset..offset + LENGTH_PREFIX]
                 .try_into()
                 .ok()?;
@@ -486,7 +467,9 @@ impl<'id> PackageIdentity<'id> {
 
 #[cfg(test)]
 mod tests {
+    use std::format;
     use std::string::ToString;
+    use std::vec::Vec;
 
     use super::{
         BuildScriptOutputs, DYLIB_PATH_KEY, LinkedDirectories, TestEnvironmentError,
@@ -578,7 +561,7 @@ mod tests {
 
     #[proxima::test]
     async fn library_path_lists_linked_then_artifact_then_deps_then_sysroot_then_inherited() {
-        let mut linked_storage = [0; 256];
+        let mut linked_storage = Vec::new();
         let mut linked = LinkedDirectories::new(&mut linked_storage);
         linked
             .add("native=/repo/target/debug/build/ring-4a1b0c/out")
@@ -749,8 +732,8 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn linked_directories_reject_a_separator_and_report_overflow() {
-        let mut storage = [0; 24];
+    async fn linked_directories_reject_a_separator_and_grow_without_a_cap() {
+        let mut storage = Vec::new();
         let mut linked = LinkedDirectories::new(&mut storage);
         let separator_path = if cfg!(windows) {
             "native=C:\\a;b"
@@ -762,11 +745,10 @@ mod tests {
             linked.add(separator_path),
             Err(TestEnvironmentError::SeparatorInDirectory)
         );
-        linked.add("native=/repo/target/out").expect("first fits");
-        assert_eq!(
-            linked.add("native=/repo/target/second"),
-            Err(TestEnvironmentError::StorageTooSmall { available: 24 })
-        );
+        for package in 0..2000 {
+            linked.add(&format!("native=/repo/target/debug/build/package-{package:04}/out")).expect("storage grows");
+        }
+        assert!(linked.as_str().len() > 65_536);
     }
 
     #[proxima::test]
@@ -809,7 +791,7 @@ mod tests {
     async fn build_script_output_supplies_out_dir_and_rustc_env_to_its_own_package_only() {
         let mut scratch = [0_u8; 1024];
         let script = build_script_message(BUILD_SCRIPT_RECORD, &mut scratch);
-        let mut outputs_storage = [0_u8; 1024];
+        let mut outputs_storage = Vec::new();
         let mut outputs = BuildScriptOutputs::new(&mut outputs_storage);
         outputs.add(&script).expect("record fits");
         let artifact = TestArtifact {
@@ -855,7 +837,7 @@ mod tests {
         .to_string();
         let mut first_scratch = [0_u8; 1024];
         let mut second_scratch = [0_u8; 1024];
-        let mut outputs_storage = [0_u8; 1024];
+        let mut outputs_storage = Vec::new();
         let mut outputs = BuildScriptOutputs::new(&mut outputs_storage);
         outputs
             .add(&build_script_message(first.as_bytes(), &mut first_scratch))
