@@ -1,5 +1,7 @@
 //! Single-owner exact child launch from one borrowed listing intent.
 
+use std::boxed::Box;
+
 use crate::ExecutablePath;
 use crate::child_completion::{ChildCompletion, ChildCompletionEvent, InvalidChildCompletionEvent};
 use crate::edge_spawn::{
@@ -17,6 +19,7 @@ pub struct RunningChild<const NAME_CAPACITY: usize> {
     child: Child,
     name: [u8; NAME_CAPACITY],
     name_length: usize,
+    long_name: Option<Box<[u8]>>,
     target: usize,
     completion: ChildCompletion,
     exit_status: Option<i32>,
@@ -38,7 +41,7 @@ impl<const NAME_CAPACITY: usize> RunningChild<NAME_CAPACITY> {
     /// Returns the selected name from fixed session storage.
     #[must_use]
     pub fn name_bytes(&self) -> &[u8] {
-        &self.name[..self.name_length]
+        self.long_name.as_deref().unwrap_or_else(|| &self.name[..self.name_length])
     }
 
     /// Takes ownership when the child is retired from its slot.
@@ -55,8 +58,6 @@ pub enum LaunchError<const NAME_CAPACITY: usize> {
     Full,
     /// The same test name is already live in this session table.
     Duplicate,
-    /// Inline identity storage is too short for this test name.
-    NameTooLong { required: usize, available: usize },
     /// The OS rejected child creation.
     Spawn(SpawnError),
     /// The launch data holds a NUL byte, a malformed environment entry, or more than the fixed storage holds.
@@ -91,13 +92,6 @@ impl<const NAME_CAPACITY: usize> From<&LaunchError<NAME_CAPACITY>> for LaunchCau
         match error {
             LaunchError::Full => Self::Full,
             LaunchError::Duplicate => Self::Duplicate,
-            LaunchError::NameTooLong {
-                required,
-                available,
-            } => Self::NameTooLong {
-                required: *required,
-                available: *available,
-            },
             LaunchError::Spawn(error) => Self::Spawn { os_code: error.os_code },
             LaunchError::Arguments(error) => Self::Arguments(*error),
             LaunchError::CapacityChanged(_) => Self::CapacityChanged,
@@ -195,15 +189,13 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
         {
             return Err(LaunchError::Duplicate);
         }
-        if name_bytes.len() > NAME_CAPACITY {
-            return Err(LaunchError::NameTooLong {
-                required: name_bytes.len(),
-                available: NAME_CAPACITY,
-            });
-        }
-
         let mut name = [0; NAME_CAPACITY];
-        name[..name_bytes.len()].copy_from_slice(name_bytes);
+        let long_name = if name_bytes.len() > NAME_CAPACITY {
+            Some(Box::<[u8]>::from(name_bytes))
+        } else {
+            name[..name_bytes.len()].copy_from_slice(name_bytes);
+            None
+        };
         let spawn = if ready { spawn_exact_ready } else { spawn_exact };
         let child = spawn(
             self.storage,
@@ -222,6 +214,7 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
             child,
             name,
             name_length: name_bytes.len(),
+            long_name,
             target: self.target,
             completion: ChildCompletion::new(),
             exit_status: None,
@@ -257,6 +250,7 @@ impl<'call, 'ledger: 'call, const NAME_CAPACITY: usize, const CAPACITY: usize>
             child,
             name: [0; NAME_CAPACITY],
             name_length: 0,
+            long_name: None,
             target: self.target,
             completion: ChildCompletion::new(),
             exit_status: None,
@@ -961,10 +955,10 @@ mod tests {
             sessions.remove(slot).expect("both streams reached EOF");
         }
         let mut short_sessions = SessionSlots::<RunningChild<8>, 1>::new();
-        assert!(matches!(
-            launch(&mut short_sessions, intent(executable, ALPHA_NAME)),
-            Err(LaunchError::NameTooLong { required, available: 8 }) if required == ALPHA_NAME.len()
-        ));
+        let slot = launch(&mut short_sessions, intent(executable, ALPHA_NAME)).expect("a name past the inline array spills to the heap");
+        assert_eq!(short_sessions.get(slot).expect("the child is stored").name_bytes(), ALPHA_NAME.as_bytes());
+        let spilled = short_sessions.remove(slot).expect("the child is stored");
+        drop(spilled);
         assert_eq!(short_sessions.len(), 0);
         std::println!(
             "{{\"duplicate_rejections\":1,\"distinct_launches\":2,\"capacity_rejections\":1,\"post_rejection_slots\":0,\"captured_stream_eofs\":4}}"
@@ -1204,19 +1198,9 @@ mod cause_tests {
 
     #[proxima::test]
     async fn every_launch_error_variant_maps_to_its_cause() {
-        let cases: [(LaunchError<64>, LaunchCause); 6] = [
+        let cases: [(LaunchError<64>, LaunchCause); 5] = [
             (LaunchError::Full, LaunchCause::Full),
             (LaunchError::Duplicate, LaunchCause::Duplicate),
-            (
-                LaunchError::NameTooLong {
-                    required: 70,
-                    available: 64,
-                },
-                LaunchCause::NameTooLong {
-                    required: 70,
-                    available: 64,
-                },
-            ),
             (
                 LaunchError::Spawn(SpawnError { os_code: 2 }),
                 LaunchCause::Spawn { os_code: 2 },
@@ -1238,7 +1222,7 @@ mod cause_tests {
             assert_eq!(LaunchCause::from(error), *expected);
             checked += 1;
         }
-        assert_eq!(checked, 6);
+        assert_eq!(checked, 5);
     }
 }
 
@@ -1301,6 +1285,7 @@ mod launch_allocation_tests {
                 current_directory: b"/",
             }
             .launch()
+            .map_err(|error| crate::runner::LaunchCause::from(&error))
         });
 
         let child = sessions

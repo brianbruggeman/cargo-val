@@ -244,6 +244,12 @@ impl<'storage> ShardArena<'storage> {
         records + (self.inflight - self.solos) < SHARD_RETRY_SLOTS
     }
 
+    /// The longest name the arena can park, which is the reserve less its NUL.
+    #[must_use]
+    pub const fn longest_name(&self) -> usize {
+        self.reserve - 1
+    }
+
     /// Whether a name is parked in the reserve.
     #[must_use]
     pub const fn carrying(&self) -> bool {
