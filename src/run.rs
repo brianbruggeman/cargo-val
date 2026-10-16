@@ -663,23 +663,16 @@ pub(crate) async fn collect_child(
 /// # Errors
 ///
 /// Returns [`RunError::RustcLibdir`] when rustc fails, prints nothing, or prints more than `output` holds.
-pub(crate) async fn collect_libdir(child: Child, output: &mut [u8]) -> Result<usize, RunError> {
-    let mut length = 0;
-    let mut overflow = false;
-    let code = collect_child(child, |bytes| {
-        let room = output.len() - length;
-        overflow |= bytes.len() > room;
-        let taken = bytes.len().min(room);
-        output[length..length + taken].copy_from_slice(&bytes[..taken]);
-        length += taken;
-    })
-    .await
-    .map_err(|_| RunError::RustcLibdir)?;
-    let mut end = length;
+pub(crate) async fn collect_libdir(child: Child, output: &mut Vec<u8>) -> Result<usize, RunError> {
+    output.clear();
+    let code = collect_child(child, |bytes| output.extend_from_slice(bytes))
+        .await
+        .map_err(|_| RunError::RustcLibdir)?;
+    let mut end = output.len();
     while end > 0 && matches!(output[end - 1], b'\n' | b'\r') {
         end -= 1;
     }
-    if code != 0 || overflow || end == 0 {
+    if code != 0 || end == 0 {
         return Err(RunError::RustcLibdir);
     }
     Ok(end)
@@ -996,7 +989,7 @@ mod tests {
 
     fn libdir_through_prime(child: Child) -> Result<std::string::String, RunError> {
         run_on_this_thread(CoreId(0), async move {
-            let mut output = [0_u8; 1024];
+            let mut output = Vec::new();
             let length = collect_libdir(child, &mut output).await?;
             Ok(std::string::String::from_utf8(output[..length].to_vec()).expect("libdir is utf-8"))
         })

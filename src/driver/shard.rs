@@ -2,8 +2,8 @@
 
 use super::{
     CargoDriver, ExactTestIntent, ExecutablePath, LaunchCause, LaunchInput, LaunchOwner, Ledger,
-    Line, ListingRun, NAME_CAPACITY, ProcessMode, RunError, RunningChild, Tally, TerminalOutcome, TestWatch,
-    Watches, executable_text, override_entries, report_launch_failure, report_nothing_ran, slot_range, spawn_reserved, start_session, write_fd,
+    Line, ListingRun, ProcessMode, RunError, RunningChild, Tally, TerminalOutcome, TestWatch,
+    Watches, executable_text, override_entries, report_launch_failure, report_nothing_ran, spawn_reserved, start_session, write_fd,
     monotonic_millis, projected, rendered, emit, emit_kept, Render,
 };
 use crate::failure_class::Exit;
@@ -488,7 +488,7 @@ pub(super) fn collect(run: &ListingRun<'_>, (executable, target): (&str, usize),
         Err(PushError::InteriorNul) => Err(RunError::Arguments),
         Err(PushError::TooLong) => Err(RunError::Launch(LaunchCause::NameTooLong {
             required: name.len(),
-            available: NAME_CAPACITY,
+            available: arena.longest_name(),
         })),
     }
 }
@@ -595,7 +595,7 @@ impl CargoDriver<'_> {
             }
         }
         let executable = core::str::from_utf8(&active.path[..active.path_length]).map_err(|_| RunError::Arguments)?;
-        let environment = &self.environments[slot_range(active.slot)];
+        let environment = &self.environments[active.slot];
         let (overrides, override_count) = override_entries(&active.layout, environment)?;
         let fixed = executable.len() + FIXED_UNITS + run.harness_arguments.iter().map(|argument| argument.len() + 1).sum::<usize>();
         while ledger.sessions().len() < run.settings.jobs {

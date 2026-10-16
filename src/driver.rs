@@ -85,7 +85,7 @@ use crate::selection::{NameFilter, Selection};
 use crate::stop::{self, DocAtTrip, StopPolicy, StopReport};
 use crate::test_environment::{
     BuildScriptOutput, BuildScriptOutputs, LinkedDirectories, MAX_ENTRIES,
-    TestEnvironmentInput, TestEnvironmentLayout,
+    TestEnvironmentError, TestEnvironmentInput, TestEnvironmentLayout,
 };
 use crate::test_intent::ExactTestIntent;
 
@@ -103,12 +103,9 @@ const SCRATCH_CAPACITY: usize = 131_072;
 const DIAGNOSTIC_CAPACITY: usize = 1_048_576;
 const BUILD_FAILURE_PREFIX: &[u8] = b"error: could not compile";
 const BUILD_WAITING_PREFIX: &[u8] = b"warning: build failed, waiting for other jobs to finish";
-const LINKED_CAPACITY: usize = 32768;
-const BUILD_SCRIPT_CAPACITY: usize = 65536;
-const ENVIRONMENT_CAPACITY: usize = LINKED_CAPACITY + 16384;
+const ENVIRONMENT_CAPACITY: usize = 49152;
 const LISTING_SLOTS: usize = 8;
 const SIGNAL_HOLDERS: usize = 3;
-const LIBDIR_CAPACITY: usize = 1024;
 const SOURCE_CAPACITY: usize = 8192;
 const FRAME_CAPACITY: usize = 131_072;
 const RESULT_LINE_CAPACITY: usize = NAME_CAPACITY + 64;
@@ -1345,12 +1342,26 @@ fn deliver<'bytes>(
     watch: &TestWatch,
 ) -> Result<OutcomeStep<'bytes>, RunError> {
     let verdict = watch.verdict();
-    let mut report = [0; NAME_CAPACITY + 34];
-    let name_length = match event {
-        HostEvent::Stdout { .. } | HostEvent::Stderr { .. } => 0,
-        HostEvent::StdoutEof { slot }
-        | HostEvent::StderrEof { slot }
-        | HostEvent::Exit { slot, .. } => {
+    let named = match event {
+        HostEvent::Stdout { .. } | HostEvent::Stderr { .. } => None,
+        HostEvent::StdoutEof { slot } | HostEvent::StderrEof { slot } | HostEvent::Exit { slot, .. } => Some(slot),
+    };
+    let name_size = match named {
+        Some(slot) => ledger.sessions().get(slot).ok_or(RunError::Outcome)?.name_bytes().len(),
+        None => 0,
+    };
+    let mut inline = [0; NAME_CAPACITY + 34];
+    let mut spill = Vec::new();
+    // a name past the inline array is the cold case: its report buffer is sized to it, so the usual launch never allocates
+    let report: &mut [u8] = if name_size + 34 > inline.len() {
+        spill.resize(name_size + 34, 0);
+        &mut spill
+    } else {
+        &mut inline
+    };
+    let name_length = match named {
+        None => 0,
+        Some(slot) => {
             let name = ledger
                 .sessions()
                 .get(slot)
@@ -1491,8 +1502,14 @@ fn spawn_list(
     Ok(child)
 }
 
-fn slot_range(slot: usize) -> Range<usize> {
-    slot * ENVIRONMENT_CAPACITY..(slot + 1) * ENVIRONMENT_CAPACITY
+// a slot starts at ENVIRONMENT_CAPACITY and doubles when a package's variables do not fit; the grown storage is reused by every later launch
+fn build_environment(input: &TestEnvironmentInput<'_>, environment: &mut Vec<u8>) -> Result<TestEnvironmentLayout, RunError> {
+    loop {
+        match TestEnvironmentLayout::build(input, environment) {
+            Err(TestEnvironmentError::StorageTooSmall { .. }) => environment.resize(environment.len().max(1) * 2, 0),
+            built => return built.map_err(|_| RunError::TestEnvironment),
+        }
+    }
 }
 
 // each listing holds up to two signal slots (the list and the ignored-list child) beside every running test, the build cargo and the doc test group, so the table is never asked for more than it has
@@ -1517,7 +1534,7 @@ fn spawn_listing(
     linked_directories: &str,
     build_script: Option<BuildScriptOutput<'_>>,
     slot: usize,
-    environments: &mut [u8],
+    environment: &mut Vec<u8>,
     identity: Identity,
 ) -> Result<PendingListing, RunError> {
     let target = run.policy.borrow_mut().target_listed();
@@ -1526,8 +1543,7 @@ fn spawn_listing(
     if executable.len() + 1 > PATH_CAPACITY || executable.as_bytes().contains(&0) {
         return Err(RunError::Arguments);
     }
-    let environment = &mut environments[slot_range(slot)];
-    let layout = TestEnvironmentLayout::build(
+    let layout = build_environment(
         &TestEnvironmentInput {
             artifact: *artifact,
             linked_directories,
@@ -1537,8 +1553,7 @@ fn spawn_listing(
             build_script,
         },
         environment,
-    )
-    .map_err(|_| RunError::TestEnvironment)?;
+    )?;
     let mut path = [0; PATH_CAPACITY];
     path[..executable.len()].copy_from_slice(executable.as_bytes());
     let (overrides, override_count) = override_entries(&layout, environment)?;
@@ -2602,7 +2617,7 @@ pub(crate) struct CargoDriver<'buffer> {
     listing_framer: ArtifactFramer<'buffer>,
     ignored_framer: ArtifactFramer<'buffer>,
     ignored: &'buffer mut IgnoredSet,
-    environments: &'buffer mut [u8],
+    environments: &'buffer mut [Vec<u8>],
     active: Option<PendingListing>,
     pending_listings: VecDeque<PendingListing>,
     listing_limit: usize,
@@ -2907,7 +2922,7 @@ fn start_listing(
     linked: &LinkedDirectories<'_>,
     build_scripts: &BuildScriptOutputs<'_>,
     slot: usize,
-    environments: &mut [u8],
+    environments: &mut [Vec<u8>],
 ) -> Result<Option<PendingListing>, RunError> {
     if run.interrupted() {
         return Ok(None);
@@ -2920,7 +2935,7 @@ fn start_listing(
     let binary_id = (!artifact.is_unit_test_target()).then_some(artifact.target_name);
     run.targets.borrow_mut().begin(artifact.package_name(), binary_id);
     let identity = Identity::new(artifact.package_name(), artifact.target_name);
-    spawn_listing(artifact, run, linked.as_str(), build_script, slot, environments, identity).map(Some)
+    spawn_listing(artifact, run, linked.as_str(), build_script, slot, &mut environments[slot], identity).map(Some)
 }
 
 
@@ -2980,7 +2995,7 @@ impl CargoDriver<'_> {
         };
         let (_, owned) = self.listed.iter().find(|(listed, _)| *listed == target).ok_or(RunError::Outcome)?;
         let artifact = owned.as_artifact();
-        let environment = &mut self.environments[slot_range(free_slot(self.active.as_ref(), &self.pending_listings))];
+        let environment = &mut self.environments[free_slot(self.active.as_ref(), &self.pending_listings)];
         let input = TestEnvironmentInput {
             artifact,
             linked_directories: self.linked.as_str(),
@@ -2989,7 +3004,7 @@ impl CargoDriver<'_> {
             home: run.home,
             build_script: self.build_scripts.find(artifact.package_id),
         };
-        let layout = TestEnvironmentLayout::build(&input, environment).map_err(|_| RunError::TestEnvironment)?;
+        let layout = build_environment(&input, environment)?;
         let name = core::str::from_utf8(id.1).map_err(|_| RunError::Arguments)?;
         let scan = ListingScan { run, lanes, executable: artifact.executable, target, environment: &*environment, layout: &layout };
         let intent = ExactTestIntent::new(ExecutablePath::Borrowed(artifact.executable), name);
@@ -3073,7 +3088,7 @@ impl CargoDriver<'_> {
                 &self.linked,
                 &self.build_scripts,
                 free_slot(self.active.as_ref(), &self.pending_listings),
-                &mut *self.environments,
+                self.environments,
             )?;
             let kept = OwnedArtifact::copy_of(&artifact);
             self.queue_listing(started, &kept, lanes)?;
@@ -3193,7 +3208,7 @@ impl CargoDriver<'_> {
                             &self.linked,
                             &self.build_scripts,
                             free_slot(self.active.as_ref(), &self.pending_listings),
-                            &mut *self.environments,
+                            self.environments,
                         )?;
                         let kept = OwnedArtifact::copy_of(&artifact);
                         self.queue_listing(started, &kept, lanes)?;
@@ -3403,7 +3418,7 @@ impl CargoDriver<'_> {
             run,
             executable,
             target: active.target,
-            environment: &self.environments[slot_range(active.slot)],
+            environment: &self.environments[active.slot],
             layout: &active.layout,
         };
         shard::load_records(run, executable, active.target)?;
@@ -3464,7 +3479,7 @@ impl CargoDriver<'_> {
             run,
             executable,
             target: active.target,
-            environment: &self.environments[slot_range(active.slot)],
+            environment: &self.environments[active.slot],
             layout: &active.layout,
         };
         shard::load_records(run, executable, active.target)?;
@@ -3861,18 +3876,18 @@ async fn run_located(parser: &CliParser<'_>, started_millis: u64, location: &mut
 type CargoStorage = (
     Box<[u8]>,
     Box<[u8]>,
+    Vec<u8>,
+    Vec<u8>,
     Box<[u8]>,
     Box<[u8]>,
-    Box<[u8]>,
-    Box<[u8]>,
-    Box<[u8]>,
+    Vec<Vec<u8>>,
     IgnoredSet,
 );
 
 type RunStorage<'environment> = (
     CargoStorage,
     (
-        Box<[u8]>,
+        (Vec<u8>, Vec<u8>),
         Box<[&'environment [u8]]>,
     ),
     (
@@ -3890,14 +3905,14 @@ fn run_storage<'environment>(process: ProcessMode, timeline_bytes: usize) -> Run
         (
             zeroed(FRAME_CAPACITY),
             zeroed(SCRATCH_CAPACITY),
-            zeroed(LINKED_CAPACITY),
-            zeroed(BUILD_SCRIPT_CAPACITY),
+            Vec::new(),
+            Vec::new(),
             zeroed(SOURCE_CAPACITY + 1),
             zeroed(RESULT_LINE_CAPACITY + 1),
-            zeroed(ENVIRONMENT_CAPACITY * LISTING_SLOTS),
+            (0..LISTING_SLOTS).map(|_| std::vec![0; ENVIRONMENT_CAPACITY]).collect(),
             IgnoredSet::new(),
         ),
-        (zeroed(LIBDIR_CAPACITY * 2), std::vec![b"".as_slice(); ENV_CAPACITY].into_boxed_slice()),
+        ((Vec::new(), Vec::new()), std::vec![b"".as_slice(); ENV_CAPACITY].into_boxed_slice()),
         (Box::new(SessionSlots::new()), (0..LIVE_CAPACITY).map(|_| None).collect()),
         match process {
             ProcessMode::Shard => (
@@ -4251,9 +4266,8 @@ pub(crate) fn spawn_libdir_query(
 
 async fn resolve_libdirs(
     queries: LibdirQueries,
-    buffer: &mut [u8],
+    (host_buffer, target_buffer): &mut (Vec<u8>, Vec<u8>),
 ) -> Result<([&str; 2], usize), RunError> {
-    let (host_buffer, target_buffer) = buffer.split_at_mut(LIBDIR_CAPACITY);
     let host_length = collect_libdir(queries.0, host_buffer).await?;
     let target_length = match queries.1 {
         Some(query) => collect_libdir(query, target_buffer).await?,
@@ -5297,7 +5311,7 @@ pub(super) mod listing_allocation_tests {
 
     use proxima_core::signal::Signal;
 
-    use super::{DocObservation, ENVIRONMENT_CAPACITY, LISTING_SLOTS, ListingRun, PendingListing, Settings, TargetTable, spawn_listing};
+    use super::{DocObservation, ENVIRONMENT_CAPACITY, ListingRun, PendingListing, Settings, TargetTable, spawn_listing};
     use crate::edge_spawn::held_launch_storage;
     use crate::cargo_message::TestArtifact;
     use crate::config::{IgnoreMode, NoTestsPolicy};
@@ -5398,7 +5412,7 @@ pub(super) mod listing_allocation_tests {
             target_name: "cargo_val",
             target_kind: "lib",
         };
-        let mut environments = super::zeroed(ENVIRONMENT_CAPACITY * LISTING_SLOTS);
+        let mut environments = std::vec![0; ENVIRONMENT_CAPACITY];
 
         let identity = super::Identity::new(artifact.package_name(), artifact.target_name);
         let (listing, allocations) = with_run(|run| crate::test_alloc::measure_allocations(|| spawn_listing(&artifact, run, "", None, 1, &mut environments, identity)));
