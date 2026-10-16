@@ -1,11 +1,6 @@
 //! Per-binary and total count lines, and the accounting invariant between them.
 
-use std::boxed::Box;
-use std::vec;
-
-pub const MAX_TARGETS: usize = 512;
-pub const ID_CAPACITY: usize = 128;
-pub const LINE_CAPACITY: usize = ID_CAPACITY + 160;
+use std::vec::Vec;
 
 /// What one test binary (or the whole run) did with each test name it listed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -36,17 +31,14 @@ impl Counts {
     }
 }
 
-#[derive(Clone, Copy)]
 struct Entry {
-    id: [u8; ID_CAPACITY],
-    id_length: usize,
+    id: Vec<u8>,
     counts: Counts,
 }
 
-/// Counters per test binary, indexed by listing order; storage is fixed.
+/// Counters per test binary, indexed by listing order; one entry per binary cargo reports, each id kept whole.
 pub struct TargetTable {
-    entries: Box<[Entry]>,
-    count: usize,
+    entries: Vec<Entry>,
 }
 
 /// Which counter a test name moved.
@@ -64,43 +56,22 @@ pub enum Tally {
 
 impl TargetTable {
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            entries: vec![Entry {
-                id: [0; ID_CAPACITY],
-                id_length: 0,
-                counts: Counts {
-                    discovered: 0,
-                    passed: 0,
-                    failed: 0,
-                    ignored: 0,
-                    filtered: 0,
-                },
-            }; MAX_TARGETS].into_boxed_slice(),
-            count: 0,
-        }
+    pub const fn new() -> Self {
+        Self { entries: Vec::new() }
     }
 
-    /// Registers the next binary under `package` for a unit-test target or `package::binary`; false when storage is full or the id is too long.
-    pub fn begin(&mut self, package: &str, binary: Option<&str>) -> bool {
-        let separator = if binary.is_some() { 2 } else { 0 };
-        let needed = package.len() + separator + binary.map_or(0, str::len);
-        if self.count == MAX_TARGETS || needed > ID_CAPACITY {
-            return false;
-        }
-        let entry = &mut self.entries[self.count];
-        entry.id[..package.len()].copy_from_slice(package.as_bytes());
+    /// Registers the next binary under `package` for a unit-test target or `package::binary`.
+    pub fn begin(&mut self, package: &str, binary: Option<&str>) {
+        let mut id = Vec::from(package.as_bytes());
         if let Some(binary) = binary {
-            entry.id[package.len()..package.len() + 2].copy_from_slice(b"::");
-            entry.id[package.len() + 2..needed].copy_from_slice(binary.as_bytes());
+            id.extend_from_slice(b"::");
+            id.extend_from_slice(binary.as_bytes());
         }
-        entry.id_length = needed;
-        self.count += 1;
-        true
+        self.entries.push(Entry { id, counts: Counts::default() });
     }
 
     pub fn tally(&mut self, target: usize, what: Tally) {
-        let Some(entry) = self.entries[..self.count].get_mut(target) else {
+        let Some(entry) = self.entries.get_mut(target) else {
             return;
         };
         let counts = &mut entry.counts;
@@ -123,19 +94,19 @@ impl TargetTable {
 
     #[must_use]
     pub const fn len(&self) -> usize {
-        self.count
+        self.entries.len()
     }
 
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.count == 0
+        self.entries.len() == 0
     }
 
     #[must_use]
     pub fn id(&self, target: usize) -> &[u8] {
         self.entries
             .get(target)
-            .map_or(&[][..], |entry| &entry.id[..entry.id_length])
+            .map_or(&[][..], |entry| entry.id.as_slice())
     }
 
     #[must_use]
@@ -145,7 +116,7 @@ impl TargetTable {
 
     #[must_use]
     pub fn total(&self) -> Counts {
-        self.entries[..self.count]
+        self.entries
             .iter()
             .fold(Counts::default(), |sum, entry| sum.plus(&entry.counts))
     }
@@ -153,7 +124,7 @@ impl TargetTable {
     /// The first binary whose counters do not balance.
     #[must_use]
     pub fn first_unbalanced(&self) -> Option<usize> {
-        (0..self.count).find(|target| !self.counts(*target).balanced())
+        (0..self.entries.len()).find(|target| !self.counts(*target).balanced())
     }
 }
 
@@ -163,17 +134,14 @@ impl Default for TargetTable {
     }
 }
 
-/// A fixed-capacity line builder.
+/// One count line, sized by its label.
 pub struct Rendered {
-    bytes: [u8; LINE_CAPACITY],
-    length: usize,
+    bytes: Vec<u8>,
 }
 
 impl Rendered {
     fn text(&mut self, text: &[u8]) {
-        let taken = text.len().min(LINE_CAPACITY - self.length);
-        self.bytes[self.length..self.length + taken].copy_from_slice(&text[..taken]);
-        self.length += taken;
+        self.bytes.extend_from_slice(text);
     }
 
     fn number(&mut self, value: usize) {
@@ -193,17 +161,14 @@ impl Rendered {
 
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.length]
+        &self.bytes
     }
 }
 
 /// `<label>: discovered N, passed P, failed F, ignored I, filtered X`, plus `, wall S.mmms` for the total line.
 #[must_use]
 pub fn render(label: &[u8], counts: &Counts, wall_millis: Option<u64>) -> Rendered {
-    let mut line = Rendered {
-        bytes: [0; LINE_CAPACITY],
-        length: 0,
-    };
+    let mut line = Rendered { bytes: Vec::new() };
     line.text(label);
     for (name, value) in [
         (&b": discovered "[..], counts.discovered),
@@ -263,8 +228,8 @@ mod tests {
     #[proxima::test]
     async fn a_launched_name_that_never_finishes_is_unbalanced_and_named() {
         let mut table = Box::new(TargetTable::new());
-        assert!(table.begin("cli_run", None));
-        assert!(table.begin("cli_run", Some("extra")));
+        table.begin("cli_run", None);
+        table.begin("cli_run", Some("extra"));
         table.tally(0, Tally::Launched);
         table.tally(0, Tally::Passed);
         table.tally(1, Tally::Filtered);
@@ -278,10 +243,13 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn an_over_long_id_is_refused() {
+    async fn an_id_and_a_table_of_any_size_are_kept_whole() {
         let mut table = Box::new(TargetTable::new());
-        let long = "x".repeat(129);
-        assert!(!table.begin(&long, None));
-        assert!(table.is_empty());
+        let long = "x".repeat(2000);
+        for _ in 0..1000 {
+            table.begin(&long, Some("serve"));
+        }
+        assert_eq!(table.len(), 1000);
+        assert_eq!(table.id(999).len(), 2000 + 2 + 5);
     }
 }
