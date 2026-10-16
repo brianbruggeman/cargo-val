@@ -6,6 +6,8 @@ use std::process::Command;
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/scratch.rs"]
@@ -36,7 +38,7 @@ fn write_package(workspace: &Path, name: &str, tests: usize) {
     fs::write(root.join("src/extra.rs"), "fn main() {\n    println!(\"extra\");\n}\n").expect("extra is writable");
     for number in 0..tests {
         let body = format!(
-            "#[test]\nfn serve_exits_cleanly_{number:02}() {{\n    let output = std::process::Command::new(env!(\"CARGO_BIN_EXE_{name}_serve\")).output().expect(\"the serve bin starts\");\n    assert!(output.status.success());\n    assert_eq!(output.stdout, b\"serving\\n\");\n}}\n"
+            "#[test]\nfn serve_exits_cleanly_{number:02}() {{\n    let output = std::process::Command::new(env!(\"CARGO_BIN_EXE_{name}_serve\")).stdout(std::process::Stdio::piped()).spawn().expect(\"the serve bin starts\").wait_with_output().expect(\"the serve bin exits\");\n    assert!(output.status.success());\n    assert_eq!(output.stdout, b\"serving\\n\");\n}}\n"
         );
         fs::write(root.join(format!("tests/serve_{number:02}.rs")), body).expect("test file is writable");
     }
@@ -58,7 +60,7 @@ fn write_workspace(root: &Path, tests: usize) -> PathBuf {
     workspace
 }
 
-fn cargo_val(scratch: &Path, workspace: &Path, target: &Path) -> Command {
+fn cargo_val(workspace: &Path) -> Command {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -67,8 +69,7 @@ fn cargo_val(scratch: &Path, workspace: &Path, target: &Path) -> Command {
         .env("CARGO_VAL_OUTPUT", "plain")
         .env("CARGO_VAL_LOG", "debug")
         .env("NO_COLOR", "1")
-        .env("CARGO_HOME", scratch.join("cargo-home"))
-        .env("CARGO_TARGET_DIR", target);
+        .envs(isolation::environment("parked-gate"));
     for key in ["CARGO_VAL_BIN_GATE", "CARGO_VAL_TARGET_DIR", "CARGO_VAL_JOBS", "RUST_TEST_THREADS"] {
         command.env_remove(key);
     }
@@ -91,7 +92,7 @@ fn passed(stdout: &str) -> usize {
 async fn more_test_binaries_than_the_old_park_capacity_wait_for_a_bin_and_every_test_runs() {
     let scratch = Scratch::new("parked-gate");
     let workspace = write_workspace(&scratch, TESTS_PER_PACKAGE);
-    let mut command = cargo_val(&scratch, &workspace, &scratch.join("target"));
+    let mut command = cargo_val(&workspace);
     command.arg("--no-default-features");
 
     let output = fixture_output(&mut command).await;
@@ -124,7 +125,7 @@ async fn a_workspace_path_over_300_characters_keeps_its_metadata_so_the_run_isol
     let scratch = Scratch::new("long-path");
     let root = long_root(&scratch);
     let workspace = write_workspace(&root, 2);
-    let mut command = cargo_val(&scratch, &workspace, &root.join("target"));
+    let mut command = cargo_val(&workspace);
     command.args(["--target-dir", "isolated"]);
 
     let output = fixture_output(&mut command).await;
@@ -145,7 +146,7 @@ async fn a_required_features_bin_that_is_not_enabled_does_not_hold_tests_past_th
     let scratch = Scratch::new("required-features");
     let workspace = write_workspace(&scratch, TESTS_PER_PACKAGE);
 
-    let output = fixture_output(&mut cargo_val(&scratch, &workspace, &scratch.join("target"))).await;
+    let output = fixture_output(&mut cargo_val(&workspace)).await;
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let lines: Vec<&str> = stderr.lines().collect();

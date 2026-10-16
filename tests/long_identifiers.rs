@@ -7,6 +7,8 @@ use std::process::Command;
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/scratch.rs"]
@@ -42,12 +44,12 @@ fn write_package(root: &Path) {
         .expect("lockfile is writable");
     fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"serving\");\n}\n").expect("main is writable");
     let body = format!(
-        "#[test]\nfn {TEST_NAME}() {{\n    let output = std::process::Command::new(env!(\"CARGO_BIN_EXE_{BIN_NAME}\")).output().expect(\"the bin starts\");\n    assert_eq!(output.stdout, b\"serving\\n\");\n}}\n\n#[test]\nfn second_{TEST_NAME}() {{\n    assert_eq!(1 + 1, 2);\n}}\n"
+        "#[test]\nfn {TEST_NAME}() {{\n    let output = std::process::Command::new(env!(\"CARGO_BIN_EXE_{BIN_NAME}\")).stdout(std::process::Stdio::piped()).spawn().expect(\"the bin starts\").wait_with_output().expect(\"the bin exits\");\n    assert_eq!(output.stdout, b\"serving\\n\");\n}}\n\n#[test]\nfn second_{TEST_NAME}() {{\n    assert_eq!(1 + 1, 2);\n}}\n"
     );
     fs::write(root.join("tests/exercise_the_long_names.rs"), body).expect("test file is writable");
 }
 
-fn cargo_val(scratch: &Path, package: &Path, target: &Path) -> Command {
+fn cargo_val(package: &Path) -> Command {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -55,8 +57,7 @@ fn cargo_val(scratch: &Path, package: &Path, target: &Path) -> Command {
         .args(["--no-fail-fast", "--tests", "--target-dir", "isolated"])
         .env("CARGO_VAL_OUTPUT", "plain")
         .env("NO_COLOR", "1")
-        .env("CARGO_HOME", scratch.join("cargo-home"))
-        .env("CARGO_TARGET_DIR", target);
+        .envs(isolation::environment("long-identifiers"));
     for key in ["CARGO_VAL_BIN_GATE", "CARGO_VAL_TARGET_DIR", "CARGO_VAL_JOBS", "RUST_TEST_THREADS", "CARGO_VAL_LOG"] {
         command.env_remove(key);
     }
@@ -82,7 +83,7 @@ async fn a_331_character_workspace_path_with_long_binary_and_test_names_complete
     write_package(&root);
     assert!(root.as_os_str().len() > PATH_FLOOR, "the package path is {} characters", root.as_os_str().len());
 
-    let output = fixture_output(&mut cargo_val(&scratch, &root, &root.join("target"))).await;
+    let output = fixture_output(&mut cargo_val(&root)).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
