@@ -8,21 +8,17 @@ mod common;
 mod binary;
 #[path = "common/fixture.rs"]
 mod fixture;
+#[path = "common/scratch.rs"]
+mod scratch;
 
 use fixture::fixture_output;
+use scratch::Scratch;
 
 const PACKAGES: [&str; 2] = ["gate_alpha", "gate_beta"];
 const TESTS_PER_PACKAGE: usize = 35;
 const PARK_CAPACITY_BEFORE_THE_FIX: usize = 64;
 #[cfg(unix)]
 const LONG_PATH_FLOOR: usize = 300;
-
-fn scratch(label: &str) -> PathBuf {
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{label}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("scratch directory is creatable");
-    directory
-}
 
 // each package has the bin its tests run and a second bin behind a feature nobody enables: metadata counts two bins, cargo builds one, so the second never arrives and every integration test of the package parks until cargo reports build-finished
 fn write_package(workspace: &Path, name: &str, tests: usize) {
@@ -93,7 +89,7 @@ fn passed(stdout: &str) -> usize {
 
 #[proxima::test(timeout = "310s")]
 async fn more_test_binaries_than_the_old_park_capacity_wait_for_a_bin_and_every_test_runs() {
-    let scratch = scratch("parked-gate");
+    let scratch = Scratch::new("parked-gate");
     let workspace = write_workspace(&scratch, TESTS_PER_PACKAGE);
     let mut command = cargo_val(&scratch, &workspace, &scratch.join("target"));
     command.arg("--no-default-features");
@@ -125,7 +121,7 @@ fn long_root(scratch: &Path) -> PathBuf {
 #[cfg(unix)]
 #[proxima::test(timeout = "310s")]
 async fn a_workspace_path_over_300_characters_keeps_its_metadata_so_the_run_isolates_and_gates_on_metadata() {
-    let scratch = scratch("long-path");
+    let scratch = Scratch::new("long-path");
     let root = long_root(&scratch);
     let workspace = write_workspace(&root, 2);
     let mut command = cargo_val(&scratch, &workspace, &root.join("target"));
@@ -146,7 +142,7 @@ async fn a_workspace_path_over_300_characters_keeps_its_metadata_so_the_run_isol
 
 #[proxima::test(timeout = "310s")]
 async fn a_required_features_bin_that_is_not_enabled_does_not_hold_tests_past_the_other_bins_artifact() {
-    let scratch = scratch("required-features");
+    let scratch = Scratch::new("required-features");
     let workspace = write_workspace(&scratch, TESTS_PER_PACKAGE);
 
     let output = fixture_output(&mut cargo_val(&scratch, &workspace, &scratch.join("target"))).await;
