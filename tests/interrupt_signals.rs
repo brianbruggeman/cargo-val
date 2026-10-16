@@ -419,7 +419,7 @@ async fn an_interrupted_rich_run_prints_the_same_block_as_plain_after_the_frame_
     let both = async { (interrupted_plain_run(("block-rich-reference", &stamps), TEST_PROCESSES).await, interrupted_rich_run(("block-rich", &stamps), TEST_PROCESSES).await) };
     let mut both = pin!(both);
     let Ok((plain, rich)) = timeout(RUN_BUDGET, both.as_mut()).await else {
-        panic!("the plain and rich runs outlived {RUN_BUDGET:?}; the last stamp without its exit names the wait:\n{}", stamps.borrow().join("\n"));
+        panic!("the plain and rich runs outlived {RUN_BUDGET:?}; the last stamp without its exit names the wait:\n{}\nlock holders at the budget:\n{}", stamps.borrow().join("\n"), group::deadline_report::lock_report::lock_holders(None, None));
     };
 
     assert_spec_block(&rich);
