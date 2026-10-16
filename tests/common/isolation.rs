@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -26,6 +27,7 @@ pub fn environment(label: &str) -> [(&'static str, PathBuf); 2] {
 }
 
 // the run number is claimed on the home, whose name carries no label, so two labels in one process can never share a home
+#[cfg(unix)]
 fn claim(parent: &Path, label: &str) -> PathBuf {
     let process = std::process::id();
     let mut run = 0_u64;
@@ -44,6 +46,17 @@ fn claim(parent: &Path, label: &str) -> PathBuf {
     }
 }
 
+// windows runs its tests one at a time (`--test-threads=1`), so no two can contend for a lock there, and a cold fixture build per test costs more than the job's time limit allows; a label keeps one warm run per process, numbered by a hash of the label so two labels never share a home
+#[cfg(windows)]
+fn claim(parent: &Path, label: &str) -> PathBuf {
+    let number = label.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    let run = parent.join(format!("{label}-{}-{number}", std::process::id()));
+    for directory in [layout::home_in(&run), run.clone()] {
+        fs::create_dir_all(&directory).unwrap_or_else(|error| panic!("{} is not creatable: {error}", directory.display()));
+    }
+    run
+}
+
 fn ambient_cargo_home() -> PathBuf {
     std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -54,7 +67,7 @@ fn ambient_cargo_home() -> PathBuf {
 fn link_caches(ambient: &Path, private: &Path) {
     for entry in LINKED_ENTRIES {
         let source = ambient.join(entry);
-        if source.exists() {
+        if source.exists() && fs::symlink_metadata(private.join(entry)).is_err() {
             link(&source, &private.join(entry));
         }
     }
