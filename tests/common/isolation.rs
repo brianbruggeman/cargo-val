@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Once;
 
 mod layout {
     include!("isolation_layout.rs");
@@ -13,6 +15,7 @@ const LINKED_ENTRIES: [&str; 4] = ["registry", "git", "config.toml", "config"];
 ///
 /// The run directory is named `label`, the pid and the first free run number, claimed by `create_dir` so two threads of one process never take the same one. Its `CARGO_HOME` is private, so `.package-cache` and its lock are too, and its registry and git caches are links to the ambient ones so nothing is downloaded.
 pub fn environment(label: &str) -> [(&'static str, PathBuf); 2] {
+    sweep_finished_runs();
     let parent = layout::runs_directory();
     fs::create_dir_all(&parent).unwrap_or_else(|error| panic!("{} is not creatable: {error}", parent.display()));
     let run = claim(&parent, label);
@@ -67,3 +70,31 @@ fn link(source: &Path, destination: &Path) {
     let linked = if source.is_dir() { std::os::windows::fs::symlink_dir(source, destination) } else { std::os::windows::fs::symlink_file(source, destination) };
     linked.unwrap_or_else(|error| panic!("{} is not linkable to {}: {error}", destination.display(), source.display()));
 }
+
+// every pass leaves a target per fixture run, about seventeen gigabytes for the whole suite, so the first run a process makes removes the runs of processes that have finished; a live process's runs are never touched, and windows keeps them all
+#[cfg(unix)]
+fn sweep_finished_runs() {
+    static SWEPT: Once = Once::new();
+    SWEPT.call_once(|| {
+        let Ok(entries) = fs::read_dir(layout::runs_directory()) else {
+            return;
+        };
+        for run in entries.flatten().map(|entry| entry.path()) {
+            let name = run.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            let process = name.rsplit('-').nth(1).and_then(|text| text.parse::<i32>().ok());
+            if process.is_some_and(|process| !process_is_alive(process)) {
+                let _ = fs::remove_dir_all(layout::home_in(&run));
+                let _ = fs::remove_dir_all(&run);
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+fn process_is_alive(process: i32) -> bool {
+    // safety: kill with signal 0 only checks that the process exists
+    unsafe { libc::kill(process, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
+#[cfg(not(unix))]
+fn sweep_finished_runs() {}
