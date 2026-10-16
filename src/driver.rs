@@ -2068,6 +2068,7 @@ impl ListingRun<'_> {
         match crate::editor_launch::spawn_detached(argv, self.environment, directory.as_bytes()) {
             Ok((group, child)) => {
                 attach(&lanes[EDITOR_LANE], child)?;
+                pipeline_step(b"probe-spawned", argv.first().map_or(&b""[..], Vec::as_slice));
                 *self.probe.borrow_mut() = Some((group, monotonic_millis().saturating_add(self.settings.probe_ms)));
                 *self.probe_site.borrow_mut() = request;
                 Ok(true)
@@ -2078,6 +2079,7 @@ impl ListingRun<'_> {
 
     // the commands for one press, given the probe's answer: detached ones run on the exit lane while review keeps drawing, an attached one takes the terminal
     fn dispatch(&self, lanes: &Lanes, (file, line, col): (Vec<u8>, u32, u32), answer: Option<&[u8]>) -> Result<(), RunError> {
+        pipeline_step(b"editor-dispatch", if answer.is_some() { &b"with-server-answer"[..] } else { &b"no-server-answer"[..] });
         let sockets = crate::editor_launch::nvim_sockets(self.environment);
         let (detached, mut commands) = crate::editor_launch::commands(&self.settings.editor, &file, (line, col), (self.environment, &sockets), answer);
         if !detached {
@@ -2124,6 +2126,7 @@ impl ListingRun<'_> {
     }
 
     pub(crate) fn editor_output_ended(&self, lanes: &Lanes) -> Result<(), RunError> {
+        pipeline_step(b"probe-stdout-eof", if self.probe.borrow().is_some() { &b"probing"[..] } else { &b"no-probe"[..] });
         self.probe_output.borrow_mut().2 = true;
         self.settle_probe(lanes)
     }
@@ -2132,9 +2135,15 @@ impl ListingRun<'_> {
     fn settle_probe(&self, lanes: &Lanes) -> Result<(), RunError> {
         let (stdout, exited, ended) = self.probe_output.borrow().clone();
         let Some(succeeded) = exited.filter(|_| ended) else {
+            pipeline_step(b"probe-settle-waiting", match (exited.is_some(), ended) {
+                (false, false) => &b"missing=exit+eof"[..],
+                (false, true) => &b"missing=exit"[..],
+                (true, _) => &b"missing=eof"[..],
+            });
             return Ok(());
         };
         if self.probe.borrow_mut().take().is_none() {
+            pipeline_step(b"probe-settle-waiting", b"no-probe");
             return Ok(());
         }
         let (file, line, col) = self.probe_site.take();
@@ -2189,6 +2198,7 @@ impl ListingRun<'_> {
     fn detached_exited(&self, lanes: &Lanes, status: io::Result<ExitStatus>) -> Result<(), RunError> {
         if self.probe.borrow().is_some() {
             self.probe_output.borrow_mut().1 = Some(status.is_ok_and(|status| status.success()));
+            pipeline_step(b"probe-exit-recorded", if self.probe_output.borrow().1 == Some(true) { &b"success"[..] } else { &b"failure"[..] });
             return self.settle_probe(lanes);
         }
         match status.map(crate::editor_launch::exit_code).map_err(|error| error.raw_os_error().unwrap_or(EXIT_FAULT_CODE)) {
