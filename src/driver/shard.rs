@@ -596,7 +596,8 @@ impl CargoDriver<'_> {
         }
         let executable = core::str::from_utf8(&active.path[..active.path_length]).map_err(|_| RunError::Arguments)?;
         let environment = &self.environments[active.slot];
-        let (overrides, override_count) = override_entries(&active.layout, environment)?;
+        let (narrow, narrow_count, wide) = override_entries(&active.layout, environment)?;
+        let overrides = if wide.is_empty() { &narrow[..narrow_count] } else { &wide[..] };
         let fixed = executable.len() + FIXED_UNITS + run.harness_arguments.iter().map(|argument| argument.len() + 1).sum::<usize>();
         while ledger.sessions().len() < run.settings.jobs {
             let in_flight = ledger.sessions().len();
@@ -615,7 +616,7 @@ impl CargoDriver<'_> {
                     owner: LaunchOwner::Ledger(&mut *ledger),
                     intent,
                     inherited_environment: run.environment,
-                    child_overrides: &overrides[..override_count],
+                    child_overrides: overrides,
                     storage: &mut storage,
                     harness_arguments: run.harness_arguments,
                     current_directory: active.layout.current_directory(environment).as_bytes(),
