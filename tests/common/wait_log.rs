@@ -29,6 +29,6 @@ pub async fn guarded<Outcome>(label: &str, (log, budget): (&Log, Duration), body
     match timeout(budget, std::panic::AssertUnwindSafe(body).catch_unwind()).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(payload)) => panic!("{label} panicked: {}\n{}", payload_text(payload.as_ref()), log.borrow().join("\n")),
-        Err(elapsed) => panic!("{label} outlived {budget:?} ({elapsed:?}); the last stamp without its exit names the wait:\n{}\nlock holders at the budget:\n{}", log.borrow().join("\n"), lock_report::lock_holders(None)),
+        Err(elapsed) => panic!("{label} outlived {budget:?} ({elapsed:?}); the last stamp without its exit names the wait:\n{}\nlock holders at the budget:\n{}", log.borrow().join("\n"), lock_report::lock_holders(None, None)),
     }
 }
