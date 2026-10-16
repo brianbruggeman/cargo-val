@@ -16,17 +16,18 @@ use crate::edge_output::{self, OutputSink};
 use crate::edge_store::{self, HEADER_BYTES, Store, View};
 use crate::edge_stream::CAPTURE_BYTES;
 use crate::line::Line;
-use crate::summary::ID_CAPACITY;
 use crate::view_defaults::FRAME_BYTES;
 
 const RECORD_BYTES: usize = 512;
+// flow-control reservation for a binary id in one event, not a limit: a longer id spills across records
+const ID_RESERVE_BYTES: usize = 128;
 const SLOTS: usize = STATUS_QUEUE_BYTES / RECORD_BYTES;
 // worst case one handled item queues: stdout and stderr captures with their headers and truncation markers.
 const HANDLER_FRAMING_BYTES: usize = 256 + 2 * PLAIN_BLOCK_FRAMING_BYTES;
 // plain mode frames each captured stream with delimiter lines that carry the binary id and the test name.
-const PLAIN_BLOCK_FRAMING_BYTES: usize = NAME_CAPACITY + ID_CAPACITY + 128;
+const PLAIN_BLOCK_FRAMING_BYTES: usize = NAME_CAPACITY + ID_RESERVE_BYTES + 128;
 // one gated event: a result line is a name, a label and its header; a failure line travels with its headers.
-const REPORT_FRAMING_BYTES: usize = 64 + ID_CAPACITY + 16;
+const REPORT_FRAMING_BYTES: usize = 64 + ID_RESERVE_BYTES + 16;
 pub(crate) const EVENT_RESERVE: usize = NAME_CAPACITY + REPORT_FRAMING_BYTES;
 const LANE_CHUNK: usize = CAPTURE_BYTES as usize;
 const CAPTURE_PAIR: usize = 2 * SYNC_WINDOW_BYTES + HANDLER_FRAMING_BYTES;

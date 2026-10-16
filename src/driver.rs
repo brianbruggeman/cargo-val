@@ -96,7 +96,6 @@ const INCLUDE_ARGUMENTS: [&[u8]; 1] = [b"--include-ignored"];
 const SHARD_ARGUMENTS: [&[u8]; 1] = [b"--test-threads=1"];
 const SHARD_ONLY_ARGUMENTS: [&[u8]; 2] = [b"--ignored", b"--test-threads=1"];
 const SHARD_INCLUDE_ARGUMENTS: [&[u8]; 2] = [b"--include-ignored", b"--test-threads=1"];
-const IDENTITY_CAPACITY: usize = 128;
 pub(crate) const NAME_CAPACITY: usize = 1024;
 const ENV_CAPACITY: usize = 1024;
 const PATH_CAPACITY: usize = 4096;
@@ -115,34 +114,24 @@ const FRAME_CAPACITY: usize = 131_072;
 const RESULT_LINE_CAPACITY: usize = NAME_CAPACITY + 64;
 
 struct Identity {
-    package: [u8; IDENTITY_CAPACITY],
-    package_length: usize,
-    binary: [u8; IDENTITY_CAPACITY],
-    binary_length: usize,
+    package: String,
+    binary: String,
 }
 
 impl Identity {
-    fn new(package: &str, binary: &str) -> Option<Self> {
-        if package.len() > IDENTITY_CAPACITY || binary.len() > IDENTITY_CAPACITY {
-            return None;
+    fn new(package: &str, binary: &str) -> Self {
+        Self {
+            package: String::from(package),
+            binary: String::from(binary),
         }
-        let mut identity = Self {
-            package: [0; IDENTITY_CAPACITY],
-            package_length: package.len(),
-            binary: [0; IDENTITY_CAPACITY],
-            binary_length: binary.len(),
-        };
-        identity.package[..package.len()].copy_from_slice(package.as_bytes());
-        identity.binary[..binary.len()].copy_from_slice(binary.as_bytes());
-        Some(identity)
     }
 
     fn package(&self) -> &str {
-        core::str::from_utf8(&self.package[..self.package_length]).unwrap_or("")
+        &self.package
     }
 
     fn binary(&self) -> &str {
-        core::str::from_utf8(&self.binary[..self.binary_length]).unwrap_or("")
+        &self.binary
     }
 }
 
@@ -185,7 +174,6 @@ pub enum RunError {
     IgnoredSet(IgnoredSetFull),
     NothingRan,
     SummaryMismatch,
-    TargetTable,
     TestThreads(ThreadsError),
     FailFast(FailFastError),
     DocTests,
@@ -232,7 +220,6 @@ impl RunError {
             Self::IgnoredSet(_) => b"cargo-val: a test binary lists more ignored tests than the fixed set holds\n",
             Self::NothingRan => b"cargo-val: an exact test launch ran no test body\n",
             Self::SummaryMismatch => b"cargo-val: test counts do not balance\n",
-            Self::TargetTable => b"cargo-val: more test binaries than the fixed table or a binary id is too long\n",
             Self::TestThreads(error) => error.message(),
             Self::FailFast(error) => error.message(),
             Self::DocTests => b"cargo-val: cargo test --doc failed before reporting results\n",
@@ -1531,19 +1518,10 @@ fn spawn_listing(
     build_script: Option<BuildScriptOutput<'_>>,
     slot: usize,
     environments: &mut [u8],
+    identity: Identity,
 ) -> Result<PendingListing, RunError> {
     let target = run.policy.borrow_mut().target_listed();
     pipeline_step(b"listing-spawned", artifact.target_name.as_bytes());
-    let binary_id = (!artifact.is_unit_test_target()).then_some(artifact.target_name);
-    if !run
-        .targets
-        .borrow_mut()
-        .begin(artifact.package_name(), binary_id)
-    {
-        return Err(RunError::TargetTable);
-    }
-    let identity = Identity::new(artifact.package_name(), artifact.target_name)
-        .ok_or(RunError::TargetTable)?;
     let executable = artifact.executable;
     if executable.len() + 1 > PATH_CAPACITY || executable.as_bytes().contains(&0) {
         return Err(RunError::Arguments);
@@ -2939,7 +2917,10 @@ fn start_listing(
         return Ok(None);
     }
     let build_script = build_scripts.find(artifact.package_id);
-    spawn_listing(artifact, run, linked.as_str(), build_script, slot, environments).map(Some)
+    let binary_id = (!artifact.is_unit_test_target()).then_some(artifact.target_name);
+    run.targets.borrow_mut().begin(artifact.package_name(), binary_id);
+    let identity = Identity::new(artifact.package_name(), artifact.target_name);
+    spawn_listing(artifact, run, linked.as_str(), build_script, slot, environments, identity).map(Some)
 }
 
 
@@ -5419,7 +5400,8 @@ pub(super) mod listing_allocation_tests {
         };
         let mut environments = super::zeroed(ENVIRONMENT_CAPACITY * LISTING_SLOTS);
 
-        let (listing, allocations) = with_run(|run| crate::test_alloc::measure_allocations(|| spawn_listing(&artifact, run, "", None, 1, &mut environments)));
+        let identity = super::Identity::new(artifact.package_name(), artifact.target_name);
+        let (listing, allocations) = with_run(|run| crate::test_alloc::measure_allocations(|| spawn_listing(&artifact, run, "", None, 1, &mut environments, identity)));
 
         let mut listing = listing.expect("the listing child starts");
         reap(&mut listing);
