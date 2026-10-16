@@ -105,6 +105,11 @@ impl DiscoveryFsm {
         waits_for_bins(&self.bins, self.gate, self.build, package_id)
     }
 
+    /// Calls `visit` with the id of `package_id` and of each package it depends on, from the metadata the bin gate read.
+    pub fn dependency_closure(&self, package_id: &str, visit: impl FnMut(&[u8])) {
+        self.bins.dependency_closure(package_id, visit);
+    }
+
     pub fn bin_built(&mut self, package_id: &str) {
         self.bins.note_built(package_id);
     }

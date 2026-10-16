@@ -11,7 +11,7 @@ use std::vec::Vec;
 
 use crate::cargo_message::{BuildEnvironment, BuildScript, TestArtifact};
 
-/// Most `KEY=VALUE` entries one executable can receive.
+/// `KEY=VALUE` entries a layout holds inline; a wider environment spills to the heap.
 pub const MAX_ENTRIES: usize = 64;
 pub use crate::edge_args::DYLIB_PATH_KEY;
 use crate::edge_args::{DEPS_SUFFIX, LOADER_DEFAULT_FALLBACKS, MAIN_SEPARATOR, PATH_SEPARATOR};
@@ -29,8 +29,6 @@ pub enum TestEnvironmentError {
     InvalidPackageId,
     /// The manifest path has no parent directory.
     InvalidManifestPath,
-    /// The executable's environment would exceed [`MAX_ENTRIES`].
-    TooManyEntries,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -134,6 +132,8 @@ impl<'storage> LinkedDirectories<'storage> {
 pub struct BuildScriptOutput<'output> {
     /// output directory, exported to the test as `OUT_DIR`.
     pub out_dir: &'output str,
+    /// the script's own search directories joined by the platform separator, which a test of a dependent package needs when the whole run's directories do not fit one environment string.
+    pub linked: &'output str,
     /// variables the script asked rustc to set, exported to the test as written.
     pub environment: BuildEnvironment<'output>,
 }
@@ -159,11 +159,21 @@ impl<'storage> BuildScriptOutputs<'storage> {
     /// Returns [`TestEnvironmentError::StorageTooSmall`] only when one record passes the four-byte length prefix.
     pub fn add(&mut self, script: &BuildScript<'_>) -> Result<(), TestEnvironmentError> {
         let environment = script.environment.separated();
-        let payload = script.package_id.len() + 1 + script.out_dir.len() + 1 + environment.len();
+        let mut linked = Vec::new();
+        for reported in script.linked_paths.iter() {
+            let directory = reported.split_once('=').map_or(reported, |(_, directory)| directory);
+            if !directory.is_empty() && !directory.as_bytes().contains(&PATH_SEPARATOR) && !has_component(&linked, directory.as_bytes()) {
+                if !linked.is_empty() {
+                    linked.push(PATH_SEPARATOR);
+                }
+                linked.extend_from_slice(directory.as_bytes());
+            }
+        }
+        let payload = script.package_id.len() + 1 + script.out_dir.len() + 1 + linked.len() + 1 + environment.len();
         let length = u32::try_from(payload).map_err(|_| TestEnvironmentError::StorageTooSmall { available: u32::MAX as usize })?;
         self.storage.extend_from_slice(&length.to_le_bytes());
-        for part in [script.package_id, script.out_dir] {
-            self.storage.extend_from_slice(part.as_bytes());
+        for part in [script.package_id.as_bytes(), script.out_dir.as_bytes(), linked.as_slice()] {
+            self.storage.extend_from_slice(part);
             self.storage.push(0);
         }
         self.storage.extend_from_slice(environment.as_bytes());
@@ -186,9 +196,11 @@ impl<'storage> BuildScriptOutputs<'storage> {
                 unsafe { str::from_utf8_unchecked(&self.storage[payload_start..payload_end]) };
             let (recorded_package, rest) = payload.split_once('\0')?;
             if recorded_package == package_id {
-                let (out_dir, environment) = rest.split_once('\0')?;
+                let (out_dir, rest) = rest.split_once('\0')?;
+                let (linked, environment) = rest.split_once('\0')?;
                 found = Some(BuildScriptOutput {
                     out_dir,
+                    linked,
                     environment: BuildEnvironment::from_separated(environment),
                 });
             }
@@ -216,9 +228,10 @@ pub struct TestEnvironmentInput<'input> {
 }
 
 /// Offsets of one executable's entries inside caller storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestEnvironmentLayout {
     entries: [Span; MAX_ENTRIES],
+    spilled: Vec<Span>,
     count: usize,
     current_directory: Span,
 }
@@ -245,22 +258,23 @@ impl TestEnvironmentLayout {
         let mut writer = Writer { storage, length: 0 };
         let mut layout = Self {
             entries: [Span::default(); MAX_ENTRIES],
+            spilled: Vec::new(),
             count: 0,
             current_directory: Span::default(),
         };
-        layout.push(write_dylib_path(&mut writer, input)?)?;
-        layout.push(writer.entry("CARGO_MANIFEST_DIR", manifest_directory)?)?;
-        layout.push(writer.entry("CARGO_PKG_NAME", identity.name)?)?;
-        layout.push(writer.entry("CARGO_PKG_VERSION", identity.version)?)?;
-        layout.push(writer.entry("CARGO_PKG_VERSION_MAJOR", identity.major)?)?;
-        layout.push(writer.entry("CARGO_PKG_VERSION_MINOR", identity.minor)?)?;
-        layout.push(writer.entry("CARGO_PKG_VERSION_PATCH", identity.patch)?)?;
-        layout.push(writer.entry("CARGO_PKG_VERSION_PRE", identity.pre)?)?;
+        layout.push(write_dylib_path(&mut writer, input)?);
+        layout.push(writer.entry("CARGO_MANIFEST_DIR", manifest_directory)?);
+        layout.push(writer.entry("CARGO_PKG_NAME", identity.name)?);
+        layout.push(writer.entry("CARGO_PKG_VERSION", identity.version)?);
+        layout.push(writer.entry("CARGO_PKG_VERSION_MAJOR", identity.major)?);
+        layout.push(writer.entry("CARGO_PKG_VERSION_MINOR", identity.minor)?);
+        layout.push(writer.entry("CARGO_PKG_VERSION_PATCH", identity.patch)?);
+        layout.push(writer.entry("CARGO_PKG_VERSION_PRE", identity.pre)?);
         if let Some(script) = input.build_script {
-            layout.push(writer.entry("OUT_DIR", script.out_dir)?)?;
+            layout.push(writer.entry("OUT_DIR", script.out_dir)?);
             for (key, value) in script.environment.iter() {
                 if !layout.has_key(writer.storage, key) {
-                    layout.push(writer.entry(key, value)?)?;
+                    layout.push(writer.entry(key, value)?);
                 }
             }
         }
@@ -270,19 +284,21 @@ impl TestEnvironmentLayout {
         Ok(layout)
     }
 
-    fn push(&mut self, span: Span) -> Result<(), TestEnvironmentError> {
-        let slot = self
-            .entries
-            .get_mut(self.count)
-            .ok_or(TestEnvironmentError::TooManyEntries)?;
-        *slot = span;
+    fn push(&mut self, span: Span) {
+        match self.entries.get_mut(self.count) {
+            Some(slot) => *slot = span,
+            None => self.spilled.push(span),
+        }
         self.count += 1;
-        Ok(())
+    }
+
+    fn span(&self, index: usize) -> Span {
+        self.entries.get(index).copied().unwrap_or_else(|| self.spilled[index - MAX_ENTRIES])
     }
 
     fn has_key(&self, storage: &[u8], key: &str) -> bool {
-        self.entries[..self.count].iter().any(|span| {
-            text(storage, *span)
+        (0..self.count).map(|index| self.span(index)).any(|span| {
+            text(storage, span)
                 .strip_prefix(key)
                 .is_some_and(|rest| rest.starts_with('='))
         })
@@ -303,7 +319,7 @@ impl TestEnvironmentLayout {
     /// Returns one `KEY=VALUE` entry written by [`Self::build`] into the same `storage`.
     #[must_use]
     pub fn entry<'storage>(&self, storage: &'storage [u8], index: usize) -> Option<&'storage str> {
-        (index < self.count).then(|| text(storage, self.entries[index]))
+        (index < self.count).then(|| text(storage, self.span(index)))
     }
 
     /// Returns the package directory every test of this executable starts in.
@@ -809,6 +825,7 @@ mod tests {
         )
         .expect("environment fits");
 
+        assert_eq!(outputs.find(script.package_id).map(|found| found.linked), Some("/work/probe_target/debug/build/buildscript_probe-b6efe4fe62985510/out:/opt/homebrew/lib"));
         assert_eq!(outputs.find("path+file:///work/another#0.1.0"), None);
         assert_eq!(lookup(&layout, &storage, "OUT_DIR"), Some(script.out_dir));
         assert_eq!(
@@ -816,6 +833,35 @@ mod tests {
             Some("hello \"quoted\" world")
         );
         assert_eq!(lookup(&layout, &storage, "PROBE_ANSWER"), Some("42"));
+    }
+
+    #[proxima::test]
+    async fn a_build_script_with_more_variables_than_the_inline_entries_keeps_every_one() {
+        let pairs: std::vec::Vec<[std::string::String; 2]> = (0..80).map(|number| [std::format!("V_{number:02}"), std::format!("v{number:02}")]).collect();
+        let record = serde_json::json!({
+            "reason": "build-script-executed", "package_id": artifact().package_id,
+            "linked_libs": [], "linked_paths": [], "cfgs": [],
+            "env": pairs, "out_dir": "/repo/target/debug/build/dylib_env-wide/out",
+        })
+        .to_string();
+        let mut scratch = [0_u8; 8192];
+        let mut outputs_storage = Vec::new();
+        let mut outputs = BuildScriptOutputs::new(&mut outputs_storage);
+        outputs.add(&build_script_message(record.as_bytes(), &mut scratch)).expect("the script is recorded");
+        let mut storage = std::vec![0; 16_384];
+
+        let layout = TestEnvironmentLayout::build(
+            &TestEnvironmentInput {
+                build_script: outputs.find(artifact().package_id),
+                ..input(artifact(), "", &[], Some("/x"))
+            },
+            &mut storage,
+        )
+        .expect("every entry fits the storage");
+
+        assert!(layout.len() > super::MAX_ENTRIES, "{} entries", layout.len());
+        assert_eq!(lookup(&layout, &storage, "V_00"), Some("v00"));
+        assert_eq!(lookup(&layout, &storage, "V_79"), Some("v79"));
     }
 
     #[proxima::test]
