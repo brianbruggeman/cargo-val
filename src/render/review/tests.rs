@@ -1402,3 +1402,29 @@ fn the_detail_screen_says_which_lock_a_deadline_kill_waited_on_and_who_held_it()
     assert!(text.contains("killed at its deadline waiting on build directory held by pid 4242"), "{text}");
     assert!(!text.contains("no output captured"), "{text}");
 }
+
+#[test]
+fn a_q_after_a_bare_csi_introducer_is_a_q_key() {
+    assert_eq!(read_in_two(b"\x1b[q", 2), [Key::Char(b'q')]);
+}
+
+#[test]
+fn two_qs_after_a_cursor_query_fragment_are_two_q_keys() {
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
+    decoded(&mut carry, b"\x1b[6", &mut keys);
+    decoded(&mut carry, b"q", &mut keys);
+    decoded(&mut carry, b"q", &mut keys);
+    assert_eq!(keys, [Key::Char(b'q'), Key::Char(b'q')]);
+}
+
+#[test]
+fn a_cursor_position_reply_is_consumed_as_a_cursor_report_and_never_as_a_char() {
+    let (mut carry, mut keys) = ([0; CARRY], Vec::new());
+    decoded(&mut carry, b"\x1b[12;40R", &mut keys);
+    assert_eq!(keys, [Key::Cursor { row: 12 }]);
+}
+
+#[test]
+fn an_arrow_split_after_the_introducer_still_decodes_as_up() {
+    assert_eq!(read_in_two(b"\x1b[A", 2), [Key::Up]);
+}

@@ -159,8 +159,9 @@ impl Key {
     /// the [`State`] across reads, so `0x1b` in one read and `[A` in the next is one `Up`, and `\e[<0;12` then `;5M` is
     /// one [`Key::Pointer`]. A lone `0x1b` is `Esc` once the next byte is not `[` or `O`, or when [`Key::flush`] runs on
     /// a tick; no timer thread is involved. `Enter` is `\r` or `\n`, `Ctrl-C` is `0x03`, printable ASCII is itself, the
-    /// arrows end `A` or `B`, an SGR mouse report ends `M` or `m`, the cursor-position reply ends `R`, and every other
-    /// escape sequence, control byte or UTF-8 byte is dropped, whichever read it arrives in.
+    /// arrows end `A` or `B`, an SGR mouse report ends `M` or `m`, the cursor-position reply ends `R`, a lowercase letter
+    /// other than a mouse release's `m` cannot end a sequence, so it abandons the held `0x1b [` and is decoded as its own
+    /// key (an unanswered cursor query must never swallow the `q` that follows), and every other escape sequence, control byte or UTF-8 byte is dropped, whichever read it arrives in.
     ///
     /// # Errors
     ///
@@ -195,6 +196,10 @@ impl Key {
             }
             (b'[', 0x30..=0x3f) => Self::collect(carry, byte),
             (b'[', 0x20..=0x2f) => {}
+            (b'[', b'a'..=b'z') if !mouse_release(carry, byte) => {
+                *carry = [0; CARRY];
+                return Self::step(carry, byte, sink);
+            }
             (b'[', 0x40..=0x7e) => return Self::finish(carry, byte, sink),
             (b'O', b'A') => {
                 *carry = [0; CARRY];
@@ -244,6 +249,10 @@ impl Key {
             _ => Ok(()),
         }
     }
+}
+
+fn mouse_release(carry: &[u8; CARRY], last: u8) -> bool {
+    last == b'm' && carry[COUNT] > 0 && carry[BODY_AT] == b'<'
 }
 
 fn held(phase: u8) -> [u8; CARRY] {
