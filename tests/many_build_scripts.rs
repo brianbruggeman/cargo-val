@@ -8,6 +8,8 @@ use std::process::Command;
 mod common;
 #[path = "common/binary.rs"]
 mod binary;
+#[path = "common/isolation.rs"]
+mod isolation;
 #[path = "common/fixture.rs"]
 mod fixture;
 #[path = "common/scratch.rs"]
@@ -55,7 +57,7 @@ fn write_workspace(root: &Path) -> PathBuf {
     workspace
 }
 
-fn cargo_val(scratch: &Path, workspace: &Path) -> Command {
+fn cargo_val(workspace: &Path) -> Command {
     let mut command = binary::command();
     command
         .arg("--manifest-path")
@@ -63,8 +65,7 @@ fn cargo_val(scratch: &Path, workspace: &Path) -> Command {
         .args(["--no-fail-fast", "--tests", "--target-dir", "isolated"])
         .env("CARGO_VAL_OUTPUT", "plain")
         .env("NO_COLOR", "1")
-        .env("CARGO_HOME", scratch.join("cargo-home"))
-        .env("CARGO_TARGET_DIR", scratch.join("target"));
+        .envs(isolation::environment("many-build-scripts"));
     command.env("CARGO_VAL_LOG", "debug");
     for key in ["CARGO_VAL_BIN_GATE", "CARGO_VAL_TARGET_DIR", "CARGO_VAL_JOBS", "RUST_TEST_THREADS"] {
         command.env_remove(key);
@@ -89,7 +90,7 @@ async fn three_hundred_build_scripts_whose_output_passes_every_old_aggregate_cap
     let scratch = Scratch::new("many-build-scripts");
     let workspace = write_workspace(&scratch);
 
-    let output = fixture_output(&mut cargo_val(&scratch, &workspace)).await;
+    let output = fixture_output(&mut cargo_val(&workspace)).await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
