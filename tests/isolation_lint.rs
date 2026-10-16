@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 // each file below sets a cargo environment variable by hand or runs a command unbounded, and the reason is why the isolated helper or the bounded wait cannot serve it
-const ENVIRONMENT_KEY_ALLOWED: [(&str, &str); 8] = [
+const ENVIRONMENT_KEY_ALLOWED: [(&str, &str); 9] = [
     ("common/isolation.rs", "the helper itself names the keys it sets"),
     ("common/lock_report.rs", "reads the keys from the command a deadline killed"),
     ("common/lock_holder.rs", "the holder is a second cargo that must share the build directory under test"),
@@ -11,16 +11,18 @@ const ENVIRONMENT_KEY_ALLOWED: [(&str, &str); 8] = [
     ("fixture_panic.rs", "a sleep child whose deadline report must read its target and home"),
     ("ignore_modes.rs", "a unit test asserting the keys the bin-gate command carries"),
     ("output_backpressure.rs", "makes the store directory under the target read-only before the run"),
+    ("parked_gate.rs", "builds its own scratch home and target so the generated workspace it measures is the only one in them"),
 ];
 
 const MAIN_THREAD_STACK: (&str, &str) = ("main_thread_stack.rs", "drive runs cargo in this process, so CARGO_HOME is scoped with temp_env");
 
-const UNBOUNDED_OUTPUT_ALLOWED: [(&str, &str); 5] = [
+const UNBOUNDED_OUTPUT_ALLOWED: [(&str, &str); 6] = [
     ("child_capture.rs", "the std reference run of echo, --version and --help that the bounded capture is compared against"),
     ("ignore_modes.rs", "runs the fd_scrub_rustc helper binary, which must inherit the test's own leaked pipes"),
     ("common/deadline_report.rs", "ps and sccache reads that run after a deadline already fired"),
     ("common/lock_report.rs", "lsof and ps reads that run after a deadline already fired"),
     ("rich_pty.rs", "pgrep of a finished session"),
+    ("parked_gate.rs", "the .output() is text inside the generated fixture crate, not a call this test makes"),
 ];
 
 fn sources(directory: &Path) -> Vec<PathBuf> {
