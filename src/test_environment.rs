@@ -825,7 +825,7 @@ mod tests {
         )
         .expect("environment fits");
 
-        assert_eq!(outputs.find(script.package_id).map(|found| found.linked), Some("/work/probe_target/debug/build/buildscript_probe-b6efe4fe62985510/out:/opt/homebrew/lib"));
+        assert_eq!(outputs.find(script.package_id).map(|found| found.linked), Some(std::format!("/work/probe_target/debug/build/buildscript_probe-b6efe4fe62985510/out{}/opt/homebrew/lib", super::PATH_SEPARATOR as char).as_str()));
         assert_eq!(outputs.find("path+file:///work/another#0.1.0"), None);
         assert_eq!(lookup(&layout, &storage, "OUT_DIR"), Some(script.out_dir));
         assert_eq!(
