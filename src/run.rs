@@ -27,6 +27,7 @@ use crate::driver::{
     Watches, editor_running, emit, keep_editor_running, keys_raw, monotonic_millis, pipeline_step, quit_step, restore_cursor, run_body, session_cancelled, session_ended, session_exited, session_output, session_resume, shard_stalled, write_fd,
 };
 use crate::edge_spawn::Child;
+use crate::line::Line;
 use crate::render::Event;
 use crate::render::review::{CARRY, Key};
 use crate::status_queue::{self, Capture, Sinks};
@@ -504,12 +505,64 @@ fn attach_keys(lane: &Lane) -> Result<(), RunError> {
     Ok(())
 }
 
+fn list_numbers(line: &mut Line<224>, bytes: &[u8]) {
+    bytes.iter().enumerate().for_each(|(index, byte)| {
+        if index > 0 {
+            line.text(b",");
+        }
+        line.number(usize::from(*byte));
+    });
+}
+
+// the key path is where a dropped key would hide: what one read held, the decoder's memory either side of it, and each key it produced
+fn stamp_keys_read(bytes: &[u8], (before, after): (&[u8; CARRY], &[u8; CARRY])) {
+    let mut name = Line::<224>::new();
+    name.text(b"count=");
+    name.number(bytes.len());
+    name.text(b" bytes=");
+    list_numbers(&mut name, &bytes[..bytes.len().min(8)]);
+    name.text(b" carry_in=");
+    list_numbers(&mut name, &before[..2]);
+    name.text(b" carry_out=");
+    list_numbers(&mut name, &after[..2]);
+    pipeline_step(b"keys-read", name.bytes());
+}
+
+fn stamp_key(key: Key) {
+    let mut name = Line::<64>::new();
+    match key {
+        Key::Char(byte) => {
+            name.text(b"char=");
+            name.number(usize::from(byte));
+        }
+        Key::Enter => name.text(b"enter"),
+        Key::Esc => name.text(b"esc"),
+        Key::Up => name.text(b"up"),
+        Key::Down => name.text(b"down"),
+        Key::CtrlC => name.text(b"ctrl-c"),
+        Key::Pointer { .. } => name.text(b"pointer"),
+        Key::Cursor { row } => {
+            name.text(b"cursor-row=");
+            name.number(usize::from(row));
+        }
+    }
+    pipeline_step(b"key-decoded", name.bytes());
+}
+
 fn keys_chunk(lanes: &Lanes, range: io::Result<Range<u32>>, run: &ListingRun<'_>) -> Result<(), RunError> {
     let range = range.map_err(|_| RunError::Reactor)?;
     let slot = lanes[KEY_LANE].0.borrow();
     let stream = slot.as_deref().ok_or(RunError::Reactor)?;
     let bytes = stream.window(range).ok_or(RunError::Reactor)?;
-    with_key_carry(run, |carry| Key::decode(carry, &bytes, |key| run.key(key)))
+    with_key_carry(run, |carry| {
+        let before = *carry;
+        let outcome = Key::decode(carry, &bytes, |key| {
+            stamp_key(key);
+            run.key(key)
+        });
+        stamp_keys_read(&bytes, (&before, carry));
+        outcome
+    })
 }
 
 // a lone escape waits in the state for the next read; a tick is the only other thing that resolves it
