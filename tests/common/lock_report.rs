@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,10 +9,10 @@ mod layout {
 
 /// The cargo lock holders at this instant, for a timeout message that must never leave a hang looking like a lock wait or the reverse: either each held lock file with its holder pids, or "no cargo lock held".
 ///
-/// `command` supplies the `CARGO_HOME` and `CARGO_TARGET_DIR` the child ran with; every isolated run this process created is checked as well, so a caller that holds no `Command` still names the holders of the fixture it was waiting on.
+/// `command` supplies the `CARGO_HOME` and `CARGO_TARGET_DIR` the child ran with, else the environment of the live `leader`, else of every child of this process, then the test's own; every isolated run this process created is checked as well, so a caller that holds no `Command` still names the holders of the fixture it was waiting on.
 // a fixture compile that waits on cargo's build-directory lock or the package-cache lock looks identical to a stuck rustc until the holder is named; the holder is usually another worktree's cargo
-pub fn lock_holders(command: Option<&Command>) -> String {
-    let files: Vec<String> = lock_files(command).into_iter().filter(|file| file.exists()).map(|file| file.display().to_string()).collect();
+pub fn lock_holders(command: Option<&Command>, leader: Option<u32>) -> String {
+    let files: Vec<String> = lock_files(command, leader).into_iter().filter(|file| file.exists()).map(|file| file.display().to_string()).collect();
     let openers = cargo_val::lock_wait::openers_among(&files);
     let held: Vec<String> = files.iter().filter_map(|file| held_by(file, &openers)).collect();
     let verdict = if held.is_empty() { format!("no cargo lock held ({} lock files checked)", files.len()) } else { held.join("\n") };
@@ -33,24 +34,59 @@ fn held_by(file: &str, openers: &[(String, u32, bool)]) -> Option<String> {
     if holders.is_empty() { None } else { Some(format!("{file}:\n{}", holders.join("\n"))) }
 }
 
-fn command_variable(command: Option<&Command>, name: &str) -> Option<OsString> {
-    match command.and_then(|command| command.get_envs().find(|(key, _)| *key == name)) {
-        Some((_, value)) => value.map(OsString::from),
-        None => std::env::var_os(name),
-    }
+fn explicit_variable(command: Option<&Command>, name: &str) -> Option<OsString> {
+    command.and_then(|command| command.get_envs().find(|(key, _)| *key == name)).and_then(|(_, value)| value.map(OsString::from))
+}
+
+fn child_pids() -> Vec<u32> {
+    let own = std::process::id();
+    let listing = capture("ps", ["-axo", "pid=,ppid="]);
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace().filter_map(|column| column.parse::<u32>().ok());
+            Some((columns.next()?, columns.next()?))
+        })
+        .filter(|(_, parent)| *parent == own)
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn process_variable(pid: u32, name: &str) -> Option<OsString> {
+    let environment = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let prefix = format!("{name}=");
+    environment.split(|byte| *byte == 0).find_map(|entry| entry.strip_prefix(prefix.as_bytes()).map(|value| OsString::from(String::from_utf8_lossy(value).into_owned())))
+}
+
+// `ps eww` prints the environment after argv on macOS; a value containing a space is cut at the space
+#[cfg(not(target_os = "linux"))]
+fn process_variable(pid: u32, name: &str) -> Option<OsString> {
+    let pid_text = pid.to_string();
+    let listing = capture("ps", ["eww", "-o", "command=", "-p", pid_text.as_str()]);
+    let prefix = format!("{name}=");
+    listing.split_whitespace().find_map(|token| token.strip_prefix(prefix.as_str()).map(OsString::from))
+}
+
+fn variable_candidates(command: Option<&Command>, leaders: &[u32], name: &str) -> BTreeSet<OsString> {
+    let explicit = explicit_variable(command, name);
+    let from_processes = leaders.iter().filter_map(|pid| process_variable(*pid, name));
+    explicit.into_iter().chain(from_processes).chain(std::env::var_os(name)).collect()
 }
 
 const PACKAGE_CACHE_LOCKS: [&str; 2] = [".package-cache", ".package-cache-mutate"];
 const BUILD_LOCKS: [&str; 3] = [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
 
-fn lock_files(command: Option<&Command>) -> Vec<PathBuf> {
-    let cargo_home = command_variable(command, "CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| command_variable(command, "HOME").map(|home| PathBuf::from(home).join(".cargo")));
-    let target = command_variable(command, "CARGO_TARGET_DIR").map(PathBuf::from);
+fn lock_files(command: Option<&Command>, leader: Option<u32>) -> Vec<PathBuf> {
+    let leaders = leader.map_or_else(child_pids, |pid| vec![pid]);
+    let mut cargo_homes: BTreeSet<PathBuf> = variable_candidates(command, &leaders, "CARGO_HOME").into_iter().map(PathBuf::from).collect();
+    if cargo_homes.is_empty() {
+        cargo_homes.extend(variable_candidates(command, &leaders, "HOME").into_iter().map(|home| PathBuf::from(home).join(".cargo")));
+    }
+    let explicit_targets: BTreeSet<PathBuf> = variable_candidates(command, &leaders, "CARGO_TARGET_DIR").into_iter().map(PathBuf::from).collect();
     let runs = process_runs();
-    let homes = cargo_home.into_iter().chain(runs.iter().map(|run| layout::home_in(run)));
-    let targets = target.into_iter().chain(runs.iter().map(|run| layout::target_in(run)));
+    let homes = cargo_homes.into_iter().chain(runs.iter().map(|run| layout::home_in(run)));
+    let targets = explicit_targets.into_iter().chain(runs.iter().map(|run| layout::target_in(run)));
     homes.flat_map(|home| PACKAGE_CACHE_LOCKS.map(|name| home.join(name))).chain(targets.flat_map(|target| build_locks(&target))).collect()
 }
 

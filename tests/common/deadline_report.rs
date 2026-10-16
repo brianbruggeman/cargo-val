@@ -1,5 +1,4 @@
 use core::time::Duration;
-
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,10 +13,10 @@ const REPORT_TAIL: usize = 64 * 1024;
 
 /// The one writer every missed test deadline goes through: snapshots the process group of `leader` (when the deadline bounded a child) and the build-directory lock holders, writes `$HOME/.cache/cargo-val-deadlines/<ts>-<pid>-<test>.log`, and returns that snapshot with the `deadline report: <path>` line the failure message must end on.
 ///
-/// `command` supplies the `CARGO_HOME` and `CARGO_TARGET_DIR` the child ran with; without one the test's own environment is read.
+/// `command`, else the live `leader`, supplies the `CARGO_HOME` and `CARGO_TARGET_DIR` the child ran with; see [`lock_report::lock_holders`].
 pub fn persist_deadline_report(deadline: Duration, leader: Option<u32>, command: Option<&Command>, stdout: &[u8], stderr: &[u8]) -> (String, String) {
     let group = leader.map_or_else(|| "  no child: the deadline bounded a stream".to_string(), group_processes);
-    let locks = lock_report::lock_holders(command);
+    let locks = lock_report::lock_holders(command, leader);
     let snapshot = format!("process group at the deadline:\n{group}\nlock holders at the deadline:\n{locks}");
     let name = current_test_name();
     let report = format!(
@@ -88,4 +87,3 @@ fn group_processes(leader: u32) -> String {
         Err(error) => format!("ps did not run: {error}"),
     }
 }
-

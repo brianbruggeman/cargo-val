@@ -1961,7 +1961,7 @@ async fn master_until(waits: &Log, wait: &str, (master, (leader, terminal)): (&C
     let verdict = match proxima_core::time::timeout(WAIT_BUDGET, reading).await {
         Ok((seen, _)) if String::from_utf8_lossy(&seen).contains(text) => Ok(seen),
         Ok(_) => Err("the pty closed before it appeared".to_owned()),
-        Err(elapsed) => Err(format!("no output within {WAIT_BUDGET:?} ({elapsed:?})\nlock holders at the budget:\n{}", group::deadline_report::lock_report::lock_holders(None))),
+        Err(elapsed) => Err(format!("no output within {WAIT_BUDGET:?} ({elapsed:?})\nlock holders at the budget:\n{}", group::deadline_report::lock_report::lock_holders(None, None))),
     };
     stamp(waits, wait, "exit");
     let Err(why) = verdict else {
