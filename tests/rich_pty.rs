@@ -107,6 +107,52 @@ fn spawn_on(slave: &OwnedFd, stdin: Stdio, fixture: &str, mode: &str, (release, 
         .expect("cargo-val is spawnable on a pty")
 }
 
+// cargo-val runs each detached editor in its own process group on purpose, so ending cargo-val's group on a failed run never reaches them; this owns the run and every editor it registered, and ends them on drop, panic included
+struct RunReaper {
+    child: std::process::Child,
+    editor_pids: Option<PathBuf>,
+}
+
+impl RunReaper {
+    fn new(child: std::process::Child, environment: &[(&str, &str)]) -> Self {
+        let editor_pids = environment.iter().find(|(name, _)| *name == "FAKE_EDITOR_LOG").map(|(_, log)| Path::new(log).with_extension("pids"));
+        Self { child, editor_pids }
+    }
+
+    fn kill_editors(&self) {
+        let Some(text) = self.editor_pids.as_deref().and_then(|pids| std::fs::read_to_string(pids).ok()) else {
+            return;
+        };
+        text.lines().filter_map(|line| line.parse::<libc::pid_t>().ok()).filter(|pid| unsafe { libc::getpgid(*pid) } == *pid).for_each(|pid| unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        });
+    }
+}
+
+impl std::ops::Deref for RunReaper {
+    type Target = std::process::Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for RunReaper {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+
+impl Drop for RunReaper {
+    fn drop(&mut self) {
+        self.kill_editors();
+        if matches!(self.child.try_wait(), Ok(None)) {
+            unsafe { libc::kill(-self.child.id().cast_signed(), libc::SIGKILL) };
+            let _ = self.child.wait();
+        }
+    }
+}
+
 fn count_before_slash(frame: &str, is_row: impl Fn(&str) -> bool) -> Option<usize> {
     let row = frame.lines().find(|line| is_row(line))?;
     let before = &row[..row.find('/')?];
@@ -244,7 +290,7 @@ where
     let keys = master.try_clone().expect("the master descriptor duplicates for writing keys");
     let probe = master.try_clone().expect("the master descriptor duplicates for the termios query");
     let stdin = if tty_stdin { Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")) } else { Stdio::piped() };
-    let mut child = spawn_on(&slave, stdin, fixture, mode, (&release, target_run), environment);
+    let mut child = RunReaper::new(spawn_on(&slave, stdin, fixture, mode, (&release, target_run), environment), environment);
     drop(child.stdin.take());
     drop(slave);
     let leader = child.id();
@@ -993,7 +1039,7 @@ async fn a_test_that_reads_stdin_under_a_controlling_terminal_completes_without_
     let run = format!("{}-{}", std::process::id(), NEXT_RUN.fetch_add(1, Ordering::Relaxed));
     let release = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rich-pty-stdin-{run}"));
     let Pty { master, slave } = open_pty();
-    let mut child = spawn_on(&slave, Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")), "stdin_reader", "rich", (&release, &run), &NO_COLOR);
+    let mut child = RunReaper::new(spawn_on(&slave, Stdio::from(slave.try_clone().expect("the slave descriptor duplicates")), "stdin_reader", "rich", (&release, &run), &NO_COLOR), &NO_COLOR);
     drop(slave);
     let leader = child.id();
     let exit = ExitSource::new(NonZeroI32::new(leader.cast_signed()).expect("a spawned child has a nonzero pid"));
