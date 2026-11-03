@@ -131,6 +131,7 @@ fn sweep_finished_runs() {
             let process = name.rsplit('-').nth(1).and_then(|text| text.parse::<i32>().ok());
             if process.is_some_and(|process| !process_is_alive(process)) {
                 let _ = fs::remove_dir_all(layout::home_in(&run));
+                let _ = fs::remove_dir(layout::lease_in(&run));
                 let _ = fs::remove_dir_all(&run);
             }
         }
