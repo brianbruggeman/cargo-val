@@ -63,7 +63,8 @@ fn build_locks(target: &Path) -> Vec<PathBuf> {
 
 // the holder read is cargo_val::lock_wait's, so the dump and the deadline classifier name a holder the same way; where lsof marks none as holding, every opener is listed as an opener and not as a holder
 fn holders_of(file: &str, openers: &[(String, u32, bool)]) -> Vec<String> {
-    let opening: Vec<(u32, bool)> = openers.iter().filter(|(name, _, _)| name == file).map(|(_, pid, held)| (*pid, *held)).collect();
+    let resolved = std::fs::canonicalize(file).map_or_else(|_| file.to_owned(), |path| path.display().to_string());
+    let opening: Vec<(u32, bool)> = openers.iter().filter(|(name, _, _)| name == file || *name == resolved).map(|(_, pid, held)| (*pid, *held)).collect();
     let marked = opening.iter().any(|(_, held)| *held);
     opening.into_iter().filter(|(_, held)| *held || !marked).map(|(pid, held)| holder_line(pid, held)).collect()
 }
