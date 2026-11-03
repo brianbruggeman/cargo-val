@@ -21,3 +21,10 @@ pub fn home_in(run: &Path) -> PathBuf {
     let (number, process) = (tail.next().unwrap_or_default(), tail.next().unwrap_or_default());
     base_directory().join("h").join(format!("{process}-{number}"))
 }
+
+/// The exclusive-lease marker of `run`: a directory beside its home, created to take the run and removed to release it.
+pub fn lease_in(run: &Path) -> PathBuf {
+    let mut home = home_in(run).into_os_string();
+    home.push(".lease");
+    PathBuf::from(home)
+}
