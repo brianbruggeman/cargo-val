@@ -5,6 +5,7 @@ unsafe extern "C" {
     fn tcgetpgrp(descriptor: i32) -> i32;
     fn getpgrp() -> i32;
     fn getpid() -> i32;
+    fn getppid() -> i32;
     fn kill(pid: i32, signal: i32) -> i32;
 }
 
@@ -49,6 +50,27 @@ fn record(log: &str, first_foreground: bool) -> std::io::Result<()> {
     writeln!(file, "foreground={}", terminal == group)
 }
 
+const ORPHANED_EXIT: i32 = 75;
+
+fn register_pid() -> std::io::Result<()> {
+    let Some(log) = std::env::var_os("FAKE_EDITOR_LOG") else {
+        return Ok(());
+    };
+    let pids = std::path::PathBuf::from(log).with_extension("pids");
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(pids)?;
+    writeln!(file, "{}", unsafe { getpid() })
+}
+
+// cargo-val detaches the editor on purpose and never reaps it, so a wait nobody can end must exit once cargo-val is gone and the parent is init
+fn hold_until(parent: i32, released: impl Fn() -> bool) {
+    while !released() {
+        if unsafe { getppid() } != parent {
+            std::process::exit(ORPHANED_EXIT);
+        }
+        std::thread::yield_now();
+    }
+}
+
 #[cfg(target_os = "macos")]
 const SIGSTOP: i32 = 17;
 #[cfg(target_os = "linux")]
@@ -56,10 +78,10 @@ const SIGSTOP: i32 = 19;
 
 fn main() {
     let first_foreground = unsafe { tcgetpgrp(0) == getpid() };
+    let parent = unsafe { getppid() };
+    register_pid().expect("the editor registers its pid for the test harness");
     if std::env::args().nth(1).as_deref() == Some("--serverlist") {
-        while std::env::var_os("FAKE_EDITOR_SERVERLIST_HANG").is_some() {
-            std::thread::yield_now();
-        }
+        hold_until(parent, || std::env::var_os("FAKE_EDITOR_SERVERLIST_HANG").is_none());
         print!("{}", std::env::var("FAKE_EDITOR_SERVERLIST").unwrap_or_default());
         return;
     }
@@ -76,14 +98,10 @@ fn main() {
     }
     let released = std::env::var_os("CARGO_VAL_FIXTURE_RELEASE_FILE").map(|release| std::path::PathBuf::from(release).with_extension("done"));
     if let Some(hold) = std::env::var_os("FAKE_EDITOR_HOLD_FILE") {
-        while !std::path::Path::new(&hold).exists() {
-            std::thread::yield_now();
-        }
+        hold_until(parent, || std::path::Path::new(&hold).exists());
     }
     if let Some(until) = released.filter(|_| std::env::var_os("FAKE_EDITOR_AWAIT_RUN").is_some()) {
-        while !until.exists() {
-            std::thread::yield_now();
-        }
+        hold_until(parent, || until.exists());
     }
     println!("fake-editor-done");
     std::io::stdout().flush().expect("the done marker reaches the terminal");
