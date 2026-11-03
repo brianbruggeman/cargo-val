@@ -68,10 +68,12 @@ fn process_variable(pid: u32, name: &str) -> Option<OsString> {
     listing.split_whitespace().find_map(|token| token.strip_prefix(prefix.as_str()).map(OsString::from))
 }
 
+// the child's own value wins; the test's ambient one is read only when nothing names the child's, since the ambient `CARGO_HOME` is usually a lock another worktree's cargo holds
 fn variable_candidates(command: Option<&Command>, leaders: &[u32], name: &str) -> BTreeSet<OsString> {
     let explicit = explicit_variable(command, name);
     let from_processes = leaders.iter().filter_map(|pid| process_variable(*pid, name));
-    explicit.into_iter().chain(from_processes).chain(std::env::var_os(name)).collect()
+    let child: BTreeSet<OsString> = explicit.into_iter().chain(from_processes).collect();
+    if child.is_empty() { std::env::var_os(name).into_iter().collect() } else { child }
 }
 
 const PACKAGE_CACHE_LOCKS: [&str; 2] = [".package-cache", ".package-cache-mutate"];
