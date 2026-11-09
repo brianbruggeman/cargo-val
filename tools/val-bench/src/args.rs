@@ -19,7 +19,7 @@ pub struct Config {
 
 const USAGE: &str = "usage: val-bench --fixture <crate dir> [--fixture ..] [--iterations N] [--warmup N] [--filter F] --output <jsonl> [--arms cargo-test,nextest,cargo-val] [--jobs N] [--val-jobs N] [--loop-scale N] [--quiet-load LOAD_1M] [--target-dir DIR] [--timeout-secs N] [--cargo-arg ARG ..] [--help]";
 
-const HELP_FLAGS: [&str; 8] = [
+const HELP_FLAGS: [&str; 10] = [
     "  --cargo-arg ARG   repeatable; ARG is appended verbatim to every arm's cargo-level args and to the",
     "                    prebuild. cargo test: before the `--` harness separator; nextest: before the trailing",
     "                    filter; cargo val: at the end. A flag with a value takes two uses, e.g.",
@@ -28,6 +28,8 @@ const HELP_FLAGS: [&str; 8] = [
     "",
     "records add first_output_ns (first byte on either pipe) and first_result_ns (first per-test result line)",
     "relative to spawn; the summary table adds median first_ms per arm.",
+    "",
+    "env: VAL_BENCH_GPU_LOCK=PATH marks the box busy (not quiet) while PATH exists.",
 ];
 
 pub fn help() -> String {

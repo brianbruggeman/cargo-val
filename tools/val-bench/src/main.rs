@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-const GPU_LOCK: &str = "/Users/brianbruggeman/repos/brianbruggeman/.long_ctx_backups/gpu.lock";
+const GPU_LOCK_ENV: &str = "VAL_BENCH_GPU_LOCK";
 const PREBUILD_LIMIT: Duration = Duration::from_hours(24);
 const NO_RESULTS: exec::Matchers = exec::Matchers { stdout: parse::never_result_line, stderr: parse::never_result_line };
 
@@ -36,6 +36,10 @@ struct Context<'config> {
     cargo_val: Option<Binary>,
     cargo_nextest: Option<Binary>,
     sink: File,
+}
+
+fn gpu_lock_held() -> bool {
+    std::env::var_os(GPU_LOCK_ENV).is_some_and(|path| Path::new(&path).exists())
 }
 
 fn main() -> ExitCode {
@@ -183,7 +187,7 @@ fn run_round(context: &Context, arms: &[Arm], dir: &Path, manifest: &str, round:
         let arm = arms[(rotation + offset) % arms.len()];
         let args = arm.args(manifest, context.config.filter.as_deref(), context.config.jobs, &context.config.cargo_args);
         let loads = exec::load_average();
-        let quiet_box = exec::is_quiet(Path::new(GPU_LOCK).exists(), loads[0], context.config.quiet_load);
+        let quiet_box = exec::is_quiet(gpu_lock_held(), loads[0], context.config.quiet_load);
         let outcome = exec::run("cargo", &args, dir, &environment(context.config, dir), Duration::from_secs(context.config.timeout_secs), arm.matchers())?;
         let executed = arm.tests_run(&outcome.stdout, &outcome.stderr);
         runs.push(Run { arm, phase, iteration, command: format!("cargo {}", args.join(" ")), outcome, executed, loads, quiet_box });
