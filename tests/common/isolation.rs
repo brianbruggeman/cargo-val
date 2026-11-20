@@ -9,6 +9,13 @@ mod layout {
     include!("isolation_layout.rs");
 }
 
+/// The exclusive-lease marker of `run`: a directory beside its home, created to take the run and removed to release it.
+fn lease_in(run: &Path) -> PathBuf {
+    let mut home = layout::home_in(run).into_os_string();
+    home.push(".lease");
+    PathBuf::from(home)
+}
+
 // the registry and git caches are shared read-mostly through links so nothing is downloaded; `.package-cache` and its lock stay private because they live at the CARGO_HOME root, not inside either
 const LINKED_ENTRIES: [&str; 4] = ["registry", "git", "config.toml", "config"];
 
@@ -60,7 +67,7 @@ fn take_warm(parent: &Path, label: &str) -> Option<(PathBuf, Lease)> {
 }
 
 fn take(run: &Path) -> Option<Lease> {
-    let marker = layout::lease_in(run);
+    let marker = lease_in(run);
     match fs::create_dir(&marker) {
         Ok(()) => Some(Lease { marker }),
         Err(error) if error.kind() == ErrorKind::AlreadyExists => None,
@@ -131,7 +138,7 @@ fn sweep_finished_runs() {
             let process = name.rsplit('-').nth(1).and_then(|text| text.parse::<i32>().ok());
             if process.is_some_and(|process| !process_is_alive(process)) {
                 let _ = fs::remove_dir_all(layout::home_in(&run));
-                let _ = fs::remove_dir(layout::lease_in(&run));
+                let _ = fs::remove_dir(lease_in(&run));
                 let _ = fs::remove_dir_all(&run);
             }
         }

@@ -4,9 +4,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-mod common;
-
-use common::group;
+mod settings {
+    include!("common/settings.rs");
+}
 
 const TEST_ATTRIBUTE: &str = "#[proxima::test(timeout = \"";
 
@@ -62,12 +62,12 @@ fn waiting_tests() -> Vec<(String, Duration, &'static str)> {
 #[test]
 fn every_test_deadline_plus_its_kill_grace_fires_before_the_harness_timeout_of_the_tests_that_use_it() {
     let waiting = waiting_tests();
-    let grace = group::settings::bound("INTERRUPT_GRACE");
+    let grace = settings::bound("INTERRUPT_GRACE");
 
     let late: Vec<String> = waiting
         .iter()
-        .filter(|(_, timeout, setting)| group::settings::bound(setting) + grace >= *timeout)
-        .map(|(file, timeout, setting)| format!("{file}: {setting} {:?} + grace {grace:?} >= harness timeout {timeout:?}", group::settings::bound(setting)))
+        .filter(|(_, timeout, setting)| settings::bound(setting) + grace >= *timeout)
+        .map(|(file, timeout, setting)| format!("{file}: {setting} {:?} + grace {grace:?} >= harness timeout {timeout:?}", settings::bound(setting)))
         .collect();
 
     assert!(waiting.len() >= 20, "the scan found only {} waiting tests; the attribute or identifier patterns no longer match", waiting.len());
