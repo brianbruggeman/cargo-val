@@ -880,7 +880,7 @@ pub(crate) fn session_cancelled(ledger: &Ledger<'_>, watches: &mut Watches, inde
     };
     if let Some(session) = ledger.sessions().get(watch.slot) {
         quit_step(b"child-signalled", watch.process_id as usize);
-        session.child().terminate();
+        session.child().terminate_group();
     }
 }
 

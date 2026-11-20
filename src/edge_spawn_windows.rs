@@ -2101,6 +2101,11 @@ mod spawn {
             unsafe { TerminateProcess(self.process.process.raw(), STATUS_CONTROL_C_EXIT) };
         }
 
+        /// Windows children are not group leaders and the run job spans every child, so this ends the child as `terminate` does.
+        pub fn terminate_group(&self) {
+            self.terminate();
+        }
+
         /// Lowers the child's priority class so doc tests yield cores to the build.
         ///
         /// # Errors

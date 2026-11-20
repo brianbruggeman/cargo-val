@@ -446,6 +446,15 @@ mod spawn {
             unsafe { libc::kill(self.process_id, STOP_SIGNAL) };
         }
 
+        /// Kills the child's whole process group with `STOP_SIGNAL`; for a child spawned as a group leader, so what the child spawned in its group ends with it.
+        pub fn terminate_group(&self) {
+            if self.process_id <= 0 {
+                return;
+            }
+            // safety: kill takes plain integers and reports failure through its status; a positive id keeps the negation from naming the caller's own group.
+            unsafe { libc::kill(-self.process_id, STOP_SIGNAL) };
+        }
+
         /// Lowers the scheduling priority of the child's process group so doc tests yield cores to the build.
         ///
         /// # Errors
